@@ -10,13 +10,22 @@
 #[allow(dead_code)]
 mod wallpaper;
 
+mod chat;
+mod composer_ui;
+
+use chat::{Backend, ChatView};
+use composer_ui::ComposerCard;
+use del_agent::{MockBackend, PermissionMode, Provider, SessionConfig, SessionManager};
 use del_core::tabs::Tabs;
-use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
+use del_core::typography::{TEXT_LG, TEXT_MD};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
@@ -27,17 +36,17 @@ const HEADING: &str = "What are we building?";
 /// Widest the composer grows on a large window, in logical pixels.
 const COMPOSER_MAX_WIDTH: f32 = 560.0;
 
-/// Fill of the composer card: a faint white lift, like the page it sits on.
-const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
-
 struct AppShell {
     tabs: Tabs,
     composer: Entity<TextareaState>,
     metrics: ShellMetrics,
+    backend: Backend,
+    /// The chat page of each tab that has had a first message sent.
+    chats: HashMap<u64, Entity<ChatView>>,
 }
 
 impl AppShell {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(backend: Backend, demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask, build, or describe a change...")
@@ -59,103 +68,47 @@ impl AppShell {
         .detach();
         composer.update(cx, |state, cx| state.focus(window, cx));
 
-        Self {
+        let mut shell = Self {
             tabs: Tabs::new(),
             composer,
             metrics: ShellMetrics::default(),
+            backend,
+            chats: HashMap::new(),
+        };
+        if demo {
+            let id = shell.tabs.active_id();
+            let chat = shell.new_chat(window, cx);
+            chat.update(cx, |chat, cx| chat.preload(&chat::demo::events(), cx));
+            shell.chats.insert(id, chat);
         }
+        shell
     }
 
-    /// Send the composer's text, if any, and clear it.
-    ///
-    /// There is no chat backend yet, so sending only clears the field.
+    fn new_chat(&self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChatView> {
+        let backend = self.backend.clone();
+        cx.new(|cx| ChatView::new(backend, window, cx))
+    }
+
+    /// Send the composer's text, if any, and move this tab to its chat page.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value();
-        if composer::submission(&text).is_none() {
+        let Some(text) = composer::submission(&text) else {
             return;
-        }
+        };
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
+        let chat = self.new_chat(window, cx);
+        chat.update(cx, |chat, cx| chat.send_first(text, cx));
+        self.chats.insert(self.tabs.active_id(), chat);
         cx.notify();
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_send = composer::submission(&self.composer.read(cx).value()).is_some();
-        let muted = rgba(0xffffff8c);
-
-        // No border: the card is told apart from the page by its fill alone.
-        v_flex()
-            .w_full()
-            .max_w(px(COMPOSER_MAX_WIDTH))
-            .p_2()
-            .gap_1()
-            .rounded(px(14.0))
-            .bg(rgba(COMPOSER_SURFACE_RGBA))
-            .child(
-                Textarea::new(&self.composer)
-                    .appearance(false)
-                    .bordered(false)
-                    // Same token as the chips below, so the input and the
-                    // model selector read at one size.
-                    .text_size(px(TEXT_MD)),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_0p5()
-                            .child(
-                                composer_chip("attach")
-                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
-                            )
-                            .child(
-                                composer_chip("model")
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(rgb(0xf0f0f0))
-                                            .child("Sonnet 5.5"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_SM))
-                                            .text_color(muted)
-                                            .child("Medium"),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("send")
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(if can_send {
-                                rgb(0xffffff)
-                            } else {
-                                rgb(0x4a4a4e)
-                            })
-                            .when(can_send, |send| {
-                                send.cursor_pointer().on_click(
-                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                )
-                            })
-                            .child(
-                                Icon::new(IconName::ArrowUp)
-                                    .small()
-                                    .text_color(if can_send {
-                                        rgb(0x111113)
-                                    } else {
-                                        rgb(0x8a8a8e)
-                                    }),
-                            ),
-                    ),
-            )
+        ComposerCard::new(
+            &self.composer,
+            COMPOSER_MAX_WIDTH,
+            cx.listener(|this, _, window, cx| this.submit(window, cx)),
+        )
     }
 
     fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -222,8 +175,21 @@ impl AppShell {
             )
     }
 
-    fn render_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let radius = px(self.metrics.page_radius);
+        let page = || {
+            div()
+                .id("page")
+                .relative()
+                .size_full()
+                .rounded(radius)
+                .overflow_hidden()
+                .bg(rgba(PAGE_SURFACE_RGBA))
+        };
+
+        if let Some(chat) = self.chats.get(&self.tabs.active_id()) {
+            return page().child(chat.clone()).into_any_element();
+        }
 
         div()
             .id("page")
@@ -261,21 +227,8 @@ impl AppShell {
                             .child(self.render_composer(cx)),
                     ),
             )
+            .into_any_element()
     }
-}
-
-/// A borderless pill used for the composer's footer controls: it lays out its
-/// children in a row and lightens on hover.
-fn composer_chip(id: &'static str) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(24.0))
-        .px_1p5()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .cursor_pointer()
-        .hover(|chip| chip.bg(rgba(0xffffff14)))
 }
 
 impl Render for AppShell {
@@ -294,10 +247,53 @@ impl Render for AppShell {
     }
 }
 
+/// Build the agent backend from `DEL_BACKEND`: `mock` and `mock-demo` use the
+/// in-memory `MockBackend` (no model needed); anything else registers no
+/// backend yet, so sending shows an error banner. Returns the backend and
+/// whether to open on the canned demo transcript.
+fn backend_from_env(runtime: &tokio::runtime::Runtime) -> (Backend, bool) {
+    let mode = std::env::var("DEL_BACKEND").unwrap_or_default();
+    let mock = mode.starts_with("mock");
+    let backends: Vec<Arc<dyn del_agent::AgentBackend>> = if mock {
+        vec![Arc::new(
+            MockBackend::new(Provider::Claude).with_delay(Duration::from_millis(60)),
+        )]
+    } else {
+        Vec::new()
+    };
+    let index = if mock {
+        std::env::temp_dir().join("del-mock-sessions.jsonl")
+    } else {
+        del_agent::default_index_path().expect("no data directory")
+    };
+    let manager = SessionManager::new(index, backends).expect("failed to open session index");
+    let config = SessionConfig {
+        cwd: std::env::current_dir().unwrap_or_default(),
+        model: None,
+        provider: Provider::Claude,
+        permission_mode: PermissionMode::Ask,
+    };
+    let backend = Backend {
+        runtime: runtime.handle().clone(),
+        manager,
+        config,
+    };
+    (backend, mode == "mock-demo")
+}
+
 fn main() {
+    // Agent calls and the broadcast pumps run here; GPUI only awaits their
+    // results. Kept alive for the life of the app.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("failed to start the agent runtime");
+    let (backend, demo) = backend_from_env(&runtime);
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             // Must run before any gpui-component feature is used.
             gpui_kit::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
@@ -333,7 +329,7 @@ fn main() {
             };
 
             gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| AppShell::new(window, cx))
+                cx.new(|cx| AppShell::new(backend, demo, window, cx))
             })
             .expect("failed to open window");
 

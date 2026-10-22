@@ -1208,10 +1208,12 @@ dependencies = [
 name = "del-app"
 version = "0.1.0"
 dependencies = [
+ "del-agent",
  "del-core",
  "gpui-kit",
  "gpui-pre",
  "image",
+ "tokio",
 ]
 
 [[package]]
