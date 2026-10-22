@@ -14,6 +14,7 @@ mod assets;
 mod chat;
 mod composer_ui;
 mod providers;
+mod right_panel;
 mod sessions;
 mod sidebar;
 mod signin;
@@ -28,6 +29,7 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use right_panel::RightPanel;
 use state::{AppState, Panel, Selection, Tab};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +58,8 @@ actions!(
         ToggleProviders,
         ToggleSidebar,
         Quit,
+        ToggleFiles,
+        ToggleTerminal,
         CloseTab,
         Tab1,
         Tab2,
@@ -98,6 +102,8 @@ struct AppShell {
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
     sidebar_open: bool,
+    right: Entity<RightPanel>,
+    right_open: bool,
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     metrics: ShellMetrics,
@@ -149,12 +155,16 @@ impl AppShell {
         })
         .detach();
 
+        let right_root = state.read(cx).effective().2;
+        let right = cx.new(|cx| RightPanel::new(right_root, window, cx));
         Self {
             state,
             composer,
             rename,
             renaming_loaded: None,
             sidebar_open: true,
+            right,
+            right_open: false,
             chats: HashMap::new(),
             metrics: ShellMetrics::default(),
         }
@@ -305,103 +315,145 @@ impl AppShell {
             .bg(rgba(SHELL_SURFACE_RGBA))
             .child(
                 h_flex()
-                    .h_full()
+                    .size_full()
                     .items_center()
-                    .gap_0p5()
-                    .pl_2()
-                    .when(SIDEBAR_ENABLED, |row| {
-                        row.child(
-                            div()
-                                .id("toggle-sidebar")
-                                .size(px(24.0))
-                                .mr_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|b| b.bg(rgba(0xffffff0a)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sidebar_open = !this.sidebar_open;
-                                    cx.notify();
-                                }))
-                                .child(
-                                    Icon::new(if self.sidebar_open {
-                                        IconName::PanelLeftClose
-                                    } else {
-                                        IconName::PanelLeftOpen
-                                    })
-                                    .small()
-                                    .text_color(muted),
-                                ),
-                        )
-                    })
-                    .children(tabs.into_iter().map(|(tab_key, title, provider)| {
-                        let active = selection == tab_key.selection() && panel == Panel::Chat;
-                        let (select, close) = (self.state.clone(), self.state.clone());
-                        let (select_tab, close_tab) = (tab_key.clone(), tab_key.clone());
-                        let name = match &tab_key {
-                            Tab::Session(id) => id.0.clone(),
-                            Tab::Draft(k) => format!("draft-{k}"),
-                        };
-                        let group = SharedString::from(format!("tab-{name}"));
-                        tab(group.clone(), active)
-                            .on_click(move |_, _, cx| {
-                                let tab = select_tab.clone();
-                                select.update(cx, |s, cx| s.select_tab(&tab, cx));
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .h_full()
+                            .items_center()
+                            .gap_0p5()
+                            .pl_2()
+                            .when(SIDEBAR_ENABLED, |row| {
+                                row.child(
+                                    div()
+                                        .id("toggle-sidebar")
+                                        .size(px(24.0))
+                                        .mr_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|b| b.bg(rgba(0xffffff0a)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sidebar_open = !this.sidebar_open;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(if self.sidebar_open {
+                                                IconName::PanelLeftClose
+                                            } else {
+                                                IconName::PanelLeftOpen
+                                            })
+                                            .small()
+                                            .text_color(muted),
+                                        ),
+                                )
                             })
-                            .child(composer_ui::provider_logo(provider, 14.0))
+                            .children(tabs.into_iter().map(|(tab_key, title, provider)| {
+                                let active =
+                                    selection == tab_key.selection() && panel == Panel::Chat;
+                                let (select, close) = (self.state.clone(), self.state.clone());
+                                let (select_tab, close_tab) = (tab_key.clone(), tab_key.clone());
+                                let name = match &tab_key {
+                                    Tab::Session(id) => id.0.clone(),
+                                    Tab::Draft(k) => format!("draft-{k}"),
+                                };
+                                let group = SharedString::from(format!("tab-{name}"));
+                                tab(group.clone(), active)
+                                    .on_click(move |_, _, cx| {
+                                        let tab = select_tab.clone();
+                                        select.update(cx, |s, cx| s.select_tab(&tab, cx));
+                                    })
+                                    .child(composer_ui::provider_logo(provider, 14.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h(px(16.0))
+                                            .line_height(px(16.0))
+                                            .truncate()
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("close-{name}")))
+                                            .size(px(16.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .flex_none()
+                                            .rounded_sm()
+                                            // Shown on hover only; faded rather than hidden so
+                                            // layout and painting stay stable.
+                                            .opacity(0.0)
+                                            .group_hover(group.clone(), |c| c.opacity(1.0))
+                                            .hover(|c| c.bg(rgba(0xffffff1a)))
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                let tab = close_tab.clone();
+                                                close.update(cx, |s, cx| s.close_tab(&tab, cx));
+                                            })
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .xsmall()
+                                                    .text_color(muted),
+                                            ),
+                                    )
+                            }))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(px(16.0))
-                                    .line_height(px(16.0))
-                                    .truncate()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("close-{name}")))
-                                    .size(px(16.0))
+                                    .id("new-tab")
+                                    .size(px(24.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .flex_none()
-                                    .rounded_sm()
-                                    // Shown on hover only; faded rather than hidden so
-                                    // layout and painting stay stable.
-                                    .opacity(0.0)
-                                    .group_hover(group.clone(), |c| c.opacity(1.0))
-                                    .hover(|c| c.bg(rgba(0xffffff1a)))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|plus| plus.bg(rgba(0xffffff0a)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        let tab = close_tab.clone();
-                                        close.update(cx, |s, cx| s.close_tab(&tab, cx));
-                                    })
-                                    .child(Icon::new(IconName::Close).xsmall().text_color(muted)),
-                            )
-                    }))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.state.update(cx, |s, cx| s.new_session(cx));
+                                        this.focus_composer(window, cx);
+                                    }))
+                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                            ),
+                    )
                     .child(
                         div()
-                            .id("new-tab")
+                            .id("toggle-right")
                             .size(px(24.0))
+                            .mr_2()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .hover(|plus| plus.bg(rgba(0xffffff0a)))
+                            .hover(|b| b.bg(rgba(0xffffff0a)))
+                            .when(self.right_open, |b| b.bg(rgba(0xffffff14)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.state.update(cx, |s, cx| s.new_session(cx));
-                                this.focus_composer(window, cx);
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.right_open = !this.right_open;
+                                cx.notify();
                             }))
-                            .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                            .child(
+                                Icon::new(if self.right_open {
+                                    IconName::PanelRightClose
+                                } else {
+                                    IconName::PanelRightOpen
+                                })
+                                .small()
+                                .text_color(muted),
+                            ),
                     ),
             )
     }
@@ -484,6 +536,8 @@ impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
         self.ensure_chat(cx);
+        let root = self.state.read(cx).effective().2;
+        self.right.update(cx, |r, cx| r.set_root(root, cx));
 
         // Load the title into the rename field when a rename starts.
         let renaming = self.state.read(cx).renaming.clone();
@@ -506,6 +560,15 @@ impl Render for AppShell {
                     return;
                 }
                 this.sidebar_open = !this.sidebar_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| {
+                this.right_open = !this.right_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.right_open = true;
+                this.right.update(cx, |r, cx| r.show_terminal(window, cx));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
@@ -559,7 +622,19 @@ impl Render for AppShell {
                             .px(inset)
                             .pb(inset)
                             .child(self.render_page(cx)),
-                    ),
+                    )
+                    .when(self.right_open, |row| {
+                        row.child(
+                            div().h_full().flex_none().pr(inset).pb(inset).child(
+                                div()
+                                    .size_full()
+                                    .rounded(px(self.metrics.page_radius))
+                                    .overflow_hidden()
+                                    .bg(rgba(PAGE_SURFACE_RGBA))
+                                    .child(self.right.clone()),
+                            ),
+                        )
+                    }),
             )
     }
 }
@@ -589,6 +664,9 @@ fn main() {
             });
 
             cx.bind_keys([
+                KeyBinding::new("cmd-\\", ToggleFiles, None),
+                KeyBinding::new("ctrl-`", ToggleTerminal, None),
+                KeyBinding::new("cmd-j", ToggleTerminal, None),
                 KeyBinding::new("cmd-t", NewSession, None),
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-w", CloseTab, None),
