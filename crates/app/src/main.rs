@@ -667,9 +667,10 @@ impl Render for AppShell {
                                 .flex_none()
                                 .overflow_hidden()
                                 .child(
-                                    // Fixed width inside the animated clip, so the panel
-                                    // slides in rather than reflowing as it grows.
-                                    div().w(px(full)).h_full().pr(inset).pb(inset).child(
+                                    // Fills whatever width the animation gives it: the panel
+                                    // grows out of the page's own space and lays out at the
+                                    // current width instead of sliding in from offscreen.
+                                    div().size_full().pr(inset).pb(inset).child(
                                         div()
                                             .size_full()
                                             .rounded(px(self.metrics.page_radius))
@@ -683,7 +684,7 @@ impl Render for AppShell {
                                     Animation::new(RIGHT_ANIM).with_easing(ease_out_quint()),
                                     move |el, t| {
                                         let t = if opening { t } else { 1.0 - t };
-                                        el.w(px(full * t))
+                                        el.w(px(full * t)).opacity(t)
                                     },
                                 ),
                         )

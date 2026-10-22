@@ -392,8 +392,9 @@ impl Render for RightPanel {
             Pane::Terminal => self.render_terminal().into_any_element(),
         };
         v_flex()
-            .w(px(PANEL_WIDTH))
-            .h_full()
+            .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .flex_none()
             .child(
                 h_flex()
