@@ -429,6 +429,14 @@ impl AppState {
         cx.notify();
     }
 
+    /// The agent a session runs on.
+    pub fn provider_of(&self, id: &SessionId) -> Option<Provider> {
+        self.records
+            .iter()
+            .find(|r| &r.id == id)
+            .map(|r| r.provider)
+    }
+
     pub fn current_title(&self, id: &SessionId) -> String {
         self.overrides
             .rows(&self.records)

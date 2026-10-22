@@ -246,19 +246,21 @@ impl AppShell {
         let muted = rgba(0xffffff8c);
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
-            let tabs: Vec<(SessionId, String)> = st
+            let tabs: Vec<(SessionId, String, Option<Provider>)> = st
                 .open_tabs
                 .iter()
-                .map(|id| (id.clone(), st.current_title(id)))
+                .map(|id| (id.clone(), st.current_title(id), st.provider_of(id)))
                 .collect();
             (tabs, st.selection.clone(), st.panel)
         };
         let draft_active = selection == Selection::Draft && panel == Panel::Chat;
         let tab = |id: SharedString, active: bool| {
             h_flex()
-                .id(id)
+                .id(id.clone())
+                .group(id)
                 .h(px(24.0))
-                .max_w(px(180.0))
+                .min_w(px(120.0))
+                .max_w(px(200.0))
                 .pl_2()
                 .pr_1()
                 .gap_1()
@@ -311,18 +313,21 @@ impl AppShell {
                                 .text_color(muted),
                             ),
                     )
-                    .children(tabs.into_iter().map(|(id, title)| {
+                    .children(tabs.into_iter().map(|(id, title, provider)| {
                         let active =
                             selection == Selection::Session(id.clone()) && panel == Panel::Chat;
                         let (select, close) = (self.state.clone(), self.state.clone());
                         let (select_id, close_id) = (id.clone(), id.clone());
-                        tab(SharedString::from(format!("tab-{}", id.0)), active)
+                        let group = SharedString::from(format!("tab-{}", id.0));
+                        tab(group.clone(), active)
                             .on_click(move |_, _, cx| {
                                 let id = select_id.clone();
                                 select.update(cx, |s, cx| s.select(id, cx));
                             })
+                            .children(provider.map(provider_badge))
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .h(px(16.0))
                                     .line_height(px(16.0))
@@ -336,7 +341,12 @@ impl AppShell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .flex_none()
                                     .rounded_sm()
+                                    // Shown on hover only; faded rather than hidden so
+                                    // layout and painting stay stable.
+                                    .opacity(0.0)
+                                    .group_hover(group.clone(), |c| c.opacity(1.0))
                                     .hover(|c| c.bg(rgba(0xffffff1a)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
@@ -444,6 +454,26 @@ impl AppShell {
                 ),
             })
     }
+}
+
+/// A small mark for the agent a tab runs on.
+fn provider_badge(provider: Provider) -> Div {
+    let (glyph, fg, bg) = match provider {
+        Provider::Claude => ("✻", 0xd97757, 0xd9775722),
+        Provider::Codex => (">_", 0xf5f5f5, 0xffffff1f),
+    };
+    div()
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .bg(rgba(bg))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(fg))
+        .child(glyph)
 }
 
 impl Render for AppShell {
