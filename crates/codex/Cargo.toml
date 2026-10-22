@@ -1,0 +1,18 @@
+[package]
+name = "del-codex"
+description = "Codex (`codex app-server`) integration: JSON-RPC client and AgentBackend."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+del-agent = { path = "../agent" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util"] }
+tempfile = "3"
