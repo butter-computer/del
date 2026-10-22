@@ -550,29 +550,23 @@ impl AppShell {
         cx.notify();
     }
 
-    pub(super) fn render_agent_messages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_agent_messages(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let active = match &self.state.read(cx).selection {
             Selection::Session(id) | Selection::Terminal(id) => Some(id),
             _ => None,
         };
         let summary = active.and_then(|id| self.reported.get(id)).cloned();
-        let mut area = v_flex().w_full().px_3().gap_1().text_size(px(12.));
-        let connected = self
-            .mcp
-            .as_ref()
-            .and_then(|m| m.handle().endpoint())
-            .is_some();
-        area = area.child(
-            h_flex()
-                .gap_3()
-                .text_color(rgb(0x999999))
-                .child(if connected {
-                    "Agent tools connected"
-                } else {
-                    "Agent tools starting…"
-                })
-                .when_some(summary, |r, s| r.child(s)),
-        );
+        if summary.is_none() && self.notices.is_empty() && self.questions.is_empty() {
+            return None;
+        }
+        let mut area = v_flex()
+            .w_full()
+            .px_3()
+            .gap_1()
+            .text_size(px(12.))
+            .when_some(summary, |area, summary| {
+                area.child(div().text_color(rgb(0x999999)).child(summary))
+            });
         if let Some((caller, title, body)) = self.notices.front() {
             area = area.child(
                 h_flex()
@@ -665,7 +659,7 @@ impl AppShell {
                     ),
             );
         }
-        area
+        Some(area)
     }
 
     fn caller_name(&self, id: &SessionId, cx: &App) -> String {

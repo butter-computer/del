@@ -777,7 +777,7 @@ impl Render for AppShell {
                 this.state.update(cx, |s, cx| s.toggle_providers(cx));
             }))
             .child(self.render_topbar(cx))
-            .child(self.render_agent_messages(cx))
+            .children(self.render_agent_messages(cx))
             .child(
                 h_flex()
                     .flex_1()
