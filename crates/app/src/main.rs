@@ -33,6 +33,7 @@ use right_panel::RightPanel;
 use state::{AppState, Panel, Selection, Tab};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
@@ -40,6 +41,9 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 /// The sidebar is reserved for something else for now: its code stays, but it is
 /// neither shown nor toggleable (button and Cmd-B) until this is turned on.
 const SIDEBAR_ENABLED: bool = false;
+
+/// How long the right panel takes to slide open or closed.
+const RIGHT_ANIM: Duration = Duration::from_millis(220);
 
 /// The prompt above the composer.
 const HEADING: &str = "What are we building?";
@@ -103,7 +107,12 @@ struct AppShell {
     renaming_loaded: Option<SessionId>,
     sidebar_open: bool,
     right: Entity<RightPanel>,
+    /// Where the right panel is heading (open or closed).
     right_open: bool,
+    /// Whether it is on screen: stays true while the close animation plays.
+    right_visible: bool,
+    /// Bumped on every toggle so each one starts a fresh animation.
+    right_toggles: u64,
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     metrics: ShellMetrics,
@@ -165,6 +174,8 @@ impl AppShell {
             sidebar_open: true,
             right,
             right_open: false,
+            right_visible: false,
+            right_toggles: 0,
             chats: HashMap::new(),
             metrics: ShellMetrics::default(),
         }
@@ -185,6 +196,31 @@ impl AppShell {
         let session = id.clone();
         let chat = cx.new(|cx| ChatView::new(backend, Some(session), first, cx));
         self.chats.insert(id, chat);
+    }
+
+    /// Open or close the right panel, animating its width.
+    fn set_right(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.right_open == open {
+            return;
+        }
+        self.right_open = open;
+        self.right_toggles += 1;
+        if open {
+            self.right_visible = true;
+        } else {
+            // Keep it on screen until the close animation has finished.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RIGHT_ANIM * 12 / 10).await;
+                let _ = this.update(cx, |this, cx| {
+                    if !this.right_open {
+                        this.right_visible = false;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -442,8 +478,7 @@ impl AppShell {
                             .when(self.right_open, |b| b.bg(rgba(0xffffff14)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.right_open = !this.right_open;
-                                cx.notify();
+                                this.set_right(!this.right_open, cx);
                             }))
                             .child(
                                 Icon::new(if self.right_open {
@@ -563,13 +598,13 @@ impl Render for AppShell {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| {
-                this.right_open = !this.right_open;
-                cx.notify();
+                this.set_right(!this.right_open, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
-                this.right_open = true;
+                if !this.right_open {
+                    this.set_right(true, cx);
+                }
                 this.right.update(cx, |r, cx| r.show_terminal(window, cx));
-                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 this.state.update(cx, |s, cx| s.close_active_tab(cx));
@@ -623,16 +658,34 @@ impl Render for AppShell {
                             .pb(inset)
                             .child(self.render_page(cx)),
                     )
-                    .when(self.right_open, |row| {
+                    .when(self.right_visible, |row| {
+                        let opening = self.right_open;
+                        let full = right_panel::PANEL_WIDTH + self.metrics.page_inset;
                         row.child(
-                            div().h_full().flex_none().pr(inset).pb(inset).child(
-                                div()
-                                    .size_full()
-                                    .rounded(px(self.metrics.page_radius))
-                                    .overflow_hidden()
-                                    .bg(rgba(PAGE_SURFACE_RGBA))
-                                    .child(self.right.clone()),
-                            ),
+                            div()
+                                .h_full()
+                                .flex_none()
+                                .overflow_hidden()
+                                .child(
+                                    // Fixed width inside the animated clip, so the panel
+                                    // slides in rather than reflowing as it grows.
+                                    div().w(px(full)).h_full().pr(inset).pb(inset).child(
+                                        div()
+                                            .size_full()
+                                            .rounded(px(self.metrics.page_radius))
+                                            .overflow_hidden()
+                                            .bg(rgba(PAGE_SURFACE_RGBA))
+                                            .child(self.right.clone()),
+                                    ),
+                                )
+                                .with_animation(
+                                    ("right-panel", self.right_toggles),
+                                    Animation::new(RIGHT_ANIM).with_easing(ease_out_quint()),
+                                    move |el, t| {
+                                        let t = if opening { t } else { 1.0 - t };
+                                        el.w(px(full * t))
+                                    },
+                                ),
                         )
                     }),
             )
@@ -665,6 +718,7 @@ fn main() {
 
             cx.bind_keys([
                 KeyBinding::new("cmd-\\", ToggleFiles, None),
+                KeyBinding::new("cmd-shift-b", ToggleFiles, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("cmd-j", ToggleTerminal, None),
                 KeyBinding::new("cmd-t", NewSession, None),
