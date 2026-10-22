@@ -14,8 +14,14 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManagerEvent {
-    Event { session: SessionId, event: AgentEvent },
-    StatusChanged { session: SessionId, status: SessionStatus },
+    Event {
+        session: SessionId,
+        event: AgentEvent,
+    },
+    StatusChanged {
+        session: SessionId,
+        status: SessionStatus,
+    },
 }
 
 struct Live {
@@ -41,7 +47,9 @@ fn next_status(current: SessionStatus, ev: &AgentEvent) -> SessionStatus {
     match ev {
         AgentEvent::TurnStarted { .. } => SessionStatus::Running,
         AgentEvent::ApprovalRequested { .. } => SessionStatus::WaitingApproval,
-        AgentEvent::Error { recoverable: false, .. } => SessionStatus::Error,
+        AgentEvent::Error {
+            recoverable: false, ..
+        } => SessionStatus::Error,
         AgentEvent::TurnCompleted { .. } if current != SessionStatus::Error => SessionStatus::Idle,
         _ => current,
     }
@@ -60,7 +68,10 @@ impl Shared {
             r.status = status;
             r.updated_at_ms = now_ms();
         });
-        let _ = self.all_tx.send(ManagerEvent::StatusChanged { session: id.clone(), status });
+        let _ = self.all_tx.send(ManagerEvent::StatusChanged {
+            session: id.clone(),
+            status,
+        });
     }
 }
 
@@ -82,7 +93,11 @@ impl SessionManager {
     }
 
     fn backend(&self, p: Provider) -> Result<Arc<dyn AgentBackend>> {
-        self.shared.backends.get(&p).cloned().ok_or(AgentError::NoBackend(p))
+        self.shared
+            .backends
+            .get(&p)
+            .cloned()
+            .ok_or(AgentError::NoBackend(p))
     }
 
     fn live_provider(&self, id: &SessionId) -> Result<Provider> {
@@ -110,26 +125,34 @@ impl SessionManager {
                             // Status first so a listener seeing the event sees a consistent status.
                             shared.set_status(&pump_id, next);
                         }
-                        let _ = shared.all_tx.send(ManagerEvent::Event { session: pump_id.clone(), event });
+                        let _ = shared.all_tx.send(ManagerEvent::Event {
+                            session: pump_id.clone(),
+                            event,
+                        });
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
-        let old = self
-            .shared
-            .live
-            .lock()
-            .unwrap()
-            .insert(id, Live { handle, status: SessionStatus::Idle, pump });
+        let old = self.shared.live.lock().unwrap().insert(
+            id,
+            Live {
+                handle,
+                status: SessionStatus::Idle,
+                pump,
+            },
+        );
         if let Some(old) = old {
             old.pump.abort();
         }
     }
 
     pub async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
-        let handle = self.backend(config.provider)?.start_session(config.clone()).await?;
+        let handle = self
+            .backend(config.provider)?
+            .start_session(config.clone())
+            .await?;
         let now = now_ms();
         self.shared.index.lock().unwrap().upsert(SessionRecord {
             id: handle.id.clone(),
@@ -159,7 +182,10 @@ impl SessionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
-        let handle = self.backend(record.provider)?.resume(record.config(), id).await?;
+        let handle = self
+            .backend(record.provider)?
+            .resume(record.config(), id)
+            .await?;
         self.attach(handle.clone());
         self.shared.set_status(id, SessionStatus::Idle);
         Ok(handle)
@@ -192,7 +218,9 @@ impl SessionManager {
         approval_id: &str,
         response: ApprovalResponse,
     ) -> Result<()> {
-        self.backend(self.live_provider(id)?)?.respond_approval(id, approval_id, response).await?;
+        self.backend(self.live_provider(id)?)?
+            .respond_approval(id, approval_id, response)
+            .await?;
         self.shared.set_status(id, SessionStatus::Running);
         Ok(())
     }
@@ -204,7 +232,12 @@ impl SessionManager {
         if let Some(l) = self.shared.live.lock().unwrap().remove(id) {
             l.pump.abort();
         }
-        let _ = self.shared.index.lock().unwrap().update(id, |r| r.status = SessionStatus::Idle);
+        let _ = self
+            .shared
+            .index
+            .lock()
+            .unwrap()
+            .update(id, |r| r.status = SessionStatus::Idle);
         res
     }
 
@@ -265,7 +298,12 @@ mod tests {
     use std::time::Duration;
 
     fn cfg(p: Provider) -> SessionConfig {
-        SessionConfig { cwd: "/tmp".into(), model: None, provider: p, permission_mode: PermissionMode::Ask }
+        SessionConfig {
+            cwd: "/tmp".into(),
+            model: None,
+            provider: p,
+            permission_mode: PermissionMode::Ask,
+        }
     }
 
     fn manager(path: &Path) -> SessionManager {
@@ -279,13 +317,18 @@ mod tests {
         .unwrap()
     }
 
-    async fn wait_status(rx: &mut broadcast::Receiver<ManagerEvent>, id: &SessionId, want: SessionStatus) {
+    async fn wait_status(
+        rx: &mut broadcast::Receiver<ManagerEvent>,
+        id: &SessionId,
+        want: SessionStatus,
+    ) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let ManagerEvent::StatusChanged { session, status } = rx.recv().await.unwrap() {
-                    if &session == id && status == want {
-                        return;
-                    }
+                if let ManagerEvent::StatusChanged { session, status } = rx.recv().await.unwrap()
+                    && &session == id
+                    && status == want
+                {
+                    return;
                 }
             }
         })
@@ -301,17 +344,28 @@ mod tests {
         let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
         assert_eq!(m.status(&h.id), Some(SessionStatus::Idle));
 
-        m.send_prompt(&h.id, UserInput::text("please approve this")).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("please approve this"))
+            .await
+            .unwrap();
         wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
         let approval = loop {
-            if let ManagerEvent::Event { event: AgentEvent::ApprovalRequested { id, .. }, .. } = all.recv().await.unwrap() {
+            if let ManagerEvent::Event {
+                event: AgentEvent::ApprovalRequested { id, .. },
+                ..
+            } = all.recv().await.unwrap()
+            {
                 break id;
             }
         };
-        m.respond_approval(&h.id, &approval, ApprovalResponse::Approve).await.unwrap();
+        m.respond_approval(&h.id, &approval, ApprovalResponse::Approve)
+            .await
+            .unwrap();
         wait_status(&mut all, &h.id, SessionStatus::Running).await;
         wait_status(&mut all, &h.id, SessionStatus::Idle).await;
-        assert_eq!(m.list_sessions()[0].title.as_deref(), Some("please approve this"));
+        assert_eq!(
+            m.list_sessions()[0].title.as_deref(),
+            Some("please approve this")
+        );
     }
 
     #[tokio::test]
@@ -326,11 +380,18 @@ mod tests {
         m.send_prompt(&b.id, UserInput::text("hi")).await.unwrap();
         let mut done = std::collections::HashSet::new();
         while done.len() < 2 {
-            if let ManagerEvent::Event { session, event: AgentEvent::TurnCompleted { .. } } = all.recv().await.unwrap() {
+            if let ManagerEvent::Event {
+                session,
+                event: AgentEvent::TurnCompleted { .. },
+            } = all.recv().await.unwrap()
+            {
                 done.insert(session);
             }
         }
-        assert!(matches!(ra.recv().await.unwrap(), AgentEvent::TurnStarted { .. }));
+        assert!(matches!(
+            ra.recv().await.unwrap(),
+            AgentEvent::TurnStarted { .. }
+        ));
         assert_eq!(m.list_sessions().len(), 2);
     }
 
@@ -350,11 +411,16 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
         assert!(!m.is_live(&id));
-        assert!(m.send_prompt(&id, UserInput::text("x")).await.is_err(), "must resume first");
+        assert!(
+            m.send_prompt(&id, UserInput::text("x")).await.is_err(),
+            "must resume first"
+        );
 
         let h = m.resume(&id).await.unwrap();
         let mut rx = h.subscribe();
-        m.send_prompt(&id, UserInput::text("hello again")).await.unwrap();
+        m.send_prompt(&id, UserInput::text("hello again"))
+            .await
+            .unwrap();
         loop {
             if matches!(rx.recv().await.unwrap(), AgentEvent::TurnCompleted { .. }) {
                 break;
@@ -378,7 +444,9 @@ mod tests {
         ));
         let mut all = m.subscribe_all();
         let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
-        m.send_prompt(&h.id, UserInput::text("approve")).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("approve"))
+            .await
+            .unwrap();
         wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
         m.interrupt(&h.id).await.unwrap();
         wait_status(&mut all, &h.id, SessionStatus::Idle).await;
@@ -388,13 +456,28 @@ mod tests {
 
     #[test]
     fn status_machine_keeps_error_until_next_prompt() {
-        let done = AgentEvent::TurnCompleted { turn_id: "t".into(), status: TurnStatus::Failed };
-        let fatal = AgentEvent::Error { message: "x".into(), recoverable: false };
-        let soft = AgentEvent::Error { message: "x".into(), recoverable: true };
-        assert_eq!(next_status(SessionStatus::Running, &soft), SessionStatus::Running);
+        let done = AgentEvent::TurnCompleted {
+            turn_id: "t".into(),
+            status: TurnStatus::Failed,
+        };
+        let fatal = AgentEvent::Error {
+            message: "x".into(),
+            recoverable: false,
+        };
+        let soft = AgentEvent::Error {
+            message: "x".into(),
+            recoverable: true,
+        };
+        assert_eq!(
+            next_status(SessionStatus::Running, &soft),
+            SessionStatus::Running
+        );
         let e = next_status(SessionStatus::Running, &fatal);
         assert_eq!(e, SessionStatus::Error);
         assert_eq!(next_status(e, &done), SessionStatus::Error);
-        assert_eq!(next_status(SessionStatus::Running, &done), SessionStatus::Idle);
+        assert_eq!(
+            next_status(SessionStatus::Running, &done),
+            SessionStatus::Idle
+        );
     }
 }

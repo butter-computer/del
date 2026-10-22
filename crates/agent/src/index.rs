@@ -58,7 +58,10 @@ impl SessionIndex {
             Ok(text) => {
                 for line in text.lines().filter(|l| !l.trim().is_empty()) {
                     if let Ok(mut r) = serde_json::from_str::<SessionRecord>(line) {
-                        if matches!(r.status, SessionStatus::Running | SessionStatus::WaitingApproval) {
+                        if matches!(
+                            r.status,
+                            SessionStatus::Running | SessionStatus::WaitingApproval
+                        ) {
                             r.status = SessionStatus::Idle;
                         }
                         records.retain(|x| x.id != r.id);
@@ -79,7 +82,7 @@ impl SessionIndex {
     /// Most recently updated first.
     pub fn list(&self) -> Vec<SessionRecord> {
         let mut v = self.records.clone();
-        v.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        v.sort_by_key(|r| std::cmp::Reverse(r.updated_at_ms));
         v
     }
 
@@ -114,7 +117,9 @@ impl SessionIndex {
         }
         let mut out = String::new();
         for r in &self.records {
-            out.push_str(&serde_json::to_string(r).map_err(|e| crate::AgentError::Backend(e.to_string()))?);
+            out.push_str(
+                &serde_json::to_string(r).map_err(|e| crate::AgentError::Backend(e.to_string()))?,
+            );
             out.push('\n');
         }
         let tmp = self.path.with_extension("jsonl.tmp");
@@ -150,10 +155,14 @@ mod tests {
         assert!(idx.list().is_empty());
         idx.upsert(rec("a", 1, SessionStatus::Running)).unwrap();
         idx.upsert(rec("b", 2, SessionStatus::Error)).unwrap();
-        idx.update(&SessionId::new("a"), |r| r.updated_at_ms = 3).unwrap();
+        idx.update(&SessionId::new("a"), |r| r.updated_at_ms = 3)
+            .unwrap();
         let again = SessionIndex::open(&p).unwrap();
         let l = again.list();
-        assert_eq!(l.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            l.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         assert_eq!(l[0].status, SessionStatus::Idle);
         assert_eq!(l[1].status, SessionStatus::Error);
     }
