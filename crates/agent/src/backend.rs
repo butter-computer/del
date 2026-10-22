@@ -52,7 +52,8 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 pub trait AgentBackend: Send + Sync {
     fn provider(&self) -> Provider;
 
-    /// Start a fresh session. Emits `SessionStarted` on the stream.
+    /// Start a fresh session. Backends need not emit `SessionStarted`: nobody can
+    /// be subscribed yet, so `SessionManager` emits it as the first history event.
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle>;
     /// Begin a new turn. Returns once the prompt is accepted; progress arrives as events.
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()>;

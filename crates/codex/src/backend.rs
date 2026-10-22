@@ -217,9 +217,6 @@ impl CodexBackend {
         let id = SessionId::new(resp.thread.id);
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
-        session.emit(AgentEvent::SessionStarted {
-            session_id: id.clone(),
-        });
         Ok(SessionHandle::new(id, provider, session.events.clone()))
     }
 }
@@ -327,9 +324,21 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn close(&self, session: &SessionId) -> Result<()> {
-        let removed = self.sessions.lock().unwrap().remove(session.as_str());
+        let (removed, last) = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let removed = sessions.remove(session.as_str());
+            (removed, sessions.is_empty())
+        };
         if removed.is_none() {
             return Err(AgentError::UnknownSession(session.clone()));
+        }
+        if last {
+            // No session left: stop the app-server rather than leave it idle.
+            // The next session spawns a fresh one.
+            if let Some(conn) = self.conn.lock().await.take() {
+                conn.client.shutdown(self.opts.shutdown_grace).await;
+            }
+            return Ok(());
         }
         if let Some(conn) = self.conn.lock().await.clone()
             && !conn.client.is_closed()

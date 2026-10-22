@@ -1196,6 +1196,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -1208,11 +1209,17 @@ dependencies = [
 name = "del-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "del-agent",
+ "del-claude",
+ "del-codex",
  "del-core",
+ "dirs 6.0.0",
  "gpui-kit",
  "gpui-pre",
  "image",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

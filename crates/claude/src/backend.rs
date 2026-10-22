@@ -42,11 +42,16 @@ impl Default for ClaudeOptions {
     }
 }
 
+/// How long `claude` gets to exit after SIGTERM before its group is killed.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 struct Live {
     events: broadcast::Sender<AgentEvent>,
     stdin: AsyncMutex<ChildStdin>,
     translator: Mutex<Translator>,
     child: AsyncMutex<Child>,
+    /// Leader of the process group `claude` and its tools run in.
+    pid: Option<u32>,
     closing: std::sync::atomic::AtomicBool,
 }
 
@@ -145,6 +150,8 @@ impl ClaudeBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
+            // Own process group, so closing takes down the MCP servers and tools too.
+            .process_group(0)
             .spawn()
             .map_err(|e| {
                 AgentError::Backend(format!(
@@ -152,6 +159,7 @@ impl ClaudeBackend {
                     self.options.binary.display()
                 ))
             })?;
+        let pid = child.id();
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -161,6 +169,7 @@ impl ClaudeBackend {
             stdin: AsyncMutex::new(stdin),
             translator: Mutex::new(Translator::new()),
             child: AsyncMutex::new(child),
+            pid,
             closing: Default::default(),
         });
 
@@ -215,11 +224,6 @@ impl ClaudeBackend {
         });
 
         self.sessions.lock().unwrap().insert(id.clone(), live);
-        // NOTE: no subscriber can exist yet, so this event only reaches consumers
-        // that obtained a sender clone earlier; kept for contract parity.
-        let _ = tx.send(AgentEvent::SessionStarted {
-            session_id: id.clone(),
-        });
         Ok(SessionHandle::new(id, Provider::Claude, tx))
     }
 
@@ -308,7 +312,13 @@ impl AgentBackend for ClaudeBackend {
             .ok_or_else(|| AgentError::UnknownSession(session.clone()))?;
         live.closing
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = live.child.lock().await.start_kill();
+        let mut child = live.child.lock().await;
+        match live.pid {
+            Some(pid) => del_agent::procgroup::terminate_group(pid, &mut child, CLOSE_GRACE).await,
+            None => {
+                let _ = child.start_kill();
+            }
+        }
         Ok(())
     }
 

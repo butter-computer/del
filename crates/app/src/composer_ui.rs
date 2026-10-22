@@ -3,7 +3,7 @@
 //! send (and, while a turn runs, stop) buttons below.
 
 use del_core::composer;
-use del_core::typography::{TEXT_MD, TEXT_SM};
+use del_core::typography::TEXT_MD;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -34,6 +34,7 @@ pub struct ComposerCard {
     max_width: f32,
     on_send: ClickHandler,
     on_stop: Option<ClickHandler>,
+    label: Option<String>,
 }
 
 impl ComposerCard {
@@ -47,7 +48,14 @@ impl ComposerCard {
             max_width,
             on_send: Box::new(on_send),
             on_stop: None,
+            label: None,
         }
+    }
+
+    /// The provider and model shown on the chip.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     /// Show a stop button; set while a turn is running.
@@ -69,6 +77,7 @@ impl RenderOnce for ComposerCard {
             max_width,
             on_send,
             on_stop,
+            label,
         } = self;
 
         // No border: the card is told apart from the page by its fill alone.
@@ -100,19 +109,12 @@ impl RenderOnce for ComposerCard {
                                     .child(Icon::new(IconName::Plus).small().text_color(muted)),
                             )
                             .child(
-                                composer_chip("model")
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(rgb(0xf0f0f0))
-                                            .child("Sonnet 5.5"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_SM))
-                                            .text_color(muted)
-                                            .child("Medium"),
-                                    ),
+                                composer_chip("model").child(
+                                    div()
+                                        .text_size(px(TEXT_MD))
+                                        .text_color(rgb(0xf0f0f0))
+                                        .child(label.unwrap_or_default()),
+                                ),
                             ),
                     )
                     .child(

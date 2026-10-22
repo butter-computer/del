@@ -24,10 +24,18 @@ pub enum ManagerEvent {
     },
 }
 
+/// Most events kept per session for late subscribers.
+const HISTORY_LIMIT: usize = 50_000;
+
 struct Live {
     handle: SessionHandle,
     status: SessionStatus,
     pump: JoinHandle<()>,
+    /// Re-broadcast of the backend's events, fed under the `live` lock together
+    /// with `history`, so a subscriber that takes the lock sees every event
+    /// exactly once: first in the history, then on the receiver.
+    fanout: broadcast::Sender<AgentEvent>,
+    history: Vec<AgentEvent>,
 }
 
 struct Shared {
@@ -110,21 +118,34 @@ impl SessionManager {
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))
     }
 
+    /// Start pumping a backend's events. Backends cannot emit `SessionStarted`
+    /// to anyone (no subscriber exists yet), so the manager emits the canonical
+    /// one here, first in the session's history; any the backend emits itself
+    /// is dropped.
     fn attach(&self, handle: SessionHandle) {
         let id = handle.id.clone();
         let mut rx = handle.subscribe();
+        let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let shared = self.shared.clone();
         let pump_id = id.clone();
         let pump = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
+                    Ok(AgentEvent::SessionStarted { .. }) => {}
                     Ok(event) => {
-                        let current = shared.live.lock().unwrap().get(&pump_id).map(|l| l.status);
-                        if let Some(cur) = current {
-                            let next = next_status(cur, &event);
-                            // Status first so a listener seeing the event sees a consistent status.
-                            shared.set_status(&pump_id, next);
+                        let mut live = shared.live.lock().unwrap();
+                        let Some(l) = live.get_mut(&pump_id) else {
+                            continue;
+                        };
+                        if l.history.len() >= HISTORY_LIMIT {
+                            l.history.drain(..HISTORY_LIMIT / 10);
                         }
+                        l.history.push(event.clone());
+                        let _ = l.fanout.send(event.clone());
+                        let next = next_status(l.status, &event);
+                        drop(live);
+                        // Status first so a listener seeing the event sees a consistent status.
+                        shared.set_status(&pump_id, next);
                         let _ = shared.all_tx.send(ManagerEvent::Event {
                             session: pump_id.clone(),
                             event,
@@ -135,12 +156,21 @@ impl SessionManager {
                 }
             }
         });
+        let started = AgentEvent::SessionStarted {
+            session_id: id.clone(),
+        };
+        let _ = self.shared.all_tx.send(ManagerEvent::Event {
+            session: id.clone(),
+            event: started.clone(),
+        });
         let old = self.shared.live.lock().unwrap().insert(
             id,
             Live {
                 handle,
                 status: SessionStatus::Idle,
                 pump,
+                fanout,
+                history: vec![started],
             },
         );
         if let Some(old) = old {
@@ -263,14 +293,25 @@ impl SessionManager {
         self.shared.index.lock().unwrap().list()
     }
 
-    /// Events of one live session.
+    /// Events of one live session from now on.
     pub fn subscribe(&self, id: &SessionId) -> Result<broadcast::Receiver<AgentEvent>> {
+        self.subscribe_with_history(id).map(|(_, rx)| rx)
+    }
+
+    /// Everything the session has emitted since it was attached (starting with
+    /// `SessionStarted`) plus a receiver for what comes next, with no gap or
+    /// overlap between the two. Use this when the subscriber may arrive after
+    /// the session already produced events.
+    pub fn subscribe_with_history(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Vec<AgentEvent>, broadcast::Receiver<AgentEvent>)> {
         self.shared
             .live
             .lock()
             .unwrap()
             .get(id)
-            .map(|l| l.handle.subscribe())
+            .map(|l| (l.history.clone(), l.fanout.subscribe()))
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))
     }
 
@@ -366,6 +407,36 @@ mod tests {
             m.list_sessions()[0].title.as_deref(),
             Some("please approve this")
         );
+    }
+
+    #[tokio::test]
+    async fn late_subscriber_gets_session_started_and_earlier_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Claude)).await.unwrap();
+        // The first prompt completes before anyone subscribes.
+        let mut all = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("hi")).await.unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        let (history, mut rx) = m.subscribe_with_history(&h.id).unwrap();
+        assert!(matches!(
+            history.first(),
+            Some(AgentEvent::SessionStarted { session_id }) if *session_id == h.id
+        ));
+        assert_eq!(
+            history
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            history
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        );
+        // No overlap: the receiver only sees what comes after the snapshot.
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

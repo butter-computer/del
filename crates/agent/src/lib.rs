@@ -6,6 +6,7 @@ pub mod detect;
 pub mod index;
 pub mod manager;
 pub mod mock;
+pub mod procgroup;
 pub mod types;
 
 pub use backend::*;

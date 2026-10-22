@@ -3,7 +3,6 @@
 //! composer.
 
 mod blocks;
-pub mod demo;
 pub mod model;
 mod view;
 

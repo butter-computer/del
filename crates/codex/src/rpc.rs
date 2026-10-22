@@ -177,6 +177,9 @@ impl CodexClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Own process group: `codex` is a Node wrapper over a native binary.
+        #[cfg(unix)]
+        cmd.process_group(0);
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
@@ -414,11 +417,21 @@ impl CodexClient {
         self.inner.fail_all("client shut down");
         self.inner.stop_writer.notify_one(); // writer drops stdin -> EOF for the server
         let child = self.inner.child.lock().await.take();
-        if let Some(mut child) = child
-            && tokio::time::timeout(grace, child.wait()).await.is_err()
-        {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        if let Some(mut child) = child {
+            let pid = child.id();
+            if tokio::time::timeout(grace, child.wait()).await.is_err() {
+                match pid {
+                    Some(pid) => {
+                        del_agent::procgroup::terminate_group(pid, &mut child, grace).await
+                    }
+                    None => {
+                        let _ = child.kill().await;
+                    }
+                }
+            } else if let Some(pid) = pid {
+                // The wrapper exited; make sure nothing it started lingers.
+                del_agent::procgroup::signal_group(pid, true);
+            }
         }
     }
 }

@@ -2,9 +2,7 @@
 
 use super::model::{Change, ChatModel, Phase, compact_count};
 use crate::composer_ui::ComposerCard;
-use del_agent::{
-    AgentError, AgentEvent, ApprovalResponse, SessionConfig, SessionId, SessionManager, UserInput,
-};
+use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::composer;
 use del_core::typography::TEXT_SM;
 use gpui_kit::component::input::{InputEvent, TextareaState};
@@ -24,7 +22,6 @@ pub const COLUMN_MAX_WIDTH: f32 = 640.0;
 pub struct Backend {
     pub runtime: tokio::runtime::Handle,
     pub manager: SessionManager,
-    pub config: SessionConfig,
 }
 
 pub struct ChatView {
@@ -33,12 +30,25 @@ pub struct ChatView {
     pub(super) composer: Entity<TextareaState>,
     backend: Backend,
     session: Option<SessionId>,
-    /// A session is being started; prompts wait until it is ready.
-    starting: bool,
+    /// The session's event stream ended (session closed or app quitting).
+    closed: bool,
+    /// Provider and model shown on the composer.
+    label: String,
 }
 
 impl ChatView {
-    pub fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A chat for `session`, which the app has already started. The view
+    /// replays what the session emitted so far (so nothing sent before this
+    /// view existed is missed), then follows it live. `first_prompt` is the
+    /// text the app sent to start the session, shown as the opening user row.
+    pub fn new(
+        backend: Backend,
+        session: Option<SessionId>,
+        label: String,
+        first_prompt: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Reply, or steer the turn...")
@@ -60,28 +70,23 @@ impl ChatView {
         composer.update(cx, |state, cx| state.focus(window, cx));
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
 
-        Self {
+        let mut view = Self {
             model: ChatModel::default(),
             scroller,
             composer,
             backend,
-            session: None,
-            starting: false,
+            session: session.clone(),
+            closed: false,
+            label,
+        };
+        if let Some(text) = first_prompt {
+            let change = view.model.push_user(text, false);
+            view.sync(Some(change), cx);
         }
-    }
-
-    /// Send the first prompt of a conversation (from the new-chat page).
-    pub fn send_first(&mut self, text: String, cx: &mut Context<Self>) {
-        self.send(text, cx);
-    }
-
-    /// Fold a canned event list into the transcript, for demos and screenshots.
-    pub fn preload(&mut self, events: &[AgentEvent], cx: &mut Context<Self>) {
-        for event in events {
-            self.on_event(event, cx);
+        if let Some(id) = session {
+            view.follow(id, cx);
         }
-        self.scroller
-            .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+        view
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
@@ -108,9 +113,6 @@ impl ChatView {
         let Some(text) = composer::submission(&self.composer.read(cx).value()) else {
             return;
         };
-        if self.starting {
-            return;
-        }
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         if self.model.is_running() && self.session.is_some() {
@@ -127,16 +129,14 @@ impl ChatView {
         self.scroller
             .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
 
-        let backend = self.backend.clone();
-        match self.session.clone() {
-            Some(id) => self.run(cx, async move {
-                backend
-                    .manager
-                    .send_prompt(&id, UserInput::text(text))
-                    .await
-            }),
-            None => self.start_session(text, cx),
-        }
+        let Some(id) = self.session.clone() else {
+            return;
+        };
+        let manager = self.backend.manager.clone();
+        self.run(cx, async move {
+            manager.resume(&id).await?;
+            manager.send_prompt(&id, UserInput::text(text)).await
+        });
     }
 
     fn steer(&mut self, text: String, cx: &mut Context<Self>) {
@@ -179,33 +179,29 @@ impl ChatView {
         self.sync(change, cx);
     }
 
-    /// Start a session, subscribe before the first prompt so no event is
-    /// missed, then pump events into the model until the stream closes.
-    fn start_session(&mut self, first_prompt: String, cx: &mut Context<Self>) {
-        self.starting = true;
-        let backend = self.backend.clone();
-        let started = self.backend.runtime.spawn(async move {
-            let handle = backend
-                .manager
-                .start_session(backend.config.clone())
-                .await?;
-            let rx = backend.manager.subscribe(&handle.id)?;
-            backend
-                .manager
-                .send_prompt(&handle.id, UserInput::text(first_prompt))
-                .await?;
-            Ok::<_, AgentError>((handle.id, rx))
+    /// Reattach the session if it is not live, replay its history into the
+    /// model, then pump new events until the stream closes.
+    fn follow(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        let manager = self.backend.manager.clone();
+        let attached = self.backend.runtime.spawn(async move {
+            manager.resume(&id).await?;
+            manager.subscribe_with_history(&id)
         });
         cx.spawn(async move |this, cx| {
-            let (id, mut rx) = match started.await {
-                Ok(Ok(started)) => started,
+            let (history, mut rx) = match attached.await {
+                Ok(Ok(attached)) => attached,
                 Ok(Err(err)) => return report(&this, cx, err.to_string()),
                 Err(err) => return report(&this, cx, err.to_string()),
             };
-            let _ = this.update(cx, |this, _| {
-                this.session = Some(id);
-                this.starting = false;
+            let replayed = this.update(cx, |this, cx| {
+                for event in &history {
+                    this.on_event(event, cx);
+                }
+                this.scroller.update(cx, |s, cx| s.scroll_to_end(cx));
             });
+            if replayed.is_err() {
+                return;
+            }
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -220,8 +216,15 @@ impl ChatView {
                     Err(RecvError::Closed) => break,
                 }
             }
+            let _ = this.update(cx, |this, _| this.closed = true);
         })
         .detach();
+    }
+
+    /// True once the session's stream ended; the app drops the view and
+    /// builds a fresh one if the session is reopened.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Run a backend call on the tokio runtime; failures become error banners.
@@ -289,7 +292,6 @@ impl ChatView {
 /// Show a backend failure as a banner (and stop the running phase).
 fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
     let _ = this.update(cx, |this, cx| {
-        this.starting = false;
         let change = this.model.push_error(message, false);
         this.sync(Some(change), cx);
     });
@@ -325,7 +327,8 @@ impl Render for ChatView {
                             &self.composer,
                             COLUMN_MAX_WIDTH,
                             cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                        );
+                        )
+                        .label(self.label.clone());
                         if running {
                             card.on_stop(cx.listener(|this, _, _, cx| this.stop(cx)))
                         } else {
