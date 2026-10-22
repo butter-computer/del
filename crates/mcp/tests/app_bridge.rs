@@ -483,3 +483,87 @@ async fn production_start_api_serves_and_shuts_down() {
     bridge.shutdown();
     assert!(bridge.handle().endpoint().is_none());
 }
+
+#[tokio::test]
+async fn opaque_terminal_lease_is_generation_safe_and_cancels_pending_questions() {
+    let mut f = Fixture::new(Default::default()).await;
+    let first = f
+        .handle
+        .register_terminal(terminal("leased", Some(Provider::Codex)))
+        .unwrap()
+        .unwrap();
+    let first_config = first.config().clone();
+    assert_eq!(post(&first_config, "ping", json!({})).await.0, 200);
+    let replacement = f
+        .handle
+        .register_terminal(terminal("leased", Some(Provider::Codex)))
+        .unwrap()
+        .unwrap();
+    let replacement_config = replacement.config().clone();
+    assert_eq!(post(&first_config, "ping", json!({})).await.0, 401);
+    drop(first);
+    assert_eq!(post(&replacement_config, "ping", json!({})).await.0, 200);
+    let config = replacement_config.clone();
+    let task = tokio::spawn(async move {
+        call(&config, "ask_user", json!({"question":"Still running?"})).await
+    });
+    let (request_id, reply) = match f.event().await {
+        BridgeEvent::AskUser {
+            request_id, reply, ..
+        } => (request_id, reply),
+        _ => panic!("expected question"),
+    };
+    // Exact opaque type accepted by the terminal host, no bridge coupling.
+    let opaque: Box<dyn std::any::Any> = Box::new(replacement);
+    drop(opaque);
+    assert_eq!(task.await.unwrap()["isError"], true);
+    assert!(reply.is_closed());
+    assert!(
+        matches!(f.event().await, BridgeEvent::QuestionClosed { request_id: id } if id == request_id)
+    );
+    assert_eq!(post(&replacement_config, "ping", json!({})).await.0, 401);
+    let summary = call(
+        &f.config,
+        "get_session_summary",
+        json!({"session_id":"leased"}),
+    )
+    .await;
+    assert_eq!(summary["structuredContent"]["info"]["id"], "leased");
+
+    let claude = f
+        .handle
+        .register_terminal(terminal("claude-leased", Some(Provider::Claude)))
+        .unwrap()
+        .unwrap();
+    let file = claude.config().files[0].clone();
+    assert!(file.exists());
+    drop(claude);
+    assert!(!file.exists());
+}
+
+#[tokio::test]
+async fn shell_registration_has_context_without_agent_lease() {
+    let f = Fixture::new(Default::default()).await;
+    assert!(
+        f.handle
+            .register_terminal(terminal("plain-shell", None))
+            .unwrap()
+            .is_none()
+    );
+    let summary = call(
+        &f.config,
+        "get_session_summary",
+        json!({"session_id":"plain-shell"}),
+    )
+    .await;
+    assert!(summary["structuredContent"]["info"]["provider"].is_null());
+    assert_eq!(summary["structuredContent"]["info"]["command"], "/bin/zsh");
+    assert!(
+        f.handle
+            .register_terminal(terminal("acp", Some(Provider::Acp)))
+            .is_err()
+    );
+    let mut chat = terminal("wrong-mode", Some(Provider::Codex));
+    chat.mode = SessionMode::Chat;
+    assert!(f.handle.register_terminal(chat).is_err());
+}

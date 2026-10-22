@@ -2,8 +2,9 @@
 //! waiting and backend I/O stay on the existing Tokio runtime.
 //!
 //! Retain `McpBridge` for the app lifetime and clone `BridgeHandle` into terminal
-//! launch tasks. Publish terminal snapshots before calling `launch_config`,
-//! append its args/env to the CLI launch, and revoke when the process exits.
+//! launch tasks. `register_terminal` returns an optional opaque TerminalLease;
+//! copy its config args/env into the launch and retain the lease in the host.
+//! Manual callers may use upsert_terminal/launch_config and revoke on exit.
 //! Dropping the owner shuts down even when launch/UI handle clones survive.
 
 use async_trait::async_trait;
@@ -93,6 +94,43 @@ pub struct McpBridge {
 #[derive(Clone)]
 pub struct BridgeHandle {
     service: Arc<Service>,
+}
+
+/// Opaque process-lifetime lease: box this for TerminalHost. Dropping it ends
+/// only this launch's credentials/config, leaving metadata for history.
+/// Do not drop it after copying args/env; retain until process exit/close.
+pub struct TerminalLease {
+    handle: BridgeHandle,
+    id: SessionId,
+    config: LaunchConfig,
+    cancel: watch::Sender<bool>,
+}
+
+impl TerminalLease {
+    pub fn config(&self) -> &LaunchConfig {
+        &self.config
+    }
+}
+
+impl Drop for TerminalLease {
+    fn drop(&mut self) {
+        let server = self.handle.service.server.lock().unwrap();
+        if let Some(server) = server.as_ref() {
+            // A late exit from an old process must not revoke its replacement.
+            let current = self
+                .handle
+                .service
+                .host
+                .revocations
+                .lock()
+                .unwrap()
+                .get(&self.id)
+                .is_some_and(|cancel| cancel.same_channel(&self.cancel));
+            if current {
+                self.handle.revoke_locked(server, &self.id);
+            }
+        }
+    }
 }
 
 impl McpBridge {
@@ -212,10 +250,47 @@ impl BridgeHandle {
         self.service.host.reported.lock().unwrap().remove(id);
     }
 
+    /// Prepare metadata and a process-lifetime lease for the terminal launcher.
+    /// Run on the runtime launch task; clone lease.config().args/env into the
+    /// prepared spec and pass the lease boxed to the host. Shell/custom
+    /// terminals are visible but return None because they need no MCP token.
+    pub fn register_terminal(&self, info: SessionInfo) -> io::Result<Option<TerminalLease>> {
+        if info.mode != SessionMode::Terminal {
+            return Err(io::Error::other(
+                "terminal registration requires terminal mode",
+            ));
+        }
+        if info.provider == Some(Provider::Acp) {
+            return Err(io::Error::other(
+                "ACP does not use terminal MCP launch config",
+            ));
+        }
+        let (id, provider) = (info.id.clone(), info.provider);
+        self.upsert_terminal(info, None);
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        let (config, cancel) = self.prepare_launch(&id, provider)?;
+        Ok(Some(TerminalLease {
+            handle: self.clone(),
+            id,
+            config,
+            cancel,
+        }))
+    }
+
     /// Run in the terminal's runtime launch task: Claude writes a private
     /// session-local file. Tokens exist before the CLI can contact the server.
     /// Repeating this rotates credentials and cancels old pending requests.
     pub fn launch_config(&self, id: &SessionId, provider: Provider) -> io::Result<LaunchConfig> {
+        self.prepare_launch(id, provider).map(|(config, _)| config)
+    }
+
+    fn prepare_launch(
+        &self,
+        id: &SessionId,
+        provider: Provider,
+    ) -> io::Result<(LaunchConfig, watch::Sender<bool>)> {
         let mut server = self.service.server.lock().unwrap();
         let server = server
             .as_mut()
@@ -254,8 +329,8 @@ impl BridgeHandle {
                     .revocations
                     .lock()
                     .unwrap()
-                    .insert(id.clone(), cancel);
-                Ok(config)
+                    .insert(id.clone(), cancel.clone());
+                Ok((config, cancel))
             }
             Err(error) => {
                 server.revoke_session(id);
