@@ -13,12 +13,12 @@ mod wallpaper;
 mod chat;
 mod composer_ui;
 
-use del_core::tabs::Tabs;
-use del_core::typography::{TEXT_LG, TEXT_MD};
-use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
 use chat::{Backend, ChatView};
 use composer_ui::ComposerCard;
 use del_agent::{MockBackend, PermissionMode, Provider, SessionConfig, SessionManager};
+use del_core::tabs::Tabs;
+use del_core::typography::{TEXT_LG, TEXT_MD};
+use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;

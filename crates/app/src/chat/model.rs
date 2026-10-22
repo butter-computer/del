@@ -69,16 +69,32 @@ pub struct ApprovalBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
-    User { text: String, steer: bool },
+    User {
+        text: String,
+        steer: bool,
+    },
     /// `open` while its deltas are still arriving.
-    Assistant { turn_id: String, text: String, open: bool },
-    Reasoning { text: String, open: bool, expanded: bool },
+    Assistant {
+        turn_id: String,
+        text: String,
+        open: bool,
+    },
+    Reasoning {
+        text: String,
+        open: bool,
+        expanded: bool,
+    },
     Tool(ToolCall),
     FileChange(FileChangeBlock),
     Approval(ApprovalBlock),
-    Error { message: String, recoverable: bool },
+    Error {
+        message: String,
+        recoverable: bool,
+    },
     /// A turn that did not complete normally.
-    TurnEnd { status: TurnStatus },
+    TurnEnd {
+        status: TurnStatus,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -136,9 +152,9 @@ impl ChatModel {
     }
 
     pub fn has_pending_approval(&self) -> bool {
-        self.blocks.iter().any(|b| {
-            matches!(b, Block::Approval(a) if a.state == ApprovalState::Pending)
-        })
+        self.blocks
+            .iter()
+            .any(|b| matches!(b, Block::Approval(a) if a.state == ApprovalState::Pending))
     }
 
     fn push(&mut self, block: Block) -> Change {
@@ -160,7 +176,10 @@ impl ChatModel {
         if !recoverable {
             self.phase = Phase::Idle;
         }
-        self.push(Block::Error { message, recoverable })
+        self.push(Block::Error {
+            message,
+            recoverable,
+        })
     }
 
     /// Stop streaming the open assistant/reasoning block, if any.
@@ -199,10 +218,14 @@ impl ChatModel {
     }
 
     fn tool_mut(&mut self, id: &str) -> Option<(usize, &mut ToolCall)> {
-        self.blocks.iter_mut().enumerate().rev().find_map(|(ix, b)| match b {
-            Block::Tool(t) if t.id == id => Some((ix, t)),
-            _ => None,
-        })
+        self.blocks
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find_map(|(ix, b)| match b {
+                Block::Tool(t) if t.id == id => Some((ix, t)),
+                _ => None,
+            })
     }
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
@@ -215,8 +238,11 @@ impl ChatModel {
                 None
             }
             AgentEvent::AssistantTextDelta { turn_id, text } => {
-                if let Some(Block::Assistant { turn_id: t, text: buf, open: true }) =
-                    self.blocks.last_mut()
+                if let Some(Block::Assistant {
+                    turn_id: t,
+                    text: buf,
+                    open: true,
+                }) = self.blocks.last_mut()
                     && t == turn_id
                 {
                     buf.push_str(text);
@@ -230,8 +256,11 @@ impl ChatModel {
                 }))
             }
             AgentEvent::AssistantMessage { turn_id, text } => {
-                if let Some(Block::Assistant { turn_id: t, text: buf, open }) =
-                    self.blocks.last_mut()
+                if let Some(Block::Assistant {
+                    turn_id: t,
+                    text: buf,
+                    open,
+                }) = self.blocks.last_mut()
                     && t == turn_id
                     && *open
                 {
@@ -247,7 +276,11 @@ impl ChatModel {
                 }))
             }
             AgentEvent::ReasoningDelta { text, .. } => {
-                if let Some(Block::Reasoning { text: buf, open: true, .. }) = self.blocks.last_mut()
+                if let Some(Block::Reasoning {
+                    text: buf,
+                    open: true,
+                    ..
+                }) = self.blocks.last_mut()
                 {
                     buf.push_str(text);
                     return Some(Change::Updated(self.blocks.len() - 1));
@@ -259,7 +292,11 @@ impl ChatModel {
                     expanded: false,
                 }))
             }
-            AgentEvent::ToolCallStarted { id, name, input_summary } => {
+            AgentEvent::ToolCallStarted {
+                id,
+                name,
+                input_summary,
+            } => {
                 self.seal();
                 Some(self.push(Block::Tool(ToolCall {
                     id: id.clone(),
@@ -275,7 +312,11 @@ impl ChatModel {
                 tool.output = output_summary.clone();
                 Some(Change::Updated(ix))
             }
-            AgentEvent::ToolCallFinished { id, status, output_summary } => {
+            AgentEvent::ToolCallFinished {
+                id,
+                status,
+                output_summary,
+            } => {
                 let state = match status {
                     ToolStatus::Completed => ToolState::Ok,
                     ToolStatus::Failed => ToolState::Error,
@@ -322,8 +363,16 @@ impl ChatModel {
                     state: ApprovalState::Pending,
                 })))
             }
-            AgentEvent::TokenUsage { input, output, cached } => {
-                self.turn_usage = Usage { input: *input, output: *output, cached: *cached };
+            AgentEvent::TokenUsage {
+                input,
+                output,
+                cached,
+            } => {
+                self.turn_usage = Usage {
+                    input: *input,
+                    output: *output,
+                    cached: *cached,
+                };
                 None
             }
             AgentEvent::TurnCompleted { status, .. } => {
@@ -336,9 +385,10 @@ impl ChatModel {
                 (*status != TurnStatus::Completed)
                     .then(|| self.push(Block::TurnEnd { status: *status }))
             }
-            AgentEvent::Error { message, recoverable } => {
-                Some(self.push_error(message.clone(), *recoverable))
-            }
+            AgentEvent::Error {
+                message,
+                recoverable,
+            } => Some(self.push_error(message.clone(), *recoverable)),
         }
     }
 }
@@ -361,7 +411,10 @@ pub fn parse_diff(diff: &str) -> Vec<DiffLine> {
             } else {
                 (DiffKind::Context, l.strip_prefix(' ').unwrap_or(l))
             };
-            DiffLine { kind, text: text.to_string() }
+            DiffLine {
+                kind,
+                text: text.to_string(),
+            }
         })
         .collect()
 }
@@ -382,11 +435,18 @@ mod tests {
     use super::*;
 
     fn delta(text: &str) -> AgentEvent {
-        AgentEvent::AssistantTextDelta { turn_id: "t1".into(), text: text.into() }
+        AgentEvent::AssistantTextDelta {
+            turn_id: "t1".into(),
+            text: text.into(),
+        }
     }
 
     fn tool_start(id: &str) -> AgentEvent {
-        AgentEvent::ToolCallStarted { id: id.into(), name: "bash".into(), input_summary: "ls".into() }
+        AgentEvent::ToolCallStarted {
+            id: id.into(),
+            name: "bash".into(),
+            input_summary: "ls".into(),
+        }
     }
 
     #[test]
@@ -396,7 +456,11 @@ mod tests {
         assert_eq!(m.apply(&delta("lo")), Some(Change::Updated(0)));
         assert_eq!(
             m.blocks,
-            vec![Block::Assistant { turn_id: "t1".into(), text: "Hello".into(), open: true }]
+            vec![Block::Assistant {
+                turn_id: "t1".into(),
+                text: "Hello".into(),
+                open: true
+            }]
         );
     }
 
@@ -404,11 +468,18 @@ mod tests {
     fn final_message_replaces_streamed_text_and_closes() {
         let mut m = ChatModel::default();
         m.apply(&delta("Hel"));
-        let ev = AgentEvent::AssistantMessage { turn_id: "t1".into(), text: "Hello!".into() };
+        let ev = AgentEvent::AssistantMessage {
+            turn_id: "t1".into(),
+            text: "Hello!".into(),
+        };
         assert_eq!(m.apply(&ev), Some(Change::Updated(0)));
         assert_eq!(
             m.blocks[0],
-            Block::Assistant { turn_id: "t1".into(), text: "Hello!".into(), open: false }
+            Block::Assistant {
+                turn_id: "t1".into(),
+                text: "Hello!".into(),
+                open: false
+            }
         );
         // A later delta starts a new message instead of reopening the old one.
         assert_eq!(m.apply(&delta("again")), Some(Change::Pushed(1)));
@@ -417,7 +488,10 @@ mod tests {
     #[test]
     fn message_without_deltas_is_pushed_closed() {
         let mut m = ChatModel::default();
-        let ev = AgentEvent::AssistantMessage { turn_id: "t1".into(), text: "hi".into() };
+        let ev = AgentEvent::AssistantMessage {
+            turn_id: "t1".into(),
+            text: "hi".into(),
+        };
         assert_eq!(m.apply(&ev), Some(Change::Pushed(0)));
     }
 
@@ -433,13 +507,20 @@ mod tests {
     #[test]
     fn reasoning_accumulates_and_closes() {
         let mut m = ChatModel::default();
-        let r = |t: &str| AgentEvent::ReasoningDelta { turn_id: "t1".into(), text: t.into() };
+        let r = |t: &str| AgentEvent::ReasoningDelta {
+            turn_id: "t1".into(),
+            text: t.into(),
+        };
         m.apply(&r("a"));
         m.apply(&r("b"));
         m.apply(&delta("x"));
         assert_eq!(
             m.blocks[0],
-            Block::Reasoning { text: "ab".into(), open: false, expanded: false }
+            Block::Reasoning {
+                text: "ab".into(),
+                open: false,
+                expanded: false
+            }
         );
         assert_eq!(m.blocks.len(), 2);
     }
@@ -448,14 +529,19 @@ mod tests {
     fn tool_lifecycle() {
         let mut m = ChatModel::default();
         m.apply(&tool_start("c1"));
-        m.apply(&AgentEvent::ToolCallUpdated { id: "c1".into(), output_summary: "partial".into() });
+        m.apply(&AgentEvent::ToolCallUpdated {
+            id: "c1".into(),
+            output_summary: "partial".into(),
+        });
         let done = AgentEvent::ToolCallFinished {
             id: "c1".into(),
             status: ToolStatus::Failed,
             output_summary: "boom".into(),
         };
         assert_eq!(m.apply(&done), Some(Change::Updated(0)));
-        let Block::Tool(t) = &m.blocks[0] else { panic!() };
+        let Block::Tool(t) = &m.blocks[0] else {
+            panic!()
+        };
         assert_eq!((t.state, t.output.as_str()), (ToolState::Error, "boom"));
     }
 
@@ -463,20 +549,28 @@ mod tests {
     fn finish_keeps_streamed_output_when_summary_is_empty() {
         let mut m = ChatModel::default();
         m.apply(&tool_start("c1"));
-        m.apply(&AgentEvent::ToolCallUpdated { id: "c1".into(), output_summary: "out".into() });
+        m.apply(&AgentEvent::ToolCallUpdated {
+            id: "c1".into(),
+            output_summary: "out".into(),
+        });
         m.apply(&AgentEvent::ToolCallFinished {
             id: "c1".into(),
             status: ToolStatus::Completed,
             output_summary: String::new(),
         });
-        let Block::Tool(t) = &m.blocks[0] else { panic!() };
+        let Block::Tool(t) = &m.blocks[0] else {
+            panic!()
+        };
         assert_eq!((t.state, t.output.as_str()), (ToolState::Ok, "out"));
     }
 
     #[test]
     fn update_for_unknown_tool_is_ignored_but_finish_is_shown() {
         let mut m = ChatModel::default();
-        let up = AgentEvent::ToolCallUpdated { id: "x".into(), output_summary: "o".into() };
+        let up = AgentEvent::ToolCallUpdated {
+            id: "x".into(),
+            output_summary: "o".into(),
+        };
         assert_eq!(m.apply(&up), None);
         let fin = AgentEvent::ToolCallFinished {
             id: "x".into(),
@@ -495,11 +589,19 @@ mod tests {
             kind: FileChangeKind::Modified,
             diff: Some(diff.into()),
         });
-        let Block::FileChange(f) = &m.blocks[0] else { panic!() };
+        let Block::FileChange(f) = &m.blocks[0] else {
+            panic!()
+        };
         assert_eq!((f.added, f.removed), (2, 1));
         assert!(f.expanded);
         assert_eq!(f.lines[0].kind, DiffKind::Hunk);
-        assert_eq!(f.lines[1], DiffLine { kind: DiffKind::Context, text: "keep".into() });
+        assert_eq!(
+            f.lines[1],
+            DiffLine {
+                kind: DiffKind::Context,
+                text: "keep".into()
+            }
+        );
     }
 
     #[test]
@@ -510,7 +612,9 @@ mod tests {
             kind: FileChangeKind::Deleted,
             diff: None,
         });
-        let Block::FileChange(f) = &m.blocks[0] else { panic!() };
+        let Block::FileChange(f) = &m.blocks[0] else {
+            panic!()
+        };
         assert!(f.lines.is_empty());
     }
 
@@ -523,20 +627,30 @@ mod tests {
             detail: "rm -rf x".into(),
         });
         assert!(m.has_pending_approval());
-        assert_eq!(m.resolve_approval("a1", ApprovalResponse::Deny), Some(Change::Updated(0)));
+        assert_eq!(
+            m.resolve_approval("a1", ApprovalResponse::Deny),
+            Some(Change::Updated(0))
+        );
         assert!(!m.has_pending_approval());
         assert_eq!(m.resolve_approval("a1", ApprovalResponse::Approve), None);
         assert_eq!(m.resolve_approval("nope", ApprovalResponse::Approve), None);
-        let Block::Approval(a) = &m.blocks[0] else { panic!() };
+        let Block::Approval(a) = &m.blocks[0] else {
+            panic!()
+        };
         assert_eq!(a.state, ApprovalState::Denied);
     }
 
     #[test]
     fn turn_phase_and_status() {
         let mut m = ChatModel::default();
-        m.apply(&AgentEvent::TurnStarted { turn_id: "t1".into() });
+        m.apply(&AgentEvent::TurnStarted {
+            turn_id: "t1".into(),
+        });
         assert!(m.is_running());
-        let done = AgentEvent::TurnCompleted { turn_id: "t1".into(), status: TurnStatus::Completed };
+        let done = AgentEvent::TurnCompleted {
+            turn_id: "t1".into(),
+            status: TurnStatus::Completed,
+        };
         assert_eq!(m.apply(&done), None);
         assert!(!m.is_running());
         assert_eq!(m.last_status, Some(TurnStatus::Completed));
@@ -546,25 +660,58 @@ mod tests {
     fn interrupted_turn_leaves_a_marker() {
         let mut m = ChatModel::default();
         m.apply(&delta("partial"));
-        let done = AgentEvent::TurnCompleted { turn_id: "t1".into(), status: TurnStatus::Interrupted };
+        let done = AgentEvent::TurnCompleted {
+            turn_id: "t1".into(),
+            status: TurnStatus::Interrupted,
+        };
         assert_eq!(m.apply(&done), Some(Change::Pushed(1)));
         assert!(matches!(m.blocks[0], Block::Assistant { open: false, .. }));
-        assert_eq!(m.blocks[1], Block::TurnEnd { status: TurnStatus::Interrupted });
+        assert_eq!(
+            m.blocks[1],
+            Block::TurnEnd {
+                status: TurnStatus::Interrupted
+            }
+        );
     }
 
     #[test]
     fn usage_replaces_within_a_turn_and_sums_across_turns() {
         let mut m = ChatModel::default();
-        let u = |i, o| AgentEvent::TokenUsage { input: i, output: o, cached: 0 };
-        let end = |s| AgentEvent::TurnCompleted { turn_id: "t".into(), status: s };
-        m.apply(&AgentEvent::TurnStarted { turn_id: "t".into() });
+        let u = |i, o| AgentEvent::TokenUsage {
+            input: i,
+            output: o,
+            cached: 0,
+        };
+        let end = |s| AgentEvent::TurnCompleted {
+            turn_id: "t".into(),
+            status: s,
+        };
+        m.apply(&AgentEvent::TurnStarted {
+            turn_id: "t".into(),
+        });
         m.apply(&u(10, 1));
         m.apply(&u(10, 5));
-        assert_eq!(m.usage(), Usage { input: 10, output: 5, cached: 0 });
+        assert_eq!(
+            m.usage(),
+            Usage {
+                input: 10,
+                output: 5,
+                cached: 0
+            }
+        );
         m.apply(&end(TurnStatus::Completed));
-        m.apply(&AgentEvent::TurnStarted { turn_id: "t2".into() });
+        m.apply(&AgentEvent::TurnStarted {
+            turn_id: "t2".into(),
+        });
         m.apply(&u(20, 2));
-        assert_eq!(m.usage(), Usage { input: 30, output: 7, cached: 0 });
+        assert_eq!(
+            m.usage(),
+            Usage {
+                input: 30,
+                output: 7,
+                cached: 0
+            }
+        );
     }
 
     #[test]
@@ -574,16 +721,28 @@ mod tests {
         assert!(m.is_running());
         m.push_user("also this".into(), true);
         assert!(m.is_running());
-        assert_eq!(m.blocks[1], Block::User { text: "also this".into(), steer: true });
+        assert_eq!(
+            m.blocks[1],
+            Block::User {
+                text: "also this".into(),
+                steer: true
+            }
+        );
     }
 
     #[test]
     fn fatal_error_stops_running_recoverable_does_not() {
         let mut m = ChatModel::default();
         m.push_user("hi".into(), false);
-        m.apply(&AgentEvent::Error { message: "rate".into(), recoverable: true });
+        m.apply(&AgentEvent::Error {
+            message: "rate".into(),
+            recoverable: true,
+        });
         assert!(m.is_running());
-        m.apply(&AgentEvent::Error { message: "dead".into(), recoverable: false });
+        m.apply(&AgentEvent::Error {
+            message: "dead".into(),
+            recoverable: false,
+        });
         assert!(!m.is_running());
         assert_eq!(m.blocks.len(), 3);
     }
@@ -595,7 +754,9 @@ mod tests {
         m.apply(&tool_start("c1"));
         assert_eq!(m.toggle(0), None);
         assert_eq!(m.toggle(1), Some(Change::Updated(1)));
-        let Block::Tool(t) = &m.blocks[1] else { panic!() };
+        let Block::Tool(t) = &m.blocks[1] else {
+            panic!()
+        };
         assert!(t.expanded);
         assert_eq!(m.toggle(9), None);
     }

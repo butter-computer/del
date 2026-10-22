@@ -6,8 +6,8 @@ use super::model::{
 use super::view::{COLUMN_MAX_WIDTH, ChatView};
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
-use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -33,22 +33,26 @@ impl ChatView {
         let content = match block {
             Block::User { text, steer } => user_message(text, steer).into_any_element(),
             Block::Assistant { text, .. } => assistant_message(ix, text).into_any_element(),
-            Block::Reasoning { text, open, expanded } => {
-                self.reasoning(ix, text, open, expanded, cx).into_any_element()
-            }
+            Block::Reasoning {
+                text,
+                open,
+                expanded,
+            } => self
+                .reasoning(ix, text, open, expanded, cx)
+                .into_any_element(),
             Block::Tool(tool) => self.tool_card(ix, tool, cx).into_any_element(),
             Block::FileChange(change) => self.file_card(ix, change, cx).into_any_element(),
             Block::Approval(approval) => self.approval_card(approval, cx).into_any_element(),
-            Block::Error { message, recoverable } => {
-                error_banner(message, recoverable).into_any_element()
-            }
+            Block::Error {
+                message,
+                recoverable,
+            } => error_banner(message, recoverable).into_any_element(),
             Block::TurnEnd { status } => turn_end(status).into_any_element(),
         };
         h_flex()
             .w_full()
             .justify_center()
             .px_3()
-            .py_1()
             .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(content))
             .into_any_element()
     }
@@ -76,13 +80,15 @@ impl ChatView {
                     .text_color(rgba(MUTED))
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .when(open, |row| row.child(Spinner::new().xsmall().color(rgba(MUTED).into())))
+                    .when(open, |row| {
+                        row.child(Spinner::new().xsmall().color(rgba(MUTED).into()))
+                    })
                     .child(if open { "Thinking" } else { "Thought" })
-                    .child(
-                        div()
-                            .text_color(rgba(FAINT))
-                            .child(if expanded { "hide" } else { "show" }),
-                    ),
+                    .child(div().text_color(rgba(FAINT)).child(if expanded {
+                        "hide"
+                    } else {
+                        "show"
+                    })),
             )
             .when(expanded, |col| {
                 col.child(
@@ -157,7 +163,12 @@ impl ChatView {
             })
     }
 
-    fn file_card(&self, ix: usize, change: FileChangeBlock, cx: &mut Context<Self>) -> impl IntoElement {
+    fn file_card(
+        &self,
+        ix: usize,
+        change: FileChangeBlock,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let (kind_label, kind_color) = match change.kind {
             FileChangeKind::Created => ("Created", GREEN),
             FileChangeKind::Modified => ("Modified", AMBER),
@@ -200,8 +211,16 @@ impl ChatView {
                                 .gap_1p5()
                                 .font_family(MONO)
                                 .text_size(px(TEXT_SM))
-                                .child(div().text_color(rgba(GREEN)).child(format!("+{}", change.added)))
-                                .child(div().text_color(rgba(RED)).child(format!("-{}", change.removed))),
+                                .child(
+                                    div()
+                                        .text_color(rgba(GREEN))
+                                        .child(format!("+{}", change.added)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgba(RED))
+                                        .child(format!("-{}", change.removed)),
+                                ),
                         )
                     }),
             )
@@ -268,18 +287,16 @@ impl ChatView {
             .child(if pending {
                 h_flex()
                     .gap_1()
-                    .child(
-                        pill("approve", "Approve", true).on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.respond(approve_id.clone(), ApprovalResponse::Approve, cx)
-                            },
-                        )),
-                    )
-                    .child(
-                        pill("deny", "Deny", false).on_click(cx.listener(move |this, _, _, cx| {
+                    .child(pill("approve", "Approve", true).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.respond(approve_id.clone(), ApprovalResponse::Approve, cx)
+                        },
+                    )))
+                    .child(pill("deny", "Deny", false).on_click(cx.listener(
+                        move |this, _, _, cx| {
                             this.respond(deny_id.clone(), ApprovalResponse::Deny, cx)
-                        })),
-                    )
+                        },
+                    )))
                     .into_any_element()
             } else {
                 let (label, color) = if approval.state == ApprovalState::Approved {
@@ -318,7 +335,10 @@ fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
 
 fn status_dot(state: ToolState) -> AnyElement {
     match state {
-        ToolState::Running => Spinner::new().xsmall().color(rgba(AMBER).into()).into_any_element(),
+        ToolState::Running => Spinner::new()
+            .xsmall()
+            .color(rgba(AMBER).into())
+            .into_any_element(),
         ToolState::Ok => dot(GREEN),
         ToolState::Error => dot(RED),
         ToolState::Declined => dot(0xffffff59),

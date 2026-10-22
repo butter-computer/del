@@ -1,6 +1,6 @@
 //! `ChatView`: session plumbing, the message list and the composer.
 
-use super::model::{ChatModel, Change, Phase, compact_count};
+use super::model::{Change, ChatModel, Phase, compact_count};
 use crate::composer_ui::ComposerCard;
 use del_agent::{
     AgentError, AgentEvent, ApprovalResponse, SessionConfig, SessionId, SessionManager, UserInput,
@@ -80,6 +80,8 @@ impl ChatView {
         for event in events {
             self.on_event(event, cx);
         }
+        self.scroller
+            .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
@@ -128,7 +130,10 @@ impl ChatView {
         let backend = self.backend.clone();
         match self.session.clone() {
             Some(id) => self.run(cx, async move {
-                backend.manager.send_prompt(&id, UserInput::text(text)).await
+                backend
+                    .manager
+                    .send_prompt(&id, UserInput::text(text))
+                    .await
             }),
             None => self.start_session(text, cx),
         }
@@ -137,21 +142,32 @@ impl ChatView {
     fn steer(&mut self, text: String, cx: &mut Context<Self>) {
         let change = self.model.push_user(text.clone(), true);
         self.sync(Some(change), cx);
-        let Some(id) = self.session.clone() else { return };
+        let Some(id) = self.session.clone() else {
+            return;
+        };
         let manager = self.backend.manager.clone();
         self.run(cx, async move { manager.steer(&id, text).await });
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.session.clone() else { return };
+        let Some(id) = self.session.clone() else {
+            return;
+        };
         let manager = self.backend.manager.clone();
         self.run(cx, async move { manager.interrupt(&id).await });
     }
 
-    pub(super) fn respond(&mut self, id: String, response: ApprovalResponse, cx: &mut Context<Self>) {
+    pub(super) fn respond(
+        &mut self,
+        id: String,
+        response: ApprovalResponse,
+        cx: &mut Context<Self>,
+    ) {
         let change = self.model.resolve_approval(&id, response);
         self.sync(change, cx);
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let manager = self.backend.manager.clone();
         self.run(cx, async move {
             manager.respond_approval(&session, &id, response).await
@@ -169,7 +185,10 @@ impl ChatView {
         self.starting = true;
         let backend = self.backend.clone();
         let started = self.backend.runtime.spawn(async move {
-            let handle = backend.manager.start_session(backend.config.clone()).await?;
+            let handle = backend
+                .manager
+                .start_session(backend.config.clone())
+                .await?;
             let rx = backend.manager.subscribe(&handle.id)?;
             backend
                 .manager
@@ -190,7 +209,10 @@ impl ChatView {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        if this.update(cx, |this, cx| this.on_event(&event, cx)).is_err() {
+                        if this
+                            .update(cx, |this, cx| this.on_event(&event, cx))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -286,6 +308,8 @@ impl Render for ChatView {
                         view.update(cx, |this, cx| this.render_row(ix, cx))
                     })
                     .size_full()
+                    // The default 32px gap is too airy for compact cards.
+                    .with_row_style(StyleRefinement::default().pb(px(6.0)))
                     .jump_button(true),
                 ),
             )
@@ -296,20 +320,18 @@ impl Render for ChatView {
                     .px_3()
                     .pb_3()
                     .child(self.render_status())
-                    .child(
-                        {
-                            let card = ComposerCard::new(
-                                &self.composer,
-                                COLUMN_MAX_WIDTH,
-                                cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                            );
-                            if running {
-                                card.on_stop(cx.listener(|this, _, _, cx| this.stop(cx)))
-                            } else {
-                                card
-                            }
-                        },
-                    ),
+                    .child({
+                        let card = ComposerCard::new(
+                            &self.composer,
+                            COLUMN_MAX_WIDTH,
+                            cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                        );
+                        if running {
+                            card.on_stop(cx.listener(|this, _, _, cx| this.stop(cx)))
+                        } else {
+                            card
+                        }
+                    }),
             )
     }
 }
