@@ -4,6 +4,8 @@
 //! session with MCP, and constructs `TerminalHost::new_prepared`. Persist only
 //! the original `TerminalLaunchSpec`; injected MCP args/env never enter it.
 //! Keep MCP launch resources in the parent until exit or explicit close.
+//! Use `TerminalHost::spawn_prepared` to create an entity without panicking on
+//! invalid launch settings or PTY spawn errors.
 
 use del_terminal::{TerminalEvent, TerminalSession, TerminalSpec, TerminalView};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -382,6 +384,26 @@ impl Focusable for TerminalHost {
     }
 }
 impl TerminalHost {
+    pub fn spawn(
+        spec: TerminalLaunchSpec,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> io::Result<Entity<Self>> {
+        Self::spawn_prepared(spec, Vec::new(), Vec::new(), window, cx)
+    }
+
+    /// Complete all fallible work before creating the GPUI entity.
+    pub fn spawn_prepared(
+        spec: TerminalLaunchSpec,
+        extra_args: Vec<String>,
+        env: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> io::Result<Entity<Self>> {
+        let (session, cwd) = spawn_session(&spec, extra_args, env)?;
+        Ok(cx.new(|cx| Self::from_session(spec, cwd, session, window, cx)))
+    }
+
     pub fn new(
         spec: TerminalLaunchSpec,
         window: &mut Window,
@@ -390,7 +412,7 @@ impl TerminalHost {
         Self::new_prepared(spec, Vec::new(), Vec::new(), window, cx)
     }
     /// Inject bridge args/env without mutating the history-safe launch spec.
-    /// The parent owns and revokes the associated MCP lease/config files.
+    /// The parent explicitly revokes MCP credentials and deletes config files.
     pub fn new_prepared(
         spec: TerminalLaunchSpec,
         extra_args: Vec<String>,
@@ -398,9 +420,17 @@ impl TerminalHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<Self> {
-        let prepared = spec.prepare(extra_args, env)?;
-        let cwd = prepared.cwd.clone().expect("validated workspace");
-        let session = TerminalSession::spawn(prepared)?;
+        let (session, cwd) = spawn_session(&spec, extra_args, env)?;
+        Ok(Self::from_session(spec, cwd, session, window, cx))
+    }
+
+    fn from_session(
+        spec: TerminalLaunchSpec,
+        cwd: PathBuf,
+        session: TerminalSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pid = session.pid();
         let terminal = cx.new(|cx| TerminalView::new(session, window, cx));
         cx.subscribe(&terminal, |this, terminal, event: &TerminalEvent, cx| {
@@ -429,7 +459,7 @@ impl TerminalHost {
         })
         .detach();
         let fallback_title = spec.title.clone();
-        Ok(Self {
+        Self {
             terminal,
             fallback_title,
             snapshot: TerminalHostSnapshot {
@@ -441,7 +471,7 @@ impl TerminalHost {
                 summary: None,
                 last_output: String::new(),
             },
-        })
+        }
     }
     pub fn snapshot(&self) -> TerminalHostSnapshot {
         self.snapshot.clone()
@@ -546,6 +576,19 @@ impl Render for TerminalHost {
                     .child(self.terminal.clone()),
             )
     }
+}
+
+fn spawn_session(
+    spec: &TerminalLaunchSpec,
+    extra_args: Vec<String>,
+    env: Vec<(String, String)>,
+) -> io::Result<(TerminalSession, PathBuf)> {
+    let prepared = spec.prepare(extra_args, env)?;
+    let cwd = prepared
+        .cwd
+        .clone()
+        .ok_or_else(|| io::Error::other("terminal workspace missing"))?;
+    Ok((TerminalSession::spawn(prepared)?, cwd))
 }
 
 fn screen_tail(session: &TerminalSession) -> String {
@@ -658,13 +701,13 @@ mod tests {
             title: "Test terminal".into(),
             login_env: false,
         };
-        let prepared = spec
-            .prepare(
-                vec!["injected argument".into()],
-                vec![("DEL_MCP_TEST_TOKEN".into(), "test-only-value".into())],
-            )
-            .unwrap();
-        let session = del_terminal::TerminalSession::spawn(prepared).unwrap();
+        let (session, actual_cwd) = super::spawn_session(
+            &spec,
+            vec!["injected argument".into()],
+            vec![("DEL_MCP_TEST_TOKEN".into(), "test-only-value".into())],
+        )
+        .unwrap();
+        assert_eq!(actual_cwd, cwd);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !session.exited() {
             assert!(
@@ -681,5 +724,17 @@ mod tests {
         assert!(output.contains("env=test-only-value"), "{output}");
         assert!(output.contains("arg=injected argument"), "{output}");
         session.close(std::time::Duration::ZERO);
+    }
+    #[test]
+    fn failed_program_returns_error_before_entity_construction() {
+        let spec = TerminalLaunchSpec {
+            kind: TerminalLaunchKind::Custom,
+            cwd: std::env::temp_dir(),
+            program: Some("/del-no-such-program/terminal-host-test".into()),
+            args: Vec::new(),
+            title: "Missing program".into(),
+            login_env: false,
+        };
+        assert!(super::spawn_session(&spec, Vec::new(), Vec::new()).is_err());
     }
 }
