@@ -36,8 +36,13 @@ pub async fn detect_all() -> Vec<ProviderStatus> {
     vec![a, b]
 }
 
+/// `Provider::Acp` has no single CLI; it always reports not installed here and
+/// `del-acp` supplies the real status from its agent registry.
 pub async fn detect(provider: Provider) -> ProviderStatus {
-    let Some(path) = find_binary(provider.binary()) else {
+    let Some(path) = (provider != Provider::Acp)
+        .then(|| find_binary(provider.binary()))
+        .flatten()
+    else {
         return ProviderStatus {
             provider,
             installed: false,
@@ -129,6 +134,7 @@ async fn probe_login(provider: Provider, bin: &Path) -> LoginState {
     let args: &[&str] = match provider {
         Provider::Codex => &["login", "status"],
         Provider::Claude => &["auth", "status"],
+        Provider::Acp => return LoginState::Unknown,
     };
     match run(bin, args).await {
         Some(o) => parse_login(provider, o.ok, &o.text),
