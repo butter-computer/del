@@ -16,12 +16,25 @@ pub const ENV_URL: &str = "DEL_MCP_URL";
 pub const ENV_TOKEN: &str = "DEL_MCP_TOKEN";
 
 /// Extra argv and environment to launch an agent CLI with.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     /// File created for this launch; delete it when the session ends.
     pub files: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for LaunchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchConfig")
+            .field("args", &self.args)
+            .field(
+                "env_keys",
+                &self.env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            )
+            .field("files", &self.files)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,20 +45,30 @@ pub enum Transport {
     Stdio { binary: PathBuf },
 }
 
-fn file_name(c: &Credentials) -> String {
+fn file_name(c: &Credentials) -> io::Result<String> {
     let safe: String = c
         .session_id
         .as_str()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
+        .take(64)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
-    format!("del-mcp-{safe}.json")
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("del-mcp-{safe}-{nonce}.json"))
 }
 
 fn write_private(path: &Path, content: &str) -> io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -70,7 +93,7 @@ pub fn claude(c: &Credentials, transport: &Transport, dir: &Path) -> io::Result<
             "env": {ENV_URL: c.url, ENV_TOKEN: c.token},
         }),
     };
-    let path = dir.join(file_name(c));
+    let path = dir.join(file_name(c)?);
     let doc = json!({"mcpServers": {SERVER_NAME: server}});
     write_private(&path, &serde_json::to_string_pretty(&doc).expect("json"))?;
     Ok(LaunchConfig {
@@ -114,12 +137,18 @@ pub fn codex(c: &Credentials, transport: &Transport) -> LaunchConfig {
         Transport::Stdio { binary } => {
             set(k("command"), toml_str(&binary.to_string_lossy()));
             set(k("args"), "[]".into());
-            set(k("env_vars"), format!("[{}, {}]", toml_str(ENV_URL), toml_str(ENV_TOKEN)));
+            set(
+                k("env_vars"),
+                format!("[{}, {}]", toml_str(ENV_URL), toml_str(ENV_TOKEN)),
+            );
         }
     }
     LaunchConfig {
         args,
-        env: vec![(ENV_URL.into(), c.url.clone()), (ENV_TOKEN.into(), c.token.clone())],
+        env: vec![
+            (ENV_URL.into(), c.url.clone()),
+            (ENV_TOKEN.into(), c.token.clone()),
+        ],
         files: vec![],
     }
 }

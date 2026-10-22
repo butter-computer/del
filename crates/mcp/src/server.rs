@@ -111,7 +111,12 @@ impl McpServer {
             port: addr.port(),
         });
         let app = Router::new()
-            .route("/mcp", post(handle_post).get(method_not_allowed).delete(method_not_allowed))
+            .route(
+                "/mcp",
+                post(handle_post)
+                    .get(method_not_allowed)
+                    .delete(method_not_allowed),
+            )
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(inner.clone());
         let (tx, rx) = oneshot::channel();
@@ -284,13 +289,23 @@ impl Inner {
     /// Handle one JSON-RPC message. `None` means "no response" (notification).
     async fn dispatch(&self, caller: &SessionId, msg: Value) -> Option<Value> {
         if msg.is_array() {
-            return Some(rpc_error(Value::Null, -32600, "batch requests are not supported"));
+            return Some(rpc_error(
+                Value::Null,
+                -32600,
+                "batch requests are not supported",
+            ));
         }
         let id = msg.get("id").cloned();
-        let Some(method) = msg.get("method").and_then(Value::as_str) else {
-            // A response or junk from the client; nothing to do.
-            return id.map(|id| rpc_error(id, -32600, "invalid request"));
-        };
+        if msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || id
+                .as_ref()
+                .is_some_and(|v| !v.is_string() && !v.is_number() && !v.is_null())
+            || msg.get("method").and_then(Value::as_str).is_none()
+            || msg.get("params").is_some_and(|v| !v.is_object())
+        {
+            return Some(rpc_error(Value::Null, -32600, "invalid request"));
+        }
+        let method = msg["method"].as_str().expect("validated method");
         let Some(id) = id else {
             return None; // notification (e.g. notifications/initialized)
         };
@@ -317,7 +332,10 @@ impl Inner {
             "tools/list" => json!({"tools": tools::tool_list()}),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 match self.call_tool(caller, name, args).await {
                     Ok(v) => v,
                     Err(ToolFail::UnknownTool) => {
@@ -340,7 +358,11 @@ impl Inner {
         args: Value,
     ) -> Result<Value, ToolFail> {
         fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, ToolFail> {
-            serde_json::from_value(args).map_err(|e| ToolFail::Invalid(format!("invalid arguments: {e}")))
+            if !args.is_object() {
+                return Err(ToolFail::Invalid("arguments must be an object".into()));
+            }
+            serde_json::from_value(args)
+                .map_err(|e| ToolFail::Invalid(format!("invalid arguments: {e}")))
         }
         let host = &self.host;
         match name {
@@ -354,10 +376,12 @@ impl Inner {
                 if let Err(e) = non_empty_max("summary", &a.summary, MAX_SUMMARY) {
                     return Ok(tool_err(e));
                 }
-                Ok(match host.report_status(caller, a.state, &a.summary).await {
-                    Ok(()) => tool_text("status recorded".into(), None, false),
-                    Err(e) => tool_err(e.to_string()),
-                })
+                Ok(
+                    match host.report_status(caller, a.state, &a.summary).await {
+                        Ok(()) => tool_text("status recorded".into(), None, false),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
             }
             "ask_user" => {
                 let a: AskUserArgs = parse(args)?;
@@ -365,29 +389,33 @@ impl Inner {
                     return Ok(tool_err(e));
                 }
                 if a.options.len() > MAX_OPTIONS
-                    || a.options.iter().any(|o| non_empty_max("option", o, MAX_OPTION).is_err())
+                    || a.options
+                        .iter()
+                        .any(|o| non_empty_max("option", o, MAX_OPTION).is_err())
                 {
                     return Ok(tool_err(format!(
                         "options: at most {MAX_OPTIONS}, each 1-{MAX_OPTION} characters"
                     )));
                 }
                 let fut = host.ask_user(caller, &a.question, &a.options);
-                Ok(match tokio::time::timeout(self.opts.ask_timeout, fut).await {
-                    Err(_) => tool_err("the user did not answer in time"),
-                    Ok(Err(e)) => tool_err(e.to_string()),
-                    Ok(Ok(UserAnswer::Dismissed)) => {
-                        tool_json(json!({"answered": false, "dismissed": true}))
-                    }
-                    Ok(Ok(UserAnswer::Option { index, text })) => {
-                        tool_json(json!({"answered": true, "answer": text, "option_index": index}))
-                    }
-                    Ok(Ok(UserAnswer::Text { text })) => {
-                        tool_json(json!({"answered": true, "answer": text}))
-                    }
-                })
+                Ok(
+                    match tokio::time::timeout(self.opts.ask_timeout, fut).await {
+                        Err(_) => tool_err("the user did not answer in time"),
+                        Ok(Err(e)) => tool_err(e.to_string()),
+                        Ok(Ok(UserAnswer::Dismissed)) => {
+                            tool_json(json!({"answered": false, "dismissed": true}))
+                        }
+                        Ok(Ok(UserAnswer::Option { index, text })) => tool_json(
+                            json!({"answered": true, "answer": text, "option_index": index}),
+                        ),
+                        Ok(Ok(UserAnswer::Text { text })) => {
+                            tool_json(json!({"answered": true, "answer": text}))
+                        }
+                    },
+                )
             }
             "list_sessions" => {
-                let _: Value = parse(args)?;
+                let _: ListSessionsArgs = parse(args)?;
                 Ok(match host.list_sessions(caller).await {
                     Ok(list) => {
                         let rows: Vec<Value> = list
@@ -418,7 +446,9 @@ impl Inner {
                 }
                 let cwd = Path::new(&a.cwd);
                 if !cwd.is_absolute() || !cwd.is_dir() {
-                    return Ok(tool_err("cwd must be an absolute path of an existing directory"));
+                    return Ok(tool_err(
+                        "cwd must be an absolute path of an existing directory",
+                    ));
                 }
                 // Reserve the quota up front so concurrent calls cannot overshoot it.
                 {
@@ -440,7 +470,10 @@ impl Inner {
                 match host.spawn_session(caller, req).await {
                     Ok(info) => {
                         let mut s = self.scope.lock().unwrap();
-                        s.children.entry(caller.clone()).or_default().insert(info.id.clone());
+                        s.children
+                            .entry(caller.clone())
+                            .or_default()
+                            .insert(info.id.clone());
                         s.parent.insert(info.id.clone(), caller.clone());
                         drop(s);
                         Ok(tool_json(serde_json::to_value(info).unwrap_or(Value::Null)))
@@ -483,7 +516,9 @@ impl Inner {
                     return Ok(tool_err(e));
                 }
                 if a.body.chars().count() > MAX_BODY {
-                    return Ok(tool_err(format!("body is longer than {MAX_BODY} characters")));
+                    return Ok(tool_err(format!(
+                        "body is longer than {MAX_BODY} characters"
+                    )));
                 }
                 Ok(match host.notify(caller, &a.title, &a.body).await {
                     Ok(()) => tool_text("notified".into(), None, false),

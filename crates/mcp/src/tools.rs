@@ -118,33 +118,43 @@ pub fn tool_list() -> Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportStatusArgs {
     pub session_id: Option<String>,
     pub state: ReportedState,
     pub summary: String,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AskUserArgs {
     pub question: String,
     #[serde(default)]
     pub options: Vec<String>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListSessionsArgs {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionArg {
     pub session_id: String,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnArgs {
     pub provider: del_agent::Provider,
     pub cwd: String,
     pub prompt: String,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendArgs {
     pub session_id: String,
     pub text: String,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotifyArgs {
     pub title: String,
     pub body: String,

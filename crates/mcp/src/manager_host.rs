@@ -7,8 +7,8 @@
 use crate::host::*;
 use async_trait::async_trait;
 use del_agent::{
-    AgentError, AgentEvent, SessionId, SessionManager, SessionRecord, SessionStatus, UserInput,
-    SessionConfig, PermissionMode,
+    AgentError, AgentEvent, PermissionMode, SessionConfig, SessionId, SessionManager,
+    SessionRecord, SessionStatus, UserInput,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -104,7 +104,12 @@ impl McpHost for ManagerHost {
     }
 
     async fn list_sessions(&self, _caller: &SessionId) -> HostResult<Vec<SessionInfo>> {
-        Ok(self.manager.list_sessions().iter().map(|r| self.info(r)).collect())
+        Ok(self
+            .manager
+            .list_sessions()
+            .iter()
+            .map(|r| self.info(r))
+            .collect())
     }
 
     async fn session_summary(
@@ -113,12 +118,16 @@ impl McpHost for ManagerHost {
         target: &SessionId,
     ) -> HostResult<SessionSummary> {
         let record = self.record(target)?;
-        let last_output = self.manager.subscribe_with_history(target).ok().and_then(|(h, _)| {
-            h.into_iter().rev().find_map(|e| match e {
-                AgentEvent::AssistantMessage { text, .. } => Some(text),
-                _ => None,
-            })
-        });
+        let last_output = self
+            .manager
+            .subscribe_with_history(target)
+            .ok()
+            .and_then(|(h, _)| {
+                h.into_iter().rev().find_map(|e| match e {
+                    AgentEvent::AssistantMessage { text, .. } => Some(text),
+                    _ => None,
+                })
+            });
         let last_output = last_output.map(|t| {
             let n = t.chars().count();
             if n > LAST_OUTPUT_CHARS {
@@ -129,7 +138,12 @@ impl McpHost for ManagerHost {
         });
         Ok(SessionSummary {
             info: self.info(&record),
-            reported_summary: self.reported.lock().unwrap().get(target).map(|(_, s)| s.clone()),
+            reported_summary: self
+                .reported
+                .lock()
+                .unwrap()
+                .get(target)
+                .map(|(_, s)| s.clone()),
             last_output,
         })
     }
@@ -164,7 +178,10 @@ impl McpHost for ManagerHost {
         text: &str,
     ) -> HostResult<()> {
         if self.manager.status(target) == Some(SessionStatus::Running) {
-            self.manager.steer(target, text.to_string()).await.map_err(fail)
+            self.manager
+                .steer(target, text.to_string())
+                .await
+                .map_err(fail)
         } else {
             self.manager
                 .send_prompt(target, UserInput::text(text))

@@ -9,6 +9,6 @@ pub mod stdio;
 pub mod tools;
 
 pub use host::*;
+pub use manager_host::{ManagerHost, McpUi};
 pub use mock::MockHost;
 pub use server::{Credentials, McpServer, ServerOptions};
-pub use manager_host::{ManagerHost, McpUi};

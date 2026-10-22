@@ -36,7 +36,10 @@ async fn post(url: &str, headers: Vec<(String, String)>, body: Value) -> (u16, S
             req = req.header(k, v);
         }
         let mut resp = req.send(body.to_string()).unwrap();
-        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
+        (
+            resp.status().as_u16(),
+            resp.body_mut().read_to_string().unwrap(),
+        )
     })
     .await
     .unwrap()
@@ -47,7 +50,12 @@ fn auth(c: &Credentials) -> Vec<(String, String)> {
 }
 
 async fn rpc(c: &Credentials, method: &str, params: Value) -> Value {
-    let (s, b) = post(&c.url, auth(c), json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})).await;
+    let (s, b) = post(
+        &c.url,
+        auth(c),
+        json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
+    )
+    .await;
     assert_eq!(s, 200, "{b}");
     serde_json::from_str(&b).unwrap()
 }
@@ -93,7 +101,12 @@ async fn initialize_and_list_tools() {
     let e = env().await;
     let r = rpc(&e.me, "initialize", json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}})).await;
     assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
-    assert!(r["result"]["instructions"].as_str().unwrap().contains("`me`"));
+    assert!(
+        r["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("`me`")
+    );
     let r = rpc(&e.me, "initialize", json!({"protocolVersion":"1999-01-01"})).await;
     assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
 
@@ -102,14 +115,27 @@ async fn initialize_and_list_tools() {
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["report_status", "ask_user", "list_sessions", "get_session_summary", "spawn_session", "send_to_session", "notify"]
+        [
+            "report_status",
+            "ask_user",
+            "list_sessions",
+            "get_session_summary",
+            "spawn_session",
+            "send_to_session",
+            "notify"
+        ]
     );
     for t in tools {
         assert!(!t["description"].as_str().unwrap().is_empty());
         assert_eq!(t["inputSchema"]["type"], "object");
     }
     // Notifications get 202 and no body.
-    let (s, b) = post(&e.me.url, auth(&e.me), json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+    let (s, b) = post(
+        &e.me.url,
+        auth(&e.me),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
     assert_eq!((s, b.as_str()), (202, ""));
     let r = rpc(&e.me, "nope/nope", json!({})).await;
     assert_eq!(r["error"]["code"], -32601);
@@ -118,14 +144,34 @@ async fn initialize_and_list_tools() {
 #[tokio::test]
 async fn report_status_and_scoping() {
     let e = env().await;
-    let r = call(&e.me, "report_status", json!({"state":"working","summary":"parsing"})).await;
+    let r = call(
+        &e.me,
+        "report_status",
+        json!({"state":"working","summary":"parsing"}),
+    )
+    .await;
     assert!(!is_error(&r));
-    let r = call(&e.me, "report_status", json!({"session_id":"me","state":"done","summary":"ok"})).await;
+    let r = call(
+        &e.me,
+        "report_status",
+        json!({"session_id":"me","state":"done","summary":"ok"}),
+    )
+    .await;
     assert!(!is_error(&r));
-    let r = call(&e.me, "report_status", json!({"session_id":"other","state":"done","summary":"ok"})).await;
+    let r = call(
+        &e.me,
+        "report_status",
+        json!({"session_id":"other","state":"done","summary":"ok"}),
+    )
+    .await;
     assert!(is_error(&r));
     // bad enum is a protocol-level invalid-params error
-    let r = call(&e.me, "report_status", json!({"state":"dancing","summary":"x"})).await;
+    let r = call(
+        &e.me,
+        "report_status",
+        json!({"state":"dancing","summary":"x"}),
+    )
+    .await;
     assert_eq!(r["error"]["code"], -32602);
     let reports = e.host.reports();
     assert_eq!(reports.len(), 2);
@@ -137,14 +183,22 @@ async fn ask_user_blocks_until_answered() {
     let e = env().await;
     let c = e.me.clone();
     let h = tokio::spawn(async move {
-        call(&c, "ask_user", json!({"question":"Deploy?","options":["yes","no"]})).await
+        call(
+            &c,
+            "ask_user",
+            json!({"question":"Deploy?","options":["yes","no"]}),
+        )
+        .await
     });
     let q = e.host.take_question().await;
     assert_eq!(q.question, "Deploy?");
     assert_eq!(q.options, ["yes", "no"]);
     assert_eq!(q.caller.as_str(), "me");
     assert!(!h.is_finished());
-    q.answer(UserAnswer::Option { index: 1, text: "no".into() });
+    q.answer(UserAnswer::Option {
+        index: 1,
+        text: "no".into(),
+    });
     let r = h.await.unwrap();
     assert_eq!(r["result"]["structuredContent"]["answer"], "no");
     assert_eq!(r["result"]["structuredContent"]["option_index"], 1);
@@ -152,7 +206,11 @@ async fn ask_user_blocks_until_answered() {
 
 #[tokio::test]
 async fn ask_user_times_out() {
-    let e = env_with(ServerOptions { ask_timeout: Duration::from_millis(100), ..Default::default() }).await;
+    let e = env_with(ServerOptions {
+        ask_timeout: Duration::from_millis(100),
+        ..Default::default()
+    })
+    .await;
     let r = call(&e.me, "ask_user", json!({"question":"hello?"})).await;
     assert!(is_error(&r));
 }
@@ -160,9 +218,13 @@ async fn ask_user_times_out() {
 #[tokio::test]
 async fn ask_user_validates_input() {
     let e = env().await;
-    assert!(is_error(&call(&e.me, "ask_user", json!({"question":"  "})).await));
+    assert!(is_error(
+        &call(&e.me, "ask_user", json!({"question":"  "})).await
+    ));
     let many: Vec<_> = (0..9).map(|i| i.to_string()).collect();
-    assert!(is_error(&call(&e.me, "ask_user", json!({"question":"q","options":many})).await));
+    assert!(is_error(
+        &call(&e.me, "ask_user", json!({"question":"q","options":many})).await
+    ));
 }
 
 #[tokio::test]
@@ -170,14 +232,21 @@ async fn list_and_summary() {
     let e = env().await;
     e.host.add_session("other", Provider::Codex);
     let r = call(&e.me, "list_sessions", json!({})).await;
-    let rows = r["result"]["structuredContent"]["sessions"].as_array().unwrap();
+    let rows = r["result"]["structuredContent"]["sessions"]
+        .as_array()
+        .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["is_self"], true);
     assert_eq!(rows[1]["is_self"], false);
     assert_eq!(rows[1]["provider"], "codex");
     let r = call(&e.me, "get_session_summary", json!({"session_id":"other"})).await;
-    assert_eq!(r["result"]["structuredContent"]["last_output"], "output of other");
-    assert!(is_error(&call(&e.me, "get_session_summary", json!({"session_id":"ghost"})).await));
+    assert_eq!(
+        r["result"]["structuredContent"]["last_output"],
+        "output of other"
+    );
+    assert!(is_error(
+        &call(&e.me, "get_session_summary", json!({"session_id":"ghost"})).await
+    ));
 }
 
 #[tokio::test]
@@ -188,31 +257,81 @@ async fn spawn_then_send_is_scoped_to_family() {
     let cwd = dir.path().to_str().unwrap();
 
     // Not spawned by me -> refused, and nothing reaches the host.
-    let r = call(&e.me, "send_to_session", json!({"session_id":"stranger","text":"hi"})).await;
+    let r = call(
+        &e.me,
+        "send_to_session",
+        json!({"session_id":"stranger","text":"hi"}),
+    )
+    .await;
     assert!(is_error(&r));
     assert!(e.host.sent().is_empty());
 
-    assert!(is_error(&call(&e.me, "spawn_session", json!({"provider":"codex","cwd":"relative","prompt":"x"})).await));
-    assert!(is_error(&call(&e.me, "spawn_session", json!({"provider":"codex","cwd":"/definitely/not/here","prompt":"x"})).await));
+    assert!(is_error(
+        &call(
+            &e.me,
+            "spawn_session",
+            json!({"provider":"codex","cwd":"relative","prompt":"x"})
+        )
+        .await
+    ));
+    assert!(is_error(
+        &call(
+            &e.me,
+            "spawn_session",
+            json!({"provider":"codex","cwd":"/definitely/not/here","prompt":"x"})
+        )
+        .await
+    ));
 
-    let r = call(&e.me, "spawn_session", json!({"provider":"codex","cwd":cwd,"prompt":"do it"})).await;
+    let r = call(
+        &e.me,
+        "spawn_session",
+        json!({"provider":"codex","cwd":cwd,"prompt":"do it"}),
+    )
+    .await;
     assert!(!is_error(&r), "{r}");
-    let child = r["result"]["structuredContent"]["id"].as_str().unwrap().to_string();
+    let child = r["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(e.host.spawned()[0].prompt, "do it");
 
-    let r = call(&e.me, "send_to_session", json!({"session_id":child,"text":"more"})).await;
+    let r = call(
+        &e.me,
+        "send_to_session",
+        json!({"session_id":child,"text":"more"}),
+    )
+    .await;
     assert!(!is_error(&r));
     assert_eq!(e.host.sent()[0].2, "more");
 
     // The child may talk back to its parent, but not to the stranger.
     let child_creds = e.server.register_session(&SessionId::new(child));
-    assert!(!is_error(&call(&child_creds, "send_to_session", json!({"session_id":"me","text":"done"})).await));
-    assert!(is_error(&call(&child_creds, "send_to_session", json!({"session_id":"stranger","text":"x"})).await));
+    assert!(!is_error(
+        &call(
+            &child_creds,
+            "send_to_session",
+            json!({"session_id":"me","text":"done"})
+        )
+        .await
+    ));
+    assert!(is_error(
+        &call(
+            &child_creds,
+            "send_to_session",
+            json!({"session_id":"stranger","text":"x"})
+        )
+        .await
+    ));
 }
 
 #[tokio::test]
 async fn spawn_limit_enforced() {
-    let e = env_with(ServerOptions { max_spawn_per_session: 2, ..Default::default() }).await;
+    let e = env_with(ServerOptions {
+        max_spawn_per_session: 2,
+        ..Default::default()
+    })
+    .await;
     let dir = tempfile::tempdir().unwrap();
     let args = json!({"provider":"claude","cwd":dir.path(),"prompt":"x"});
     assert!(!is_error(&call(&e.me, "spawn_session", args.clone()).await));
@@ -223,9 +342,14 @@ async fn spawn_limit_enforced() {
 #[tokio::test]
 async fn notify_reaches_host() {
     let e = env().await;
-    assert!(!is_error(&call(&e.me, "notify", json!({"title":"Done","body":"all green"})).await));
+    assert!(!is_error(
+        &call(&e.me, "notify", json!({"title":"Done","body":"all green"})).await
+    ));
     assert_eq!(e.host.notifications()[0].1, "Done");
-    assert_eq!(call(&e.me, "nope", json!({})).await["error"]["code"], -32602);
+    assert_eq!(
+        call(&e.me, "nope", json!({})).await["error"]["code"],
+        -32602
+    );
 }
 
 #[tokio::test]
@@ -259,7 +383,12 @@ async fn stdio_proxy_round_trip() {
     let out = Buf::default();
     let (url, o) = (e.me.url.clone(), out.clone());
     tokio::task::spawn_blocking(move || {
-        del_mcp::stdio::run(&url, "bad", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".as_bytes(), o)
+        del_mcp::stdio::run(
+            &url,
+            "bad",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".as_bytes(),
+            o,
+        )
     })
     .await
     .unwrap();
@@ -279,18 +408,36 @@ fn launch_configs() {
     assert_eq!(l.args[0], "--mcp-config");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&l.args[1]).unwrap()).unwrap();
     assert_eq!(v["mcpServers"]["del"]["url"], "http://127.0.0.1:1234/mcp");
-    assert_eq!(v["mcpServers"]["del"]["headers"]["Authorization"], "Bearer secret");
-    assert!(l.files[0].file_name().unwrap().to_str().unwrap().contains("s_1"));
+    assert_eq!(
+        v["mcpServers"]["del"]["headers"]["Authorization"],
+        "Bearer secret"
+    );
+    assert!(
+        l.files[0]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("s_1")
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&l.files[0]).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&l.files[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     let l = launch::codex(&c, &Transport::Http);
     assert_eq!(
         l.args,
-        ["-c", "mcp_servers.del.url=\"http://127.0.0.1:1234/mcp\"", "-c", "mcp_servers.del.bearer_token_env_var=\"DEL_MCP_TOKEN\""]
+        [
+            "-c",
+            "mcp_servers.del.url=\"http://127.0.0.1:1234/mcp\"",
+            "-c",
+            "mcp_servers.del.bearer_token_env_var=\"DEL_MCP_TOKEN\""
+        ]
     );
     assert!(l.env.contains(&("DEL_MCP_TOKEN".into(), "secret".into())));
     assert!(!l.args.iter().any(|a| a.contains("secret")));
@@ -323,27 +470,119 @@ async fn manager_host_drives_real_session_manager() {
         })
         .await
         .unwrap();
-    let server = McpServer::start(Arc::new(ManagerHost::new(mgr.clone(), Arc::new(AutoUi))), Default::default())
-        .await
-        .unwrap();
+    let server = McpServer::start(
+        Arc::new(ManagerHost::new(mgr.clone(), Arc::new(AutoUi))),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     let c = server.register_session(&me.id);
 
-    let r = call(&c, "spawn_session", json!({"provider":"claude","cwd":dir.path(),"prompt":"hello there"})).await;
+    let r = call(
+        &c,
+        "spawn_session",
+        json!({"provider":"claude","cwd":dir.path(),"prompt":"hello there"}),
+    )
+    .await;
     assert!(!is_error(&r), "{r}");
-    let child = r["result"]["structuredContent"]["id"].as_str().unwrap().to_string();
+    let child = r["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(mgr.is_live(&SessionId::new(child.clone())));
 
     let r = call(&c, "list_sessions", json!({})).await;
-    assert_eq!(r["result"]["structuredContent"]["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        r["result"]["structuredContent"]["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
-    call(&c, "report_status", json!({"state":"working","summary":"checking"})).await;
-    let r = call(&c, "get_session_summary", json!({"session_id": me.id.as_str()})).await;
-    assert_eq!(r["result"]["structuredContent"]["reported_summary"], "checking");
-    assert_eq!(r["result"]["structuredContent"]["info"]["reported_state"], "working");
+    call(
+        &c,
+        "report_status",
+        json!({"state":"working","summary":"checking"}),
+    )
+    .await;
+    let r = call(
+        &c,
+        "get_session_summary",
+        json!({"session_id": me.id.as_str()}),
+    )
+    .await;
+    assert_eq!(
+        r["result"]["structuredContent"]["reported_summary"],
+        "checking"
+    );
+    assert_eq!(
+        r["result"]["structuredContent"]["info"]["reported_state"],
+        "working"
+    );
 
     let r = call(&c, "ask_user", json!({"question":"?"})).await;
     assert_eq!(r["result"]["structuredContent"]["answer"], "42");
-    let r = call(&c, "send_to_session", json!({"session_id": child, "text": "again"})).await;
+    let r = call(
+        &c,
+        "send_to_session",
+        json!({"session_id": child, "text": "again"}),
+    )
+    .await;
     assert!(!is_error(&r), "{r}");
     mgr.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejects_malformed_requests_and_unknown_tool_fields() {
+    let e = env().await;
+    for body in [
+        json!({}),
+        json!(42),
+        json!({"jsonrpc":"1.0","id":1,"method":"ping"}),
+        json!({"jsonrpc":"2.0","id":{},"method":"ping"}),
+        json!({"jsonrpc":"2.0","id":1,"method":"ping","params":false}),
+    ] {
+        let (status, body) = post(&e.me.url, auth(&e.me), body).await;
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+    }
+    for (tool, args) in [
+        ("list_sessions", json!({"extra":true})),
+        ("list_sessions", json!([])),
+        ("notify", json!({"title":"hi","body":"there","extra":true})),
+    ] {
+        let response = call(&e.me, tool, args).await;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    assert!(e.host.notifications().is_empty());
+}
+
+#[test]
+fn launch_files_are_unique_and_debug_hides_tokens() {
+    let c = Credentials {
+        session_id: SessionId::new("same"),
+        url: "http://127.0.0.1:1234/mcp".into(),
+        token: "private-bearer-value".into(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let first = launch::claude(&c, &Transport::Http, dir.path()).unwrap();
+    let mut rotated = c.clone();
+    rotated.token = "rotated-private-bearer".into();
+    let second = launch::claude(&rotated, &Transport::Http, dir.path()).unwrap();
+    assert_ne!(first.files, second.files);
+    let original = std::fs::read_to_string(&first.files[0]).unwrap();
+    assert!(original.contains(&c.token));
+    assert!(!original.contains(&rotated.token));
+    for transport in [
+        Transport::Http,
+        Transport::Stdio {
+            binary: "/tmp/del-mcp-stdio".into(),
+        },
+    ] {
+        let config = launch::codex(&c, &transport);
+        assert!(!format!("{config:?}").contains(&c.token));
+    }
+    assert!(!format!("{c:?}").contains(&c.token));
 }

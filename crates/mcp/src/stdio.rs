@@ -15,7 +15,12 @@ fn emit(output: &Mutex<impl Write>, line: &str) {
     let _ = o.flush();
 }
 
-fn forward(agent: &ureq::Agent, url: &str, token: &str, line: &str) -> Result<Option<String>, String> {
+fn forward(
+    agent: &ureq::Agent,
+    url: &str,
+    token: &str,
+    line: &str,
+) -> Result<Option<String>, String> {
     let resp = agent
         .post(url)
         .header("Authorization", &format!("Bearer {token}"))
@@ -24,7 +29,10 @@ fn forward(agent: &ureq::Agent, url: &str, token: &str, line: &str) -> Result<Op
         .send(line)
         .map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     match status {
         202 => Ok(None),
         200 => Ok(Some(body.trim().to_string())),
