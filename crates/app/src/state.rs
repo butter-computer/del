@@ -23,17 +23,34 @@ pub enum Panel {
 /// Which session is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
-    /// A session that does not exist yet; it starts on the first prompt, with
-    /// whatever provider, model and folder the pickers hold.
-    Draft,
+    /// A session that does not exist yet (a "new tab"); it starts on the first
+    /// prompt, with the provider, model and folder its own pickers hold.
+    Draft(u64),
     Session(SessionId),
+}
+
+/// One tab in the top bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tab {
+    Draft(u64),
+    Session(SessionId),
+}
+
+impl Tab {
+    pub fn selection(&self) -> Selection {
+        match self {
+            Tab::Draft(k) => Selection::Draft(*k),
+            Tab::Session(id) => Selection::Session(id.clone()),
+        }
+    }
 }
 
 /// Results coming back from the runtime.
 enum Msg {
     Refresh,
     Statuses(Vec<ProviderStatus>),
-    Started(SessionId, String),
+    /// A draft tab became a session: (draft key, session, first prompt).
+    Started(u64, SessionId, String),
     Error(String),
 }
 
@@ -44,7 +61,8 @@ pub struct AppState {
     overrides: Overrides,
     records: Vec<SessionRecord>,
     pub selection: Selection,
-    pub draft: SessionConfig,
+    drafts: HashMap<u64, SessionConfig>,
+    next_draft: u64,
     pub panel: Panel,
     pub providers: Vec<ProviderStatus>,
     /// Provider whose sign-in is running in the user's terminal.
@@ -57,10 +75,10 @@ pub struct AppState {
     /// The prompt that started each session opened this run, for its chat's
     /// first row (taken once by the chat view).
     first_prompts: HashMap<SessionId, String>,
-    /// Sessions shown as tabs in the top bar: opened this run, in order.
-    pub open_tabs: Vec<SessionId>,
+    /// Tabs in the top bar, in order: new-session drafts and sessions opened this run.
+    pub tabs: Vec<Tab>,
     /// A draft is being turned into a session; blocks a double send.
-    pub starting: bool,
+    starting: std::collections::HashSet<u64>,
 }
 
 impl AppState {
@@ -123,17 +141,20 @@ impl AppState {
             tx,
             overrides,
             records,
-            selection: Selection::Draft,
-            draft: SessionConfig {
-                cwd: std::env::current_dir()
-                    .ok()
-                    .filter(|d| d != std::path::Path::new("/"))
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_else(|| PathBuf::from("/")),
-                model: None,
-                provider: Provider::Claude,
-                permission_mode: PermissionMode::default(),
-            },
+            selection: Selection::Draft(0),
+            drafts: HashMap::from([(
+                0,
+                SessionConfig {
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .filter(|d| d != std::path::Path::new("/"))
+                        .or_else(dirs::home_dir)
+                        .unwrap_or_else(|| PathBuf::from("/")),
+                    model: None,
+                    provider: Provider::Claude,
+                    permission_mode: PermissionMode::default(),
+                },
+            )]),
             panel: Panel::Chat,
             providers: Provider::ALL
                 .iter()
@@ -150,8 +171,9 @@ impl AppState {
             show_archived: false,
             error,
             first_prompts: HashMap::new(),
-            starting: false,
-            open_tabs: Vec::new(),
+            starting: Default::default(),
+            tabs: vec![Tab::Draft(0)],
+            next_draft: 1,
         }
     }
 
@@ -172,15 +194,16 @@ impl AppState {
             Msg::Refresh => self.records = self.manager.list_sessions(),
             Msg::Statuses(list) => {
                 // Default the draft to a usable provider once we know.
-                let draft_ready = list
-                    .iter()
-                    .any(|s| s.provider == self.draft.provider && providers::ready(s));
-                if !draft_ready
-                    && self.selection == Selection::Draft
-                    && let Some(ready) = list.iter().find(|s| providers::ready(s))
-                {
-                    self.draft.provider = ready.provider;
-                    self.draft.model = None;
+                if let Some(ready) = list.iter().find(|s| providers::ready(s)) {
+                    for draft in self.drafts.values_mut() {
+                        let draft_ready = list
+                            .iter()
+                            .any(|s| s.provider == draft.provider && providers::ready(s));
+                        if !draft_ready {
+                            draft.provider = ready.provider;
+                            draft.model = None;
+                        }
+                    }
                 }
                 if let Some(p) = self.signin
                     && list.iter().any(|s| s.provider == p && providers::ready(s))
@@ -189,15 +212,22 @@ impl AppState {
                 }
                 self.providers = list;
             }
-            Msg::Started(id, prompt) => {
+            Msg::Started(key, id, prompt) => {
                 self.first_prompts.insert(id.clone(), prompt);
-                self.add_tab(&id);
-                self.starting = false;
+                self.starting.remove(&key);
+                self.drafts.remove(&key);
+                // The draft tab turns into the session's tab, in place.
+                match self.tabs.iter().position(|t| *t == Tab::Draft(key)) {
+                    Some(at) => self.tabs[at] = Tab::Session(id.clone()),
+                    None => self.add_tab(&id),
+                }
                 self.records = self.manager.list_sessions();
-                self.selection = Selection::Session(id);
+                if self.selection == Selection::Draft(key) {
+                    self.selection = Selection::Session(id);
+                }
             }
             Msg::Error(e) => {
-                self.starting = false;
+                self.starting.clear();
                 self.error = Some(e);
             }
         }
@@ -250,11 +280,10 @@ impl AppState {
     pub fn effective(&self) -> (Provider, Option<String>, PathBuf) {
         match self.active_row() {
             Some(r) => (r.provider, r.model, r.cwd),
-            None => (
-                self.draft.provider,
-                self.draft.model.clone(),
-                self.draft.cwd.clone(),
-            ),
+            None => match self.draft() {
+                Some(d) => (d.provider, d.model.clone(), d.cwd.clone()),
+                None => (Provider::Claude, None, PathBuf::from("/")),
+            },
         }
     }
 
@@ -268,36 +297,123 @@ impl AppState {
 
     // ---- sessions ----
 
+    /// The open draft tab's config, if a draft is open.
+    fn draft(&self) -> Option<&SessionConfig> {
+        match self.selection {
+            Selection::Draft(k) => self.drafts.get(&k),
+            Selection::Session(_) => None,
+        }
+    }
+
+    fn draft_mut(&mut self) -> Option<&mut SessionConfig> {
+        match self.selection {
+            Selection::Draft(k) => self.drafts.get_mut(&k),
+            Selection::Session(_) => None,
+        }
+    }
+
+    /// Whether the open draft is being turned into a session.
+    pub fn is_starting(&self) -> bool {
+        matches!(self.selection, Selection::Draft(k) if self.starting.contains(&k))
+    }
+
+    /// Open a new tab, starting from the provider, model and folder of the
+    /// current one. Any number can be open.
     pub fn new_session(&mut self, cx: &mut Context<Self>) {
-        self.selection = Selection::Draft;
+        let (provider, model, cwd) = self.effective();
+        self.open_draft(provider, model, cwd, cx);
+    }
+
+    fn open_draft(
+        &mut self,
+        provider: Provider,
+        model: Option<String>,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.next_draft;
+        self.next_draft += 1;
+        self.drafts.insert(
+            key,
+            SessionConfig {
+                cwd,
+                model,
+                provider,
+                permission_mode: PermissionMode::default(),
+            },
+        );
+        self.tabs.push(Tab::Draft(key));
+        self.selection = Selection::Draft(key);
         self.panel = Panel::Chat;
         self.renaming = None;
         cx.notify();
     }
 
+    /// The agent or model of an existing session cannot change, so choosing
+    /// another in its composer opens a new tab with that choice, in the same
+    /// folder.
+    pub fn fork_with(&mut self, provider: Provider, model: Option<String>, cx: &mut Context<Self>) {
+        let (_, _, cwd) = self.effective();
+        self.open_draft(provider, model, cwd, cx);
+    }
+
     fn add_tab(&mut self, id: &SessionId) {
-        if !self.open_tabs.contains(id) {
-            self.open_tabs.push(id.clone());
+        let tab = Tab::Session(id.clone());
+        if !self.tabs.contains(&tab) {
+            self.tabs.push(tab);
         }
     }
 
-    /// Close a tab. The session stays in the sidebar and keeps running.
-    pub fn close_tab(&mut self, id: &SessionId, cx: &mut Context<Self>) {
-        let at = self.open_tabs.iter().position(|t| t == id);
-        self.open_tabs.retain(|t| t != id);
-        if self.selection == Selection::Session(id.clone()) {
-            let next = at.and_then(|i| {
-                self.open_tabs
-                    .get(i)
-                    .or_else(|| i.checked_sub(1).and_then(|j| self.open_tabs.get(j)))
-                    .cloned()
-            });
+    pub fn select_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
+        match tab {
+            Tab::Session(id) => self.select(id.clone(), cx),
+            Tab::Draft(k) => {
+                self.selection = Selection::Draft(*k);
+                self.panel = Panel::Chat;
+                self.renaming = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Close a tab. A session stays in the sidebar list and keeps running.
+    pub fn close_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
+        let Some(at) = self.tabs.iter().position(|t| t == tab) else {
+            return;
+        };
+        self.tabs.remove(at);
+        if let Tab::Draft(k) = tab {
+            self.drafts.remove(k);
+            self.starting.remove(k);
+        }
+        if self.selection == tab.selection() {
+            let next = self
+                .tabs
+                .get(at)
+                .or_else(|| at.checked_sub(1).and_then(|j| self.tabs.get(j)))
+                .cloned();
             match next {
-                Some(next) => self.select(next, cx),
+                Some(next) => self.select_tab(&next, cx),
                 None => self.new_session(cx),
             }
         }
         cx.notify();
+    }
+
+    /// Close the open tab (Cmd-W).
+    pub fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        let tab = match &self.selection {
+            Selection::Draft(k) => Tab::Draft(*k),
+            Selection::Session(id) => Tab::Session(id.clone()),
+        };
+        self.close_tab(&tab, cx);
+    }
+
+    /// Jump to tab `n` (0-based), as Cmd-1..9 do.
+    pub fn select_nth(&mut self, n: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(n).cloned() {
+            self.select_tab(&tab, cx);
+        }
     }
 
     pub fn select(&mut self, id: SessionId, cx: &mut Context<Self>) {
@@ -316,16 +432,18 @@ impl AppState {
         cx.notify();
     }
 
-    /// Move through the sidebar by `delta` rows (wrapping).
+    /// Move through the tabs by `delta` (wrapping).
     pub fn select_relative(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let ids: Vec<SessionId> = self.rows().into_iter().map(|r| r.id).collect();
-        let current = match &self.selection {
-            Selection::Session(id) => Some(id),
-            Selection::Draft => None,
+        let n = self.tabs.len() as isize;
+        let Some(at) = self
+            .tabs
+            .iter()
+            .position(|t| t.selection() == self.selection)
+        else {
+            return;
         };
-        if let Some(next) = sessions::step(&ids, current, delta).cloned() {
-            self.select(next, cx);
-        }
+        let next = (at as isize + delta).rem_euclid(n) as usize;
+        self.select_nth(next, cx);
     }
 
     /// Send a prompt to the open session, starting it first if it is a draft.
@@ -333,12 +451,13 @@ impl AppState {
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         match self.selection.clone() {
-            Selection::Draft => {
-                if self.starting {
+            Selection::Draft(key) => {
+                if !self.starting.insert(key) {
                     return;
                 }
-                self.starting = true;
-                let config = self.draft.clone();
+                let Some(config) = self.drafts.get(&key).cloned() else {
+                    return;
+                };
                 self.rt.spawn(async move {
                     let result = async {
                         let handle = manager.start_session(config).await?;
@@ -349,7 +468,7 @@ impl AppState {
                     }
                     .await;
                     let _ = tx.send(match result {
-                        Ok(id) => Msg::Started(id, text),
+                        Ok(id) => Msg::Started(key, id, text),
                         Err(e) => Msg::Error(e.to_string()),
                     });
                 });
@@ -400,12 +519,8 @@ impl AppState {
             let _ = manager.close(&close_id).await;
             let _ = tx.send(Msg::Refresh);
         });
-        if was_active {
-            self.selection = Selection::Draft;
-            if let Some(next) = self.rows().into_iter().next() {
-                self.select(next.id, cx);
-            }
-        }
+        self.close_tab(&Tab::Session(id), cx);
+        let _ = was_active;
         cx.notify();
     }
 
@@ -430,6 +545,20 @@ impl AppState {
     }
 
     /// The agent a session runs on.
+    /// Title and agent shown on a tab.
+    pub fn tab_info(&self, tab: &Tab) -> (String, Provider) {
+        match tab {
+            Tab::Session(id) => (
+                self.current_title(id),
+                self.provider_of(id).unwrap_or(Provider::Claude),
+            ),
+            Tab::Draft(k) => (
+                sessions::DEFAULT_TITLE.to_string(),
+                self.drafts.get(k).map_or(Provider::Claude, |d| d.provider),
+            ),
+        }
+    }
+
     pub fn provider_of(&self, id: &SessionId) -> Option<Provider> {
         self.records
             .iter()
@@ -457,21 +586,30 @@ impl AppState {
     // ---- composer pickers (a draft's choices; an open session's are fixed) ----
 
     pub fn is_draft(&self) -> bool {
-        self.selection == Selection::Draft
+        matches!(self.selection, Selection::Draft(_))
     }
 
     pub fn set_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        if self.is_draft() && self.draft.provider != provider {
-            self.draft.provider = provider;
-            self.draft.model = None;
-            cx.notify();
+        if let Some(d) = self.draft_mut() {
+            if d.provider != provider {
+                d.provider = provider;
+                d.model = None;
+                cx.notify();
+            }
+        } else if self.effective().0 != provider {
+            self.fork_with(provider, None, cx);
         }
     }
 
     pub fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
-        if self.is_draft() {
-            self.draft.model = model;
+        if let Some(d) = self.draft_mut() {
+            d.model = model;
             cx.notify();
+        } else {
+            let (provider, current, _) = self.effective();
+            if current != model {
+                self.fork_with(provider, model, cx);
+            }
         }
     }
 
@@ -491,7 +629,9 @@ impl AppState {
                 && let Some(dir) = paths.pop()
             {
                 let _ = this.update(cx, |s, cx| {
-                    s.draft.cwd = dir;
+                    if let Some(d) = s.draft_mut() {
+                        d.cwd = dir;
+                    }
                     cx.notify();
                 });
             }

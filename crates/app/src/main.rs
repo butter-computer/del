@@ -28,7 +28,7 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use state::{AppState, Panel, Selection};
+use state::{AppState, Panel, Selection, Tab};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -55,7 +55,17 @@ actions!(
         StopSession,
         ToggleProviders,
         ToggleSidebar,
-        Quit
+        Quit,
+        CloseTab,
+        Tab1,
+        Tab2,
+        Tab3,
+        Tab4,
+        Tab5,
+        Tab6,
+        Tab7,
+        Tab8,
+        Tab9
     ]
 );
 
@@ -167,6 +177,11 @@ impl AppShell {
         self.chats.insert(id, chat);
     }
 
+    fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.select_nth(n, cx));
+        self.focus_composer(window, cx);
+    }
+
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
@@ -175,7 +190,7 @@ impl AppShell {
     fn open_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
         match &self.state.read(cx).selection {
             Selection::Session(id) => self.chats.get(id).cloned(),
-            Selection::Draft => None,
+            Selection::Draft(_) => None,
         }
     }
 
@@ -188,7 +203,7 @@ impl AppShell {
         };
         let prompt = prompt.to_string();
         let chat = self.open_chat(cx);
-        if chat.is_none() && self.state.read(cx).starting {
+        if chat.is_none() && self.state.read(cx).is_starting() {
             return;
         }
         self.composer
@@ -251,14 +266,16 @@ impl AppShell {
         let muted = rgba(0xffffff8c);
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
-            let tabs: Vec<(SessionId, String, Option<Provider>)> = st
-                .open_tabs
+            let tabs: Vec<(Tab, String, Provider)> = st
+                .tabs
                 .iter()
-                .map(|id| (id.clone(), st.current_title(id), st.provider_of(id)))
+                .map(|tab| {
+                    let (title, provider) = st.tab_info(tab);
+                    (tab.clone(), title, provider)
+                })
                 .collect();
             (tabs, st.selection.clone(), st.panel)
         };
-        let draft_active = selection == Selection::Draft && panel == Panel::Chat;
         let tab = |id: SharedString, active: bool| {
             h_flex()
                 .id(id.clone())
@@ -320,18 +337,21 @@ impl AppShell {
                                 ),
                         )
                     })
-                    .children(tabs.into_iter().map(|(id, title, provider)| {
-                        let active =
-                            selection == Selection::Session(id.clone()) && panel == Panel::Chat;
+                    .children(tabs.into_iter().map(|(tab_key, title, provider)| {
+                        let active = selection == tab_key.selection() && panel == Panel::Chat;
                         let (select, close) = (self.state.clone(), self.state.clone());
-                        let (select_id, close_id) = (id.clone(), id.clone());
-                        let group = SharedString::from(format!("tab-{}", id.0));
+                        let (select_tab, close_tab) = (tab_key.clone(), tab_key.clone());
+                        let name = match &tab_key {
+                            Tab::Session(id) => id.0.clone(),
+                            Tab::Draft(k) => format!("draft-{k}"),
+                        };
+                        let group = SharedString::from(format!("tab-{name}"));
                         tab(group.clone(), active)
                             .on_click(move |_, _, cx| {
-                                let id = select_id.clone();
-                                select.update(cx, |s, cx| s.select(id, cx));
+                                let tab = select_tab.clone();
+                                select.update(cx, |s, cx| s.select_tab(&tab, cx));
                             })
-                            .children(provider.map(provider_badge))
+                            .child(composer_ui::provider_logo(provider, 14.0))
                             .child(
                                 div()
                                     .flex_1()
@@ -343,7 +363,7 @@ impl AppShell {
                             )
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("close-{}", id.0)))
+                                    .id(SharedString::from(format!("close-{name}")))
                                     .size(px(16.0))
                                     .flex()
                                     .items_center()
@@ -360,15 +380,12 @@ impl AppShell {
                                     })
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
-                                        let id = close_id.clone();
-                                        close.update(cx, |s, cx| s.close_tab(&id, cx));
+                                        let tab = close_tab.clone();
+                                        close.update(cx, |s, cx| s.close_tab(&tab, cx));
                                     })
                                     .child(Icon::new(IconName::Close).xsmall().text_color(muted)),
                             )
                     }))
-                    .when(draft_active, |row| {
-                        row.child(tab("tab-draft".into(), true).child("New session"))
-                    })
                     .child(
                         div()
                             .id("new-tab")
@@ -463,19 +480,6 @@ impl AppShell {
     }
 }
 
-/// The agent's logo, drawn in the logo's own colour with no background.
-fn provider_badge(provider: Provider) -> impl IntoElement {
-    let (path, color) = match provider {
-        Provider::Claude => ("icons/claude.svg", 0xd97757),
-        Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
-    };
-    svg()
-        .path(path)
-        .size(px(14.0))
-        .flex_none()
-        .text_color(rgb(color))
-}
-
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
@@ -504,6 +508,19 @@ impl Render for AppShell {
                 this.sidebar_open = !this.sidebar_open;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                this.state.update(cx, |s, cx| s.close_active_tab(cx));
+                this.focus_composer(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Tab1, w, cx| this.go_tab(0, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab2, w, cx| this.go_tab(1, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab3, w, cx| this.go_tab(2, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab4, w, cx| this.go_tab(3, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab5, w, cx| this.go_tab(4, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab6, w, cx| this.go_tab(5, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab7, w, cx| this.go_tab(6, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab8, w, cx| this.go_tab(7, w, cx)))
+            .on_action(cx.listener(|this, _: &Tab9, w, cx| this.go_tab(8, w, cx)))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 this.state.update(cx, |s, cx| s.new_session(cx));
                 this.focus_composer(window, cx);
@@ -572,11 +589,24 @@ fn main() {
             });
 
             cx.bind_keys([
+                KeyBinding::new("cmd-t", NewSession, None),
                 KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-1", Tab1, None),
+                KeyBinding::new("cmd-2", Tab2, None),
+                KeyBinding::new("cmd-3", Tab3, None),
+                KeyBinding::new("cmd-4", Tab4, None),
+                KeyBinding::new("cmd-5", Tab5, None),
+                KeyBinding::new("cmd-6", Tab6, None),
+                KeyBinding::new("cmd-7", Tab7, None),
+                KeyBinding::new("cmd-8", Tab8, None),
+                KeyBinding::new("cmd-9", Tab9, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-]", NextSession, None),
-                KeyBinding::new("cmd-[", PrevSession, None),
+                KeyBinding::new("ctrl-tab", NextSession, None),
+                KeyBinding::new("cmd-shift-]", NextSession, None),
+                KeyBinding::new("ctrl-shift-tab", PrevSession, None),
+                KeyBinding::new("cmd-shift-[", PrevSession, None),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("cmd-.", StopSession, None),
                 KeyBinding::new("cmd-,", ToggleProviders, None),

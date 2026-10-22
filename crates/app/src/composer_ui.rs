@@ -32,8 +32,9 @@ pub struct ComposerCard {
     provider_ready: bool,
     model: Option<String>,
     folder: String,
-    /// The session exists: agent, model and folder can no longer change.
-    locked: bool,
+    /// The session exists, so its folder can no longer change. (Agent and
+    /// model stay dropdowns; picking another opens a new tab.)
+    folder_locked: bool,
     running: bool,
     on_send: Handler,
     on_stop: Handler,
@@ -51,7 +52,7 @@ impl ComposerCard {
         provider_ready: bool,
         model: Option<String>,
         folder: String,
-        locked: bool,
+        folder_locked: bool,
         running: bool,
     ) -> Self {
         let noop: Handler = Rc::new(|_, _| {});
@@ -62,7 +63,7 @@ impl ComposerCard {
             provider_ready,
             model,
             folder,
-            locked,
+            folder_locked,
             running,
             on_send: noop.clone(),
             on_stop: noop.clone(),
@@ -94,15 +95,22 @@ impl ComposerCard {
     }
 }
 
-/// A flat footer control: text with an optional caret, lightening on hover.
-fn chip(id: &'static str, locked: bool) -> Button {
-    Button::new(id)
-        .ghost()
-        .small()
-        .compact()
-        .rounded_full()
-        .disabled(false)
-        .when(locked, |b| b.cursor_default())
+/// The agent's logo in its own colour, no background.
+pub fn provider_logo(provider: Provider, size: f32) -> Svg {
+    let (path, color) = match provider {
+        Provider::Claude => ("icons/claude.svg", 0xd97757),
+        Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
+    };
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(rgb(color))
+}
+
+/// A flat footer control.
+fn chip(id: &'static str) -> Button {
+    Button::new(id).ghost().small().compact().rounded_full()
 }
 
 impl RenderOnce for ComposerCard {
@@ -116,7 +124,7 @@ impl RenderOnce for ComposerCard {
             provider_ready,
             model,
             folder,
-            locked,
+            folder_locked,
             running,
             on_send,
             on_stop,
@@ -125,46 +133,31 @@ impl RenderOnce for ComposerCard {
             on_model,
         } = self;
 
-        let agent_label = h_flex()
-            .gap_1p5()
-            .items_center()
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(rgb(if provider_ready { 0x4cc38a } else { 0xf5a524 })),
-            )
-            .child(providers::display_name(provider));
-        let agent = chip("agent", locked)
-            .child(agent_label)
-            .when(!locked, |b| b.dropdown_caret(true));
-        let model_btn = chip("model", locked)
-            .label(providers::model_label(model.as_deref()))
-            .text_color(muted)
-            .when(!locked, |b| b.dropdown_caret(true));
-
-        let agent_el = if locked {
-            agent.into_any_element()
-        } else {
+        let agent = chip("agent").child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(provider_logo(provider, 14.0).when(!provider_ready, |l| l.opacity(0.5)))
+                .child(providers::display_name(provider)),
+        );
+        let agent_el = {
             let current = provider;
-            agent
-                .dropdown_menu(move |menu, _, _| {
-                    Provider::ALL.iter().fold(menu, |menu, &p| {
-                        let on_provider = on_provider.clone();
-                        menu.item(
-                            PopupMenuItem::new(providers::display_name(p))
-                                .checked(p == current)
-                                .on_click(move |_, w, cx| on_provider(p, w, cx)),
-                        )
-                    })
+            agent.dropdown_menu(move |menu, _, _| {
+                Provider::ALL.iter().fold(menu, |menu, &p| {
+                    let on_provider = on_provider.clone();
+                    menu.item(
+                        PopupMenuItem::new(providers::display_name(p))
+                            .checked(p == current)
+                            .on_click(move |_, w, cx| on_provider(p, w, cx)),
+                    )
                 })
-                .into_any_element()
+            })
         };
-        let model_el = if locked {
-            model_btn.into_any_element()
-        } else {
+        let model_el = {
             let current = model.clone();
-            model_btn
+            chip("model")
+                .label(providers::model_label(model.as_deref()))
+                .text_color(muted)
                 .dropdown_menu(move |menu, _, _| {
                     providers::models(provider).iter().fold(menu, |menu, m| {
                         let on_model = on_model.clone();
@@ -176,13 +169,12 @@ impl RenderOnce for ComposerCard {
                         )
                     })
                 })
-                .into_any_element()
         };
-        let folder_el = chip("folder", locked)
+        let folder_el = chip("folder")
             .icon(IconName::Folder)
             .label(folder)
             .text_color(muted)
-            .when(!locked, |b| {
+            .when(!folder_locked, |b| {
                 let on_folder = on_folder.clone();
                 b.on_click(move |_, w, cx| on_folder(w, cx))
             });

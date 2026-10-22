@@ -102,21 +102,6 @@ pub fn overrides_path() -> Option<PathBuf> {
     del_agent::data_dir().map(|d| d.join("sidebar.json"))
 }
 
-/// The id after (or before) `current` in `ids`, wrapping. `None` if empty.
-pub fn step<'a>(
-    ids: &'a [SessionId],
-    current: Option<&SessionId>,
-    delta: isize,
-) -> Option<&'a SessionId> {
-    if ids.is_empty() {
-        return None;
-    }
-    let at = current
-        .and_then(|c| ids.iter().position(|i| i == c))
-        .map_or(if delta >= 0 { -1 } else { 0 }, |i| i as isize);
-    ids.get((at + delta).rem_euclid(ids.len() as isize) as usize)
-}
-
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -198,18 +183,6 @@ mod tests {
         assert!(o.rows(&[record("a", None, 0)])[0].archived);
         o.set_archived(&id, false);
         assert!(!o.rows(&[record("a", None, 0)])[0].archived);
-    }
-
-    #[test]
-    fn step_wraps_in_both_directions() {
-        let ids: Vec<SessionId> = ["a", "b", "c"].map(SessionId::new).into();
-        assert_eq!(step(&ids, Some(&ids[0]), 1), Some(&ids[1]));
-        assert_eq!(step(&ids, Some(&ids[2]), 1), Some(&ids[0]));
-        assert_eq!(step(&ids, Some(&ids[0]), -1), Some(&ids[2]));
-        // Nothing selected: forward starts at the first, back at the last.
-        assert_eq!(step(&ids, None, 1), Some(&ids[0]));
-        assert_eq!(step(&ids, None, -1), Some(&ids[2]));
-        assert_eq!(step(&[], None, 1), None);
     }
 
     #[test]

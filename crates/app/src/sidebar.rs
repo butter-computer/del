@@ -183,9 +183,9 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
     let archived = s.archived_rows();
     let active = match &s.selection {
         Selection::Session(id) => Some(id.clone()),
-        Selection::Draft => None,
+        Selection::Draft(_) => None,
     };
-    let draft_selected = s.selection == Selection::Draft && s.panel == Panel::Chat;
+    let draft_selected = matches!(s.selection, Selection::Draft(_)) && s.panel == Panel::Chat;
     let providers_open = s.panel == Panel::Providers;
     let show_archived = s.show_archived;
 
