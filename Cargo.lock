@@ -1215,6 +1215,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "del-claude"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "del-agent",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "del-codex"
 version = "0.1.0"
 dependencies = [
