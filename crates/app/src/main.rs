@@ -42,6 +42,20 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 /// neither shown nor toggleable (button and Cmd-B) until this is turned on.
 const SIDEBAR_ENABLED: bool = false;
 
+/// Width a tab animates to or from; settled tabs size themselves.
+const TAB_WIDTH: f32 = 160.0;
+
+/// The title inside a tab.
+fn tab_title(title: String) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(16.0))
+        .line_height(px(16.0))
+        .truncate()
+        .child(title)
+}
+
 /// How long the right panel takes to slide open or closed.
 const RIGHT_ANIM: Duration = Duration::from_millis(220);
 
@@ -312,14 +326,20 @@ impl AppShell {
         let muted = rgba(0xffffff8c);
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
-            let tabs: Vec<(Tab, String, Provider)> = st
+            // Live tabs, with just-closed ones (ghosts) kept at their old place
+            // while they shrink away.
+            let mut tabs: Vec<(Option<Tab>, u64, String, Provider)> = st
                 .tabs
                 .iter()
                 .map(|tab| {
                     let (title, provider) = st.tab_info(tab);
-                    (tab.clone(), title, provider)
+                    (Some(tab.clone()), st.uid_of(tab), title, provider)
                 })
                 .collect();
+            for g in &st.ghosts {
+                let at = g.at.min(tabs.len());
+                tabs.insert(at, (None, g.uid, g.title.clone(), g.provider));
+            }
             (tabs, st.selection.clone(), st.panel)
         };
         let tab = |id: SharedString, active: bool| {
@@ -390,59 +410,77 @@ impl AppShell {
                                         ),
                                 )
                             })
-                            .children(tabs.into_iter().map(|(tab_key, title, provider)| {
+                            .children(tabs.into_iter().map(|(tab_key, uid, title, provider)| {
+                                let live = tab_key.is_some();
                                 let active =
-                                    selection == tab_key.selection() && panel == Panel::Chat;
-                                let (select, close) = (self.state.clone(), self.state.clone());
-                                let (select_tab, close_tab) = (tab_key.clone(), tab_key.clone());
+                                    tab_key.as_ref().is_some_and(|t| selection == t.selection())
+                                        && panel == Panel::Chat;
                                 let name = match &tab_key {
-                                    Tab::Session(id) => id.0.clone(),
-                                    Tab::Draft(k) => format!("draft-{k}"),
+                                    Some(Tab::Session(id)) => id.0.clone(),
+                                    Some(Tab::Draft(k)) => format!("draft-{k}"),
+                                    None => format!("closing-{uid}"),
                                 };
                                 let group = SharedString::from(format!("tab-{name}"));
-                                tab(group.clone(), active)
-                                    .on_click(move |_, _, cx| {
-                                        let tab = select_tab.clone();
-                                        select.update(cx, |s, cx| s.select_tab(&tab, cx));
-                                    })
-                                    .child(composer_ui::provider_logo(provider, 14.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .h(px(16.0))
-                                            .line_height(px(16.0))
-                                            .truncate()
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("close-{name}")))
-                                            .size(px(16.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .flex_none()
-                                            .rounded_sm()
-                                            // Shown on hover only; faded rather than hidden so
-                                            // layout and painting stay stable.
-                                            .opacity(0.0)
-                                            .group_hover(group.clone(), |c| c.opacity(1.0))
-                                            .hover(|c| c.bg(rgba(0xffffff1a)))
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                let tab = close_tab.clone();
-                                                close.update(cx, |s, cx| s.close_tab(&tab, cx));
-                                            })
-                                            .child(
-                                                Icon::new(IconName::Close)
-                                                    .xsmall()
-                                                    .text_color(muted),
-                                            ),
-                                    )
+                                let mut el = tab(group.clone(), active);
+                                if let Some(tab_key) = tab_key.clone() {
+                                    let (select, close) = (self.state.clone(), self.state.clone());
+                                    let (select_tab, close_tab) = (tab_key.clone(), tab_key);
+                                    el = el
+                                        .on_click(move |_, _, cx| {
+                                            let tab = select_tab.clone();
+                                            select.update(cx, |s, cx| s.select_tab(&tab, cx));
+                                        })
+                                        .child(composer_ui::provider_logo(provider, 14.0))
+                                        .child(tab_title(title))
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("close-{name}")))
+                                                .size(px(16.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .flex_none()
+                                                .rounded_sm()
+                                                // Shown on hover only; faded rather than hidden
+                                                // so layout and painting stay stable.
+                                                .opacity(0.0)
+                                                .group_hover(group.clone(), |c| c.opacity(1.0))
+                                                .hover(|c| c.bg(rgba(0xffffff1a)))
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .on_click(move |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                    let tab = close_tab.clone();
+                                                    close.update(cx, |s, cx| s.close_tab(&tab, cx));
+                                                })
+                                                .child(
+                                                    Icon::new(IconName::Close)
+                                                        .xsmall()
+                                                        .text_color(muted),
+                                                ),
+                                        );
+                                } else {
+                                    // Closing: same look, no handlers.
+                                    el = el
+                                        .child(composer_ui::provider_logo(provider, 14.0))
+                                        .child(tab_title(title))
+                                        .child(div().size(px(16.0)).flex_none());
+                                }
+                                // Width grows from 0 on open and back to 0 on close;
+                                // afterwards the tab sizes itself as usual.
+                                el.overflow_hidden().with_animation(
+                                    SharedString::from(format!("tab-anim-{uid}-{live}")),
+                                    Animation::new(state::TAB_ANIM).with_easing(ease_out_quint()),
+                                    move |el, t| {
+                                        let t = if live { t } else { 1.0 - t };
+                                        if t < 1.0 {
+                                            el.min_w(px(0.0)).w(px(TAB_WIDTH * t))
+                                        } else {
+                                            el
+                                        }
+                                    },
+                                )
                             }))
                             .child(
                                 div()

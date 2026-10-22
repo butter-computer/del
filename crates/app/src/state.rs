@@ -29,8 +29,21 @@ pub enum Selection {
     Session(SessionId),
 }
 
+/// How long a tab takes to grow in or shrink away.
+pub const TAB_ANIM: Duration = Duration::from_millis(180);
+
+/// A tab that was just closed, kept on screen while it shrinks away.
+#[derive(Debug, Clone)]
+pub struct Ghost {
+    pub uid: u64,
+    /// Where it was in the tab list.
+    pub at: usize,
+    pub title: String,
+    pub provider: Provider,
+}
+
 /// One tab in the top bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tab {
     Draft(u64),
     Session(SessionId),
@@ -77,6 +90,11 @@ pub struct AppState {
     first_prompts: HashMap<SessionId, String>,
     /// Tabs in the top bar, in order: new-session drafts and sessions opened this run.
     pub tabs: Vec<Tab>,
+    /// A stable id per tab (kept when a draft becomes its session), so each
+    /// tab animates in exactly once.
+    uids: HashMap<Tab, u64>,
+    next_uid: u64,
+    pub ghosts: Vec<Ghost>,
     /// A draft is being turned into a session; blocks a double send.
     starting: std::collections::HashSet<u64>,
 }
@@ -173,6 +191,9 @@ impl AppState {
             first_prompts: HashMap::new(),
             starting: Default::default(),
             tabs: vec![Tab::Draft(0)],
+            uids: HashMap::from([(Tab::Draft(0), 0)]),
+            next_uid: 1,
+            ghosts: Vec::new(),
             next_draft: 1,
         }
     }
@@ -218,7 +239,12 @@ impl AppState {
                 self.drafts.remove(&key);
                 // The draft tab turns into the session's tab, in place.
                 match self.tabs.iter().position(|t| *t == Tab::Draft(key)) {
-                    Some(at) => self.tabs[at] = Tab::Session(id.clone()),
+                    Some(at) => {
+                        self.tabs[at] = Tab::Session(id.clone());
+                        if let Some(uid) = self.uids.remove(&Tab::Draft(key)) {
+                            self.uids.insert(Tab::Session(id.clone()), uid);
+                        }
+                    }
                     None => self.add_tab(&id),
                 }
                 self.records = self.manager.list_sessions();
@@ -342,6 +368,7 @@ impl AppState {
                 permission_mode: PermissionMode::default(),
             },
         );
+        self.new_uid(Tab::Draft(key));
         self.tabs.push(Tab::Draft(key));
         self.selection = Selection::Draft(key);
         self.panel = Panel::Chat;
@@ -357,9 +384,19 @@ impl AppState {
         self.open_draft(provider, model, cwd, cx);
     }
 
+    fn new_uid(&mut self, tab: Tab) {
+        self.uids.insert(tab, self.next_uid);
+        self.next_uid += 1;
+    }
+
+    pub fn uid_of(&self, tab: &Tab) -> u64 {
+        self.uids.get(tab).copied().unwrap_or(0)
+    }
+
     fn add_tab(&mut self, id: &SessionId) {
         let tab = Tab::Session(id.clone());
         if !self.tabs.contains(&tab) {
+            self.new_uid(tab.clone());
             self.tabs.push(tab);
         }
     }
@@ -381,6 +418,23 @@ impl AppState {
         let Some(at) = self.tabs.iter().position(|t| t == tab) else {
             return;
         };
+        let (title, provider) = self.tab_info(tab);
+        let uid = self.uid_of(tab);
+        self.uids.remove(tab);
+        self.ghosts.push(Ghost {
+            uid,
+            at,
+            title,
+            provider,
+        });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TAB_ANIM * 12 / 10).await;
+            let _ = this.update(cx, |s, cx| {
+                s.ghosts.retain(|g| g.uid != uid);
+                cx.notify();
+            });
+        })
+        .detach();
         self.tabs.remove(at);
         if let Tab::Draft(k) = tab {
             self.drafts.remove(k);
