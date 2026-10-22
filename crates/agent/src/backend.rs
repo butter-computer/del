@@ -30,7 +30,11 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub fn new(id: SessionId, provider: Provider, events: broadcast::Sender<AgentEvent>) -> Self {
-        Self { id, provider, events }
+        Self {
+            id,
+            provider,
+            events,
+        }
     }
     /// Subscribe to events emitted from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
