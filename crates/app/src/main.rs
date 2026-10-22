@@ -9,8 +9,9 @@ mod wallpaper;
 
 use std::sync::Arc;
 
-use del_core::{Counter, SHELL_SURFACE_RGB, ShellMetrics};
+use del_core::{SHELL_SURFACE_RGB, ShellMetrics, composer};
 use gpui_kit::component::button::*;
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -18,14 +19,91 @@ use gpui_kit::*;
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
+/// Widest the composer grows on a large window, in logical pixels.
+const COMPOSER_MAX_WIDTH: f32 = 640.0;
+
 struct AppShell {
-    counter: Counter,
+    composer: Entity<TextareaState>,
     metrics: ShellMetrics,
     /// Decoded before the window opened, so the first frame already shows it.
     wallpaper: Option<Arc<RenderImage>>,
 }
 
 impl AppShell {
+    fn new(
+        wallpaper: Option<Arc<RenderImage>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let composer = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx)
+                .placeholder("Ask, build, or describe a change...")
+                .auto_grow(2, 8)
+                .submit_on_enter(true);
+            state.set_submit_on_enter(true, cx);
+            state
+        });
+        // Enter (without Shift) submits; Shift+Enter inserts a newline.
+        cx.subscribe_in(
+            &composer,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        )
+        .detach();
+        composer.update(cx, |state, cx| state.focus(window, cx));
+
+        Self {
+            composer,
+            metrics: ShellMetrics::default(),
+            wallpaper,
+        }
+    }
+
+    /// Send the composer's text, if any, and clear it.
+    ///
+    /// There is no chat backend yet, so sending only clears the field.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value();
+        if composer::submission(&text).is_none() {
+            return;
+        }
+        self.composer
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let can_send = composer::submission(&self.composer.read(cx).value()).is_some();
+
+        v_flex()
+            .w_full()
+            .max_w(px(COMPOSER_MAX_WIDTH))
+            .gap_2()
+            .p_3()
+            .rounded(px(16.0))
+            .bg(rgba(0x0b0b0dcc))
+            .border_1()
+            .border_color(rgba(0xffffff1f))
+            .child(
+                Textarea::new(&self.composer)
+                    .appearance(false)
+                    .bordered(false),
+            )
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("send")
+                        .primary()
+                        .label("Send")
+                        .disabled(!can_send)
+                        .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                ),
+            )
+    }
+
     fn render_topbar(&self, cx: &App) -> impl IntoElement {
         // The system title bar is hidden (`appears_transparent`), so this bar
         // is the whole chrome: it paints the shared shell colour with no
@@ -88,7 +166,8 @@ impl AppShell {
                     .inset_0()
                     .items_center()
                     .justify_center()
-                    .gap_4()
+                    .gap_5()
+                    .px_6()
                     .child(
                         div()
                             .text_xl()
@@ -96,21 +175,7 @@ impl AppShell {
                             .text_color(rgb(0xf5f5f5))
                             .child("What should we work on in del?"),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgba(0xffffffb3))
-                            .child(self.counter.greeting()),
-                    )
-                    .child(
-                        Button::new("increment")
-                            .primary()
-                            .label(format!("Count: {}", self.counter.count()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.counter.increment();
-                                cx.notify();
-                            })),
-                    ),
+                    .child(self.render_composer(cx)),
             )
     }
 }
@@ -166,12 +231,8 @@ fn main() {
         };
 
         let wallpaper = wallpaper.finish();
-        gpui_kit::open_window(options, cx, move |_, cx| {
-            cx.new(|_| AppShell {
-                counter: Counter::new(),
-                metrics,
-                wallpaper,
-            })
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| AppShell::new(wallpaper, window, cx))
         })
         .expect("failed to open window");
 

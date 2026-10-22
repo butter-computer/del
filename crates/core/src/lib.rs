@@ -3,6 +3,7 @@
 //! This crate has no dependency on GPUI or any other UI toolkit, so it can be
 //! unit-tested and reused from any front end.
 
+pub mod composer;
 pub mod shell;
 pub mod wallpaper;
 
