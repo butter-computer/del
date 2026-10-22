@@ -21,6 +21,9 @@ use gpui_kit::*;
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
+/// The prompt above the composer.
+const HEADING: &str = "What are we building?";
+
 /// Widest the composer grows on a large window, in logical pixels.
 const COMPOSER_MAX_WIDTH: f32 = 560.0;
 
@@ -230,21 +233,33 @@ impl AppShell {
             .overflow_hidden()
             .bg(rgba(PAGE_SURFACE_RGBA))
             .child(
+                // Centre one column on the page, and left-align its contents so
+                // the heading starts at the composer's left edge.
                 v_flex()
                     .absolute()
                     .inset_0()
                     .items_center()
                     .justify_center()
-                    .gap_3()
                     .px_3()
                     .child(
-                        div()
-                            .text_size(px(TEXT_LG))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xf5f5f5))
-                            .child("What should we work on in del?"),
-                    )
-                    .child(self.render_composer(cx)),
+                        v_flex()
+                            .w_full()
+                            .max_w(px(COMPOSER_MAX_WIDTH))
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    // The composer's padding plus the input's own
+                                    // inset, so the heading and the input text
+                                    // share a left edge.
+                                    .pl(px(17.5))
+                                    .text_size(px(TEXT_LG))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(0xf5f5f5))
+                                    .child(HEADING),
+                            )
+                            .child(self.render_composer(cx)),
+                    ),
             )
     }
 }
