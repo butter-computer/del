@@ -15,6 +15,10 @@ pub const SERVER_NAME: &str = "del";
 pub const ENV_URL: &str = "DEL_MCP_URL";
 pub const ENV_TOKEN: &str = "DEL_MCP_TOKEN";
 
+/// Allow the server's default 30-minute user wait to settle before the client
+/// aborts. Scoped to del only: no process-wide timeout/env overrides.
+pub const TOOL_TIMEOUT_SECS: u64 = 31 * 60;
+
 /// Extra argv and environment to launch an agent CLI with.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LaunchConfig {
@@ -85,12 +89,14 @@ pub fn claude(c: &Credentials, transport: &Transport, dir: &Path) -> io::Result<
             "type": "http",
             "url": c.url,
             "headers": {"Authorization": format!("Bearer {}", c.token)},
+            "timeout": TOOL_TIMEOUT_SECS * 1_000,
         }),
         Transport::Stdio { binary } => json!({
             "type": "stdio",
             "command": binary,
             "args": [],
             "env": {ENV_URL: c.url, ENV_TOKEN: c.token},
+            "timeout": TOOL_TIMEOUT_SECS * 1_000,
         }),
     };
     let path = dir.join(file_name(c)?);
@@ -143,6 +149,7 @@ pub fn codex(c: &Credentials, transport: &Transport) -> LaunchConfig {
             );
         }
     }
+    set(k("tool_timeout_sec"), TOOL_TIMEOUT_SECS.to_string());
     LaunchConfig {
         args,
         env: vec![

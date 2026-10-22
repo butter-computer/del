@@ -436,7 +436,9 @@ fn launch_configs() {
             "-c",
             "mcp_servers.del.url=\"http://127.0.0.1:1234/mcp\"",
             "-c",
-            "mcp_servers.del.bearer_token_env_var=\"DEL_MCP_TOKEN\""
+            "mcp_servers.del.bearer_token_env_var=\"DEL_MCP_TOKEN\"",
+            "-c",
+            "mcp_servers.del.tool_timeout_sec=1860"
         ]
     );
     assert!(l.env.contains(&("DEL_MCP_TOKEN".into(), "secret".into())));
@@ -585,4 +587,48 @@ fn launch_files_are_unique_and_debug_hides_tokens() {
         assert!(!format!("{config:?}").contains(&c.token));
     }
     assert!(!format!("{c:?}").contains(&c.token));
+}
+
+#[test]
+fn launch_timeouts_cover_the_user_wait_without_process_wide_overrides() {
+    let credentials = Credentials {
+        session_id: SessionId::new("waiter"),
+        url: "http://127.0.0.1:1234/mcp".into(),
+        token: "test-only-token".into(),
+    };
+    let timeout_secs = ServerOptions::default().ask_timeout.as_secs() + 60;
+    assert_eq!(launch::TOOL_TIMEOUT_SECS, timeout_secs);
+    let dir = tempfile::tempdir().unwrap();
+    for transport in [
+        Transport::Http,
+        Transport::Stdio {
+            binary: "/tmp/del-mcp-stdio".into(),
+        },
+    ] {
+        let claude = launch::claude(&credentials, &transport, dir.path()).unwrap();
+        let document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude.files[0]).unwrap()).unwrap();
+        assert_eq!(
+            document["mcpServers"]["del"]["timeout"],
+            timeout_secs * 1_000
+        );
+        assert_eq!(document["mcpServers"].as_object().unwrap().len(), 1);
+        assert!(
+            claude.env.is_empty(),
+            "do not change timeouts for other configured servers"
+        );
+        assert!(!claude.args.iter().any(|arg| arg == "--strict-mcp-config"));
+        let codex = launch::codex(&credentials, &transport);
+        assert!(codex.args.windows(2).any(|args| args
+            == [
+                "-c",
+                &format!("mcp_servers.del.tool_timeout_sec={timeout_secs}")
+            ]));
+        assert!(
+            codex
+                .env
+                .iter()
+                .all(|(name, _)| name == launch::ENV_URL || name == launch::ENV_TOKEN)
+        );
+    }
 }

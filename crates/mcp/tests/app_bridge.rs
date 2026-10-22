@@ -567,3 +567,36 @@ async fn shell_registration_has_context_without_agent_lease() {
     chat.mode = SessionMode::Chat;
     assert!(f.handle.register_terminal(chat).is_err());
 }
+
+#[tokio::test]
+async fn http_disconnect_removes_its_pending_question() {
+    use tokio::io::AsyncWriteExt;
+    let mut f = Fixture::new(Default::default()).await;
+    let endpoint = f.handle.endpoint().unwrap();
+    let authority = endpoint
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/mcp")
+        .unwrap();
+    let mut connection = tokio::net::TcpStream::connect(authority).await.unwrap();
+    let body = json!({"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"Disconnect me"}}}).to_string();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        env(&f.config, "DEL_MCP_TOKEN"),
+        body.len()
+    );
+    connection.write_all(request.as_bytes()).await.unwrap();
+    let (id, reply) = match f.event().await {
+        BridgeEvent::AskUser {
+            request_id, reply, ..
+        } => (request_id, reply),
+        _ => panic!("expected question"),
+    };
+    drop(connection);
+    let closed = tokio::time::timeout(Duration::from_secs(2), f.events.recv())
+        .await
+        .expect("disconnected HTTP request must remove its UI question")
+        .unwrap();
+    assert!(matches!(closed, BridgeEvent::QuestionClosed { request_id } if request_id == id));
+    assert!(reply.is_closed());
+}
