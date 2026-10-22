@@ -10,6 +10,7 @@
 #[allow(dead_code)]
 mod wallpaper;
 
+mod assets;
 mod chat;
 mod composer_ui;
 mod providers;
@@ -456,24 +457,17 @@ impl AppShell {
     }
 }
 
-/// A small mark for the agent a tab runs on.
-fn provider_badge(provider: Provider) -> Div {
-    let (glyph, fg, bg) = match provider {
-        Provider::Claude => ("✻", 0xd97757, 0xd9775722),
-        Provider::Codex => (">_", 0xf5f5f5, 0xffffff1f),
+/// The agent's logo, drawn in the logo's own colour with no background.
+fn provider_badge(provider: Provider) -> impl IntoElement {
+    let (path, color) = match provider {
+        Provider::Claude => ("icons/claude.svg", 0xd97757),
+        Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
     };
-    div()
-        .size(px(16.0))
+    svg()
+        .path(path)
+        .size(px(14.0))
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_sm()
-        .bg(rgba(bg))
-        .text_size(px(9.0))
-        .font_weight(FontWeight::BOLD)
-        .text_color(rgb(fg))
-        .child(glyph)
+        .text_color(rgb(color))
 }
 
 impl Render for AppShell {
@@ -546,7 +540,7 @@ impl Render for AppShell {
 
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(|cx| {
             // Must run before any gpui-component feature is used.
             gpui_kit::init(cx);
