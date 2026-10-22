@@ -36,7 +36,7 @@ impl AppShell {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask, build, or describe a change...")
-                .auto_grow(1, 6)
+                .auto_grow(3, 8)
                 .submit_on_enter(true);
             state.set_submit_on_enter(true, cx);
             state
