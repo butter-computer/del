@@ -106,10 +106,10 @@ impl AppShell {
         TitleBar::new()
             .h(px(self.metrics.topbar_height))
             .border_b_0()
-            // No fill of its own: the shell root already paints
-            // `SHELL_SURFACE_RGBA` behind it, and a second translucent layer
-            // here would make the top bar darker than the gutter.
-            .bg(gpui::transparent_black())
+            // Painted once, here and on the gutter below, never underneath the
+            // page: stacked translucent layers would make the page more
+            // opaque than the bar.
+            .bg(rgba(SHELL_SURFACE_RGBA))
             .child(
                 h_flex().h_full().items_center().child(
                     div()
@@ -155,18 +155,15 @@ impl Render for AppShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
 
-        v_flex()
-            .size_full()
-            .bg(rgba(SHELL_SURFACE_RGBA))
-            .child(self.render_topbar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .px(inset)
-                    .pb(inset)
-                    .child(self.render_page(cx)),
-            )
+        v_flex().size_full().child(self.render_topbar(cx)).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .bg(rgba(SHELL_SURFACE_RGBA))
+                .px(inset)
+                .pb(inset)
+                .child(self.render_page(cx)),
+        )
     }
 }
 
