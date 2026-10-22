@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/agent", "crates/codex", "crates/claude", "crates/app"]
+members = ["crates/core", "crates/agent", "crates/codex", "crates/claude", "crates/app", "crates/mcp"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ publish = false
 [workspace.dependencies]
 del-core = { path = "crates/core" }
 del-agent = { path = "crates/agent" }
+del-mcp = { path = "crates/mcp" }
 
 # GPUI is published by Zed as the `gpui-pre-*` crate family (snapshots of
 # zed-industries/zed's crates). gpui-kit bundles gpui, gpui_platform, gpui-base
