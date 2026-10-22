@@ -7,7 +7,7 @@ pub mod composer;
 pub mod shell;
 pub mod wallpaper;
 
-pub use shell::{SHELL_SURFACE_RGB, ShellMetrics};
+pub use shell::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics};
 
 /// A simple counter with a greeting, used as placeholder domain logic.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -1,15 +1,16 @@
 //! The `del` application shell: a custom top bar that hosts the macOS traffic
-//! lights, over a rounded page inset from the window edges whose background is
-//! the user's desktop wallpaper (or a bundled default).
+//! lights, over a rounded black page inset from the window edges. The window
+//! itself is translucent and blurred, so the desktop shows through the shell.
 //!
-//! Layout metrics, the shell colour and wallpaper lookup live in `del_core`;
-//! this crate decodes the wallpaper and renders.
+//! Layout metrics and the shell colours live in `del_core`; this crate renders
+//! them.
 
+// The wallpaper background is switched off for now; the loader stays so it can
+// be wired back in without redoing the preload and decode work.
+#[allow(dead_code)]
 mod wallpaper;
 
-use std::sync::Arc;
-
-use del_core::{SHELL_SURFACE_RGB, ShellMetrics, composer};
+use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::*;
@@ -25,16 +26,10 @@ const COMPOSER_MAX_WIDTH: f32 = 640.0;
 struct AppShell {
     composer: Entity<TextareaState>,
     metrics: ShellMetrics,
-    /// Decoded before the window opened, so the first frame already shows it.
-    wallpaper: Option<Arc<RenderImage>>,
 }
 
 impl AppShell {
-    fn new(
-        wallpaper: Option<Arc<RenderImage>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask, build, or describe a change...")
@@ -59,7 +54,6 @@ impl AppShell {
         Self {
             composer,
             metrics: ShellMetrics::default(),
-            wallpaper,
         }
     }
 
@@ -112,7 +106,7 @@ impl AppShell {
         TitleBar::new()
             .h(px(self.metrics.topbar_height))
             .border_b_0()
-            .bg(rgb(SHELL_SURFACE_RGB))
+            .bg(rgba(SHELL_SURFACE_RGBA))
             .child(
                 h_flex().h_full().items_center().child(
                     div()
@@ -133,33 +127,7 @@ impl AppShell {
             .size_full()
             .rounded(radius)
             .overflow_hidden()
-            .bg(rgb(0x14161b))
-            .when_some(self.wallpaper.clone(), |page, image| {
-                page.child(
-                    img(image)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .rounded(radius)
-                        .object_fit(ObjectFit::Cover),
-                )
-            })
-            // A scrim that darkens toward the bottom keeps text legible over
-            // any wallpaper and blends the page into the dark shell.
-            // It needs the page's radius too: `overflow_hidden` clips to the
-            // page's rectangle, not its rounded outline, so an unrounded
-            // scrim would paint square corners over the rounded wallpaper.
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(radius)
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(rgba(0x00000040), 0.0),
-                        linear_color_stop(rgba(0x000000d9), 1.0),
-                    )),
-            )
+            .bg(rgba(PAGE_SURFACE_RGBA))
             .child(
                 v_flex()
                     .absolute()
@@ -186,7 +154,7 @@ impl Render for AppShell {
 
         v_flex()
             .size_full()
-            .bg(rgb(SHELL_SURFACE_RGB))
+            .bg(rgba(SHELL_SURFACE_RGBA))
             .child(self.render_topbar(cx))
             .child(
                 div()
@@ -200,10 +168,6 @@ impl Render for AppShell {
 }
 
 fn main() {
-    // Kick off wallpaper lookup and decoding immediately; it overlaps GPUI's
-    // startup and is joined right before the window is created.
-    let wallpaper = wallpaper::preload();
-
     gpui_kit::application().run(|cx| {
         // Must run before any gpui-component feature is used.
         gpui_kit::init(cx);
@@ -226,13 +190,12 @@ fn main() {
                 cx,
             ))),
             window_min_size: Some(size(px(480.0), px(320.0))),
-            window_background: WindowBackgroundAppearance::Opaque,
+            window_background: WindowBackgroundAppearance::Blurred,
             ..TitleBar::window_options()
         };
 
-        let wallpaper = wallpaper.finish();
         gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| AppShell::new(wallpaper, window, cx))
+            cx.new(|cx| AppShell::new(window, cx))
         })
         .expect("failed to open window");
 
