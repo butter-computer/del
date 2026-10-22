@@ -684,7 +684,7 @@ impl Render for AppShell {
                                     Animation::new(RIGHT_ANIM).with_easing(ease_out_quint()),
                                     move |el, t| {
                                         let t = if opening { t } else { 1.0 - t };
-                                        el.w(px(full * t)).opacity(t)
+                                        el.w(px(full * t))
                                     },
                                 ),
                         )
