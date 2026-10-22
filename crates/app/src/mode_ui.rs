@@ -132,14 +132,14 @@ impl AppShell {
         }
         if let Selection::Draft(key) = state.selection {
             let cwd = state.effective().2;
-            if !self.launchers.contains_key(&key) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.launchers.entry(key) {
                 let launcher = cx.new(|cx| TerminalLauncher::new(cwd.clone(), window, cx));
                 cx.subscribe_in(&launcher, window, move |this, _, event, window, cx| {
                     let TerminalLauncherEvent::Launch(spec) = event;
                     this.begin_terminal(spec.clone(), Some(key), None, None, None, window, cx);
                 })
                 .detach();
-                self.launchers.insert(key, launcher);
+                entry.insert(launcher);
                 self.launcher_cwds.insert(key, cwd);
             } else if self.launcher_cwds.get(&key) != Some(&cwd) {
                 self.launchers[&key].update(cx, |l, cx| l.set_workspace(cwd.clone(), cx));
