@@ -61,7 +61,9 @@ impl ManagerHost {
         let status = self.manager.status(&r.id).unwrap_or(r.status);
         SessionInfo {
             id: r.id.clone(),
-            provider: r.provider,
+            provider: Some(r.provider),
+            mode: SessionMode::Chat,
+            command: None,
             cwd: r.cwd.clone(),
             title: r.title.clone(),
             status: status_str(status).into(),

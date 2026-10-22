@@ -48,7 +48,9 @@ impl MockHost {
     pub fn add_session(&self, id: &str, provider: Provider) -> SessionInfo {
         let info = SessionInfo {
             id: SessionId::new(id),
-            provider,
+            provider: Some(provider),
+            mode: SessionMode::Chat,
+            command: None,
             cwd: "/tmp".into(),
             title: None,
             status: "idle".into(),

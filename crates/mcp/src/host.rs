@@ -26,10 +26,22 @@ impl ReportedState {
 }
 
 /// One row of `list_sessions`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    #[default]
+    Chat,
+    Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
-    pub provider: Provider,
+    pub provider: Option<Provider>,
+    #[serde(default)]
+    pub mode: SessionMode,
+    #[serde(default)]
+    pub command: Option<String>,
     pub cwd: PathBuf,
     pub title: Option<String>,
     /// del's own coarse status: `idle`, `running`, `waiting_approval`, `error`.
