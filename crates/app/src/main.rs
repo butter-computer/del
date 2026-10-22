@@ -11,7 +11,6 @@
 mod wallpaper;
 
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
-use gpui_kit::component::button::*;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -21,7 +20,10 @@ use gpui_kit::*;
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
 /// Widest the composer grows on a large window, in logical pixels.
-const COMPOSER_MAX_WIDTH: f32 = 640.0;
+const COMPOSER_MAX_WIDTH: f32 = 720.0;
+
+/// Fill of the composer card: a faint white lift, like the page it sits on.
+const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 
 struct AppShell {
     composer: Entity<TextareaState>,
@@ -72,29 +74,91 @@ impl AppShell {
 
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_send = composer::submission(&self.composer.read(cx).value()).is_some();
+        let muted = rgba(0xffffff8c);
 
         v_flex()
             .w_full()
             .max_w(px(COMPOSER_MAX_WIDTH))
-            .gap_2()
-            .p_3()
-            .rounded(px(16.0))
-            .bg(rgba(0x0b0b0dcc))
+            .px_4()
+            .pt_4()
+            .pb_3()
+            .gap_3()
+            .rounded(px(24.0))
+            .bg(rgba(COMPOSER_SURFACE_RGBA))
             .border_1()
-            .border_color(rgba(0xffffff1f))
+            .border_color(rgba(0xffffff14))
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
                     .bordered(false),
             )
             .child(
-                h_flex().justify_end().child(
-                    Button::new("send")
-                        .primary()
-                        .label("Send")
-                        .disabled(!can_send)
-                        .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-                ),
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                composer_chip("attach")
+                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                            )
+                            .child(
+                                composer_chip("model")
+                                    .child(
+                                        Icon::new(IconName::Bot).small().text_color(rgb(0xe0805f)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0xf0f0f0))
+                                            .child("Sonnet 5.5"),
+                                    )
+                                    .child(div().text_sm().text_color(muted).child("Medium"))
+                                    .child(
+                                        Icon::new(IconName::ChevronDown).small().text_color(muted),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                composer_chip("mode")
+                                    .child(div().text_sm().text_color(muted).child("Auto"))
+                                    .child(
+                                        Icon::new(IconName::ChevronDown).small().text_color(muted),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("send")
+                                    .size(px(32.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(if can_send {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(0x4a4a4e)
+                                    })
+                                    .when(can_send, |send| {
+                                        send.cursor_pointer().on_click(cx.listener(
+                                            |this, _, window, cx| this.submit(window, cx),
+                                        ))
+                                    })
+                                    .child(Icon::new(IconName::ArrowUp).size_4().text_color(
+                                        if can_send {
+                                            rgb(0x111113)
+                                        } else {
+                                            rgb(0x8a8a8e)
+                                        },
+                                    )),
+                            ),
+                    ),
             )
     }
 
@@ -151,6 +215,20 @@ impl AppShell {
     }
 }
 
+/// A borderless pill used for the composer's footer controls: it lays out its
+/// children in a row and lightens on hover.
+fn composer_chip(id: &'static str) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .h(px(32.0))
+        .px_2()
+        .gap_1p5()
+        .items_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|chip| chip.bg(rgba(0xffffff14)))
+}
+
 impl Render for AppShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
@@ -168,43 +246,45 @@ impl Render for AppShell {
 }
 
 fn main() {
-    gpui_kit::application().run(|cx| {
-        // Must run before any gpui-component feature is used.
-        gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        // The window root paints the theme background across the whole
-        // window, which would hide the blurred window material behind it. The
-        // shell paints its own translucent surfaces, so make this one clear.
-        Theme::update(cx, |theme| {
-            theme.colors.background = gpui::transparent_black()
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            // Must run before any gpui-component feature is used.
+            gpui_kit::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            // The window root paints the theme background across the whole
+            // window, which would hide the blurred window material behind it. The
+            // shell paints its own translucent surfaces, so make this one clear.
+            Theme::update(cx, |theme| {
+                theme.colors.background = gpui::transparent_black()
+            });
+
+            let metrics = ShellMetrics::default();
+            let (light_x, light_y) = metrics.traffic_light_origin();
+
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("del".into()),
+                    traffic_light_position: Some(point(px(light_x), px(light_y))),
+                    // Hides the system title bar so the top bar below is drawn
+                    // entirely by us.
+                    ..TitleBar::title_bar_options()
+                }),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    WINDOW_SIZE,
+                    cx,
+                ))),
+                window_min_size: Some(size(px(480.0), px(320.0))),
+                window_background: WindowBackgroundAppearance::Blurred,
+                ..TitleBar::window_options()
+            };
+
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| AppShell::new(window, cx))
+            })
+            .expect("failed to open window");
+
+            cx.activate(true);
         });
-
-        let metrics = ShellMetrics::default();
-        let (light_x, light_y) = metrics.traffic_light_origin();
-
-        let options = WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: Some("del".into()),
-                traffic_light_position: Some(point(px(light_x), px(light_y))),
-                // Hides the system title bar so the top bar below is drawn
-                // entirely by us.
-                ..TitleBar::title_bar_options()
-            }),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                WINDOW_SIZE,
-                cx,
-            ))),
-            window_min_size: Some(size(px(480.0), px(320.0))),
-            window_background: WindowBackgroundAppearance::Blurred,
-            ..TitleBar::window_options()
-        };
-
-        gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| AppShell::new(window, cx))
-        })
-        .expect("failed to open window");
-
-        cx.activate(true);
-    });
 }
