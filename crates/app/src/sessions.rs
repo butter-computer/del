@@ -75,7 +75,7 @@ impl Overrides {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| b.updated_secs.cmp(&a.updated_secs));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.updated_secs));
         rows
     }
 
@@ -99,7 +99,7 @@ impl Overrides {
 
 /// Where overrides are saved, next to the manager's index.
 pub fn overrides_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("del").join("sidebar.json"))
+    del_agent::data_dir().map(|d| d.join("sidebar.json"))
 }
 
 /// The id after (or before) `current` in `ids`, wrapping. `None` if empty.

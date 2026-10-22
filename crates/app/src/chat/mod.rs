@@ -6,4 +6,4 @@ mod blocks;
 pub mod model;
 mod view;
 
-pub use view::{Backend, ChatView};
+pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView};

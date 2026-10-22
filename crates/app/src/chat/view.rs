@@ -1,11 +1,9 @@
-//! `ChatView`: session plumbing, the message list and the composer.
+//! `ChatView`: session plumbing and the message list. The composer is shared
+//! with the new-chat page and lives in the app shell.
 
 use super::model::{Change, ChatModel, Phase, compact_count};
-use crate::composer_ui::ComposerCard;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
-use del_core::composer;
 use del_core::typography::TEXT_SM;
-use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::*;
@@ -27,13 +25,10 @@ pub struct Backend {
 pub struct ChatView {
     pub(super) model: ChatModel,
     pub(super) scroller: Entity<MessageScrollerState>,
-    pub(super) composer: Entity<TextareaState>,
     backend: Backend,
     session: Option<SessionId>,
     /// The session's event stream ended (session closed or app quitting).
     closed: bool,
-    /// Provider and model shown on the composer.
-    label: String,
 }
 
 impl ChatView {
@@ -44,40 +39,17 @@ impl ChatView {
     pub fn new(
         backend: Backend,
         session: Option<SessionId>,
-        label: String,
         first_prompt: Option<String>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx)
-                .placeholder("Reply, or steer the turn...")
-                .auto_grow(1, 8)
-                .submit_on_enter(true);
-            state.set_submit_on_enter(true, cx);
-            state
-        });
-        cx.subscribe_in(
-            &composer,
-            window,
-            |this, _, event, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            },
-        )
-        .detach();
-        composer.update(cx, |state, cx| state.focus(window, cx));
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
 
         let mut view = Self {
             model: ChatModel::default(),
             scroller,
-            composer,
             backend,
             session: session.clone(),
             closed: false,
-            label,
         };
         if let Some(text) = first_prompt {
             let change = view.model.push_user(text, false);
@@ -109,12 +81,14 @@ impl ChatView {
         cx.notify();
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = composer::submission(&self.composer.read(cx).value()) else {
-            return;
-        };
-        self.composer
-            .update(cx, |state, cx| state.set_value("", window, cx));
+    /// Whether a turn is in flight.
+    pub fn is_running(&self) -> bool {
+        self.model.is_running()
+    }
+
+    /// Send text from the shared composer: steers the turn if one is running,
+    /// otherwise starts a new turn.
+    pub fn submit(&mut self, text: String, cx: &mut Context<Self>) {
         if self.model.is_running() && self.session.is_some() {
             self.steer(text, cx);
         } else {
@@ -149,7 +123,7 @@ impl ChatView {
         self.run(cx, async move { manager.steer(&id, text).await });
     }
 
-    fn stop(&mut self, cx: &mut Context<Self>) {
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.session.clone() else {
             return;
         };
@@ -300,8 +274,6 @@ fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
 impl Render for ChatView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let running = self.model.is_running();
-
         v_flex()
             .size_full()
             .child(
@@ -312,7 +284,7 @@ impl Render for ChatView {
                     .size_full()
                     // The default 32px gap is too airy for compact cards.
                     .with_row_style(StyleRefinement::default().pb(px(6.0)))
-                    .jump_button(true),
+                    .jump_button(false),
                 ),
             )
             .child(
@@ -320,21 +292,7 @@ impl Render for ChatView {
                     .w_full()
                     .items_center()
                     .px_3()
-                    .pb_3()
-                    .child(self.render_status())
-                    .child({
-                        let card = ComposerCard::new(
-                            &self.composer,
-                            COLUMN_MAX_WIDTH,
-                            cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                        )
-                        .label(self.label.clone());
-                        if running {
-                            card.on_stop(cx.listener(|this, _, _, cx| this.stop(cx)))
-                        } else {
-                            card
-                        }
-                    }),
+                    .child(self.render_status()),
             )
     }
 }

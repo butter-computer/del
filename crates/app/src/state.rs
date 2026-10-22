@@ -57,6 +57,8 @@ pub struct AppState {
     /// The prompt that started each session opened this run, for its chat's
     /// first row (taken once by the chat view).
     first_prompts: HashMap<SessionId, String>,
+    /// Sessions shown as tabs in the top bar: opened this run, in order.
+    pub open_tabs: Vec<SessionId>,
     /// A draft is being turned into a session; blocks a double send.
     pub starting: bool,
 }
@@ -149,6 +151,7 @@ impl AppState {
             error,
             first_prompts: HashMap::new(),
             starting: false,
+            open_tabs: Vec::new(),
         }
     }
 
@@ -188,6 +191,7 @@ impl AppState {
             }
             Msg::Started(id, prompt) => {
                 self.first_prompts.insert(id.clone(), prompt);
+                self.add_tab(&id);
                 self.starting = false;
                 self.records = self.manager.list_sessions();
                 self.selection = Selection::Session(id);
@@ -271,7 +275,33 @@ impl AppState {
         cx.notify();
     }
 
+    fn add_tab(&mut self, id: &SessionId) {
+        if !self.open_tabs.contains(id) {
+            self.open_tabs.push(id.clone());
+        }
+    }
+
+    /// Close a tab. The session stays in the sidebar and keeps running.
+    pub fn close_tab(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        let at = self.open_tabs.iter().position(|t| t == id);
+        self.open_tabs.retain(|t| t != id);
+        if self.selection == Selection::Session(id.clone()) {
+            let next = at.and_then(|i| {
+                self.open_tabs
+                    .get(i)
+                    .or_else(|| i.checked_sub(1).and_then(|j| self.open_tabs.get(j)))
+                    .cloned()
+            });
+            match next {
+                Some(next) => self.select(next, cx),
+                None => self.new_session(cx),
+            }
+        }
+        cx.notify();
+    }
+
     pub fn select(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.add_tab(&id);
         self.selection = Selection::Session(id.clone());
         self.panel = Panel::Chat;
         self.renaming = None;
@@ -418,22 +448,21 @@ impl AppState {
 
     // ---- composer pickers (a draft's choices; an open session's are fixed) ----
 
-    fn is_draft(&self) -> bool {
+    pub fn is_draft(&self) -> bool {
         self.selection == Selection::Draft
     }
 
-    pub fn cycle_provider(&mut self, cx: &mut Context<Self>) {
-        if self.is_draft() {
-            self.draft.provider = providers::next_provider(self.draft.provider);
+    pub fn set_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if self.is_draft() && self.draft.provider != provider {
+            self.draft.provider = provider;
             self.draft.model = None;
             cx.notify();
         }
     }
 
-    pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
+    pub fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
         if self.is_draft() {
-            self.draft.model =
-                providers::next_model(self.draft.provider, self.draft.model.as_deref());
+            self.draft.model = model;
             cx.notify();
         }
     }

@@ -1,71 +1,108 @@
-//! The composer card shared by the new-chat page and the chat page: a
-//! borderless card with the input on top and the attach/model chips plus the
-//! send (and, while a turn runs, stop) buttons below.
+//! The one composer used by both the new-chat page and the chat page: a
+//! borderless card with the input on top; below it the agent and model
+//! dropdowns, the working folder, and a single send / stop button.
+//!
+//! Standard chat-composer behaviour: Enter sends, Shift+Enter inserts a
+//! newline, the send button turns into a stop button while a turn runs (Enter
+//! then steers the turn), and the agent / model / folder are locked once the
+//! session exists.
 
+use crate::providers;
+use del_agent::Provider;
 use del_core::composer;
 use del_core::typography::TEXT_MD;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::rc::Rc;
 
 /// Fill of the composer card: a faint white lift, like the page it sits on.
 pub const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 
-type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
-
-/// A borderless pill used for the composer's footer controls: it lays out its
-/// children in a row and lightens on hover.
-pub fn composer_chip(id: &'static str) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(24.0))
-        .px_1p5()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .cursor_pointer()
-        .hover(|chip| chip.bg(rgba(0xffffff14)))
-}
+type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct ComposerCard {
     input: Entity<TextareaState>,
     max_width: f32,
-    on_send: ClickHandler,
-    on_stop: Option<ClickHandler>,
-    label: Option<String>,
+    provider: Provider,
+    provider_ready: bool,
+    model: Option<String>,
+    folder: String,
+    /// The session exists: agent, model and folder can no longer change.
+    locked: bool,
+    running: bool,
+    on_send: Handler,
+    on_stop: Handler,
+    on_folder: Handler,
+    on_provider: Rc<dyn Fn(Provider, &mut Window, &mut App)>,
+    on_model: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
 }
 
 impl ComposerCard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: &Entity<TextareaState>,
         max_width: f32,
-        on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        provider: Provider,
+        provider_ready: bool,
+        model: Option<String>,
+        folder: String,
+        locked: bool,
+        running: bool,
     ) -> Self {
+        let noop: Handler = Rc::new(|_, _| {});
         Self {
             input: input.clone(),
             max_width,
-            on_send: Box::new(on_send),
-            on_stop: None,
-            label: None,
+            provider,
+            provider_ready,
+            model,
+            folder,
+            locked,
+            running,
+            on_send: noop.clone(),
+            on_stop: noop.clone(),
+            on_folder: noop,
+            on_provider: Rc::new(|_, _, _| {}),
+            on_model: Rc::new(|_, _, _| {}),
         }
     }
 
-    /// The provider and model shown on the chip.
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
+    pub fn on_send(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_send = Rc::new(f);
         self
     }
+    pub fn on_stop(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_stop = Rc::new(f);
+        self
+    }
+    pub fn on_folder(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_folder = Rc::new(f);
+        self
+    }
+    pub fn on_provider(mut self, f: impl Fn(Provider, &mut Window, &mut App) + 'static) -> Self {
+        self.on_provider = Rc::new(f);
+        self
+    }
+    pub fn on_model(mut self, f: impl Fn(Option<String>, &mut Window, &mut App) + 'static) -> Self {
+        self.on_model = Rc::new(f);
+        self
+    }
+}
 
-    /// Show a stop button; set while a turn is running.
-    pub fn on_stop(
-        mut self,
-        on_stop: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_stop = Some(Box::new(on_stop));
-        self
-    }
+/// A flat footer control: text with an optional caret, lightening on hover.
+fn chip(id: &'static str, locked: bool) -> Button {
+    Button::new(id)
+        .ghost()
+        .small()
+        .compact()
+        .rounded_full()
+        .disabled(false)
+        .when(locked, |b| b.cursor_default())
 }
 
 impl RenderOnce for ComposerCard {
@@ -75,10 +112,115 @@ impl RenderOnce for ComposerCard {
         let ComposerCard {
             input,
             max_width,
+            provider,
+            provider_ready,
+            model,
+            folder,
+            locked,
+            running,
             on_send,
             on_stop,
-            label,
+            on_folder,
+            on_provider,
+            on_model,
         } = self;
+
+        let agent_label = h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(if provider_ready { 0x4cc38a } else { 0xf5a524 })),
+            )
+            .child(providers::display_name(provider));
+        let agent = chip("agent", locked)
+            .child(agent_label)
+            .when(!locked, |b| b.dropdown_caret(true));
+        let model_btn = chip("model", locked)
+            .label(providers::model_label(model.as_deref()))
+            .text_color(muted)
+            .when(!locked, |b| b.dropdown_caret(true));
+
+        let agent_el = if locked {
+            agent.into_any_element()
+        } else {
+            let current = provider;
+            agent
+                .dropdown_menu(move |menu, _, _| {
+                    Provider::ALL.iter().fold(menu, |menu, &p| {
+                        let on_provider = on_provider.clone();
+                        menu.item(
+                            PopupMenuItem::new(providers::display_name(p))
+                                .checked(p == current)
+                                .on_click(move |_, w, cx| on_provider(p, w, cx)),
+                        )
+                    })
+                })
+                .into_any_element()
+        };
+        let model_el = if locked {
+            model_btn.into_any_element()
+        } else {
+            let current = model.clone();
+            model_btn
+                .dropdown_menu(move |menu, _, _| {
+                    providers::models(provider).iter().fold(menu, |menu, m| {
+                        let on_model = on_model.clone();
+                        let value = m.map(str::to_string);
+                        menu.item(
+                            PopupMenuItem::new(providers::model_label(*m))
+                                .checked(value.as_deref() == current.as_deref())
+                                .on_click(move |_, w, cx| on_model(value.clone(), w, cx)),
+                        )
+                    })
+                })
+                .into_any_element()
+        };
+        let folder_el = chip("folder", locked)
+            .icon(IconName::Folder)
+            .label(folder)
+            .text_color(muted)
+            .when(!locked, |b| {
+                let on_folder = on_folder.clone();
+                b.on_click(move |_, w, cx| on_folder(w, cx))
+            });
+
+        // One round button: send, or stop while a turn is running.
+        let action = div()
+            .id("send")
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full();
+        let action = if running {
+            action
+                .bg(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(move |_, w, cx| on_stop(w, cx))
+                .child(div().size(px(9.0)).rounded_xs().bg(rgb(0x111113)))
+        } else {
+            action
+                .bg(if can_send {
+                    rgb(0xffffff)
+                } else {
+                    rgb(0x4a4a4e)
+                })
+                .when(can_send, |a| {
+                    a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
+                })
+                .child(
+                    Icon::new(IconName::ArrowUp)
+                        .small()
+                        .text_color(if can_send {
+                            rgb(0x111113)
+                        } else {
+                            rgb(0x8a8a8e)
+                        }),
+                )
+        };
 
         // No border: the card is told apart from the page by its fill alone.
         v_flex()
@@ -92,8 +234,6 @@ impl RenderOnce for ComposerCard {
                 Textarea::new(&input)
                     .appearance(false)
                     .bordered(false)
-                    // Same token as the chips below, so the input and the
-                    // model selector read at one size.
                     .text_size(px(TEXT_MD)),
             )
             .child(
@@ -104,66 +244,11 @@ impl RenderOnce for ComposerCard {
                         h_flex()
                             .items_center()
                             .gap_0p5()
-                            .child(
-                                composer_chip("attach")
-                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
-                            )
-                            .child(
-                                composer_chip("model").child(
-                                    div()
-                                        .text_size(px(TEXT_MD))
-                                        .text_color(rgb(0xf0f0f0))
-                                        .child(label.unwrap_or_default()),
-                                ),
-                            ),
+                            .child(agent_el)
+                            .child(model_el)
+                            .child(folder_el),
                     )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .when_some(on_stop, |row, on_stop| {
-                                row.child(
-                                    div()
-                                        .id("stop")
-                                        .size(px(24.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .bg(rgba(0xffffff1f))
-                                        .cursor_pointer()
-                                        .hover(|stop| stop.bg(rgba(0xffffff2e)))
-                                        .on_click(move |e, w, cx| on_stop(e, w, cx))
-                                        // A plain square: the stop glyph.
-                                        .child(div().size(px(8.0)).rounded_xs().bg(rgb(0xf5f5f5))),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id("send")
-                                    .size(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(if can_send {
-                                        rgb(0xffffff)
-                                    } else {
-                                        rgb(0x4a4a4e)
-                                    })
-                                    .when(can_send, |send| {
-                                        send.cursor_pointer()
-                                            .on_click(move |e, w, cx| on_send(e, w, cx))
-                                    })
-                                    .child(Icon::new(IconName::ArrowUp).small().text_color(
-                                        if can_send {
-                                            rgb(0x111113)
-                                        } else {
-                                            rgb(0x8a8a8e)
-                                        },
-                                    )),
-                            ),
-                    ),
+                    .child(action),
             )
     }
 }

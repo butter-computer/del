@@ -37,8 +37,17 @@ pub fn now_ms() -> u64 {
 }
 
 /// `<user data dir>/del/sessions.jsonl`.
+/// Directory for del's own data: `$DEL_DATA_DIR` if set (tests, trial runs),
+/// otherwise `<platform data dir>/del`.
+pub fn data_dir() -> Option<PathBuf> {
+    match std::env::var_os("DEL_DATA_DIR") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => dirs::data_dir().map(|d| d.join("del")),
+    }
+}
+
 pub fn default_index_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("del").join("sessions.jsonl"))
+    data_dir().map(|d| d.join("sessions.jsonl"))
 }
 
 #[derive(Debug)]

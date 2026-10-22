@@ -58,6 +58,7 @@ fn row_item(
 
     let mut item = h_flex()
         .id(key.clone())
+        .relative()
         .group(group.clone())
         .h(px(ROW_HEIGHT))
         .px_2()
@@ -72,8 +73,9 @@ fn row_item(
         .child(dot(status_color(row.status)))
         .child(
             div()
-                .w(px(16.0))
+                .w(px(22.0))
                 .flex_none()
+                .whitespace_nowrap()
                 .text_size(px(TEXT_SM))
                 .text_color(rgba(FAINT))
                 .child(sessions::glyph(row.provider)),
@@ -125,15 +127,22 @@ fn row_item(
                     .flex_none()
                     .text_size(px(TEXT_SM))
                     .text_color(rgba(FAINT))
-                    .group_hover(group.clone(), |t| t.invisible().w(px(0.0)))
+                    .group_hover(group.clone(), |t| t.opacity(0.0))
                     .child(time),
             )
             .child(
+                // Always laid out and painted, only faded in on hover: toggling
+                // `display` under the pointer made GPUI paint children it had
+                // not prepainted, which aborted the app.
                 h_flex()
-                    .flex_none()
+                    .absolute()
+                    .right_1()
+                    .pl_2()
                     .gap_0p5()
-                    .hidden()
-                    .group_hover(hover_group, |a| a.flex())
+                    .rounded_md()
+                    .bg(rgb(0x2b2b2e))
+                    .opacity(0.0)
+                    .group_hover(hover_group, |a| a.opacity(1.0))
                     .when(!archived, |a| {
                         a.child(
                             text_button(SharedString::from(format!("rn-{}", id.0)), "Rename")

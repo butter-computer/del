@@ -39,20 +39,6 @@ pub fn model_label(model: Option<&str>) -> String {
     model.unwrap_or("Default").to_string()
 }
 
-/// The model after `current` in the provider's list, wrapping around.
-pub fn next_model(provider: Provider, current: Option<&str>) -> Option<String> {
-    let list = models(provider);
-    let at = list.iter().position(|m| *m == current).map_or(0, |i| i + 1);
-    list[at % list.len()].map(str::to_string)
-}
-
-pub fn next_provider(provider: Provider) -> Provider {
-    match provider {
-        Provider::Codex => Provider::Claude,
-        Provider::Claude => Provider::Codex,
-    }
-}
-
 /// The command the user runs to sign in, shown in the panel.
 pub fn login_command(provider: Provider) -> &'static str {
     match provider {
@@ -89,21 +75,6 @@ pub fn launch_login(provider: Provider, path: &std::path::Path) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn model_cycle_wraps_and_starts_from_default() {
-        assert_eq!(next_model(Provider::Claude, None), Some("sonnet".into()));
-        assert_eq!(next_model(Provider::Claude, Some("haiku")), None);
-        assert_eq!(next_model(Provider::Claude, Some("unknown")), None);
-    }
-
-    #[test]
-    fn provider_cycle_alternates() {
-        assert_eq!(
-            next_provider(next_provider(Provider::Codex)),
-            Provider::Codex
-        );
-    }
 
     #[test]
     fn summary_covers_each_state() {

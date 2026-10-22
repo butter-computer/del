@@ -19,10 +19,11 @@ mod signin;
 mod state;
 
 use chat::ChatView;
-use del_agent::{AgentBackend, MockBackend, Provider, SessionId, SessionStatus};
+use composer_ui::ComposerCard;
+use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
-use gpui_kit::component::input::{InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -37,10 +38,7 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 const HEADING: &str = "What are we building?";
 
 /// Widest the composer grows on a large window, in logical pixels.
-const COMPOSER_MAX_WIDTH: f32 = 560.0;
-
-/// Fill of the composer card: a faint white lift, like the page it sits on.
-const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
+const COMPOSER_MAX_WIDTH: f32 = chat::COLUMN_MAX_WIDTH;
 
 actions!(
     del,
@@ -50,7 +48,9 @@ actions!(
         PrevSession,
         FocusComposer,
         StopSession,
-        ToggleProviders
+        ToggleProviders,
+        ToggleSidebar,
+        Quit
     ]
 );
 
@@ -67,7 +67,12 @@ pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
     }
     vec![
         Arc::new(del_codex::CodexBackend::new(Default::default())),
-        Arc::new(del_claude::ClaudeBackend::default()),
+        // Project settings only: the user's own `bypassPermissions` default would
+        // otherwise make Claude never ask, so del's Ask mode could not work.
+        Arc::new(del_claude::ClaudeBackend::new(del_claude::ClaudeOptions {
+            setting_sources: Some("project".into()),
+            ..Default::default()
+        })),
     ]
 }
 
@@ -77,6 +82,7 @@ struct AppShell {
     rename: Entity<InputState>,
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
+    sidebar_open: bool,
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     metrics: ShellMetrics,
@@ -86,7 +92,7 @@ impl AppShell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
-                .placeholder("Ask, build, or describe a change...")
+                .placeholder("Ask anything...")
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             state.set_submit_on_enter(true, cx);
@@ -133,13 +139,14 @@ impl AppShell {
             composer,
             rename,
             renaming_loaded: None,
+            sidebar_open: true,
             chats: HashMap::new(),
             metrics: ShellMetrics::default(),
         }
     }
 
     /// Make sure the open session has a live chat view.
-    fn ensure_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn ensure_chat(&mut self, cx: &mut Context<Self>) {
         self.chats.retain(|_, chat| !chat.read(cx).is_closed());
         let Selection::Session(id) = self.state.read(cx).selection.clone() else {
             return;
@@ -150,190 +157,121 @@ impl AppShell {
         let (backend, first) = self
             .state
             .update(cx, |s, _| (s.backend(), s.take_first_prompt(&id)));
-        let (provider, model, _) = self.state.read(cx).effective();
-        let label = format!(
-            "{} · {}",
-            providers::display_name(provider),
-            providers::model_label(model.as_deref())
-        );
         let session = id.clone();
-        let chat = cx.new(|cx| ChatView::new(backend, Some(session), label, first, window, cx));
+        let chat = cx.new(|cx| ChatView::new(backend, Some(session), first, cx));
         self.chats.insert(id, chat);
-    }
-
-    fn has_chat(&self, cx: &App) -> bool {
-        match &self.state.read(cx).selection {
-            Selection::Session(id) => self.chats.contains_key(id),
-            Selection::Draft => false,
-        }
     }
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
-    /// Send the composer's text to the open session (starting it if it is a
-    /// draft) and clear the field.
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).active_status() == SessionStatus::Running {
-            return;
+    /// The open session's chat view, if it has one.
+    fn open_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
+        match &self.state.read(cx).selection {
+            Selection::Session(id) => self.chats.get(id).cloned(),
+            Selection::Draft => None,
         }
+    }
+
+    /// Send the composer's text: starts the session from a draft, or sends to
+    /// (steers) the open one. Clears the field.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value();
         let Some(prompt) = composer::submission(&text) else {
             return;
         };
         let prompt = prompt.to_string();
+        let chat = self.open_chat(cx);
+        if chat.is_none() && self.state.read(cx).starting {
+            return;
+        }
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
-        self.state.update(cx, |s, cx| s.send(prompt, cx));
+        match chat {
+            Some(chat) => chat.update(cx, |c, cx| c.submit(prompt, cx)),
+            None => self.state.update(cx, |s, cx| s.send(prompt, cx)),
+        }
     }
 
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(chat) = self.open_chat(cx) {
+            chat.update(cx, |c, cx| c.stop(cx));
+        }
+    }
+
+    /// The shared composer card, identical on the new-chat and chat pages.
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (running, is_draft, provider, model, cwd, provider_ready) = {
+        let chat = self.open_chat(cx);
+        let running = chat.as_ref().is_some_and(|c| c.read(cx).is_running());
+        let (provider, model, cwd, locked, ready) = {
             let st = self.state.read(cx);
             let (provider, model, cwd) = st.effective();
             (
-                st.active_status() == SessionStatus::Running,
-                st.selection == Selection::Draft,
                 provider,
                 model,
                 cwd,
+                !st.is_draft(),
                 st.status_of(provider).is_some_and(providers::ready),
             )
         };
-        let can_send = !running && composer::submission(&self.composer.read(cx).value()).is_some();
-        let muted = rgba(0xffffff8c);
-        let (state_p, state_m, state_f, state_stop) = (
-            self.state.clone(),
+        let (shell, state_p, state_m, state_f) = (
+            cx.entity(),
             self.state.clone(),
             self.state.clone(),
             self.state.clone(),
         );
-
-        // No border: the card is told apart from the page by its fill alone.
-        v_flex()
-            .w_full()
-            .max_w(px(COMPOSER_MAX_WIDTH))
-            .p_2()
-            .gap_1()
-            .rounded(px(14.0))
-            .bg(rgba(COMPOSER_SURFACE_RGBA))
-            .child(
-                Textarea::new(&self.composer)
-                    .appearance(false)
-                    .bordered(false)
-                    // Same token as the chips below, so the input and the
-                    // model selector read at one size.
-                    .text_size(px(TEXT_MD)),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_0p5()
-                            .child(
-                                composer_chip("attach")
-                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
-                            )
-                            .child(
-                                picker_chip("provider", is_draft)
-                                    .on_click(move |_, _, cx| {
-                                        state_p.update(cx, |s, cx| s.cycle_provider(cx))
-                                    })
-                                    .child(
-                                        div().size(px(6.0)).rounded_full().bg(rgb(
-                                            if provider_ready { 0x4cc38a } else { 0xf5a524 },
-                                        )),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(rgb(0xf0f0f0))
-                                            .child(providers::display_name(provider)),
-                                    ),
-                            )
-                            .child(
-                                picker_chip("model", is_draft)
-                                    .on_click(move |_, _, cx| {
-                                        state_m.update(cx, |s, cx| s.cycle_model(cx))
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(muted)
-                                            .child(providers::model_label(model.as_deref())),
-                                    ),
-                            )
-                            .child(
-                                picker_chip("folder", is_draft)
-                                    .on_click(move |_, _, cx| {
-                                        state_f.update(cx, |s, cx| s.pick_folder(cx))
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(muted)
-                                            .child(sessions::folder_name(&cwd)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("send")
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(if can_send {
-                                rgb(0xffffff)
-                            } else {
-                                rgb(0x4a4a4e)
-                            })
-                            .when(can_send, |send| {
-                                send.cursor_pointer().on_click(
-                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                )
-                            })
-                            .when(running, |send| {
-                                send.cursor_pointer()
-                                    .bg(rgb(0xffffff))
-                                    .on_click(move |_, _, cx| {
-                                        state_stop.update(cx, |s, cx| s.stop(cx))
-                                    })
-                                    .child(div().size(px(8.0)).rounded_sm().bg(rgb(0x111113)))
-                            })
-                            .when(!running, |send| {
-                                send.child(Icon::new(IconName::ArrowUp).small().text_color(
-                                    if can_send {
-                                        rgb(0x111113)
-                                    } else {
-                                        rgb(0x8a8a8e)
-                                    },
-                                ))
-                            }),
-                    ),
-            )
+        let shell_stop = shell.clone();
+        ComposerCard::new(
+            &self.composer,
+            COMPOSER_MAX_WIDTH,
+            provider,
+            ready,
+            model,
+            sessions::folder_name(&cwd),
+            locked,
+            running,
+        )
+        .on_send(move |window, cx| shell.update(cx, |this, cx| this.submit(window, cx)))
+        .on_stop(move |_, cx| shell_stop.update(cx, |this, cx| this.stop(cx)))
+        .on_provider(move |p, _, cx| state_p.update(cx, |s, cx| s.set_provider(p, cx)))
+        .on_model(move |m, _, cx| state_m.update(cx, |s, cx| s.set_model(m, cx)))
+        .on_folder(move |_, cx| state_f.update(cx, |s, cx| s.pick_folder(cx)))
     }
 
+    /// Session tabs in the top bar, with a plus button for a new session. The
+    /// bar is also the window's drag area, so tabs stop mouse-down from
+    /// starting a drag.
     fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = rgba(0xffffff8c);
-        let title = {
+        let (tabs, selection, panel) = {
             let st = self.state.read(cx);
-            match (st.panel, st.active_row()) {
-                (Panel::Providers, _) => "Providers".to_string(),
-                (_, Some(row)) => row.title,
-                _ => sessions::DEFAULT_TITLE.to_string(),
-            }
+            let tabs: Vec<(SessionId, String)> = st
+                .open_tabs
+                .iter()
+                .map(|id| (id.clone(), st.current_title(id)))
+                .collect();
+            (tabs, st.selection.clone(), st.panel)
+        };
+        let draft_active = selection == Selection::Draft && panel == Panel::Chat;
+        let tab = |id: SharedString, active: bool| {
+            h_flex()
+                .id(id)
+                .h(px(24.0))
+                .max_w(px(180.0))
+                .pl_2()
+                .pr_1()
+                .gap_1()
+                .items_center()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(TEXT_MD))
+                .text_color(if active { rgb(0xf5f5f5) } else { muted })
+                .when(active, |t| t.bg(rgba(0xffffff14)))
+                .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
 
-        // The system title bar is hidden (`appears_transparent`), so this bar
-        // is the whole chrome: it paints the shared shell colour with no
-        // bottom border, owns window dragging, and leaves room on the left for
-        // the inset traffic lights.
         TitleBar::new()
             .h(px(self.metrics.topbar_height))
             .border_b_0()
@@ -342,25 +280,98 @@ impl AppShell {
             // opaque than the bar.
             .bg(rgba(SHELL_SURFACE_RGBA))
             .child(
-                div()
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .gap_0p5()
                     .pl_2()
-                    .text_size(px(TEXT_MD))
-                    .text_color(muted)
-                    .child(title),
+                    .child(
+                        div()
+                            .id("toggle-sidebar")
+                            .size(px(24.0))
+                            .mr_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|b| b.bg(rgba(0xffffff0a)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_open = !this.sidebar_open;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(if self.sidebar_open {
+                                    IconName::PanelLeftClose
+                                } else {
+                                    IconName::PanelLeftOpen
+                                })
+                                .small()
+                                .text_color(muted),
+                            ),
+                    )
+                    .children(tabs.into_iter().map(|(id, title)| {
+                        let active =
+                            selection == Selection::Session(id.clone()) && panel == Panel::Chat;
+                        let (select, close) = (self.state.clone(), self.state.clone());
+                        let (select_id, close_id) = (id.clone(), id.clone());
+                        tab(SharedString::from(format!("tab-{}", id.0)), active)
+                            .on_click(move |_, _, cx| {
+                                let id = select_id.clone();
+                                select.update(cx, |s, cx| s.select(id, cx));
+                            })
+                            .child(div().min_w_0().truncate().child(title))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("close-{}", id.0)))
+                                    .size(px(16.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .hover(|c| c.bg(rgba(0xffffff1a)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let id = close_id.clone();
+                                        close.update(cx, |s, cx| s.close_tab(&id, cx));
+                                    })
+                                    .child(Icon::new(IconName::Close).xsmall().text_color(muted)),
+                            )
+                    }))
+                    .when(draft_active, |row| {
+                        row.child(tab("tab-draft".into(), true).child("New session"))
+                    })
+                    .child(
+                        div()
+                            .id("new-tab")
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|plus| plus.bg(rgba(0xffffff0a)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.state.update(cx, |s, cx| s.new_session(cx));
+                                this.focus_composer(window, cx);
+                            }))
+                            .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                    ),
             )
     }
 
     fn render_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let radius = px(self.metrics.page_radius);
-        let (panel, heading, error, open_chat) = {
+        let (panel, error) = {
             let st = self.state.read(cx);
-            let heading = st.active_row().map_or(HEADING.to_string(), |row| row.title);
-            let open_chat = match &st.selection {
-                Selection::Session(id) => self.chats.get(id).cloned(),
-                Selection::Draft => None,
-            };
-            (st.panel, heading, st.error.clone(), open_chat)
+            (st.panel, st.error.clone())
         };
+        let chat = self.open_chat(cx);
 
         div()
             .id("page")
@@ -372,13 +383,23 @@ impl AppShell {
             .when(panel == Panel::Providers, |page| {
                 page.child(signin::render(&self.state, cx))
             })
-            .when_some(open_chat.filter(|_| panel == Panel::Chat), |page, chat| {
-                page.child(chat)
-            })
-            .when(panel == Panel::Chat && !self.has_chat(cx), |page| {
-                page.child(
-                    // Centre one column on the page, and left-align its contents so
-                    // the heading starts at the composer's left edge.
+            .when(panel == Panel::Chat, |page| match chat {
+                // Chat page: transcript above, the shared composer below.
+                Some(chat) => page.child(
+                    v_flex()
+                        .size_full()
+                        .child(div().flex_1().min_h_0().child(chat))
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .items_center()
+                                .px_3()
+                                .pb_3()
+                                .child(self.render_composer(cx)),
+                        ),
+                ),
+                // New-chat page: heading and the same composer, centred.
+                None => page.child(
                     v_flex()
                         .absolute()
                         .inset_0()
@@ -400,7 +421,7 @@ impl AppShell {
                                         .text_size(px(TEXT_LG))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(rgb(0xf5f5f5))
-                                        .child(heading),
+                                        .child(HEADING),
                                 )
                                 .child(self.render_composer(cx))
                                 .when_some(error, |col, message| {
@@ -413,47 +434,15 @@ impl AppShell {
                                     )
                                 }),
                         ),
-                )
+                ),
             })
     }
-}
-
-/// A footer chip that cycles or opens a choice on click. Once a session has
-/// started its choices are fixed, so the chip stops reacting.
-fn picker_chip(id: &'static str, enabled: bool) -> Stateful<Div> {
-    let chip = h_flex()
-        .id(id)
-        .h(px(24.0))
-        .px_1p5()
-        .gap_1()
-        .items_center()
-        .rounded_full();
-    if enabled {
-        chip.cursor_pointer()
-            .hover(|chip| chip.bg(rgba(0xffffff14)))
-    } else {
-        chip
-    }
-}
-
-/// A borderless pill used for the composer's footer controls: it lays out its
-/// children in a row and lightens on hover.
-fn composer_chip(id: &'static str) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(24.0))
-        .px_1p5()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .cursor_pointer()
-        .hover(|chip| chip.bg(rgba(0xffffff14)))
 }
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
-        self.ensure_chat(window, cx);
+        self.ensure_chat(cx);
 
         // Load the title into the rename field when a rename starts.
         let renaming = self.state.read(cx).renaming.clone();
@@ -471,6 +460,10 @@ impl Render for AppShell {
         v_flex()
             .size_full()
             .key_context("Shell")
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.sidebar_open = !this.sidebar_open;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 this.state.update(cx, |s, cx| s.new_session(cx));
                 this.focus_composer(window, cx);
@@ -498,7 +491,9 @@ impl Render for AppShell {
                     .flex_1()
                     .min_h_0()
                     .bg(rgba(SHELL_SURFACE_RGBA))
-                    .child(sidebar::render(&self.state, &self.rename, cx))
+                    .when(self.sidebar_open, |row| {
+                        row.child(sidebar::render(&self.state, &self.rename, cx))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -527,16 +522,27 @@ fn main() {
                 // The composer input inherits the theme size; keep it on the
                 // type scale.
                 theme.font_size = px(TEXT_MD);
+                // Dropdown menus use the composer's surface, not the stock
+                // near-black popover with a hard border.
+                theme.colors.popover = rgb(0x2b2b2e).into();
+                theme.colors.popover_foreground = rgb(0xf0f0f0).into();
+                theme.colors.border = rgba(0xffffff14).into();
+                theme.colors.accent = rgba(0xffffff14).into();
+                theme.colors.accent_foreground = rgb(0xf5f5f5).into();
             });
 
             cx.bind_keys([
                 KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-]", NextSession, None),
                 KeyBinding::new("cmd-[", PrevSession, None),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("cmd-.", StopSession, None),
                 KeyBinding::new("cmd-,", ToggleProviders, None),
             ]);
+            // Quit runs the shutdown hook, which ends every backend process.
+            cx.on_action(|_: &Quit, cx| cx.quit());
             // Closing the window quits, which also runs the shutdown hook.
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
