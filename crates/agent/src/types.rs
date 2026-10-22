@@ -81,7 +81,10 @@ pub struct UserInput {
 
 impl UserInput {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { text: text.into(), attachments: Vec::new() }
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
     }
 }
 
@@ -129,20 +132,62 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    SessionStarted { session_id: SessionId },
-    TurnStarted { turn_id: String },
-    AssistantTextDelta { turn_id: String, text: String },
+    SessionStarted {
+        session_id: SessionId,
+    },
+    TurnStarted {
+        turn_id: String,
+    },
+    AssistantTextDelta {
+        turn_id: String,
+        text: String,
+    },
     /// Final text of one assistant message (after its deltas, if any).
-    AssistantMessage { turn_id: String, text: String },
-    ReasoningDelta { turn_id: String, text: String },
-    ToolCallStarted { id: String, name: String, input_summary: String },
-    ToolCallUpdated { id: String, output_summary: String },
-    ToolCallFinished { id: String, status: ToolStatus, output_summary: String },
-    FileChange { path: PathBuf, kind: FileChangeKind, diff: Option<String> },
-    ApprovalRequested { id: String, kind: ApprovalKind, detail: String },
-    TokenUsage { input: u64, output: u64, cached: u64 },
-    TurnCompleted { turn_id: String, status: TurnStatus },
-    Error { message: String, recoverable: bool },
+    AssistantMessage {
+        turn_id: String,
+        text: String,
+    },
+    ReasoningDelta {
+        turn_id: String,
+        text: String,
+    },
+    ToolCallStarted {
+        id: String,
+        name: String,
+        input_summary: String,
+    },
+    ToolCallUpdated {
+        id: String,
+        output_summary: String,
+    },
+    ToolCallFinished {
+        id: String,
+        status: ToolStatus,
+        output_summary: String,
+    },
+    FileChange {
+        path: PathBuf,
+        kind: FileChangeKind,
+        diff: Option<String>,
+    },
+    ApprovalRequested {
+        id: String,
+        kind: ApprovalKind,
+        detail: String,
+    },
+    TokenUsage {
+        input: u64,
+        output: u64,
+        cached: u64,
+    },
+    TurnCompleted {
+        turn_id: String,
+        status: TurnStatus,
+    },
+    Error {
+        message: String,
+        recoverable: bool,
+    },
 }
 
 /// Coarse per-session state tracked by the manager.
