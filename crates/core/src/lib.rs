@@ -5,6 +5,7 @@
 
 pub mod composer;
 pub mod shell;
+pub mod tabs;
 pub mod typography;
 pub mod wallpaper;
 

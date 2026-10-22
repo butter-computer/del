@@ -10,6 +10,7 @@
 #[allow(dead_code)]
 mod wallpaper;
 
+use del_core::tabs::Tabs;
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -27,6 +28,7 @@ const COMPOSER_MAX_WIDTH: f32 = 560.0;
 const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 
 struct AppShell {
+    tabs: Tabs,
     composer: Entity<TextareaState>,
     metrics: ShellMetrics,
 }
@@ -55,6 +57,7 @@ impl AppShell {
         composer.update(cx, |state, cx| state.focus(window, cx));
 
         Self {
+            tabs: Tabs::new(),
             composer,
             metrics: ShellMetrics::default(),
         }
@@ -152,7 +155,10 @@ impl AppShell {
             )
     }
 
-    fn render_topbar(&self, cx: &App) -> impl IntoElement {
+    fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = rgba(0xffffff8c);
+        let active_id = self.tabs.active_id();
+
         // The system title bar is hidden (`appears_transparent`), so this bar
         // is the whole chrome: it paints the shared shell colour with no
         // bottom border, owns window dragging, and leaves room on the left for
@@ -165,13 +171,51 @@ impl AppShell {
             // opaque than the bar.
             .bg(rgba(SHELL_SURFACE_RGBA))
             .child(
-                h_flex().h_full().items_center().child(
-                    div()
-                        .text_size(px(TEXT_MD))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child("del"),
-                ),
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .gap_0p5()
+                    .pl_2()
+                    .children(self.tabs.tabs().iter().map(|tab| {
+                        let id = tab.id;
+                        let active = id == active_id;
+                        div()
+                            .id(("tab", id as usize))
+                            .h(px(24.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(TEXT_MD))
+                            .text_color(if active { rgb(0xf5f5f5) } else { muted })
+                            .when(active, |tab| tab.bg(rgba(0xffffff14)))
+                            .when(!active, |tab| tab.hover(|tab| tab.bg(rgba(0xffffff0a))))
+                            // Clicking a tab must not start a window drag.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.tabs.select(id);
+                                cx.notify();
+                            }))
+                            .child(tab.title.clone())
+                    }))
+                    .child(
+                        div()
+                            .id("new-tab")
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|plus| plus.bg(rgba(0xffffff0a)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.tabs.add();
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                    ),
             )
     }
 
