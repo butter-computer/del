@@ -112,14 +112,6 @@ pub enum Change {
     Updated(usize),
 }
 
-impl Change {
-    pub fn index(self) -> usize {
-        match self {
-            Change::Pushed(ix) | Change::Updated(ix) => ix,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ChatModel {
     pub blocks: Vec<Block>,
@@ -315,10 +307,10 @@ impl ChatModel {
                 Some(self.push(Block::FileChange(FileChangeBlock {
                     path: path.clone(),
                     kind: *kind,
-                    lines,
                     added,
                     removed,
-                    expanded: false,
+                    expanded: !lines.is_empty() && lines.len() <= AUTO_EXPAND_DIFF_LINES,
+                    lines,
                 })))
             }
             AgentEvent::ApprovalRequested { id, kind, detail } => {
@@ -350,6 +342,9 @@ impl ChatModel {
         }
     }
 }
+
+/// Diffs up to this many lines start expanded.
+const AUTO_EXPAND_DIFF_LINES: usize = 12;
 
 /// Parse a unified diff into display lines, dropping the file headers.
 pub fn parse_diff(diff: &str) -> Vec<DiffLine> {
@@ -502,6 +497,7 @@ mod tests {
         });
         let Block::FileChange(f) = &m.blocks[0] else { panic!() };
         assert_eq!((f.added, f.removed), (2, 1));
+        assert!(f.expanded);
         assert_eq!(f.lines[0].kind, DiffKind::Hunk);
         assert_eq!(f.lines[1], DiffLine { kind: DiffKind::Context, text: "keep".into() });
     }

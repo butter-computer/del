@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 del-core.workspace = true
+del-agent.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 gpui-kit.workspace = true
 # Listed explicitly so the exact GPUI snapshot is a hard constraint of this
 # workspace, not only an implementation detail of gpui-kit.
