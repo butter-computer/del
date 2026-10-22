@@ -126,6 +126,7 @@ pub fn glyph(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "CX",
         Provider::Claude => "CL",
+        Provider::Acp => "AC",
     }
 }
 

@@ -23,6 +23,7 @@ use std::rc::Rc;
 pub const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
+type ChoiceHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct ComposerCard {
@@ -39,8 +40,8 @@ pub struct ComposerCard {
     on_send: Handler,
     on_stop: Handler,
     on_folder: Handler,
-    on_provider: Rc<dyn Fn(Provider, &mut Window, &mut App)>,
-    on_model: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
+    on_provider: ChoiceHandler<Provider>,
+    on_model: ChoiceHandler<Option<String>>,
 }
 
 impl ComposerCard {
@@ -100,6 +101,7 @@ pub fn provider_logo(provider: Provider, size: f32) -> Svg {
     let (path, color) = match provider {
         Provider::Claude => ("icons/claude.svg", 0xd97757),
         Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
+        Provider::Acp => ("icons/acp.svg", 0xb1b7c4),
     };
     svg()
         .path(path)
@@ -161,9 +163,9 @@ impl RenderOnce for ComposerCard {
                 .dropdown_menu(move |menu, _, _| {
                     providers::models(provider).iter().fold(menu, |menu, m| {
                         let on_model = on_model.clone();
-                        let value = m.map(str::to_string);
+                        let value = m.clone();
                         menu.item(
-                            PopupMenuItem::new(providers::model_label(*m))
+                            PopupMenuItem::new(providers::model_label(m.as_deref()))
                                 .checked(value.as_deref() == current.as_deref())
                                 .on_click(move |_, w, cx| on_model(value.clone(), w, cx)),
                         )

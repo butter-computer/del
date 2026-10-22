@@ -42,6 +42,7 @@ fn provider_card(
     let provider = status.provider;
     let headline = providers::summary(status);
     let dot = match (status.installed, status.login) {
+        (true, _) if provider == Provider::Acp => 0x4cc38a,
         (false, _) => 0xf0524f,
         (true, LoginState::LoggedIn) => 0x4cc38a,
         (true, LoginState::LoggedOut) => 0xf5a524,
@@ -63,19 +64,27 @@ fn provider_card(
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        format!("{version}  ·  {path}")
+        if provider == Provider::Acp {
+            version
+        } else {
+            format!("{version}  ·  {path}")
+        }
     };
 
-    let instructions: Option<String> = match (status.installed, status.login) {
-        (true, LoginState::LoggedOut) => Some(format!(
-            "Click Sign in to run `{}` in Terminal, finish in your browser, then come back. del checks again automatically.",
-            providers::login_command(provider)
-        )),
-        (true, LoginState::Unknown) => Some(format!(
-            "del could not read the sign-in state. Try `{}` in a terminal, then re-check.",
-            providers::login_command(provider)
-        )),
-        _ => None,
+    let instructions: Option<String> = if provider == Provider::Acp {
+        Some("Choose an installed ACP agent in the composer. Sign in through that agent’s CLI if it asks.".into())
+    } else {
+        match (status.installed, status.login) {
+            (true, LoginState::LoggedOut) => Some(format!(
+                "Click Sign in to run `{}` in Terminal, finish in your browser, then come back. del checks again automatically.",
+                providers::login_command(provider)
+            )),
+            (true, LoginState::Unknown) => Some(format!(
+                "del could not read the sign-in state. Try `{}` in a terminal, then re-check.",
+                providers::login_command(provider)
+            )),
+            _ => None,
+        }
     };
 
     v_flex()
@@ -123,7 +132,9 @@ fn provider_card(
                 .gap_1()
                 .pt_1()
                 .when(
-                    status.installed && status.login != LoginState::LoggedIn,
+                    provider != Provider::Acp
+                        && status.installed
+                        && status.login != LoginState::LoggedIn,
                     |row| {
                         let label = if signing_in {
                             "Waiting for sign-in…"
@@ -135,6 +146,7 @@ fn provider_card(
                                 match provider {
                                     Provider::Codex => "signin-codex",
                                     Provider::Claude => "signin-claude",
+                                    Provider::Acp => "signin-acp",
                                 },
                                 label,
                                 !signing_in,
@@ -150,6 +162,7 @@ fn provider_card(
                         match provider {
                             Provider::Codex => "recheck-codex",
                             Provider::Claude => "recheck-claude",
+                            Provider::Acp => "recheck-acp",
                         },
                         "Re-check",
                         false,

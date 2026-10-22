@@ -1,0 +1,23 @@
+[package]
+name = "del-acp"
+description = "Agent Client Protocol (ACP) backend for del: chat mode with any ACP-speaking agent."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+del-agent.workspace = true
+# Official ACP wire types (Zed / agentclientprotocol.com). Only the schema crate
+# is used: the full `agent-client-protocol` runtime is callback/futures based and
+# does not fit del's tokio `AgentBackend` model, so JSON-RPC over stdio is ours.
+agent-client-protocol-schema = { version = "1.12", default-features = false }
+async-trait = "0.1"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

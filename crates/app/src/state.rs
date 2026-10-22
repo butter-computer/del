@@ -144,7 +144,7 @@ impl AppState {
 
         let detect_tx = tx.clone();
         rt.spawn(async move {
-            let _ = detect_tx.send(Msg::Statuses(detect_all().await));
+            let _ = detect_tx.send(Msg::Statuses(providers::detect_all().await));
         });
 
         Self::pump(rx, cx);
@@ -710,7 +710,7 @@ impl AppState {
     pub fn recheck(&mut self, cx: &mut Context<Self>) {
         let tx = self.tx.clone();
         self.rt.spawn(async move {
-            let _ = tx.send(Msg::Statuses(detect_all().await));
+            let _ = tx.send(Msg::Statuses(providers::detect_all().await));
         });
         cx.notify();
     }
@@ -731,7 +731,7 @@ impl AppState {
         self.rt.spawn(async move {
             for _ in 0..100 {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                let all = detect_all().await;
+                let all = providers::detect_all().await;
                 let done = all
                     .iter()
                     .any(|s| s.provider == provider && s.login == LoginState::LoggedIn);

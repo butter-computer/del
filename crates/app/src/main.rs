@@ -107,6 +107,7 @@ pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
     }
     vec![
         Arc::new(del_codex::CodexBackend::new(Default::default())),
+        Arc::new(del_acp::AcpBackend::default()),
         // Project settings only: the user's own `bypassPermissions` default would
         // otherwise make Claude never ask, so del's Ask mode could not work.
         Arc::new(del_claude::ClaudeBackend::new(del_claude::ClaudeOptions {
