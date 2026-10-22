@@ -166,6 +166,10 @@ impl TerminalLaunchSpec {
             program: self.program.clone(),
             args,
             env,
+            env_remove: del_agent::environment::WORKER_SESSION_ENV
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect(),
             cwd: Some(self.cwd.canonicalize()?),
             login_env: self.login_env,
             ..TerminalSpec::default()
@@ -694,7 +698,7 @@ mod tests {
             program: Some("/bin/sh".into()),
             args: vec![
                 "-c".into(),
-                "printf 'cwd=%s\\nenv=%s\\narg=%s\\n' \"$PWD\" \"$DEL_MCP_TEST_TOKEN\" \"$1\""
+                "test \"${CLAUDECODE+x}\" != x || exit 21; test \"${CLAUDE_CODE_CHILD_SESSION+x}\" != x || exit 22; printf 'cwd=%s\\nenv=%s\\narg=%s\\n' \"$PWD\" \"$DEL_MCP_TEST_TOKEN\" \"$1\""
                     .into(),
                 "terminal-host-test".into(),
             ],
@@ -704,7 +708,11 @@ mod tests {
         let (session, actual_cwd) = super::spawn_session(
             &spec,
             vec!["injected argument".into()],
-            vec![("DEL_MCP_TEST_TOKEN".into(), "test-only-value".into())],
+            vec![
+                ("DEL_MCP_TEST_TOKEN".into(), "test-only-value".into()),
+                ("CLAUDECODE".into(), "worker-test".into()),
+                ("CLAUDE_CODE_CHILD_SESSION".into(), "worker-test".into()),
+            ],
         )
         .unwrap();
         assert_eq!(actual_cwd, cwd);
