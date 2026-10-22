@@ -5,6 +5,7 @@
 
 pub mod composer;
 pub mod shell;
+pub mod typography;
 pub mod wallpaper;
 
 pub use shell::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics};

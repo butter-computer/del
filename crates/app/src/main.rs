@@ -10,6 +10,7 @@
 #[allow(dead_code)]
 mod wallpaper;
 
+use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::*;
@@ -20,7 +21,7 @@ use gpui_kit::*;
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
 /// Widest the composer grows on a large window, in logical pixels.
-const COMPOSER_MAX_WIDTH: f32 = 720.0;
+const COMPOSER_MAX_WIDTH: f32 = 560.0;
 
 /// Fill of the composer card: a faint white lift, like the page it sits on.
 const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
@@ -35,7 +36,7 @@ impl AppShell {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask, build, or describe a change...")
-                .auto_grow(2, 8)
+                .auto_grow(1, 6)
                 .submit_on_enter(true);
             state.set_submit_on_enter(true, cx);
             state
@@ -76,17 +77,14 @@ impl AppShell {
         let can_send = composer::submission(&self.composer.read(cx).value()).is_some();
         let muted = rgba(0xffffff8c);
 
+        // No border: the card is told apart from the page by its fill alone.
         v_flex()
             .w_full()
             .max_w(px(COMPOSER_MAX_WIDTH))
-            .px_4()
-            .pt_4()
-            .pb_3()
-            .gap_3()
-            .rounded(px(24.0))
+            .p_2()
+            .gap_1()
+            .rounded(px(14.0))
             .bg(rgba(COMPOSER_SURFACE_RGBA))
-            .border_1()
-            .border_color(rgba(0xffffff14))
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
@@ -99,7 +97,7 @@ impl AppShell {
                     .child(
                         h_flex()
                             .items_center()
-                            .gap_1()
+                            .gap_0p5()
                             .child(
                                 composer_chip("attach")
                                     .child(Icon::new(IconName::Plus).small().text_color(muted)),
@@ -107,56 +105,45 @@ impl AppShell {
                             .child(
                                 composer_chip("model")
                                     .child(
-                                        Icon::new(IconName::Bot).small().text_color(rgb(0xe0805f)),
-                                    )
-                                    .child(
                                         div()
-                                            .text_sm()
+                                            .text_size(px(TEXT_MD))
                                             .text_color(rgb(0xf0f0f0))
                                             .child("Sonnet 5.5"),
                                     )
-                                    .child(div().text_sm().text_color(muted).child("Medium"))
                                     .child(
-                                        Icon::new(IconName::ChevronDown).small().text_color(muted),
+                                        div()
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(muted)
+                                            .child("Medium"),
                                     ),
                             ),
                     )
                     .child(
-                        h_flex()
+                        div()
+                            .id("send")
+                            .size(px(24.0))
+                            .flex()
                             .items_center()
-                            .gap_2()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(if can_send {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(0x4a4a4e)
+                            })
+                            .when(can_send, |send| {
+                                send.cursor_pointer().on_click(
+                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                                )
+                            })
                             .child(
-                                composer_chip("mode")
-                                    .child(div().text_sm().text_color(muted).child("Auto"))
-                                    .child(
-                                        Icon::new(IconName::ChevronDown).small().text_color(muted),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("send")
-                                    .size(px(32.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(if can_send {
-                                        rgb(0xffffff)
+                                Icon::new(IconName::ArrowUp)
+                                    .small()
+                                    .text_color(if can_send {
+                                        rgb(0x111113)
                                     } else {
-                                        rgb(0x4a4a4e)
-                                    })
-                                    .when(can_send, |send| {
-                                        send.cursor_pointer().on_click(cx.listener(
-                                            |this, _, window, cx| this.submit(window, cx),
-                                        ))
-                                    })
-                                    .child(Icon::new(IconName::ArrowUp).size_4().text_color(
-                                        if can_send {
-                                            rgb(0x111113)
-                                        } else {
-                                            rgb(0x8a8a8e)
-                                        },
-                                    )),
+                                        rgb(0x8a8a8e)
+                                    }),
                             ),
                     ),
             )
@@ -177,7 +164,7 @@ impl AppShell {
             .child(
                 h_flex().h_full().items_center().child(
                     div()
-                        .text_sm()
+                        .text_size(px(TEXT_MD))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(cx.theme().foreground)
                         .child("del"),
@@ -201,11 +188,11 @@ impl AppShell {
                     .inset_0()
                     .items_center()
                     .justify_center()
-                    .gap_5()
-                    .px_6()
+                    .gap_3()
+                    .px_3()
                     .child(
                         div()
-                            .text_xl()
+                            .text_size(px(TEXT_LG))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(0xf5f5f5))
                             .child("What should we work on in del?"),
@@ -220,9 +207,9 @@ impl AppShell {
 fn composer_chip(id: &'static str) -> Stateful<Div> {
     h_flex()
         .id(id)
-        .h(px(32.0))
-        .px_2()
-        .gap_1p5()
+        .h(px(24.0))
+        .px_1p5()
+        .gap_1()
         .items_center()
         .rounded_full()
         .cursor_pointer()
@@ -256,7 +243,10 @@ fn main() {
             // window, which would hide the blurred window material behind it. The
             // shell paints its own translucent surfaces, so make this one clear.
             Theme::update(cx, |theme| {
-                theme.colors.background = gpui::transparent_black()
+                theme.colors.background = gpui::transparent_black();
+                // The composer input inherits the theme size; keep it on the
+                // type scale.
+                theme.font_size = px(TEXT_MD);
             });
 
             let metrics = ShellMetrics::default();
