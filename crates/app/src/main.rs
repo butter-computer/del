@@ -42,7 +42,7 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 /// neither shown nor toggleable (button and Cmd-B) until this is turned on.
 const SIDEBAR_ENABLED: bool = false;
 
-/// Width a tab animates to or from; settled tabs size themselves.
+/// Every tab is this wide once settled; it animates to and from 0.
 const TAB_WIDTH: f32 = 160.0;
 
 /// The title inside a tab.
@@ -474,11 +474,12 @@ impl AppShell {
                                     Animation::new(state::TAB_ANIM).with_easing(ease_out_quint()),
                                     move |el, t| {
                                         let t = if live { t } else { 1.0 - t };
-                                        if t < 1.0 {
-                                            el.min_w(px(0.0)).w(px(TAB_WIDTH * t))
-                                        } else {
-                                            el
-                                        }
+                                        // Always an explicit width, so there is no jump
+                                        // between the animated and the settled size.
+                                        el.min_w(px(0.0))
+                                            .max_w(px(TAB_WIDTH))
+                                            .flex_none()
+                                            .w(px(TAB_WIDTH * t))
                                     },
                                 )
                             }))
