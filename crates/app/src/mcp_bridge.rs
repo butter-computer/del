@@ -1,0 +1,531 @@
+//! App-owned MCP service. GPUI consumes `BridgeEvent` on its own thread; all
+//! waiting and backend I/O stay on the existing Tokio runtime.
+//!
+//! Retain `McpBridge` for the app lifetime and clone `BridgeHandle` into terminal
+//! launch tasks. Publish terminal snapshots before calling `launch_config`,
+//! append its args/env to the CLI launch, and revoke when the process exits.
+//! Dropping the owner shuts down even when launch/UI handle clones survive.
+
+use async_trait::async_trait;
+use del_agent::{AgentEvent, Provider, SessionId, SessionManager, SessionStatus, UserInput};
+use del_mcp::{
+    HostError, HostResult, McpHost, McpServer, ReportedState, ServerOptions, SessionInfo,
+    SessionMode, SessionSummary, SpawnRequest, UserAnswer,
+    launch::{self, LaunchConfig, Transport},
+};
+use std::collections::HashMap;
+use std::io;
+use std::path::PathBuf;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::{mpsc::UnboundedSender, oneshot, watch};
+
+/// Handle these on the GPUI thread. Keep reply senders with the visible prompt
+/// or launch task; dropping a sender fails the tool instead of hanging it.
+pub enum BridgeEvent {
+    AskUser {
+        request_id: u64,
+        caller: SessionId,
+        question: String,
+        options: Vec<String>,
+        reply: oneshot::Sender<UserAnswer>,
+    },
+    /// Remove the matching prompt (answered, timed out, revoked, or shutdown).
+    QuestionClosed { request_id: u64 },
+    Status {
+        caller: SessionId,
+        state: ReportedState,
+        summary: String,
+    },
+    Notify {
+        caller: SessionId,
+        title: String,
+        body: String,
+    },
+    /// Launch a real visible terminal session and reply only after it starts.
+    SpawnTerminal {
+        caller: SessionId,
+        request: SpawnRequest,
+        reply: oneshot::Sender<HostResult<SessionInfo>>,
+    },
+    /// Write text to the target terminal, including the Enter/submit action.
+    SendTerminal {
+        caller: SessionId,
+        target: SessionId,
+        text: String,
+        reply: oneshot::Sender<HostResult<()>>,
+    },
+}
+
+#[derive(Clone)]
+struct TerminalSnapshot {
+    info: SessionInfo,
+    last_output: Option<String>,
+}
+
+struct AppHost {
+    manager: SessionManager,
+    events: UnboundedSender<BridgeEvent>,
+    terminals: Mutex<HashMap<SessionId, TerminalSnapshot>>,
+    reported: Mutex<HashMap<SessionId, (ReportedState, String)>>,
+    revocations: Mutex<HashMap<SessionId, watch::Sender<bool>>>,
+    stopped: watch::Receiver<bool>,
+    next_question: AtomicU64,
+}
+
+struct Service {
+    // Option makes shutdown explicit even while BridgeHandle clones survive.
+    server: Mutex<Option<McpServer>>,
+    host: Arc<AppHost>,
+    config_dir: PathBuf,
+    files: Mutex<HashMap<SessionId, Vec<PathBuf>>>,
+    stopped: watch::Sender<bool>,
+}
+
+/// App lifetime owner; create using the app's existing runtime (never block_on
+/// on the UI thread). No runtime, terminal, or agent process is created here.
+pub struct McpBridge {
+    handle: BridgeHandle,
+}
+
+#[derive(Clone)]
+pub struct BridgeHandle {
+    service: Arc<Service>,
+}
+
+impl McpBridge {
+    pub async fn start(
+        manager: SessionManager,
+        events: UnboundedSender<BridgeEvent>,
+        config_dir: PathBuf,
+    ) -> io::Result<Self> {
+        Self::start_with_options(manager, events, config_dir, ServerOptions::default()).await
+    }
+
+    pub async fn start_with_options(
+        manager: SessionManager,
+        events: UnboundedSender<BridgeEvent>,
+        config_dir: PathBuf,
+        options: ServerOptions,
+    ) -> io::Result<Self> {
+        std::fs::create_dir_all(&config_dir)?;
+        let (stopped, rx) = watch::channel(false);
+        let host = Arc::new(AppHost {
+            manager,
+            events,
+            terminals: Mutex::new(HashMap::new()),
+            reported: Mutex::new(HashMap::new()),
+            revocations: Mutex::new(HashMap::new()),
+            stopped: rx,
+            next_question: AtomicU64::new(1),
+        });
+        let server = McpServer::start(host.clone(), options).await?;
+        Ok(Self {
+            handle: BridgeHandle {
+                service: Arc::new(Service {
+                    server: Mutex::new(Some(server)),
+                    host,
+                    config_dir,
+                    files: Mutex::new(HashMap::new()),
+                    stopped,
+                }),
+            },
+        })
+    }
+
+    pub fn handle(&self) -> BridgeHandle {
+        self.handle.clone()
+    }
+
+    pub fn shutdown(&self) {
+        let mut server = self.handle.service.server.lock().unwrap();
+        // Wake pending ask/spawn/send before graceful HTTP shutdown.
+        self.handle.service.stopped.send_replace(true);
+        if let Some(server) = server.take() {
+            server.shutdown();
+        }
+        for files in self
+            .handle
+            .service
+            .files
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, f)| f)
+        {
+            remove_files(files);
+        }
+        self.handle.service.host.revocations.lock().unwrap().clear();
+    }
+}
+
+impl Drop for McpBridge {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn remove_files(files: Vec<PathBuf>) {
+    for file in files {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+fn tail(text: String) -> String {
+    let skip = text.chars().count().saturating_sub(2_000);
+    text.chars().skip(skip).collect()
+}
+
+impl BridgeHandle {
+    pub fn endpoint(&self) -> Option<String> {
+        self.service
+            .server
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(McpServer::url)
+    }
+
+    /// Call on session creation/metadata changes; shell/custom terminals use
+    /// provider None and are visible in tools without receiving agent tokens.
+    pub fn upsert_terminal(&self, info: SessionInfo, last_output: Option<String>) {
+        self.service.host.terminals.lock().unwrap().insert(
+            info.id.clone(),
+            TerminalSnapshot {
+                info,
+                last_output: last_output.map(tail),
+            },
+        );
+    }
+
+    pub fn update_terminal_output(&self, id: &SessionId, text: String) {
+        if let Some(snapshot) = self.service.host.terminals.lock().unwrap().get_mut(id) {
+            snapshot.last_output = Some(tail(text));
+        }
+    }
+
+    pub fn remove_terminal(&self, id: &SessionId) {
+        self.revoke(id);
+        self.service.host.terminals.lock().unwrap().remove(id);
+        self.service.host.reported.lock().unwrap().remove(id);
+    }
+
+    /// Run in the terminal's runtime launch task: Claude writes a private
+    /// session-local file. Tokens exist before the CLI can contact the server.
+    /// Repeating this rotates credentials and cancels old pending requests.
+    pub fn launch_config(&self, id: &SessionId, provider: Provider) -> io::Result<LaunchConfig> {
+        let mut server = self.service.server.lock().unwrap();
+        let server = server
+            .as_mut()
+            .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+        let info = self
+            .service
+            .host
+            .info(id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if info.provider != Some(provider) || info.mode != SessionMode::Terminal {
+            return Err(io::Error::other(
+                "MCP launch requires the matching agent terminal session",
+            ));
+        }
+        self.revoke_locked(server, id);
+        let credentials = server.register_session(id);
+        let config = match provider {
+            Provider::Claude => {
+                launch::claude(&credentials, &Transport::Http, &self.service.config_dir)
+            }
+            Provider::Codex => Ok(launch::codex(&credentials, &Transport::Http)),
+            Provider::Acp => Err(io::Error::other(
+                "ACP does not use terminal MCP launch config",
+            )),
+        };
+        match config {
+            Ok(config) => {
+                self.service
+                    .files
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), config.files.clone());
+                let (cancel, _) = watch::channel(false);
+                self.service
+                    .host
+                    .revocations
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), cancel);
+                Ok(config)
+            }
+            Err(error) => {
+                server.revoke_session(id);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn revoke(&self, id: &SessionId) {
+        if let Some(server) = self.service.server.lock().unwrap().as_ref() {
+            self.revoke_locked(server, id);
+        }
+    }
+
+    fn revoke_locked(&self, server: &McpServer, id: &SessionId) {
+        server.revoke_session(id);
+        if let Some(cancel) = self.service.host.revocations.lock().unwrap().remove(id) {
+            cancel.send_replace(true);
+        }
+        if let Some(files) = self.service.files.lock().unwrap().remove(id) {
+            remove_files(files);
+        }
+    }
+}
+
+fn failed(message: impl Into<String>) -> HostError {
+    HostError::Failed(message.into())
+}
+
+impl AppHost {
+    fn emit(&self, event: BridgeEvent) -> HostResult<()> {
+        if *self.stopped.borrow() {
+            return Err(failed("MCP bridge stopped"));
+        }
+        self.events
+            .send(event)
+            .map_err(|_| failed("app UI is unavailable"))
+    }
+
+    fn infos(&self) -> Vec<SessionInfo> {
+        let mut infos: HashMap<_, _> = self
+            .manager
+            .list_sessions()
+            .into_iter()
+            .map(|record| {
+                let status = self.manager.status(&record.id).unwrap_or(record.status);
+                let status = match status {
+                    SessionStatus::Idle => "idle",
+                    SessionStatus::Running => "running",
+                    SessionStatus::WaitingApproval => "waiting_approval",
+                    SessionStatus::Error => "error",
+                };
+                (
+                    record.id.clone(),
+                    SessionInfo {
+                        id: record.id,
+                        provider: Some(record.provider),
+                        mode: SessionMode::Chat,
+                        command: None,
+                        cwd: record.cwd,
+                        title: record.title,
+                        status: status.into(),
+                        reported_state: None,
+                    },
+                )
+            })
+            .collect();
+        for (id, snapshot) in self.terminals.lock().unwrap().iter() {
+            infos.insert(id.clone(), snapshot.info.clone());
+        }
+        let reported = self.reported.lock().unwrap();
+        let mut infos: Vec<_> = infos
+            .into_values()
+            .map(|mut info| {
+                if let Some((state, _)) = reported.get(&info.id) {
+                    info.reported_state = Some(*state);
+                }
+                info
+            })
+            .collect();
+        infos.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        infos
+    }
+
+    fn info(&self, id: &SessionId) -> HostResult<SessionInfo> {
+        self.infos()
+            .into_iter()
+            .find(|info| &info.id == id)
+            .ok_or_else(|| HostError::UnknownSession(id.to_string()))
+    }
+
+    async fn reply<T>(&self, caller: &SessionId, reply: oneshot::Receiver<T>) -> HostResult<T> {
+        let mut stopped = self.stopped.clone();
+        let mut revoked = self
+            .revocations
+            .lock()
+            .unwrap()
+            .get(caller)
+            .map(watch::Sender::subscribe)
+            .ok_or_else(|| failed("session credentials revoked"))?;
+        if *stopped.borrow() || *revoked.borrow() {
+            return Err(failed("session credentials revoked"));
+        }
+        tokio::select! {
+            biased;
+            _ = stopped.changed() => Err(failed("MCP bridge stopped")),
+            _ = revoked.changed() => Err(failed("session credentials revoked")),
+            result = reply => result.map_err(|_| failed("app canceled the request")),
+        }
+    }
+}
+
+struct QuestionGuard {
+    events: UnboundedSender<BridgeEvent>,
+    id: u64,
+}
+impl Drop for QuestionGuard {
+    fn drop(&mut self) {
+        let _ = self.events.send(BridgeEvent::QuestionClosed {
+            request_id: self.id,
+        });
+    }
+}
+
+#[async_trait]
+impl McpHost for AppHost {
+    async fn report_status(
+        &self,
+        caller: &SessionId,
+        state: ReportedState,
+        summary: &str,
+    ) -> HostResult<()> {
+        self.info(caller)?;
+        self.emit(BridgeEvent::Status {
+            caller: caller.clone(),
+            state,
+            summary: summary.into(),
+        })?;
+        self.reported
+            .lock()
+            .unwrap()
+            .insert(caller.clone(), (state, summary.into()));
+        Ok(())
+    }
+
+    async fn ask_user(
+        &self,
+        caller: &SessionId,
+        question: &str,
+        options: &[String],
+    ) -> HostResult<UserAnswer> {
+        self.info(caller)?;
+        let request_id = self.next_question.fetch_add(1, Ordering::Relaxed);
+        let (reply, rx) = oneshot::channel();
+        self.emit(BridgeEvent::AskUser {
+            request_id,
+            caller: caller.clone(),
+            question: question.into(),
+            options: options.into(),
+            reply,
+        })?;
+        let _guard = QuestionGuard {
+            events: self.events.clone(),
+            id: request_id,
+        };
+        self.reply(caller, rx).await
+    }
+
+    async fn list_sessions(&self, _: &SessionId) -> HostResult<Vec<SessionInfo>> {
+        Ok(self.infos())
+    }
+
+    async fn session_summary(
+        &self,
+        _: &SessionId,
+        target: &SessionId,
+    ) -> HostResult<SessionSummary> {
+        let info = self.info(target)?;
+        let terminal = self.terminals.lock().unwrap().get(target).cloned();
+        let last_output = match terminal {
+            Some(snapshot) => snapshot.last_output,
+            None => self
+                .manager
+                .subscribe_with_history(target)
+                .ok()
+                .and_then(|(history, _)| {
+                    history.into_iter().rev().find_map(|event| match event {
+                        AgentEvent::AssistantMessage { text, .. } => Some(tail(text)),
+                        _ => None,
+                    })
+                }),
+        };
+        let reported_summary = self
+            .reported
+            .lock()
+            .unwrap()
+            .get(target)
+            .map(|(_, text)| text.clone());
+        Ok(SessionSummary {
+            info,
+            reported_summary,
+            last_output,
+        })
+    }
+
+    async fn spawn_session(
+        &self,
+        caller: &SessionId,
+        request: SpawnRequest,
+    ) -> HostResult<SessionInfo> {
+        self.info(caller)?;
+        let (reply, rx) = oneshot::channel();
+        self.emit(BridgeEvent::SpawnTerminal {
+            caller: caller.clone(),
+            request,
+            reply,
+        })?;
+        let info = self.reply(caller, rx).await??;
+        // The UI has created and launched the terminal; publish its returned
+        // metadata before the server permits parent/child messaging.
+        self.terminals
+            .lock()
+            .unwrap()
+            .entry(info.id.clone())
+            .or_insert_with(|| TerminalSnapshot {
+                info: info.clone(),
+                last_output: None,
+            });
+        Ok(info)
+    }
+
+    async fn send_to_session(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        text: &str,
+    ) -> HostResult<()> {
+        self.info(target)?;
+        let terminal = self.terminals.lock().unwrap().contains_key(target);
+        if terminal {
+            let (reply, rx) = oneshot::channel();
+            self.emit(BridgeEvent::SendTerminal {
+                caller: caller.clone(),
+                target: target.clone(),
+                text: text.into(),
+                reply,
+            })?;
+            self.reply(caller, rx).await?
+        } else {
+            self.manager
+                .resume(target)
+                .await
+                .map_err(|e| failed(e.to_string()))?;
+            if self.manager.status(target) == Some(SessionStatus::Running) {
+                self.manager.steer(target, text.into()).await
+            } else {
+                self.manager
+                    .send_prompt(target, UserInput::text(text))
+                    .await
+            }
+            .map_err(|e| failed(e.to_string()))
+        }
+    }
+
+    async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()> {
+        self.info(caller)?;
+        self.emit(BridgeEvent::Notify {
+            caller: caller.clone(),
+            title: title.into(),
+            body: body.into(),
+        })
+    }
+}
