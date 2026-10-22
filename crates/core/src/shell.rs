@@ -16,7 +16,7 @@ pub const SHELL_SURFACE_RGBA: u32 = 0x0d0d0f8c;
 /// it. It is deliberately nearly transparent. The page sits on top of the shell
 /// colour, so a strong page colour would stack two translucent layers and look
 /// far more opaque than the top bar. Packed `0xRRGGBBAA`.
-pub const PAGE_SURFACE_RGBA: u32 = 0xffffff1a;
+pub const PAGE_SURFACE_RGBA: u32 = 0xffffff08;
 
 /// Diameter of a macOS traffic light button, in logical pixels.
 pub const TRAFFIC_LIGHT_SIZE: f32 = 12.0;
