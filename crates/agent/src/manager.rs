@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -29,6 +30,7 @@ const HISTORY_LIMIT: usize = 50_000;
 
 struct Live {
     handle: SessionHandle,
+    config: SessionConfig,
     status: SessionStatus,
     pump: JoinHandle<()>,
     /// Re-broadcast of the backend's events, fed under the `live` lock together
@@ -42,6 +44,7 @@ struct Shared {
     backends: HashMap<Provider, Arc<dyn AgentBackend>>,
     index: Mutex<SessionIndex>,
     live: Mutex<HashMap<SessionId, Live>>,
+    resume_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     all_tx: broadcast::Sender<ManagerEvent>,
 }
 
@@ -84,6 +87,60 @@ impl Shared {
 }
 
 impl SessionManager {
+    pub async fn list_models(
+        &self,
+        provider: Provider,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<crate::ModelInfo>> {
+        self.shared
+            .backends
+            .get(&provider)
+            .ok_or(AgentError::NoBackend(provider))?
+            .list_models(cwd)
+            .await
+    }
+
+    /// Read a provider conversation name, including terminal-owned conversations.
+    pub async fn session_display_title(
+        &self,
+        provider: Provider,
+        id: &SessionId,
+        cwd: &Path,
+    ) -> Result<Option<String>> {
+        self.backend(provider)?.session_display_title(id, cwd).await
+    }
+
+    /// Refresh provider-owned names without changing session order or live state.
+    pub async fn refresh_titles(&self) -> Result<bool> {
+        let mut changed = false;
+        for record in self.list_sessions() {
+            let Ok(backend) = self.backend(record.provider) else {
+                continue;
+            };
+            let Ok(Ok(Some(title))) = tokio::time::timeout(
+                Duration::from_secs(3),
+                backend.session_title(&record.id, &record.cwd),
+            )
+            .await
+            else {
+                continue;
+            };
+            let title = title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            let mut index = self.shared.index.lock().unwrap();
+            if index
+                .get(&record.id)
+                .is_some_and(|r| r.title.as_deref() != Some(title))
+            {
+                index.update(&record.id, |r| r.title = Some(title.to_owned()))?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
     /// `index_path` is typically [`default_index_path`].
     pub fn new(
         index_path: impl AsRef<Path>,
@@ -95,6 +152,7 @@ impl SessionManager {
                 backends: backends.into_iter().map(|b| (b.provider(), b)).collect(),
                 index: Mutex::new(SessionIndex::open(index_path.as_ref())?),
                 live: Mutex::new(HashMap::new()),
+                resume_locks: Mutex::new(HashMap::new()),
                 all_tx,
             }),
         })
@@ -122,10 +180,28 @@ impl SessionManager {
     /// to anyone (no subscriber exists yet), so the manager emits the canonical
     /// one here, first in the session's history; any the backend emits itself
     /// is dropped.
-    fn attach(&self, handle: SessionHandle) {
+    fn attach(&self, handle: SessionHandle, config: SessionConfig) {
         let id = handle.id.clone();
         let mut rx = handle.subscribe();
-        let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        // Publish the attachment before the pump can consume its first event.
+        let mut live = self.shared.live.lock().unwrap();
+        let old = live.remove(&id);
+        let started = AgentEvent::SessionStarted {
+            session_id: id.clone(),
+        };
+        let (fanout, history) = if let Some(old) = old {
+            old.pump.abort();
+            (old.fanout, old.history)
+        } else {
+            let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+            let mut history = vec![started.clone()];
+            history.extend_from_slice(handle.history());
+            let _ = self.shared.all_tx.send(ManagerEvent::Event {
+                session: id.clone(),
+                event: started,
+            });
+            (fanout, history)
+        };
         let shared = self.shared.clone();
         let pump_id = id.clone();
         let pump = tokio::spawn(async move {
@@ -156,29 +232,21 @@ impl SessionManager {
                 }
             }
         });
-        let started = AgentEvent::SessionStarted {
-            session_id: id.clone(),
-        };
-        let _ = self.shared.all_tx.send(ManagerEvent::Event {
-            session: id.clone(),
-            event: started.clone(),
-        });
-        let old = self.shared.live.lock().unwrap().insert(
+        live.insert(
             id,
             Live {
                 handle,
+                config,
                 status: SessionStatus::Idle,
                 pump,
                 fanout,
-                history: vec![started],
+                history,
             },
         );
-        if let Some(old) = old {
-            old.pump.abort();
-        }
     }
 
     pub async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        let applied_config = config.clone();
         let handle = self
             .backend(config.provider)?
             .start_session(config.clone())
@@ -189,18 +257,29 @@ impl SessionManager {
             provider: config.provider,
             cwd: config.cwd,
             model: config.model,
+            reasoning_effort: config.reasoning_effort,
+            service_tier: config.service_tier,
             permission_mode: config.permission_mode,
             title: None,
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
         })?;
-        self.attach(handle.clone());
+        self.attach(handle.clone(), applied_config);
         Ok(handle)
     }
 
     /// Reattach a session from the index (or return the live one).
     pub async fn resume(&self, id: &SessionId) -> Result<SessionHandle> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _resuming = lock.lock().await;
         if let Some(l) = self.shared.live.lock().unwrap().get(id) {
             return Ok(l.handle.clone());
         }
@@ -216,13 +295,48 @@ impl SessionManager {
             .backend(record.provider)?
             .resume(record.config(), id)
             .await?;
-        self.attach(handle.clone());
+        self.attach(handle.clone(), record.config());
         self.shared.set_status(id, SessionStatus::Idle);
         Ok(handle)
     }
 
     pub async fn send_prompt(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _sending = lock.lock().await;
         let p = self.live_provider(id)?;
+        let config = self
+            .shared
+            .index
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| AgentError::UnknownSession(id.clone()))?
+            .config();
+        let changed = self
+            .shared
+            .live
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|live| live.config != config);
+        if changed {
+            if self.status(id) == Some(SessionStatus::Running)
+                || self.status(id) == Some(SessionStatus::WaitingApproval)
+            {
+                return Err(AgentError::Busy(
+                    "settings apply after the current turn finishes".into(),
+                ));
+            }
+            let handle = self.backend(p)?.reconfigure(config.clone(), id).await?;
+            self.attach(handle, config);
+        }
         let title: String = input.text.trim().chars().take(60).collect();
         self.backend(p)?.send_prompt(id, input).await?;
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
@@ -234,8 +348,29 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Persist next-turn settings without creating or selecting another session.
+    pub fn set_model_settings(
+        &self,
+        id: &SessionId,
+        model: Option<String>,
+        effort: Option<String>,
+        tier: Option<String>,
+    ) -> Result<()> {
+        self.shared.index.lock().unwrap().update(id, |record| {
+            record.model = model;
+            record.reasoning_effort = effort;
+            record.service_tier = tier;
+        })
+    }
+
     pub async fn steer(&self, id: &SessionId, text: String) -> Result<()> {
         self.backend(self.live_provider(id)?)?.steer(id, text).await
+    }
+
+    pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        self.backend(self.live_provider(id)?)?
+            .steer_input(id, input)
+            .await
     }
 
     pub async fn interrupt(&self, id: &SessionId) -> Result<()> {
@@ -342,6 +477,8 @@ mod tests {
         SessionConfig {
             cwd: "/tmp".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             provider: p,
             permission_mode: PermissionMode::Ask,
         }
@@ -375,6 +512,49 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {want:?}"));
+    }
+
+    #[tokio::test]
+    async fn reconfiguration_preserves_history_and_existing_subscribers() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Claude)).await.unwrap();
+        let (_, mut rx) = m.subscribe_with_history(&h.id).unwrap();
+        let mut all = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("first"))
+            .await
+            .unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        while rx.try_recv().is_ok() {}
+        let (before, _) = m.subscribe_with_history(&h.id).unwrap();
+        m.set_model_settings(&h.id, Some("new-model".into()), Some("high".into()), None)
+            .unwrap();
+        m.send_prompt(&h.id, UserInput::text("second"))
+            .await
+            .unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        let (after, _) = m.subscribe_with_history(&h.id).unwrap();
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(
+            after
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+                .count(),
+            2
+        );
+        let mut completed = false;
+        while let Ok(event) = rx.try_recv() {
+            completed |= matches!(event, AgentEvent::TurnCompleted { .. });
+        }
+        assert!(
+            completed,
+            "the original chat subscriber must receive the next reply"
+        );
+        assert_eq!(
+            m.shared.live.lock().unwrap()[&h.id].config.model.as_deref(),
+            Some("new-model")
+        );
+        assert_eq!(m.list_sessions().len(), 1);
     }
 
     #[tokio::test]

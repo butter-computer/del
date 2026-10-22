@@ -16,3 +16,6 @@ pub use index::{SessionRecord, data_dir, default_index_path};
 pub use manager::{ManagerEvent, SessionManager};
 pub use mock::MockBackend;
 pub use types::*;
+
+mod models;
+pub use models::{EffortOption, ModelInfo};

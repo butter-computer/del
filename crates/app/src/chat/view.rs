@@ -1,10 +1,10 @@
 //! `ChatView`: session plumbing and the message list. The composer is shared
 //! with the new-chat page and lives in the app shell.
 
-use super::model::{Change, ChatModel, Phase, compact_count};
+use super::model::{Block, Change, ChatModel, Phase, compact_count};
+use crate::appearance::rgba;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::typography::TEXT_SM;
-use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -20,15 +20,61 @@ pub const COLUMN_MAX_WIDTH: f32 = 640.0;
 pub struct Backend {
     pub runtime: tokio::runtime::Handle,
     pub manager: SessionManager,
+    pub updates_enabled: bool,
+    pub update_progress: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync>,
+}
+
+impl Backend {
+    pub async fn resume(&self, id: &SessionId) -> del_agent::Result<del_agent::SessionHandle> {
+        if self.updates_enabled
+            && !self.manager.is_live(id)
+            && let Some(record) = self
+                .manager
+                .list_sessions()
+                .into_iter()
+                .find(|r| &r.id == id)
+        {
+            let report = &self.update_progress;
+            let result = crate::provider_updates::ensure_provider(
+                record.provider,
+                record.model,
+                |message| report(id.0.clone(), Some(message)),
+            )
+            .await;
+            report(id.0.clone(), None);
+            result.map_err(AgentError::Backend)?;
+        }
+        self.manager.resume(id).await
+    }
+}
+
+struct MessageJump {
+    target: usize,
+    from: f32,
+    started: std::time::Instant,
+}
+
+fn active_prompt(prompts: &[usize], top: usize, at_end: bool) -> Option<usize> {
+    if at_end {
+        prompts.last().copied()
+    } else {
+        prompts.iter().rev().find(|ix| **ix <= top).copied()
+    }
 }
 
 pub struct ChatView {
     pub(super) model: ChatModel,
-    pub(super) scroller: Entity<MessageScrollerState>,
+    pub(super) scroller: ListState,
+    jump: Option<MessageJump>,
+    rail_hover: Option<usize>,
+    rail_previous_hover: Option<usize>,
     backend: Backend,
+    pub queue: crate::followups::Queue,
     session: Option<SessionId>,
     /// The session's event stream ended (session closed or app quitting).
     closed: bool,
+    loading: bool,
+    completed_turns: u64,
 }
 
 impl ChatView {
@@ -42,14 +88,33 @@ impl ChatView {
         first_prompt: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-
+        let scroller = ListState::new(0, ListAlignment::Top, px(400.0));
+        scroller.set_follow_mode(FollowMode::Tail);
+        let view = cx.weak_entity();
+        scroller.set_scroll_handler(move |_, _, cx| {
+            let view = view.clone();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.jump = None;
+                    cx.notify();
+                });
+            });
+        });
         let mut view = Self {
+            queue: session
+                .as_ref()
+                .map(crate::followups::Queue::load)
+                .unwrap_or_default(),
             model: ChatModel::default(),
             scroller,
+            jump: None,
+            rail_hover: None,
+            rail_previous_hover: None,
             backend,
             session: session.clone(),
             closed: false,
+            loading: session.is_some(),
+            completed_turns: 0,
         };
         if let Some(text) = first_prompt {
             let change = view.model.push_user(text, false);
@@ -62,6 +127,9 @@ impl ChatView {
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
+        if matches!(event, AgentEvent::TurnCompleted { .. }) {
+            self.completed_turns += 1;
+        }
         let change = self.model.apply(event);
         self.sync(change, cx);
     }
@@ -69,14 +137,13 @@ impl ChatView {
     /// Keep the virtual list's rows in step with the model.
     fn sync(&mut self, change: Option<Change>, cx: &mut Context<Self>) {
         if let Some(change) = change {
-            self.scroller.update(cx, |scroller, cx| match change {
+            match change {
                 Change::Pushed(_) => {
-                    scroller.append(1, cx);
+                    let count = self.scroller.item_count();
+                    self.scroller.splice(count..count, 1);
                 }
-                Change::Updated(ix) => {
-                    scroller.remeasure_items(ix..ix + 1, cx);
-                }
-            });
+                Change::Updated(ix) => self.scroller.remeasure_items(ix..ix + 1),
+            }
         }
         cx.notify();
     }
@@ -86,41 +153,133 @@ impl ChatView {
         self.model.is_running()
     }
 
-    /// Send text from the shared composer: steers the turn if one is running,
-    /// otherwise starts a new turn.
-    pub fn submit(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.model.is_running() && self.session.is_some() {
-            self.steer(text, cx);
-        } else {
-            self.send(text, cx);
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    pub fn save_queue(&self) {
+        let _ = self.queue.save();
+    }
+
+    pub fn enqueue(&mut self, input: UserInput, cx: &mut Context<Self>) -> String {
+        let id = self.queue.push(input);
+        self.save_queue();
+        cx.notify();
+        id
+    }
+
+    pub fn take_queued(&mut self, id: &str, cx: &mut Context<Self>) -> Option<UserInput> {
+        let item = self.queue.take(id)?;
+        self.save_queue();
+        cx.notify();
+        Some(item.input)
+    }
+
+    pub fn reorder_queued(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        self.queue.reorder(from, to);
+        self.save_queue();
+        cx.notify();
+    }
+
+    pub fn submit_input(&mut self, input: UserInput, steer: bool, cx: &mut Context<Self>) {
+        let id = self.enqueue(input, cx);
+        if !self.is_running() || steer {
+            self.deliver_queued(id, steer && self.is_running(), cx);
         }
     }
 
-    fn send(&mut self, text: String, cx: &mut Context<Self>) {
-        let change = self.model.push_user(text.clone(), false);
-        self.sync(Some(change), cx);
-        // Sending is an explicit "show me the reply": follow the tail again.
-        self.scroller
-            .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
-
-        let Some(id) = self.session.clone() else {
-            return;
-        };
-        let manager = self.backend.manager.clone();
-        self.run(cx, async move {
-            manager.resume(&id).await?;
-            manager.send_prompt(&id, UserInput::text(text)).await
-        });
+    fn send_next(&mut self, cx: &mut Context<Self>) {
+        if !self.is_running()
+            && let Some(id) = self.queue.next()
+        {
+            self.deliver_queued(id, false, cx);
+        }
     }
 
-    fn steer(&mut self, text: String, cx: &mut Context<Self>) {
-        let change = self.model.push_user(text.clone(), true);
-        self.sync(Some(change), cx);
-        let Some(id) = self.session.clone() else {
+    pub fn deliver_queued(&mut self, item_id: String, steer: bool, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
             return;
         };
-        let manager = self.backend.manager.clone();
-        self.run(cx, async move { manager.steer(&id, text).await });
+        let Some(input) = self.queue.begin(&item_id) else {
+            return;
+        };
+        self.save_queue();
+        let backend = self.backend.clone();
+        let text = if input.attachments.is_empty() {
+            input.text.clone()
+        } else {
+            format!(
+                "{}\n{}",
+                input.text,
+                input
+                    .attachments
+                    .iter()
+                    .map(|a| format!(
+                        "[{}]",
+                        a.path.file_name().unwrap_or_default().to_string_lossy()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        let row_index = self.model.blocks.len();
+        let completed_turns = self.completed_turns;
+        let delivery = self.backend.runtime.spawn(async move {
+            backend.resume(&session).await?;
+            if steer {
+                backend.manager.steer_input(&session, input).await
+            } else {
+                backend.manager.send_prompt(&session, input).await
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = delivery
+                .await
+                .map_err(|e| AgentError::Backend(e.to_string()))
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                let busy = matches!(&result, Err(AgentError::Busy(_)));
+                if busy {
+                    this.queue.wait(&item_id);
+                } else {
+                    this.queue
+                        .finish(&item_id, result.as_ref().err().map(ToString::to_string));
+                }
+                this.save_queue();
+                if result.is_ok() {
+                    // Backend events may already have arrived. Add the user row
+                    // before dispatch below, rather than changing phase on ack.
+                    if !this.model.is_running()
+                        && this.model.last_status == Some(del_agent::TurnStatus::Completed)
+                    {
+                        this.send_next(cx);
+                    }
+                } else {
+                    if matches!(this.model.blocks.get(row_index), Some(Block::User { .. })) {
+                        this.model.blocks.remove(row_index);
+                        this.scroller.splice(row_index..row_index + 1, 0);
+                    }
+                    if busy {
+                        // A provider may already be running a steered follow-up
+                        // before its next TurnStarted reaches this view.
+                        if this.completed_turns > completed_turns && !this.is_running() {
+                            if this.model.last_status == Some(del_agent::TurnStatus::Completed) {
+                                this.send_next(cx);
+                            }
+                        } else {
+                            this.model.phase = Phase::Running;
+                        }
+                    } else if !steer {
+                        this.model.phase = Phase::Idle;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        let change = self.model.push_user(text, steer);
+        self.sync(Some(change), cx);
+        self.scroller.scroll_to_end();
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -156,10 +315,10 @@ impl ChatView {
     /// Reattach the session if it is not live, replay its history into the
     /// model, then pump new events until the stream closes.
     fn follow(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        let manager = self.backend.manager.clone();
+        let backend = self.backend.clone();
         let attached = self.backend.runtime.spawn(async move {
-            manager.resume(&id).await?;
-            manager.subscribe_with_history(&id)
+            backend.resume(&id).await?;
+            backend.manager.subscribe_with_history(&id)
         });
         cx.spawn(async move |this, cx| {
             let (history, mut rx) = match attached.await {
@@ -171,7 +330,15 @@ impl ChatView {
                 for event in &history {
                     this.on_event(event, cx);
                 }
-                this.scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+                this.scroller.set_follow_mode(FollowMode::Tail);
+                this.scroller.scroll_to_end();
+                this.loading = false;
+                if this.model.last_status.is_none()
+                    || this.model.last_status == Some(del_agent::TurnStatus::Completed)
+                {
+                    this.send_next(cx);
+                }
+                cx.notify();
             });
             if replayed.is_err() {
                 return;
@@ -180,7 +347,22 @@ impl ChatView {
                 match rx.recv().await {
                     Ok(event) => {
                         if this
-                            .update(cx, |this, cx| this.on_event(&event, cx))
+                            .update(cx, |this, cx| {
+                                let before = this.completed_turns;
+                                this.on_event(&event, cx);
+                                // Claude emits completion and the next queued
+                                // turn's start together. Fold both before deciding
+                                // whether the provider is ready for another prompt.
+                                while let Ok(event) = rx.try_recv() {
+                                    this.on_event(&event, cx);
+                                }
+                                if this.completed_turns > before
+                                    && this.model.last_status
+                                        == Some(del_agent::TurnStatus::Completed)
+                                {
+                                    this.send_next(cx);
+                                }
+                            })
                             .is_err()
                         {
                             break;
@@ -221,7 +403,7 @@ impl ChatView {
         let waiting = self.model.has_pending_approval();
         let (label, hint) = match (self.model.phase, self.model.last_status) {
             (Phase::Running, _) if waiting => ("Waiting for your approval", ""),
-            (Phase::Running, _) => ("Working", "Enter steers the turn"),
+            (Phase::Running, _) => ("Working", "Enter queues · ⌘Enter steers"),
             (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => ("Done", ""),
             (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => ("Stopped", ""),
             (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => ("Turn failed", ""),
@@ -266,26 +448,164 @@ impl ChatView {
 /// Show a backend failure as a banner (and stop the running phase).
 fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
     let _ = this.update(cx, |this, cx| {
+        this.loading = false;
         let change = this.model.push_error(message, false);
         this.sync(Some(change), cx);
     });
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        if let Some(jump) = &self.jump {
+            let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
+            self.scroller.scroll_to(ListOffset {
+                item_ix: jump.target,
+                offset_in_item: px(0.0),
+            });
+            if t < 1.0 {
+                let target = self
+                    .scroller
+                    .scroll_px_offset_for_scrollbar()
+                    .y
+                    .as_f32()
+                    .max(-self.scroller.max_offset_for_scrollbar().y.as_f32());
+                let eased = 1.0 - (1.0 - t).powi(3);
+                self.scroller.set_offset_from_scrollbar(point(
+                    px(0.0),
+                    px(jump.from + (target - jump.from) * eased),
+                ));
+                window.request_animation_frame();
+            } else {
+                self.jump = None;
+            }
+        }
+        let top = self.scroller.logical_scroll_top().item_ix;
+        let prompts: Vec<_> = self
+            .model
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, block)| {
+                if let Block::User { text, .. } = block {
+                    Some((ix, text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let at_end = self.scroller.is_following_tail()
+            || self.scroller.is_scrolled_to_end() == Some(true)
+            || self.scroller.max_offset_for_scrollbar().y <= px(0.0);
+        let active = self.jump.as_ref().map(|jump| jump.target).or_else(|| {
+            active_prompt(
+                &prompts.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(),
+                top,
+                at_end,
+            )
+        });
+        let hover = self.rail_hover;
+        let previous_hover = self.rail_previous_hover;
         v_flex()
             .size_full()
             .child(
-                div().flex_1().min_h_0().child(
-                    MessageScroller::new("messages", self.scroller.clone(), move |ix, _, cx| {
-                        view.update(cx, |this, cx| this.render_row(ix, cx))
-                    })
-                    .size_full()
-                    // The default 32px gap is too airy for compact cards.
-                    .with_row_style(StyleRefinement::default().pb(px(6.0)))
-                    .jump_button(false),
-                ),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("message-navigation")
+                            .w(px(24.0))
+                            .h_full()
+                            .flex_none()
+                            .justify_center()
+                            .py_3()
+                            .child(
+                                v_flex()
+                                    .id("message-ticks")
+                                    .max_h_full()
+                                    .overflow_y_scroll()
+                                    .children(prompts.into_iter().enumerate().map(|(position, (ix, text))| {
+                                        let strength = |hover: Option<usize>| hover.map_or(0.0, |hover| {
+                                            (1.0 - position.abs_diff(hover) as f32 / 4.0).max(0.0)
+                                        });
+                                        let previous = strength(previous_hover);
+                                        let next = strength(hover);
+                                        let selected = active == Some(ix);
+                                        div()
+                                            .id(("message-jump", ix))
+                                            .role(gpui::Role::Button)
+                                            .aria_label(format!(
+                                                "Jump to message: {}",
+                                                text.chars().take(80).collect::<String>()
+                                            ))
+                                            .tooltip(move |window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    text.chars().take(180).collect::<String>(),
+                                                )
+                                                .build(window, cx)
+                                            })
+                                            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                                                let next = if *hovered { Some(position) }
+                                                    else if this.rail_hover == Some(position) { None }
+                                                    else { this.rail_hover };
+                                                if next != this.rail_hover {
+                                                    this.rail_previous_hover = this.rail_hover;
+                                                    this.rail_hover = next;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .group("message-tick")
+                                            .w_full()
+                                            .h(px(12.0))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_start()
+                                            .pl(px(2.0))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.jump = Some(MessageJump {
+                                                    target: ix,
+                                                    from: this
+                                                        .scroller
+                                                        .scroll_px_offset_for_scrollbar()
+                                                        .y
+                                                        .as_f32(),
+                                                    started: std::time::Instant::now(),
+                                                });
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div().h(px(2.0))
+                                                    .with_animation(SharedString::from(format!("rail-{ix}-{previous_hover:?}-{hover:?}-{selected}")),
+                                                        Animation::new(std::time::Duration::from_millis(100)).with_easing(ease_out_quint()),
+                                                        move |tick, t| {
+                                                            let weight = previous + (next - previous) * t;
+                                                            let width = (7.0 + 15.0 * weight).max(if selected { 14.0 } else { 7.0 });
+                                                            let alpha = (0.22 + 0.68 * weight).max(if selected { 0.8 } else { 0.22 });
+                                                            tick.w(px(width)).bg(rgba(0xffffffff).opacity(alpha))
+                                                        })
+                                            )
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            list(self.scroller.clone(), move |ix, _, cx| {
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .px_3()
+                                    .pb(px(6.0))
+                                    .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
+                                    .into_any_element()
+                            })
+                            .size_full()
+                            .min_h_0()
+                            .py_2(),
+                        ),
+                    ),
             )
             .child(
                 v_flex()
@@ -294,5 +614,207 @@ impl Render for ChatView {
                     .px_3()
                     .child(self.render_status()),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::gpui;
+    use core::prelude::v1::test;
+
+    #[::core::prelude::v1::test]
+    fn message_rail_highlights_last_prompt_at_bottom_even_when_earlier_prompt_is_at_top() {
+        assert_eq!(active_prompt(&[0, 3, 6, 9], 3, true), Some(9));
+        assert_eq!(active_prompt(&[0, 3, 6, 9], 3, false), Some(3));
+        assert_eq!(active_prompt(&[0, 3, 6, 9], 8, false), Some(6));
+        assert_eq!(active_prompt(&[], 0, true), None);
+    }
+    #[gpui::test]
+    fn followups_wait_for_completion_then_send_in_order(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            [Arc::new(
+                del_agent::MockBackend::new(del_agent::Provider::Codex)
+                    .with_delay(std::time::Duration::from_millis(3)),
+            ) as Arc<dyn del_agent::AgentBackend>],
+        )
+        .unwrap();
+        let session = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: Default::default(),
+            }))
+            .unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager: manager.clone(),
+            updates_enabled: false,
+            update_progress: Arc::new(|_, _| {}),
+        };
+        let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.session = Some(session.id.clone());
+            view.loading = true;
+            view.follow(session.id.clone(), cx);
+        });
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if !view.read_with(cx, |view, _| view.loading) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        view.update(cx, |view, cx| {
+            view.submit_input(UserInput::text("first"), false, cx);
+            view.submit_input(UserInput::text("second"), false, cx);
+            view.submit_input(UserInput::text("third"), false, cx);
+            assert_eq!(view.queue.items.len(), 3);
+            assert_eq!(
+                view.queue.items.iter().filter(|item| item.sending).count(),
+                1
+            );
+        });
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| {
+                view.queue.items.is_empty() && !view.is_running()
+            }) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        view.read_with(cx, |view, _| {
+            assert!(view.queue.items.is_empty());
+            let users = view
+                .model
+                .blocks
+                .iter()
+                .filter_map(|block| {
+                    if let Block::User { text, .. } = block {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(users, ["first", "second", "third"]);
+        });
+        runtime.block_on(manager.shutdown());
+    }
+    #[gpui::test]
+    fn busy_followup_waits_for_the_running_turn_without_showing_an_error(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            [Arc::new(
+                del_agent::MockBackend::new(del_agent::Provider::Codex)
+                    .with_delay(std::time::Duration::from_millis(3)),
+            ) as Arc<dyn del_agent::AgentBackend>],
+        )
+        .unwrap();
+        let session = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: Default::default(),
+            }))
+            .unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager: manager.clone(),
+            updates_enabled: false,
+            update_progress: Arc::new(|_, _| {}),
+        };
+        let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.session = Some(session.id.clone());
+            view.loading = true;
+            view.follow(session.id.clone(), cx);
+        });
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if !view.read_with(cx, |view, _| view.loading) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        runtime
+            .block_on(manager.send_prompt(&session.id, UserInput::text("already running")))
+            .unwrap();
+        // The backend has accepted a turn before its TurnStarted reaches the view.
+        view.update(cx, |view, cx| {
+            view.submit_input(UserInput::text("follow-up"), false, cx)
+        });
+        for _ in 0..10 {
+            cx.run_until_parked();
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.queue.items.iter().all(|item| item.error.is_none()),
+                "busy is a waiting state, not a failed message"
+            );
+            assert!(
+                view.is_running(),
+                "a busy response must not reset a running turn to Done"
+            );
+        });
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| {
+                view.queue.items.is_empty() && !view.is_running()
+            }) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        view.read_with(cx, |view, _| {
+            assert!(view.queue.items.is_empty());
+            let users = view
+                .model
+                .blocks
+                .iter()
+                .filter_map(|block| {
+                    if let Block::User { text, .. } = block {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(users, ["follow-up"]);
+        });
+        runtime.block_on(manager.shutdown());
     }
 }

@@ -39,10 +39,12 @@ pub async fn detect_all() -> Vec<ProviderStatus> {
 /// `Provider::Acp` has no single CLI; it always reports not installed here and
 /// `del-acp` supplies the real status from its agent registry.
 pub async fn detect(provider: Provider) -> ProviderStatus {
-    let Some(path) = (provider != Provider::Acp)
-        .then(|| find_binary(provider.binary()))
-        .flatten()
-    else {
+    let found = if provider == Provider::Acp {
+        None
+    } else {
+        find_working_binary(provider.binary()).await
+    };
+    let Some((path, version)) = found else {
         return ProviderStatus {
             provider,
             installed: false,
@@ -51,22 +53,46 @@ pub async fn detect(provider: Provider) -> ProviderStatus {
             login: LoginState::Unknown,
         };
     };
-    let (version, login) = tokio::join!(probe_version(&path), probe_login(provider, &path));
+    let login = probe_login(provider, &path).await;
     ProviderStatus {
         provider,
         installed: true,
         path: Some(path),
-        version,
+        version: Some(version),
         login,
     }
 }
 
 /// Search `PATH` first, then common install locations (GUI apps often get a minimal PATH).
 pub fn find_binary(name: &str) -> Option<PathBuf> {
+    find_in(name, &search_dirs())
+}
+
+fn search_dirs() -> Vec<PathBuf> {
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
     dirs.extend(common_dirs());
-    find_in(name, &dirs)
+    dirs
+}
+
+/// A launcher may be executable even when its bundled binary is missing.
+/// Use the first installation that actually answers the version probe.
+pub async fn find_working_binary(name: &str) -> Option<(PathBuf, String)> {
+    find_working_in(name, &search_dirs()).await
+}
+
+async fn find_working_in(name: &str, dirs: &[PathBuf]) -> Option<(PathBuf, String)> {
+    let mut seen = std::collections::HashSet::new();
+    for dir in dirs {
+        let path = dir.join(name);
+        if is_executable(&path)
+            && seen.insert(path.clone())
+            && let Some(version) = probe_version(&path).await
+        {
+            return Some((path, version));
+        }
+    }
+    None
 }
 
 fn common_dirs() -> Vec<PathBuf> {
@@ -83,6 +109,22 @@ fn common_dirs() -> Vec<PathBuf> {
             ".volta/bin",
         ] {
             v.push(h.join(rel));
+        }
+        let nvm = std::env::var_os("NVM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| h.join(".nvm"));
+        if let Ok(entries) = std::fs::read_dir(nvm.join("versions/node")) {
+            let mut versions: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+            versions.sort_by_cached_key(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .trim_start_matches('v')
+                    .split('.')
+                    .map(|part| part.parse::<u32>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            });
+            v.extend(versions.into_iter().rev().map(|path| path.join("bin")));
         }
     }
     v
@@ -255,5 +297,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("codex"), "x").unwrap();
         assert!(find_in("codex", &[dir.path().to_path_buf()]).is_none());
+    }
+
+    #[tokio::test]
+    async fn skips_broken_launcher_before_working_installation() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("broken");
+        let working = dir.path().join("working");
+        for (folder, script) in [
+            (&broken, "#!/bin/sh\nexit 1\n"),
+            (&working, "#!/bin/sh\necho 'codex-cli 1.2.3'\n"),
+        ] {
+            std::fs::create_dir(folder).unwrap();
+            let bin = folder.join("codex");
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found = find_working_in("codex", &[broken, working.clone()])
+            .await
+            .unwrap();
+        assert_eq!(found, (working.join("codex"), "1.2.3".into()));
     }
 }

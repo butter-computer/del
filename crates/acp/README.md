@@ -46,20 +46,26 @@ session index. `DEL_DATA_DIR` overrides that directory. On macOS the default is
 The `id` must be nonempty and contain no `/`. User entries replace defaults
 with the same ID. Commands inherit the process environment plus configured
 overrides. Sign in through the agent's own CLI; del does not manage credentials.
-The app offers ACP as a provider, with installed agent IDs in its second picker.
-An empty selection uses the first installed registry entry.
+The app offers ACP as a provider. Its model picker discovers installed registry
+agents and their advertised model/config choices. An empty selection uses the
+first installed registry entry. Discovery can create a temporary ACP session,
+but does not submit a prompt.
 
 For programmatic callers, `SessionConfig.model` selects `agent-id` or
-`agent-id/model-id`. The latter invokes the agent's optional `session/set_model`
-method and reports an error when unsupported. Opaque del session IDs encode both
+`agent-id/model-id`. The latter uses an advertised model config option through
+`session/set_config_option`, or the agent's optional `session/set_model` method.
+Unsupported selections report an error. Advertised `thought_level` options map
+to reasoning effort; unsupported effort values are rejected. Opaque del session IDs encode both
 the agent ID and its wire session ID, so resume keeps the original agent even
 when the default agent changes. Resume sends `session/load` only when advertised.
 
 ## Limits
 
 File and terminal client capabilities are disabled; callbacks receive JSON-RPC
-method-not-found responses. Agents may use their own tools instead. Attachments
-and ACP extensions are not implemented. ACP v1 has no standard steer method, so
+method-not-found responses. Agents may use their own tools instead. Image
+attachments with an image MIME type are sent as base64 ACP image content;
+other attachments become textual path references. Actual image support depends
+on the agent and model. ACP v1 has no standard steer method, so
 steering returns an explicit error. Stop a turn, then send a new prompt.
 
 The shared `SessionHandle` is delivered after setup. Conversation replay emitted

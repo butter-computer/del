@@ -65,6 +65,68 @@ pub struct Mapper {
 }
 
 impl Mapper {
+    /// Rebuild the same events used by the live chat from persisted turn items.
+    /// User/reasoning items are snapshot-only here: the live composer already
+    /// inserts its user messages and reasoning arrives as deltas.
+    pub fn history(&mut self, turns: &[Value]) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for turn in turns {
+            let Some(id) = turn["id"].as_str() else {
+                continue;
+            };
+            events.extend(self.notification("turn/started", &json!({"turn": turn})));
+            for item in turn["items"].as_array().into_iter().flatten() {
+                match item["type"].as_str() {
+                    Some("userMessage") => {
+                        let text = item["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|content| match content["type"].as_str() {
+                                Some("text") => content["text"].as_str().map(str::to_owned),
+                                Some("localImage") => content["path"]
+                                    .as_str()
+                                    .map(|path| format!("[attached image: {path}]")),
+                                Some("image") => Some("[attached image]".into()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        events.push(AgentEvent::UserMessage { text });
+                    }
+                    Some("reasoning") => {
+                        let text = ["summary", "content"]
+                            .into_iter()
+                            .flat_map(|field| {
+                                item[field]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !text.is_empty() {
+                            events.push(AgentEvent::ReasoningDelta {
+                                turn_id: id.into(),
+                                text,
+                            });
+                        }
+                    }
+                    _ => {
+                        let params = json!({"turnId": id, "item": item});
+                        events.extend(self.notification("item/started", &params));
+                        events.extend(self.notification("item/completed", &params));
+                    }
+                }
+            }
+            if turn["status"].as_str() != Some("inProgress") {
+                events.extend(self.notification("turn/completed", &json!({"turn": turn})));
+            }
+        }
+        events
+    }
+
     pub fn turn_id(&self) -> Option<&str> {
         self.turn_id.as_deref()
     }

@@ -7,3 +7,7 @@ mod protocol;
 
 pub use backend::{AuthStatus, ClaudeBackend, ClaudeOptions, auth_status};
 pub use protocol::Translator;
+
+mod models;
+
+mod titles;

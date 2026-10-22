@@ -190,6 +190,7 @@ fn permission_result(
 }
 
 struct Live {
+    models: Vec<ModelInfo>,
     rpc: Arc<Rpc>,
     client: Arc<Client>,
     remote: String,
@@ -284,7 +285,7 @@ impl AcpBackend {
             }), Some(SETUP_TIMEOUT)).await?;
             if init["protocolVersion"] != 1 { return Err(RpcError::new(-32603, "Agent did not negotiate ACP v1")); }
             let mut params = json!({"cwd":config.cwd,"mcpServers":[]});
-            let response = if let Some((_, remote)) = &saved {
+            let mut response = if let Some((_, remote)) = &saved {
                 if init["agentCapabilities"]["loadSession"] != true {
                     return Err(RpcError::new(-32601, "This ACP agent does not support session/load"));
                 }
@@ -304,12 +305,25 @@ impl AcpBackend {
                 rpc.request("session/set_mode", json!({"sessionId":remote,"modeId":"plan"}), Some(SETUP_TIMEOUT)).await?;
             }
             if let Some(model) = model {
-                rpc.request("session/set_model", json!({"sessionId":remote,"modelId":model}), Some(SETUP_TIMEOUT)).await?;
+                if let Some(option) = crate::models::option(&response, "model") {
+                    let updated = rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":model}), Some(SETUP_TIMEOUT)).await?;
+                    if updated["configOptions"].is_array() { response["configOptions"] = updated["configOptions"].clone(); }
+                } else {
+                    rpc.request("session/set_model", json!({"sessionId":remote,"modelId":model}), Some(SETUP_TIMEOUT)).await?;
+                }
             }
-            Ok::<_, RpcError>(remote)
+            if let Some(effort) = &config.reasoning_effort {
+                let option = crate::models::option(&response, "thought_level")
+                    .ok_or_else(|| RpcError::invalid_params("This agent does not advertise reasoning effort"))?;
+                if !crate::models::choices(option).iter().any(|o| o["value"].as_str() == Some(effort)) {
+                    return Err(RpcError::invalid_params("Unsupported reasoning effort for this agent/model"));
+                }
+                rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":effort}), Some(SETUP_TIMEOUT)).await?;
+            }
+            Ok::<_, RpcError>((remote, crate::models::catalog(&agent.id, &agent.name, &response)))
         }.await;
-        let remote = match setup {
-            Ok(remote) => remote,
+        let (remote, models) = match setup {
+            Ok(result) => result,
             Err(e) => {
                 client.state.lock().unwrap().closing = true;
                 rpc.kill(CLOSE_GRACE).await;
@@ -326,6 +340,7 @@ impl AcpBackend {
             serde_json::to_string(&(&agent.id, &remote)).unwrap()
         ));
         let live = Arc::new(Live {
+            models,
             rpc,
             client,
             remote,
@@ -341,6 +356,40 @@ impl AgentBackend for AcpBackend {
     fn provider(&self) -> Provider {
         Provider::Acp
     }
+    async fn list_models(&self, cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
+        let agents = self.agents.clone().unwrap_or_else(|| registry::load().0);
+        let mut models = Vec::new();
+        for agent in agents.into_iter().filter(|a| a.resolve().is_some()) {
+            let config = SessionConfig {
+                cwd: cwd.into(),
+                model: Some(agent.id.clone()),
+                reasoning_effort: None,
+                service_tier: None,
+                provider: Provider::Acp,
+                permission_mode: PermissionMode::Ask,
+            };
+            match self.open(config, None).await {
+                Ok(handle) => {
+                    models.extend(self.live(&handle.id)?.models.clone());
+                    self.close(&handle.id).await?;
+                }
+                Err(error) => models.push(ModelInfo {
+                    id: agent.id,
+                    name: agent.name,
+                    description: format!("Agent default · {error}"),
+                    efforts: vec![],
+                    default_effort: None,
+                    is_default: false,
+                    fast_tier: None,
+                }),
+            }
+        }
+        if let Some(first) = models.first_mut() {
+            first.is_default = true;
+        }
+        Ok(models)
+    }
+
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
         self.open(config, None).await
     }
@@ -349,10 +398,19 @@ impl AgentBackend for AcpBackend {
     }
 
     async fn send_prompt(&self, id: &SessionId, input: UserInput) -> Result<()> {
-        if !input.attachments.is_empty() {
-            return Err(AgentError::Backend(
-                "ACP attachments are not supported yet".into(),
-            ));
+        use base64::Engine as _;
+        let mut content = vec![json!({"type":"text","text":input.text})];
+        for attachment in &input.attachments {
+            if let Some(mime) = attachment
+                .mime
+                .as_deref()
+                .filter(|mime| mime.starts_with("image/"))
+            {
+                let bytes = tokio::fs::read(&attachment.path).await?;
+                content.push(json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+            } else {
+                content.push(json!({"type":"text","text":format!("[Attached file: {}]", attachment.path.display())}));
+            }
         }
         let live = self.live(id)?;
         let rpc = live.rpc.clone();
@@ -372,7 +430,7 @@ impl AgentBackend for AcpBackend {
             );
             rpc.request(
                 "session/prompt",
-                json!({"sessionId":live.remote,"prompt":[{"type":"text","text":input.text}]}),
+                json!({"sessionId":live.remote,"prompt":content}),
                 None,
             )
         };

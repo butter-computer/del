@@ -404,6 +404,8 @@ mod tests {
         SessionConfig {
             cwd: ".".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             provider: Provider::Codex,
             permission_mode: PermissionMode::Ask,
         }

@@ -17,6 +17,10 @@ struct Meta {
     title: Option<String>,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    unread: bool,
 }
 
 /// User-level overrides on top of the manager's index, keyed by session id.
@@ -34,6 +38,8 @@ pub struct Row {
     pub status: SessionStatus,
     pub updated_secs: u64,
     pub archived: bool,
+    pub pinned: bool,
+    pub unread: bool,
 }
 
 /// A terminal session stays separate from the manager's chat index.
@@ -45,6 +51,7 @@ pub struct TerminalRow {
     pub provider: Option<Provider>,
     pub active: bool,
     pub summary: String,
+    pub pinned: bool,
 }
 
 impl Overrides {
@@ -62,6 +69,28 @@ impl Overrides {
 
     pub fn set_archived(&mut self, id: &SessionId, archived: bool) {
         self.meta(id).archived = archived;
+    }
+
+    pub fn set_pinned(&mut self, id: &SessionId, pinned: bool) {
+        self.meta(id).pinned = pinned;
+    }
+
+    pub fn set_unread(&mut self, id: &SessionId, unread: bool) {
+        self.meta(id).unread = unread;
+    }
+
+    pub fn title(&self, id: &SessionId) -> Option<&str> {
+        self.0.get(&id.0).and_then(|meta| meta.title.as_deref())
+    }
+    pub fn archived(&self, id: &SessionId) -> bool {
+        self.0.get(&id.0).is_some_and(|meta| meta.archived)
+    }
+    pub fn unread(&self, id: &SessionId) -> bool {
+        self.0.get(&id.0).is_some_and(|meta| meta.unread)
+    }
+
+    pub fn remove(&mut self, id: &SessionId) {
+        self.0.remove(&id.0);
     }
 
     /// Rows for every record, most recently used first. Records whose
@@ -83,10 +112,12 @@ impl Overrides {
                     status: r.status,
                     updated_secs: r.updated_at_ms / 1000,
                     archived: meta.is_some_and(|m| m.archived),
+                    pinned: meta.is_some_and(|m| m.pinned),
+                    unread: meta.is_some_and(|m| m.unread),
                 }
             })
             .collect();
-        rows.sort_by_key(|r| std::cmp::Reverse(r.updated_secs));
+        rows.sort_by_key(|r| (!r.pinned, std::cmp::Reverse(r.updated_secs)));
         rows
     }
 
@@ -113,25 +144,6 @@ pub fn overrides_path() -> Option<PathBuf> {
     del_agent::data_dir().map(|d| d.join("sidebar.json"))
 }
 
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Short relative time: "now", "5m", "3h", "2d", "6w".
-pub fn relative_time(now: u64, then: u64) -> String {
-    let s = now.saturating_sub(then);
-    match s {
-        0..=44 => "now".into(),
-        45..=3_599 => format!("{}m", (s / 60).max(1)),
-        3_600..=86_399 => format!("{}h", s / 3_600),
-        86_400..=604_799 => format!("{}d", s / 86_400),
-        _ => format!("{}w", s / 604_800),
-    }
-}
-
 /// Last path component, for compact display.
 pub fn folder_name(path: &Path) -> String {
     path.file_name()
@@ -149,6 +161,8 @@ mod tests {
             provider: Provider::Claude,
             cwd: "/tmp/proj".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             permission_mode: Default::default(),
             title: title.map(str::to_string),
             created_at_ms: 0,
@@ -189,6 +203,27 @@ mod tests {
     }
 
     #[test]
+    fn pinned_rows_sort_first_and_round_trip() {
+        let mut overrides = Overrides::default();
+        let older = SessionId::new("older");
+        overrides.set_pinned(&older, true);
+        overrides.set_unread(&older, true);
+        let rows = overrides.rows(&[
+            record("newer", Some("Newer"), 5_000),
+            record("older", Some("Older"), 1_000),
+        ]);
+        assert_eq!(rows[0].id, older);
+        assert!(rows[0].pinned);
+
+        let saved = serde_json::to_string(&overrides).unwrap();
+        let mut restored: Overrides = serde_json::from_str(&saved).unwrap();
+        assert!(restored.rows(&[record("older", None, 0)])[0].pinned);
+        assert!(restored.rows(&[record("older", None, 0)])[0].unread);
+        restored.remove(&older);
+        assert!(!restored.rows(&[record("older", None, 0)])[0].unread);
+    }
+
+    #[test]
     fn save_and_load_round_trip_and_corrupt_is_empty() {
         let dir = std::env::temp_dir().join(format!("del-sidebar-{}", std::process::id()));
         let path = dir.join("sidebar.json");
@@ -199,15 +234,5 @@ mod tests {
         std::fs::write(&path, "garbage").unwrap();
         assert_eq!(Overrides::load(&path), Overrides::default());
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn relative_time_buckets() {
-        assert_eq!(relative_time(100, 100), "now");
-        assert_eq!(relative_time(400, 100), "5m");
-        assert_eq!(relative_time(100 + 7200, 100), "2h");
-        assert_eq!(relative_time(100 + 3 * 86_400, 100), "3d");
-        assert_eq!(relative_time(100 + 14 * 86_400, 100), "2w");
-        assert_eq!(relative_time(5, 100), "now");
     }
 }

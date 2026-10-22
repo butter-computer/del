@@ -467,6 +467,8 @@ async fn manager_host_drives_real_session_manager() {
         .start_session(del_agent::SessionConfig {
             cwd: dir.path().into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             provider: Provider::Claude,
             permission_mode: Default::default(),
         })

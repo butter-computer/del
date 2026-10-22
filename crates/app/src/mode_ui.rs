@@ -1,10 +1,11 @@
 //! Main-app session modes and the GPUI end of the MCP command channel.
+use crate::appearance::{rgb, rgba};
 use crate::mcp_bridge::{BridgeEvent, McpBridge};
 use crate::sessions::TerminalRow;
-use crate::state::{Selection, Tab};
+use crate::state::Selection;
 use crate::terminal_host::{
     TerminalHost, TerminalHostEvent, TerminalHostSnapshot, TerminalHostStatus, TerminalLaunchKind,
-    TerminalLaunchSpec, TerminalLauncher, TerminalLauncherEvent,
+    TerminalLaunchSpec,
 };
 use crate::terminal_store::{TerminalRecord, TerminalStore};
 use crate::{AppShell, composer_ui};
@@ -98,6 +99,8 @@ impl AppShell {
             .state
             .update(cx, |s, _| std::mem::take(&mut s.closed_terminals));
         for id in closed {
+            self.terminal_opening.remove(&id);
+            self.terminal_attempts.remove(&id);
             if let Some(host) = self.terminals.remove(&id) {
                 host.update(cx, |host, cx| host.close(cx));
             }
@@ -107,45 +110,72 @@ impl AppShell {
             }
             self.questions.retain(|q| q.caller != id);
         }
+        for id in std::mem::take(&mut self.terminal_update_restarts) {
+            if let Some(record) = self
+                .terminal_store
+                .records
+                .iter()
+                .find(|r| r.id == id)
+                .cloned()
+            {
+                self.begin_terminal(record.launch, None, Some(id), None, None, window, cx);
+            }
+        }
+        let selection = self.state.read(cx).selection.clone();
+        if self.mcp.is_some()
+            && let Selection::Terminal(id) = selection
+            && !self.terminals.contains_key(&id)
+            && !self.terminal_attempts.contains(&id)
+            && let Some(record) = self
+                .terminal_store
+                .records
+                .iter()
+                .find(|r| r.id == id)
+                .cloned()
+        {
+            self.begin_terminal(record.launch, None, Some(id), None, None, window, cx);
+        }
         if previous_question != self.questions.front().map(|q| q.id) {
             self.mcp_answer
                 .update(cx, |i, cx| i.set_value("", window, cx));
         }
-        let draft_keys: Vec<_> = self
-            .state
-            .read(cx)
-            .tabs
-            .iter()
-            .filter_map(|t| {
-                if let Tab::Draft(k) = t {
-                    Some(*k)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        self.launchers.retain(|k, _| draft_keys.contains(k));
-        self.launcher_cwds.retain(|k, _| draft_keys.contains(k));
-        let state = self.state.read(cx);
-        if state.mode() != SessionMode::Terminal {
-            return;
+    }
+
+    /// A terminal draft uses the same composer until its first prompt is sent.
+    pub(super) fn submit_terminal_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((key, config)) = self.state.read(cx).terminal_draft() else {
+            return false;
+        };
+        if self.state.read(cx).is_starting() {
+            return true;
         }
-        if let Selection::Draft(key) = state.selection {
-            let cwd = state.effective().2;
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.launchers.entry(key) {
-                let launcher = cx.new(|cx| TerminalLauncher::new(cwd.clone(), window, cx));
-                cx.subscribe_in(&launcher, window, move |this, _, event, window, cx| {
-                    let TerminalLauncherEvent::Launch(spec) = event;
-                    this.begin_terminal(spec.clone(), Some(key), None, None, None, window, cx);
-                })
-                .detach();
-                entry.insert(launcher);
-                self.launcher_cwds.insert(key, cwd);
-            } else if self.launcher_cwds.get(&key) != Some(&cwd) {
-                self.launchers[&key].update(cx, |l, cx| l.set_workspace(cwd.clone(), cx));
-                self.launcher_cwds.insert(key, cwd);
+        let spec = match TerminalLaunchSpec::from_config(&config) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.set_mode_error(error.to_string(), cx);
+                return true;
             }
-        }
+        };
+        self.state.update(cx, |state, cx| {
+            state.begin_terminal_prompt(key, prompt.to_owned(), cx)
+        });
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.begin_terminal(
+            spec,
+            Some(key),
+            None,
+            Some(prompt.to_owned()),
+            None,
+            window,
+            cx,
+        );
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -162,6 +192,7 @@ impl AppShell {
         if reply.as_ref().is_some_and(|r| r.is_closed()) {
             return;
         }
+        let resuming = existing.is_some();
         let id = existing.unwrap_or_else(|| {
             SessionId::new(format!(
                 "terminal-{}-{}",
@@ -172,6 +203,28 @@ impl AppShell {
                     .as_nanos()
             ))
         });
+        if !self.terminal_opening.insert(id.clone()) {
+            return;
+        }
+        self.terminal_attempts.insert(id.clone());
+        let previous = self
+            .terminal_store
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .cloned();
+        let saved_records = self.terminal_store.records.clone();
+        let conversation_id = previous
+            .as_ref()
+            .and_then(|r| r.conversation_id.clone())
+            .or_else(|| {
+                (!resuming && spec.kind == TerminalLaunchKind::Claude)
+                    .then(|| uuid::Uuid::new_v4().to_string())
+            });
+        let saved_title = previous
+            .as_ref()
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| spec.label());
         if let Some(old) = self.terminals.remove(&id) {
             old.update(cx, |host, cx| host.close(cx));
             if let Some(bridge) = &self.mcp {
@@ -184,43 +237,73 @@ impl AppShell {
             mode: SessionMode::Terminal,
             command: Some(spec.kind.label().into()),
             cwd: spec.cwd.clone(),
-            title: Some(spec.label()),
+            title: Some(saved_title.clone()),
             status: "running".into(),
             reported_state: None,
         };
         let bridge = self.mcp.as_ref().map(McpBridge::handle);
         let prepare_info = info.clone();
         let runtime = self.state.read(cx).backend().runtime;
-        let prepare = runtime.spawn_blocking(move || {
-            if let Some(bridge) = bridge {
+        let report = self.state.read(cx).update_reporter(
+            draft
+                .map(|key| format!("draft-{key}"))
+                .unwrap_or_else(|| id.0.clone()),
+        );
+        let program = spec.program.clone();
+        let provider = spec.provider();
+        let prepare = runtime.spawn(async move {
+            let managed_updates = if let (Some(program), Some(provider)) = (program, provider) {
+                let result = crate::provider_updates::ensure_program(program.into(), provider, |message| report(Some(message))).await;
+                report(None);
+                result?
+            } else { false };
+            tokio::task::spawn_blocking(move || {
+            let conversation_id = if resuming && prepare_info.provider == Some(Provider::Codex) && conversation_id.is_none() {
+                previous.as_ref().and_then(|record| crate::terminal_conversation::recover_legacy_codex(
+                    &crate::terminal_conversation::codex_root(), record, &saved_records))
+            } else { conversation_id };
+            if resuming && prepare_info.provider.is_some() && conversation_id.is_none() {
+                return Err("The original conversation could not be identified uniquely. Its saved history has been preserved.".into());
+            }
+            let (mut args, env) = if let Some(bridge) = bridge {
                 bridge.upsert_terminal(prepare_info.clone(), None);
                 if let Some(provider) = prepare_info.provider {
-                    let config = bridge
-                        .launch_config(&prepare_info.id, provider)
-                        .map_err(|e| e.to_string())?;
-                    return Ok((config.args, config.env));
-                }
+                    let config = bridge.launch_config(&prepare_info.id, provider).map_err(|e| e.to_string())?;
+                    (config.args, config.env)
+                } else { (Vec::new(), Vec::new()) }
             } else if prepare_info.provider.is_some() {
                 return Err("Agent tools are still starting. Try again in a moment.".into());
+            } else { (Vec::new(), Vec::new()) };
+            if managed_updates && prepare_info.provider == Some(Provider::Codex) {
+                // Del has already updated this installation. Do not let the CLI
+                // interpose its own update prompt before the waiting first prompt.
+                args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
             }
-            Ok((Vec::new(), Vec::new()))
+            if let Some(conversation) = &conversation_id {
+                args.extend(resume_args(prepare_info.provider, conversation, resuming)?);
+            }
+            Ok((args, env, conversation_id))
+            }).await.map_err(|e| e.to_string())?
         });
         cx.spawn_in(window, async move |this, cx| {
             let prepared = prepare.await.map_err(|e| e.to_string()).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| {
-                if reply.as_ref().is_some_and(|r| r.is_closed()) {
+                let still_opening = this.terminal_opening.remove(&id);
+                if !still_opening || reply.as_ref().is_some_and(|r| r.is_closed()) {
                     if let Some(bridge) = &this.mcp {
                         bridge.handle().revoke(&id);
                         bridge.handle().remove_terminal(&id);
                     }
                     return;
                 }
-                let result = prepared.and_then(|(mut args, env)| {
+                let result = prepared.and_then(|(mut args, env, conversation_id)| {
                     if let Some(prompt) = prompt {
                         args.push("--".into());
                         args.push(prompt);
                     }
-                    let host = TerminalHost::spawn_prepared(spec.clone(), args, env, window, cx)
+                    let mut launch = spec.clone();
+                    launch.title = saved_title.clone();
+                    let host = TerminalHost::spawn_prepared(launch, args, env, window, cx)
                         .map_err(|e| e.to_string())?;
                     let event_id = id.clone();
                     cx.subscribe(&host, move |this, _, event, cx| {
@@ -229,12 +312,17 @@ impl AppShell {
                         }
                     })
                     .detach();
-                    host.update(cx, |host, cx| host.focus(window, cx));
+                    if !resuming || this.state.read(cx).selection == Selection::Terminal(id.clone())
+                    {
+                        host.update(cx, |host, cx| host.focus(window, cx));
+                    }
                     this.terminals.insert(id.clone(), host);
                     this.terminal_store.upsert(TerminalRecord {
                         id: id.clone(),
-                        title: spec.label(),
+                        title: saved_title.clone(),
                         launch: spec.clone(),
+                        pinned: false,
+                        conversation_id,
                     });
                     if let Err(e) = this.terminal_store.save(&TerminalStore::path()) {
                         this.set_mode_error(
@@ -243,18 +331,20 @@ impl AppShell {
                         );
                     }
                     this.state.update(cx, |s, cx| {
-                        s.terminal_started(
-                            draft,
-                            TerminalRow {
-                                id: id.clone(),
-                                title: spec.label(),
-                                cwd: spec.cwd.clone(),
-                                provider: spec.provider(),
-                                active: true,
-                                summary: String::new(),
-                            },
-                            cx,
-                        )
+                        let row = TerminalRow {
+                            id: id.clone(),
+                            title: saved_title.clone(),
+                            cwd: spec.cwd.clone(),
+                            provider: spec.provider(),
+                            active: true,
+                            summary: String::new(),
+                            pinned: false,
+                        };
+                        if resuming {
+                            s.terminal_reopened(row, cx);
+                        } else {
+                            s.terminal_started(draft, row, cx);
+                        }
                     });
                     if let Some(bridge) = &this.mcp {
                         bridge.handle().upsert_terminal(info.clone(), None);
@@ -266,8 +356,10 @@ impl AppShell {
                         bridge.handle().revoke(&id);
                         bridge.handle().remove_terminal(&id);
                     }
-                    if let Some(launcher) = draft.and_then(|key| this.launchers.get(&key)) {
-                        launcher.update(cx, |l, cx| l.launch_failed(error.clone(), cx));
+                    if let Some(key) = draft {
+                        this.state.update(cx, |state, cx| {
+                            state.terminal_start_failed(key, error.clone(), cx)
+                        });
                     }
                     this.set_mode_error(error.clone(), cx);
                 }
@@ -276,6 +368,93 @@ impl AppShell {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Refresh titles by exact provider identity, including saved terminals that
+    /// are not open. Keep all I/O off the UI thread and retain stable names on errors.
+    pub(super) fn watch_terminal_titles(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok((records, backend)) = this.update(cx, |this, cx| {
+                    (
+                        this.terminal_store.records.clone(),
+                        this.state.read(cx).backend(),
+                    )
+                }) else {
+                    break;
+                };
+                let lookup = backend.runtime.spawn(async move {
+                    let mut titles = Vec::new();
+                    for record in records {
+                        let title = if let (Some(provider), Some(identity)) =
+                            (record.launch.provider(), record.conversation_id.as_ref())
+                        {
+                            tokio::time::timeout(
+                                Duration::from_secs(3),
+                                backend.manager.session_display_title(
+                                    provider,
+                                    &SessionId::new(identity.clone()),
+                                    &record.launch.cwd,
+                                ),
+                            )
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .flatten()
+                        } else {
+                            None
+                        };
+                        titles.push((record.id, record.conversation_id, title));
+                    }
+                    titles
+                });
+                let titles = lookup.await.unwrap_or_default();
+                if this
+                    .update(cx, |this, cx| {
+                        let mut changed = false;
+                        for (id, identity, title) in titles {
+                            if !this
+                                .terminal_store
+                                .records
+                                .iter()
+                                .any(|r| r.id == id && r.conversation_id == identity)
+                            {
+                                continue;
+                            }
+                            if let Some(host) = this.terminals.get(&id) {
+                                host.update(cx, |host, cx| host.refresh_title(title.clone(), cx));
+                            }
+                            if let Some(title) = title
+                                && this.terminal_store.set_title(&id, &title)
+                            {
+                                changed = true;
+                                this.state.update(cx, |s, cx| {
+                                    if let Some(row) =
+                                        s.terminal_rows.iter_mut().find(|r| r.id == id)
+                                    {
+                                        row.title = title;
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        if changed
+                            && let Err(error) = this.terminal_store.save(&TerminalStore::path())
+                        {
+                            this.set_mode_error(
+                                format!("Could not save conversation title: {error}"),
+                                cx,
+                            );
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
         })
         .detach();
     }
@@ -293,8 +472,90 @@ impl AppShell {
         {
             return;
         }
+        if let TerminalHostStatus::Exited { code } = snapshot.status
+            && let Some(provider) = self
+                .terminal_store
+                .records
+                .iter()
+                .find(|r| &r.id == id)
+                .and_then(|r| r.launch.provider())
+            && crate::provider_updates::completed_cli_update(provider, &snapshot.last_output, code)
+            && self
+                .terminal_update_restarted
+                .insert((id.clone(), snapshot.pid))
+        {
+            self.terminal_update_restarts.insert(id.clone());
+            cx.notify();
+        }
+        if let Some(hint) = snapshot.conversation_hint.clone()
+            && self
+                .terminal_store
+                .records
+                .iter()
+                .find(|r| &r.id == id)
+                .is_some_and(|r| {
+                    !r.conversation_id
+                        .as_ref()
+                        .is_some_and(|saved| saved.starts_with(&hint))
+                })
+            && self.terminal_identity_pending.insert(id.clone())
+        {
+            let id = id.clone();
+            let pid = snapshot.pid;
+            let runtime = self.state.read(cx).backend().runtime;
+            let lookup_hint = hint.clone();
+            let lookup = runtime.spawn(async move {
+                for _ in 0..20 {
+                    let hint = lookup_hint.clone();
+                    let found = tokio::task::spawn_blocking(move || {
+                        crate::terminal_conversation::resolve_codex_prefix(
+                            &crate::terminal_conversation::codex_root(),
+                            &hint,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if found.is_some() {
+                        return found;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                None
+            });
+            cx.spawn(async move |this, cx| {
+                let found = lookup.await.ok().flatten();
+                let _ = this.update(cx, |this, cx| {
+                    this.terminal_identity_pending.remove(&id);
+                    if this.terminals.get(&id).is_none_or(|host| {
+                        let current = host.read(cx).snapshot();
+                        current.pid != pid || current.conversation_hint.as_ref() != Some(&hint)
+                    }) {
+                        return;
+                    }
+                    if let Some(found) = found
+                        && let Some(record) =
+                            this.terminal_store.records.iter_mut().find(|r| r.id == id)
+                    {
+                        record.conversation_id = Some(found);
+                        if let Err(error) = this.terminal_store.save(&TerminalStore::path()) {
+                            this.set_mode_error(
+                                format!("Could not save conversation identity: {error}"),
+                                cx,
+                            );
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
         let active = snapshot.status == TerminalHostStatus::Running;
         self.state.update(cx, |s, cx| {
+            if snapshot.title_loading {
+                s.terminal_title_loading.insert(id.clone());
+            } else {
+                s.terminal_title_loading.remove(id);
+            }
             if let Some(row) = s.terminal_rows.iter_mut().find(|r| &r.id == id) {
                 row.title = snapshot.title.clone();
                 row.active = active;
@@ -302,6 +563,11 @@ impl AppShell {
             }
             cx.notify();
         });
+        if self.terminal_store.set_title(id, &snapshot.title)
+            && let Err(error) = self.terminal_store.save(&TerminalStore::path())
+        {
+            self.set_mode_error(format!("Could not save terminal title: {error}"), cx);
+        }
         if let Some(bridge) = &self.mcp {
             let provider = match snapshot.kind {
                 TerminalLaunchKind::Codex => Some(Provider::Codex),
@@ -328,7 +594,7 @@ impl AppShell {
         cx.notify();
     }
 
-    fn set_mode_error(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(super) fn set_mode_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.error = Some(error);
             cx.notify();
@@ -363,6 +629,9 @@ impl AppShell {
                 state,
                 summary,
             } => {
+                if state == del_mcp::ReportedState::Done {
+                    self.state.update(cx, |s, cx| s.reply_finished(&caller, cx));
+                }
                 self.reported
                     .insert(caller, format!("{state:?}: {summary}"));
             }
@@ -435,21 +704,84 @@ impl AppShell {
         cx.notify();
     }
 
+    pub(super) fn render_new_session_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cwd = self.state.read(cx).effective().2;
+        let state = self.state.clone();
+        h_flex()
+            .size_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .child(
+                Button::new("new-workspace")
+                    .ghost()
+                    .h(px(24.0))
+                    .px_3()
+                    .text_size(px(14.0))
+                    .cursor_pointer()
+                    .icon(Icon::new(IconName::Folder).size(px(16.0)))
+                    .label(crate::sessions::folder_name(&cwd))
+                    .text_color(rgba(0xffffff8c))
+                    .on_click(move |_, _, cx| state.update(cx, |state, cx| state.pick_folder(cx))),
+            )
+            .child(self.render_mode_picker(cx))
+    }
+
+    fn mode_slide_position(&self, cx: &App) -> f32 {
+        let target = if self.state.read(cx).mode() == SessionMode::Terminal {
+            1.0
+        } else {
+            0.0
+        };
+        let Some(started) = self.mode_slide_started else {
+            return target;
+        };
+        let t = (started.elapsed().as_secs_f32() / 0.18).min(1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.mode_slide_from + (target - self.mode_slide_from) * eased
+    }
+
     pub(super) fn render_mode_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode = self.state.read(cx).mode();
-        let mut row = h_flex().gap_1().pb_2();
-        for (choice, label) in [
-            (SessionMode::Chat, "Chat"),
-            (SessionMode::Terminal, "Terminal"),
+        let position = self.mode_slide_position(cx);
+        let mut row = h_flex().relative().h(px(24.0)).gap_1().flex_none().child(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(44.0 * position))
+                .h(px(24.0))
+                .w(px(40.0 + 20.0 * position))
+                .rounded_md()
+                .bg(rgba(0xffffff20)),
+        );
+        for (choice, label, width) in [
+            (SessionMode::Chat, "Chat", 40.0),
+            (SessionMode::Terminal, "Terminal", 60.0),
         ] {
             row = row.child(
-                Button::new(SharedString::from(format!("new-mode-{label}")))
-                    .ghost()
-                    .small()
-                    .label(label)
-                    .when(mode == choice, |b| b.bg(rgba(0xffffff20)))
+                div()
+                    .id(SharedString::from(format!("new-mode-{label}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .relative()
+                    .w(px(width))
+                    .h(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.set_mode(choice, cx))
+                        if this.state.read(cx).mode() == choice || this.state.read(cx).is_starting()
+                        {
+                            return;
+                        }
+                        this.mode_slide_from = this.mode_slide_position(cx);
+                        this.mode_slide_started = Some(std::time::Instant::now());
+                        this.state.update(cx, |s, cx| s.set_mode(choice, cx));
+                        cx.notify();
                     })),
             );
         }
@@ -458,36 +790,8 @@ impl AppShell {
 
     pub(super) fn render_terminal_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let selection = self.state.read(cx).selection.clone();
-        let mut page = v_flex()
-            .id("terminal-page")
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .bg(rgb(0));
+        let mut page = v_flex().id("terminal-page").size_full().min_h_0().min_w_0();
         match selection {
-            Selection::Draft(key) => {
-                let state = self.state.clone();
-                page = page
-                    .child(
-                        h_flex()
-                            .p_3()
-                            .gap_3()
-                            .items_center()
-                            .child(self.render_mode_picker(cx))
-                            .child(
-                                Button::new("terminal-workspace")
-                                    .ghost()
-                                    .small()
-                                    .label("Choose workspace…")
-                                    .on_click(move |_, _, cx| {
-                                        state.update(cx, |s, cx| s.pick_folder(cx))
-                                    }),
-                            ),
-                    )
-                    .when_some(self.launchers.get(&key).cloned(), |p, launcher| {
-                        p.child(div().flex_1().min_h_0().child(launcher))
-                    });
-            }
             Selection::Terminal(id) => {
                 if let Some(host) = self.terminals.get(&id) {
                     page = page.child(div().flex_1().min_h_0().min_w_0().child(host.clone()));
@@ -495,11 +799,21 @@ impl AppShell {
                         page = page.child(self.restart_button(id, cx));
                     }
                 } else {
-                    page = page.child(v_flex().p_4().gap_3().child("This terminal is stopped. Restart opens a new process in its saved workspace.")
-                        .child(self.restart_button(id,cx)));
+                    if self.terminal_opening.contains(&id) || !self.terminal_attempts.contains(&id)
+                    {
+                        page = page.child(div().p_4().child("Reopening conversation…"));
+                    } else {
+                        page = page.child(
+                            v_flex()
+                                .p_4()
+                                .gap_3()
+                                .child("Could not reopen this conversation.")
+                                .child(self.restart_button(id, cx)),
+                        );
+                    }
                 }
             }
-            Selection::Session(_) => {}
+            Selection::Draft(_) | Selection::Session(_) => {}
         }
         if let Some(error) = self.state.read(cx).error.clone() {
             page = page.child(div().p_3().text_color(rgb(0xf08b8b)).child(error));
@@ -511,7 +825,7 @@ impl AppShell {
         Button::new("restart-terminal")
             .ghost()
             .small()
-            .label("Restart terminal")
+            .label("Reopen conversation")
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(record) = this
                     .terminal_store
@@ -677,5 +991,44 @@ impl AppShell {
                     title
                 }
             })
+    }
+}
+
+/// Resume by exact identity; never replay the opening prompt or use --last.
+fn resume_args(
+    provider: Option<Provider>,
+    conversation: &str,
+    resuming: bool,
+) -> Result<Vec<String>, String> {
+    uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid saved conversation ID".to_owned())?;
+    Ok(match provider {
+        Some(Provider::Codex) if resuming => vec!["resume".into(), conversation.into()],
+        Some(Provider::Claude) => vec![
+            if resuming { "--resume" } else { "--session-id" }.into(),
+            conversation.into(),
+        ],
+        _ => Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn reopened_agents_use_the_saved_identity_without_replaying_a_prompt() {
+        let id = "01a16585-21de-7e41-9a31-9857f8268084";
+        assert_eq!(
+            resume_args(Some(Provider::Codex), id, true).unwrap(),
+            ["resume", id]
+        );
+        assert_eq!(
+            resume_args(Some(Provider::Claude), id, true).unwrap(),
+            ["--resume", id]
+        );
+        assert_eq!(
+            resume_args(Some(Provider::Claude), id, false).unwrap(),
+            ["--session-id", id]
+        );
+        assert!(resume_args(Some(Provider::Codex), "--last", true).is_err());
     }
 }

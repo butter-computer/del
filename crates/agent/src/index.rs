@@ -11,6 +11,10 @@ pub struct SessionRecord {
     pub provider: Provider,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub permission_mode: PermissionMode,
     pub title: Option<String>,
     pub created_at_ms: u64,
@@ -23,6 +27,8 @@ impl SessionRecord {
         SessionConfig {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            service_tier: self.service_tier.clone(),
             provider: self.provider,
             permission_mode: self.permission_mode,
         }
@@ -148,6 +154,8 @@ mod tests {
             provider: Provider::Claude,
             cwd: "/tmp".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             permission_mode: PermissionMode::Ask,
             title: None,
             created_at_ms: at,

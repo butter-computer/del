@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Deserialize)]
 pub struct ThreadRef {
     pub id: String,
+    #[serde(default)]
+    pub turns: Vec<Value>,
 }
 
 /// Result of `thread/start`, `thread/resume` and `thread/fork`.

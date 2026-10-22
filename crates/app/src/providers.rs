@@ -31,26 +31,6 @@ pub fn display_name(provider: Provider) -> &'static str {
     }
 }
 
-/// Model choices; `None` is the provider's own default.
-pub fn models(provider: Provider) -> Vec<Option<String>> {
-    match provider {
-        Provider::Codex => vec![None, Some("gpt-5-codex".into()), Some("gpt-5".into())],
-        Provider::Claude => vec![
-            None,
-            Some("sonnet".into()),
-            Some("opus".into()),
-            Some("haiku".into()),
-        ],
-        Provider::Acp => std::iter::once(None)
-            .chain(del_acp::registry::installed_ids().into_iter().map(Some))
-            .collect(),
-    }
-}
-
-pub fn model_label(model: Option<&str>) -> String {
-    model.unwrap_or("Default").to_string()
-}
-
 /// The command the user runs to sign in, shown in the panel.
 pub fn login_command(provider: Provider) -> &'static str {
     match provider {
@@ -60,19 +40,17 @@ pub fn login_command(provider: Provider) -> &'static str {
     }
 }
 
-pub fn install_hint(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "Install: npm i -g @openai/codex  (or brew install codex)",
-        Provider::Claude => "Install: see claude.com/claude-code",
-        Provider::Acp => {
-            "Install an ACP adapter or configure acp-agents.json in del’s data directory"
-        }
-    }
-}
-
 /// Installed ACP agents authenticate through their own CLI when launched.
 pub async fn detect_all() -> Vec<ProviderStatus> {
     let mut statuses = del_agent::detect_all().await;
+    statuses.push(detect(Provider::Acp).await);
+    statuses
+}
+
+pub async fn detect(provider: Provider) -> ProviderStatus {
+    if provider != Provider::Acp {
+        return del_agent::detect::detect(provider).await;
+    }
     let (agents, warning) = del_acp::registry::load();
     let installed: Vec<_> = del_acp::registry::detect(&agents)
         .into_iter()
@@ -83,14 +61,13 @@ pub async fn detect_all() -> Vec<ProviderStatus> {
         .map(|s| s.agent.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    statuses.push(ProviderStatus {
+    ProviderStatus {
         provider: Provider::Acp,
         installed: !installed.is_empty(),
         path: None,
         version: Some(warning.unwrap_or(names)),
         login: LoginState::Unknown,
-    });
-    statuses
+    }
 }
 
 /// Open the CLI's official login in the user's terminal (macOS Terminal).

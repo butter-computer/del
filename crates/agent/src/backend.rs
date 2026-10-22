@@ -26,6 +26,7 @@ pub struct SessionHandle {
     pub id: SessionId,
     pub provider: Provider,
     events: broadcast::Sender<AgentEvent>,
+    history: std::sync::Arc<[AgentEvent]>,
 }
 
 impl SessionHandle {
@@ -34,7 +35,18 @@ impl SessionHandle {
             id,
             provider,
             events,
+            history: Default::default(),
         }
+    }
+    /// Snapshot restored before live subscribers can attach. Broadcasting these
+    /// events during `resume` would lose them because no receiver exists yet.
+    pub fn with_history(mut self, history: Vec<AgentEvent>) -> Self {
+        self.history = history.into();
+        self
+    }
+
+    pub fn history(&self) -> &[AgentEvent] {
+        &self.history
     }
     /// Subscribe to events emitted from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -52,6 +64,30 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 pub trait AgentBackend: Send + Sync {
     fn provider(&self) -> Provider;
 
+    /// Discover model choices without submitting a prompt or registering a chat.
+    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<crate::ModelInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Read the provider's saved title without resuming or submitting a turn.
+    async fn session_title(
+        &self,
+        _session: &SessionId,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Display name for externally owned conversations, using the provider's
+    /// first-message preview when it has not assigned a name yet.
+    async fn session_display_title(
+        &self,
+        session: &SessionId,
+        cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        self.session_title(session, cwd).await
+    }
+
     /// Start a fresh session. Backends need not emit `SessionStarted`: nobody can
     /// be subscribed yet, so `SessionManager` emits it as the first history event.
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle>;
@@ -59,10 +95,27 @@ pub trait AgentBackend: Send + Sync {
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()>;
     /// Inject guidance into the turn currently in flight.
     async fn steer(&self, session: &SessionId, text: String) -> Result<()>;
+    async fn steer_input(&self, session: &SessionId, input: UserInput) -> Result<()> {
+        if !input.attachments.is_empty() {
+            return Err(AgentError::Backend("This provider does not support images while steering. Keep this as a queued follow-up.".into()));
+        }
+        self.steer(session, input.text).await
+    }
     /// Stop the current turn (ends with `TurnCompleted{Interrupted}`).
     async fn interrupt(&self, session: &SessionId) -> Result<()>;
     /// Reattach to a previously started session (e.g. after app restart).
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle>;
+    /// Apply settings between turns while retaining the provider session ID.
+    /// Providers with live controls may override this; CLI-only providers resume
+    /// the same saved conversation with their new launch settings.
+    async fn reconfigure(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+    ) -> Result<SessionHandle> {
+        self.close(session).await?;
+        self.resume(config, session).await
+    }
     /// Answer a pending `ApprovalRequested`.
     async fn respond_approval(
         &self,

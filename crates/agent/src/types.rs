@@ -67,6 +67,11 @@ pub struct SessionConfig {
     pub cwd: PathBuf,
     /// Provider model id; `None` means the provider's default.
     pub model: Option<String>,
+    /// Provider reasoning effort; absent preserves the provider default.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub provider: Provider,
     pub permission_mode: PermissionMode,
 }
@@ -137,6 +142,10 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// A user message restored from the provider's saved transcript.
+    UserMessage {
+        text: String,
+    },
     SessionStarted {
         session_id: SessionId,
     },

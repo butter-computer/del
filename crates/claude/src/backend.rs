@@ -21,6 +21,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 use crate::protocol::{Translator, interrupt_line, user_message_line};
+use base64::Engine as _;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeOptions {
@@ -75,6 +76,7 @@ impl Live {
 pub struct ClaudeBackend {
     options: ClaudeOptions,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
+    titles: Arc<Mutex<crate::titles::Titles>>,
 }
 
 impl ClaudeBackend {
@@ -82,6 +84,7 @@ impl ClaudeBackend {
         Self {
             options,
             sessions: Mutex::default(),
+            titles: Default::default(),
         }
     }
 
@@ -122,6 +125,9 @@ impl ClaudeBackend {
         a.extend(session_flag.map(String::from));
         if let Some(m) = &config.model {
             a.extend(["--model".into(), m.clone()]);
+        }
+        if let Some(effort) = &config.reasoning_effort {
+            a.extend(["--effort".into(), effort.clone()]);
         }
         if let Some(s) = &self.options.setting_sources {
             a.extend(["--setting-sources".into(), s.clone()]);
@@ -230,22 +236,70 @@ impl ClaudeBackend {
 
     async fn submit(&self, session: &SessionId, input: UserInput) -> Result<()> {
         let live = self.live(session)?;
-        let mut text = input.text;
-        for a in &input.attachments {
-            text.push_str(&format!("\n[Attached file: {}]", a.path.display()));
-        }
+        let line = input_line(&input).await?;
         let turn_id = uuid::Uuid::new_v4().to_string();
-        live.write_line(&user_message_line(&text)).await?;
+        live.write_line(&line).await?;
         let evs = live.translator.lock().unwrap().enqueue_turn(turn_id);
         live.emit(evs);
         Ok(())
     }
 }
 
+async fn input_line(input: &UserInput) -> Result<String> {
+    let mut content = vec![serde_json::json!({"type":"text", "text":input.text})];
+    for attachment in &input.attachments {
+        if let Some(mime) = attachment
+            .mime
+            .as_deref()
+            .filter(|mime| mime.starts_with("image/"))
+        {
+            let bytes = tokio::fs::read(&attachment.path).await?;
+            content.push(
+                serde_json::json!({"type":"image","source":{"type":"base64","media_type":mime,
+                    "data":base64::engine::general_purpose::STANDARD.encode(bytes)}}),
+            );
+        } else {
+            content.push(serde_json::json!({"type":"text","text":format!("[Attached file: {}]", attachment.path.display())}));
+        }
+    }
+    let line = if input.attachments.is_empty() {
+        user_message_line(&input.text)
+    } else {
+        serde_json::json!({"type":"user","message":{"role":"user","content":content}}).to_string()
+    };
+    Ok(line)
+}
+
 #[async_trait]
 impl AgentBackend for ClaudeBackend {
     fn provider(&self) -> Provider {
         Provider::Claude
+    }
+
+    async fn list_models(&self, cwd: &std::path::Path) -> Result<Vec<del_agent::ModelInfo>> {
+        crate::models::discover(&self.options, cwd).await
+    }
+
+    async fn session_title(
+        &self,
+        session: &SessionId,
+        cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        let Some(root) = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+        else {
+            return Ok(None);
+        };
+        let (titles, cwd, id) = (
+            self.titles.clone(),
+            cwd.to_owned(),
+            session.as_str().to_owned(),
+        );
+        tokio::task::spawn_blocking(move || titles.lock().unwrap().read(&root, &cwd, &id))
+            .await
+            .map_err(|e| AgentError::Backend(e.to_string()))?
+            .map_err(AgentError::from)
     }
 
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
@@ -268,6 +322,10 @@ impl AgentBackend for ClaudeBackend {
     /// like `send_prompt`.
     async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
         self.submit(session, UserInput::text(text)).await
+    }
+
+    async fn steer_input(&self, session: &SessionId, input: UserInput) -> Result<()> {
+        self.submit(session, input).await
     }
 
     async fn interrupt(&self, session: &SessionId) -> Result<()> {
@@ -357,4 +415,61 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
         logged_in: v["loggedIn"].as_bool().unwrap_or(false),
         method: v["authMethod"].as_str().map(str::to_owned),
     })
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+    #[test]
+    fn effort_is_forwarded_only_when_selected() {
+        let backend = ClaudeBackend::new(ClaudeOptions::default());
+        let mut config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: Some("sonnet".into()),
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Claude,
+            permission_mode: PermissionMode::Ask,
+        };
+        assert!(
+            !backend
+                .args(&config, ["--session-id", "test"])
+                .contains(&"--effort".into())
+        );
+        config.reasoning_effort = Some("high".into());
+        let args = backend.args(&config, ["--session-id", "test"]);
+        assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
+        assert!(args.windows(2).any(|w| w == ["--model", "sonnet"]));
+    }
+}
+
+#[cfg(test)]
+mod image_input_tests {
+    use super::*;
+    #[tokio::test]
+    async fn images_are_encoded_in_the_message_not_only_named_in_text() {
+        let path =
+            std::env::temp_dir().join(format!("del-image-wire-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        let input = UserInput {
+            text: "look".into(),
+            attachments: vec![del_agent::Attachment {
+                path: path.clone(),
+                mime: Some("image/png".into()),
+            }],
+        };
+        let line = input_line(&input).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["message"]["content"][0]["text"], "look");
+        assert_eq!(value["message"]["content"][1]["source"]["data"], "AQID");
+        assert_eq!(
+            value["message"]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(
+            input_line(&UserInput::text("plain")).await.unwrap(),
+            user_message_line("plain")
+        );
+    }
 }

@@ -160,6 +160,8 @@ impl McpHost for ManagerHost {
             .start_session(SessionConfig {
                 cwd: request.cwd,
                 model: None,
+                reasoning_effort: None,
+                service_tier: None,
                 provider: request.provider,
                 permission_mode: PermissionMode::default(),
             })

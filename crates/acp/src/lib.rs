@@ -6,3 +6,5 @@ mod translate;
 
 pub use backend::AcpBackend;
 pub use registry::AcpAgentConfig;
+
+mod models;

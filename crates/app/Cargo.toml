@@ -16,6 +16,7 @@ async-trait = "0.1"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "macros"] }
 gpui-kit.workspace = true
 # Listed explicitly so the exact GPUI snapshot is a hard constraint of this
@@ -29,3 +30,7 @@ del-claude = { path = "../claude" }
 del-acp = { path = "../acp" }
 del-terminal = { path = "../terminal" }
 del-mcp.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile = "3"

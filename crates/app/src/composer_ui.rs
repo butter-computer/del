@@ -7,6 +7,7 @@
 //! then steers the turn), and the agent / model / folder are locked once the
 //! session exists.
 
+use crate::appearance::{rgb, rgba};
 use crate::providers;
 use del_agent::Provider;
 use del_core::composer;
@@ -21,6 +22,7 @@ use std::rc::Rc;
 
 /// Fill of the composer card: a faint white lift, like the page it sits on.
 pub const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
+pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 type ChoiceHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
@@ -31,17 +33,19 @@ pub struct ComposerCard {
     max_width: f32,
     provider: Provider,
     provider_ready: bool,
-    model: Option<String>,
+    model_picker: Entity<crate::model_picker::ModelPicker>,
     folder: String,
-    /// The session exists, so its folder can no longer change. (Agent and
-    /// model stay dropdowns; picking another opens a new tab.)
+    /// The session exists, so its working folder can no longer change.
     folder_locked: bool,
+    show_folder: bool,
     running: bool,
+    starting: bool,
     on_send: Handler,
+    on_attach: Handler,
+    has_attachments: bool,
     on_stop: Handler,
     on_folder: Handler,
     on_provider: ChoiceHandler<Provider>,
-    on_model: ChoiceHandler<Option<String>>,
 }
 
 impl ComposerCard {
@@ -51,7 +55,7 @@ impl ComposerCard {
         max_width: f32,
         provider: Provider,
         provider_ready: bool,
-        model: Option<String>,
+        model_picker: Entity<crate::model_picker::ModelPicker>,
         folder: String,
         folder_locked: bool,
         running: bool,
@@ -62,16 +66,37 @@ impl ComposerCard {
             max_width,
             provider,
             provider_ready,
-            model,
+            model_picker,
             folder,
             folder_locked,
+            show_folder: true,
             running,
+            starting: false,
             on_send: noop.clone(),
+            on_attach: noop.clone(),
+            has_attachments: false,
             on_stop: noop.clone(),
             on_folder: noop,
             on_provider: Rc::new(|_, _, _| {}),
-            on_model: Rc::new(|_, _, _| {}),
         }
+    }
+
+    pub fn attachments(mut self, has: bool) -> Self {
+        self.has_attachments = has;
+        self
+    }
+    pub fn on_attach(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_attach = Rc::new(handler);
+        self
+    }
+    pub fn show_folder(mut self, show: bool) -> Self {
+        self.show_folder = show;
+        self
+    }
+
+    pub fn starting(mut self, starting: bool) -> Self {
+        self.starting = starting;
+        self
     }
 
     pub fn on_send(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -90,19 +115,19 @@ impl ComposerCard {
         self.on_provider = Rc::new(f);
         self
     }
-    pub fn on_model(mut self, f: impl Fn(Option<String>, &mut Window, &mut App) + 'static) -> Self {
-        self.on_model = Rc::new(f);
-        self
+}
+
+pub(crate) fn provider_brand(provider: Provider) -> (&'static str, u32) {
+    match provider {
+        Provider::Claude => ("icons/claude.svg", 0xd97757),
+        Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
+        Provider::Acp => ("icons/acp.svg", 0xb1b7c4),
     }
 }
 
 /// The agent's logo in its own colour, no background.
 pub fn provider_logo(provider: Provider, size: f32) -> Svg {
-    let (path, color) = match provider {
-        Provider::Claude => ("icons/claude.svg", 0xd97757),
-        Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
-        Provider::Acp => ("icons/acp.svg", 0xb1b7c4),
-    };
+    let (path, color) = provider_brand(provider);
     svg()
         .path(path)
         .size(px(size))
@@ -117,25 +142,29 @@ fn chip(id: &'static str) -> Button {
 
 impl RenderOnce for ComposerCard {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let can_send = composer::submission(&self.input.read(cx).value()).is_some();
+        let can_send =
+            self.has_attachments || composer::submission(&self.input.read(cx).value()).is_some();
         let muted = rgba(0xffffff8c);
         let ComposerCard {
             input,
             max_width,
             provider,
             provider_ready,
-            model,
+            model_picker,
             folder,
             folder_locked,
+            show_folder,
             running,
+            starting,
             on_send,
+            on_attach,
+            has_attachments: _,
             on_stop,
             on_folder,
             on_provider,
-            on_model,
         } = self;
 
-        let agent = chip("agent").child(
+        let agent = chip("agent").disabled(starting).child(
             h_flex()
                 .gap_1p5()
                 .items_center()
@@ -145,41 +174,40 @@ impl RenderOnce for ComposerCard {
         let agent_el = {
             let current = provider;
             agent.dropdown_menu(move |menu, _, _| {
-                Provider::ALL.iter().fold(menu, |menu, &p| {
-                    let on_provider = on_provider.clone();
-                    menu.item(
-                        PopupMenuItem::new(providers::display_name(p))
-                            .checked(p == current)
-                            .on_click(move |_, w, cx| on_provider(p, w, cx)),
-                    )
-                })
-            })
-        };
-        let model_el = {
-            let current = model.clone();
-            chip("model")
-                .label(providers::model_label(model.as_deref()))
-                .text_color(muted)
-                .dropdown_menu(move |menu, _, _| {
-                    providers::models(provider).iter().fold(menu, |menu, m| {
-                        let on_model = on_model.clone();
-                        let value = m.clone();
+                Provider::ALL
+                    .iter()
+                    .fold(menu.check_side(Side::Right), |menu, &p| {
+                        let on_provider = on_provider.clone();
+                        let (path, color) = provider_brand(p);
                         menu.item(
-                            PopupMenuItem::new(providers::model_label(m.as_deref()))
-                                .checked(value.as_deref() == current.as_deref())
-                                .on_click(move |_, w, cx| on_model(value.clone(), w, cx)),
+                            PopupMenuItem::new(providers::display_name(p))
+                                .icon(Icon::default().path(path).text_color(rgb(color)))
+                                .checked(p == current)
+                                .on_click(move |_, w, cx| on_provider(p, w, cx)),
                         )
                     })
-                })
+            })
         };
-        let folder_el = chip("folder")
-            .icon(IconName::Folder)
-            .label(folder)
-            .text_color(muted)
-            .when(!folder_locked, |b| {
-                let on_folder = on_folder.clone();
-                b.on_click(move |_, w, cx| on_folder(w, cx))
-            });
+        let folder_el = if folder_locked {
+            h_flex()
+                .h(px(20.0))
+                .px_1()
+                .gap_1()
+                .items_center()
+                .text_size(px(12.0))
+                .text_color(muted)
+                .child(Icon::new(IconName::Folder).small())
+                .child(folder)
+                .into_any_element()
+        } else {
+            chip("folder")
+                .disabled(starting)
+                .icon(IconName::Folder)
+                .label(folder)
+                .text_color(muted)
+                .on_click(move |_, w, cx| on_folder(w, cx))
+                .into_any_element()
+        };
 
         // One round button: send, or stop while a turn is running.
         let action = div()
@@ -189,7 +217,9 @@ impl RenderOnce for ComposerCard {
             .items_center()
             .justify_center()
             .rounded_full();
-        let action = if running {
+        let action = if starting {
+            action.child(gpui_kit::component::spinner::Spinner::new().small())
+        } else if running {
             action
                 .bg(rgb(0xffffff))
                 .cursor_pointer()
@@ -238,9 +268,16 @@ impl RenderOnce for ComposerCard {
                         h_flex()
                             .items_center()
                             .gap_0p5()
+                            .child(
+                                chip("attach-images")
+                                    .icon(IconName::Plus)
+                                    .tooltip("Attach images")
+                                    .accessibility_label("Attach images")
+                                    .on_click(move |_, window, cx| on_attach(window, cx)),
+                            )
                             .child(agent_el)
-                            .child(model_el)
-                            .child(folder_el),
+                            .child(model_picker)
+                            .when(show_folder, |row| row.child(folder_el)),
                     )
                     .child(action),
             )

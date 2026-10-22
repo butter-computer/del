@@ -331,14 +331,13 @@ struct PaintCell {
     row: usize,
     text: String,
     fg: Hsla,
-    bg: Hsla,
+    bg: Option<Hsla>,
     flags: Flags,
 }
 struct Frame {
     cells: Vec<PaintCell>,
     cursor: Option<(usize, usize, CursorShape)>,
     width: Pixels,
-    background: Hsla,
 }
 
 impl TerminalView {
@@ -360,12 +359,12 @@ impl TerminalView {
         });
         self.session.with_term(|term| {
             let content = term.renderable_content();
-            let background = color(colors::resolve(
+            let background = colors::resolve(
                 alacritty_terminal::vte::ansi::Color::Named(
                     alacritty_terminal::vte::ansi::NamedColor::Background,
                 ),
                 content.colors,
-            ));
+            );
             let mut cells = Vec::new();
             for indexed in content.display_iter {
                 let row = indexed.point.line.0 + content.display_offset as i32;
@@ -403,9 +402,11 @@ impl TerminalView {
                     text,
                     fg: color(fg),
                     bg: if selected {
-                        rgba(0x43556fff).into()
+                        Some(rgba(0x43556fff).into())
+                    } else if bg == background && !cell.flags.contains(Flags::INVERSE) {
+                        None
                     } else {
-                        color(bg)
+                        Some(color(bg))
                     },
                     flags: cell.flags,
                 });
@@ -418,7 +419,6 @@ impl TerminalView {
                 cells,
                 cursor,
                 width: self.cell_width,
-                background,
             }
         })
     }
@@ -477,7 +477,6 @@ impl Render for TerminalView {
             .flex_col()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(0))
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::copy))
@@ -492,7 +491,7 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .child(
-                div().flex_1().min_h_0().overflow_hidden().child(
+                div().flex_1().min_h_0().overflow_hidden().p_3().child(
                     canvas(
                         move |bounds, window, cx| {
                             before.update(cx, |this, _| this.prepare(bounds, window))
@@ -507,11 +506,13 @@ impl Render for TerminalView {
                                 ElementInputHandler::new(bounds, painted.clone()),
                                 cx,
                             );
-                            window.paint_quad(fill(bounds, frame.background));
                             let cursor = frame.cursor;
                             // Paint every background before glyphs: a wide glyph
                             // extends into its spacer cell.
                             for cell in &frame.cells {
+                                let Some(background) = cell.bg else {
+                                    continue;
+                                };
                                 let origin = bounds.origin
                                     + point(
                                         frame.width * cell.col as f32,
@@ -519,7 +520,7 @@ impl Render for TerminalView {
                                     );
                                 window.paint_quad(fill(
                                     Bounds::new(origin, size(frame.width, px(LINE_HEIGHT))),
-                                    cell.bg,
+                                    background,
                                 ));
                             }
                             for cell in frame.cells {
@@ -568,7 +569,7 @@ impl Render for TerminalView {
                                     && matches!(shape, CursorShape::Beam | CursorShape::Underline)
                                 {
                                     let b = if shape == CursorShape::Beam {
-                                        Bounds::new(origin, size(px(1.5), px(LINE_HEIGHT)))
+                                        Bounds::new(origin, size(px(1.0), px(LINE_HEIGHT)))
                                     } else {
                                         Bounds::new(
                                             origin + point(px(0.), px(LINE_HEIGHT - 2.)),

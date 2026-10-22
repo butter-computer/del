@@ -1,6 +1,9 @@
 # del-terminal
 
-An embedded Unix terminal with portable-pty, alacritty_terminal, and a GPUI entity. The view uses a compact black surface and Menlo at 13 logical pixels.
+An embedded Unix terminal with portable-pty, alacritty_terminal, and a GPUI entity.
+The view uses Menlo at 13 logical pixels and leaves the default terminal background
+transparent so the host's chat surface shows through. Explicit cell backgrounds,
+inverse colors, and selection remain visible.
 
 ```rust,ignore
 // In app initialization:
@@ -21,6 +24,11 @@ terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
 `TerminalSpec::command("claude", ["--help"])` runs a program through the user's interactive login shell so it receives the user's PATH. Set `login_env: false` for direct execution. `env`, `cwd`, initial grid size, and scrollback capacity are configurable. Inherited environment is retained with TERM, COLORTERM, and TERM_PROGRAM defaults. Extra environment overrides those defaults. Environment variables that a login startup file reassigns follow that shell's normal behavior.
 
 `TerminalView` emits `TerminalEvent` for title changes, bell, exit status, and repaint wakeups. Subscribe with GPUI's `cx.subscribe` or `cx.subscribe_in`. Alternatively, drive a `TerminalSession` without a view using `take_events`, `write`, `resize`, and `with_term`. Call `ack_wakeup` when handling a repaint. The final exit event follows PTY output draining.
+
+The app host owns provider-specific launch settings, workspace trust, updates,
+saved conversation identities, and automatic reopening after a successful CLI
+update. Those behaviors are not applied by this generic terminal crate or its
+standalone demo. See the [application README](../../README.md#files-and-terminals).
 
 Cmd-C/Cmd-V and Ctrl-Shift-C/Ctrl-Shift-V copy/paste. Drag selects, double-click selects a word, triple-click selects a line. Shift overrides application mouse reporting. Shift-PageUp/PageDown/Home/End scroll the history. The wheel scrolls history or reports to mouse-enabled applications; alternate-screen wheel events map to cursor keys when alternate scrolling is enabled. Option sends an ESC prefix by default; set `option_as_meta = false` for OS Option character composition. Printable text and IME preedit use GPUI's input handler; only committed text reaches the child. Applications cannot read or overwrite the clipboard through OSC 52.
 

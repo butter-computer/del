@@ -127,6 +127,8 @@ async fn real_manager_and_terminal_context_status_notify_and_summary() {
         .start_session(SessionConfig {
             cwd: f._dir.path().into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             provider: Provider::Codex,
             permission_mode: Default::default(),
         })

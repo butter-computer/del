@@ -98,6 +98,49 @@ impl TerminalLaunchSpec {
             login_env: true,
         })
     }
+    pub fn from_config(config: &del_agent::SessionConfig) -> io::Result<Self> {
+        let kind = match config.provider {
+            del_agent::Provider::Codex => TerminalLaunchKind::Codex,
+            del_agent::Provider::Claude => TerminalLaunchKind::Claude,
+            del_agent::Provider::Acp => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Choose Codex or Claude to start a terminal session",
+                ));
+            }
+        };
+        let mut spec = Self::agent(kind, config.cwd.clone())?;
+        spec.apply_model_settings(config);
+        Ok(spec)
+    }
+
+    fn apply_model_settings(&mut self, config: &del_agent::SessionConfig) {
+        if let Some(model) = &config.model {
+            self.args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = &config.reasoning_effort {
+            match self.kind {
+                TerminalLaunchKind::Codex => self.args.extend([
+                    "-c".into(),
+                    format!(
+                        "model_reasoning_effort={}",
+                        serde_json::to_string(effort).unwrap()
+                    ),
+                ]),
+                TerminalLaunchKind::Claude => self.args.extend(["--effort".into(), effort.clone()]),
+                _ => {}
+            }
+        }
+        if self.kind == TerminalLaunchKind::Codex
+            && let Some(tier) = &config.service_tier
+        {
+            self.args.extend([
+                "-c".into(),
+                format!("service_tier={}", serde_json::to_string(tier).unwrap()),
+            ]);
+        }
+    }
+
     /// Run the user's explicit command as one shell command, preserving its
     /// quoting and pipelines. This is separate from the agent argv interface.
     pub fn custom(command: impl Into<String>, cwd: impl Into<PathBuf>) -> io::Result<Self> {
@@ -161,6 +204,24 @@ impl TerminalLaunchSpec {
             ));
         }
         let mut args = self.args.clone();
+        let cwd = self.cwd.canonicalize()?;
+        if self.kind == TerminalLaunchKind::Codex {
+            // Scope trust to the folder explicitly opened in Del. Keep the
+            // provider's approval policy and sandbox settings unchanged.
+            args.extend([
+                "-c".into(),
+                format!(
+                    "projects.{}.trust_level=\"trusted\"",
+                    serde_json::to_string(&cwd.to_string_lossy()).unwrap()
+                ),
+            ]);
+            // Use the provider's conversation name, without the folder/status
+            // decorations or a UUID while the name is still being generated.
+            args.extend([
+                "-c".into(),
+                r#"tui.terminal_title=["session-id","thread-name"]"#.into(),
+            ]);
+        }
         args.extend(extra_args);
         Ok(TerminalSpec {
             program: self.program.clone(),
@@ -170,7 +231,7 @@ impl TerminalLaunchSpec {
                 .iter()
                 .map(|key| (*key).to_owned())
                 .collect(),
-            cwd: Some(self.cwd.canonicalize()?),
+            cwd: Some(cwd),
             login_env: self.login_env,
             ..TerminalSpec::default()
         })
@@ -368,6 +429,51 @@ pub struct TerminalHostSnapshot {
     pub pid: u32,
     pub summary: Option<String>,
     pub last_output: String,
+    pub conversation_hint: Option<String>,
+    pub title_loading: bool,
+    title_pending_since: Option<std::time::Instant>,
+}
+
+impl TerminalHostSnapshot {
+    fn update_title(&mut self, title: Option<&str>, fallback: &str) {
+        let title = title.map(|title| {
+            if self.kind == TerminalLaunchKind::Claude {
+                crate::terminal_conversation::claude_osc_title(title)
+            } else {
+                title
+            }
+        });
+        if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+            if crate::terminal_conversation::title_is_pending(title) {
+                if self.title_pending_since.is_none() {
+                    self.title_pending_since = Some(std::time::Instant::now());
+                    self.title_loading = true;
+                }
+                return;
+            }
+            if self.kind == TerminalLaunchKind::Codex
+                && let Some((identity, name)) = crate::terminal_conversation::codex_title(title)
+            {
+                self.conversation_hint = Some(identity);
+                if let Some(name) = name {
+                    self.update_title(Some(&name), fallback);
+                } else {
+                    self.title_pending_since = None;
+                    self.title_loading = false;
+                }
+                return;
+            }
+            self.title_pending_since = None;
+            self.title_loading = false;
+            self.title = title.to_owned();
+        } else if !matches!(
+            self.kind,
+            TerminalLaunchKind::Codex | TerminalLaunchKind::Claude
+        ) {
+            self.title = fallback.to_owned();
+        }
+        // Agent TUIs clear OSC titles on exit; keep their last conversation name.
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -388,6 +494,10 @@ impl Focusable for TerminalHost {
     }
 }
 impl TerminalHost {
+    pub fn terminal_view(&self) -> Entity<TerminalView> {
+        self.terminal.clone()
+    }
+
     pub fn spawn(
         spec: TerminalLaunchSpec,
         window: &mut Window,
@@ -447,11 +557,8 @@ impl TerminalHost {
             this.snapshot.last_output = output;
             match event {
                 TerminalEvent::TitleChanged(title) => {
-                    this.snapshot.title = title
-                        .as_ref()
-                        .filter(|title| !title.trim().is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| this.fallback_title.clone())
+                    this.snapshot
+                        .update_title(title.as_deref(), &this.fallback_title);
                 }
                 TerminalEvent::Exited { code }
                     if this.snapshot.status != TerminalHostStatus::Closed =>
@@ -465,6 +572,45 @@ impl TerminalHost {
             cx.notify();
         })
         .detach();
+        if spec.kind == TerminalLaunchKind::Claude {
+            // Claude has no interactive-launch trust flag. Confirm only its
+            // exact startup dialog, letting Claude persist trust itself. Never
+            // auto-answer later tool approvals or dialogs in custom terminals.
+            let workspace = cwd.clone();
+            cx.spawn(async move |this, cx| {
+                let started = std::time::Instant::now();
+                let mut observed = None;
+                while started.elapsed() < std::time::Duration::from_secs(120) {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let keep_waiting = this.update(cx, |this, cx| {
+                        let session = this.terminal.read(cx).session();
+                        if session.exited() || this.snapshot.status != TerminalHostStatus::Running {
+                            return false;
+                        }
+                        let screen = screen_tail(session);
+                        let Some(key) = claude_workspace_trust_key(&screen, &workspace) else {
+                            // Once the recognized dialog disappears, stop.
+                            return observed.is_none();
+                        };
+                        let seen = observed.get_or_insert_with(std::time::Instant::now);
+                        // Claude briefly ignores confirmation input while the
+                        // dialog mounts. Wait before selecting or confirming.
+                        if seen.elapsed() < std::time::Duration::from_secs(2) {
+                            return true;
+                        }
+                        session.write(key.to_vec());
+                        *seen = std::time::Instant::now();
+                        key != b"\r"
+                    });
+                    if !matches!(keep_waiting, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let fallback_title = spec.title.clone();
         Self {
             terminal,
@@ -477,9 +623,35 @@ impl TerminalHost {
                 pid,
                 summary: None,
                 last_output: String::new(),
+                conversation_hint: None,
+                title_loading: false,
+                title_pending_since: None,
             },
         }
     }
+    /// Metadata reads never resume a thread or send a prompt. A completed lookup
+    /// also ends the loading animation if the TUI leaves its progress title set.
+    pub fn refresh_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        let before = self.snapshot.clone();
+        if let Some(title) = title
+            .filter(|t| !t.trim().is_empty() && !crate::terminal_conversation::title_is_pending(t))
+        {
+            self.snapshot.title = title;
+            self.snapshot.title_loading = false;
+        }
+        if self
+            .snapshot
+            .title_pending_since
+            .is_some_and(|start| start.elapsed().as_secs() >= 30)
+        {
+            self.snapshot.title_loading = false;
+        }
+        if self.snapshot != before {
+            cx.emit(TerminalHostEvent::Changed(self.snapshot.clone()));
+            cx.notify();
+        }
+    }
+
     pub fn snapshot(&self) -> TerminalHostSnapshot {
         self.snapshot.clone()
     }
@@ -532,7 +704,6 @@ impl Render for TerminalHost {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .bg(rgb(0))
             .child(
                 h_flex()
                     .h(px(32.))
@@ -564,14 +735,6 @@ impl Render for TerminalHost {
                                     this.snapshot.last_output.clone(),
                                 ));
                             })),
-                    )
-                    .child(
-                        Button::new("close-terminal-process")
-                            .ghost()
-                            .small()
-                            .label("Close")
-                            .disabled(self.snapshot.status == TerminalHostStatus::Closed)
-                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),
             )
             .child(
@@ -631,10 +794,178 @@ fn screen_tail(session: &TerminalSession) -> String {
     })
 }
 
+fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'static [u8]> {
+    let lines: Vec<_> = screen.lines().map(str::trim).collect();
+    if !lines.contains(&"Accessing workspace:")
+        || !lines.contains(&cwd.to_string_lossy().as_ref())
+        || !lines.last()?.starts_with("Enter to confirm")
+        || !lines.last()?.contains("Esc to cancel")
+    {
+        return None;
+    }
+    let selected = lines.iter().find_map(|line| {
+        line.strip_prefix('❯')
+            .or_else(|| line.strip_prefix('>'))
+            .map(str::trim)
+    })?;
+    match selected {
+        "Yes, I trust this folder" => Some(b"\r"),
+        "No, exit" | "No, continue without these permissions"
+            if lines.contains(&"Yes, I trust this folder") =>
+        {
+            Some(b"\x1b[B")
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TerminalLaunchKind, TerminalLaunchSpec};
     use std::path::PathBuf;
+
+    #[test]
+    fn claude_only_confirms_the_selected_workspace_trust_dialog() {
+        let cwd = std::path::Path::new("/work/project");
+        let screen = "Accessing workspace:\n/work/project\nNo, exit\n❯ Yes, I trust this folder\nEnter to confirm · Esc to cancel";
+        assert_eq!(
+            super::claude_workspace_trust_key(screen, cwd),
+            Some(b"\r".as_slice())
+        );
+        let cancel_selected = screen.replace("No, exit\n❯ Yes", "❯ No, exit\nYes");
+        assert_eq!(
+            super::claude_workspace_trust_key(&cancel_selected, cwd),
+            Some(b"\x1b[B".as_slice())
+        );
+        for unrelated in [
+            screen.replace("/work/project", "/work/other"),
+            screen.replace("Accessing workspace:", "Allow this command?"),
+            screen.replace("❯ Yes, I trust this folder", "Yes, I trust this folder"),
+            format!("{screen}\nClaude is ready for a prompt"),
+            screen.replace("Enter to confirm · Esc to cancel", "Loading…"),
+        ] {
+            assert_eq!(super::claude_workspace_trust_key(&unrelated, cwd), None);
+        }
+    }
+
+    #[test]
+    fn codex_publishes_conversation_name_instead_of_project_directory() {
+        let spec = TerminalLaunchSpec {
+            kind: TerminalLaunchKind::Codex,
+            cwd: std::env::temp_dir(),
+            program: Some("/bin/cat".into()),
+            args: vec![],
+            title: "Codex".into(),
+            login_env: false,
+        };
+        let prepared = spec
+            .prepare(vec!["--".into(), "hello".into()], vec![])
+            .unwrap();
+        assert!(
+            prepared
+                .args
+                .windows(2)
+                .any(|args| args == ["-c", r#"tui.terminal_title=["session-id","thread-name"]"#])
+        );
+        assert_eq!(&prepared.args[prepared.args.len() - 2..], &["--", "hello"]);
+    }
+
+    #[test]
+    fn provider_title_updates_survive_terminal_title_reset() {
+        for kind in [TerminalLaunchKind::Codex, TerminalLaunchKind::Claude] {
+            let mut snapshot = super::TerminalHostSnapshot {
+                kind,
+                cwd: std::env::temp_dir(),
+                title: kind.label().into(),
+                status: super::TerminalHostStatus::Running,
+                pid: 1,
+                summary: None,
+                last_output: String::new(),
+                conversation_hint: None,
+                title_loading: false,
+                title_pending_since: None,
+            };
+            for title in [
+                Some("Build the sidebar"),
+                Some("Resize sidebar smoothly"),
+                Some("⠧ | renaming... ⠧"),
+                None,
+                Some(""),
+            ] {
+                snapshot.update_title(title, kind.label());
+            }
+            assert_eq!(snapshot.title, "Resize sidebar smoothly");
+            assert!(snapshot.title_loading);
+            snapshot.title_loading = false; // completed metadata refresh
+            snapshot.update_title(Some("⠋ | renaming... ⠋"), kind.label());
+            assert!(
+                !snapshot.title_loading,
+                "repeated progress must not restart loading"
+            );
+            snapshot.update_title(Some("Fix renaming bugs"), kind.label());
+            assert_eq!(snapshot.title, "Fix renaming bugs");
+            assert!(!snapshot.title_loading);
+            snapshot.update_title(Some("⠋ | renaming... ⠋"), kind.label());
+            assert!(snapshot.title_loading, "a new rename can animate again");
+        }
+    }
+
+    #[test]
+    fn composer_settings_and_prompt_reach_terminal_argv() {
+        for (kind, provider, effort_args) in [
+            (
+                TerminalLaunchKind::Codex,
+                del_agent::Provider::Codex,
+                vec![
+                    "-c",
+                    "model_reasoning_effort=\"high\"",
+                    "-c",
+                    "service_tier=\"priority\"",
+                ],
+            ),
+            (
+                TerminalLaunchKind::Claude,
+                del_agent::Provider::Claude,
+                vec!["--effort", "high"],
+            ),
+        ] {
+            let config = del_agent::SessionConfig {
+                provider,
+                cwd: std::env::temp_dir(),
+                model: Some("chosen-model".into()),
+                reasoning_effort: Some("high".into()),
+                service_tier: Some("priority".into()),
+                permission_mode: Default::default(),
+            };
+            let mut spec = TerminalLaunchSpec {
+                kind,
+                cwd: config.cwd.clone(),
+                program: Some("/bin/cat".into()),
+                args: vec![],
+                title: "Test".into(),
+                login_env: false,
+            };
+            spec.apply_model_settings(&config);
+            let prompt = "build this; keep it one argument";
+            let prepared = spec
+                .prepare(vec!["--".into(), prompt.into()], vec![])
+                .unwrap();
+            let mut expected = vec!["--model", "chosen-model"];
+            expected.extend(effort_args);
+            let trust = format!(
+                "projects.{}.trust_level=\"trusted\"",
+                serde_json::to_string(&config.cwd.canonicalize().unwrap().to_string_lossy())
+                    .unwrap()
+            );
+            if kind == TerminalLaunchKind::Codex {
+                expected.extend(["-c", &trust]);
+                expected.extend(["-c", r#"tui.terminal_title=["session-id","thread-name"]"#]);
+            }
+            expected.extend(["--", prompt]);
+            assert_eq!(prepared.args, expected);
+            assert_eq!(prepared.cwd, Some(config.cwd.canonicalize().unwrap()));
+        }
+    }
 
     #[test]
     fn shell_keeps_workspace_and_login_environment() {
@@ -665,7 +996,22 @@ mod tests {
                 vec![("DEL_MCP_TOKEN".into(), "test-secret".into())],
             )
             .unwrap();
-        assert_eq!(prepared.args.len(), 3);
+        assert_eq!(
+            prepared.args,
+            [
+                "original",
+                "-c",
+                &format!(
+                    "projects.{}.trust_level=\"trusted\"",
+                    serde_json::to_string(&spec.cwd.canonicalize().unwrap().to_string_lossy())
+                        .unwrap()
+                ),
+                "-c",
+                r#"tui.terminal_title=["session-id","thread-name"]"#,
+                "-c",
+                "mcp_servers.del.url=loopback"
+            ]
+        );
         assert_eq!(prepared.env[0].1, "test-secret");
         assert_eq!(serde_json::to_string(&spec).unwrap(), before);
         assert!(!before.contains("test-secret"));

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Del</title>
+  <defs>
+    <linearGradient id="graphite" x1="140" y1="64" x2="830" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#65686c"/><stop offset=".36" stop-color="#303236"/><stop offset=".72" stop-color="#17181b"/><stop offset="1" stop-color="#090a0c"/>
+    </linearGradient>
+    <radialGradient id="light" cx=".18" cy="0" r=".95">
+      <stop stop-color="#fff" stop-opacity=".14"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="200" y1="70" x2="800" y2="950" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".5"/><stop offset=".45" stop-color="#fff" stop-opacity=".08"/><stop offset="1" stop-color="#fff" stop-opacity=".17"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="320" y1="270" x2="680" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fafbfc"/><stop offset=".25" stop-color="#d5d9df"/><stop offset=".49" stop-color="#9fa6b0"/><stop offset=".51" stop-color="#7c848f"/><stop offset=".78" stop-color="#c2c9d1"/><stop offset="1" stop-color="#eff2f5"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="330" y1="280" x2="655" y2="755" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff"/><stop offset=".4" stop-color="#fff" stop-opacity=".7"/><stop offset=".65" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity=".6"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-25%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="22" stdDeviation="17" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+    <path id="d" fill-rule="evenodd" d="M306 270Q290 270 290 286V738Q290 754 306 754H490C652 754 750 659 750 512S652 270 490 270ZM402 378H486C582 378 638 429 638 512S582 646 486 646H402Z"/>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#graphite)"/>
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#light)"/>
+  <rect x="66" y="66" width="892" height="892" rx="204" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  <use href="#d" fill="url(#glass)" filter="url(#shadow)"/>
+  <use href="#d" fill="none" stroke="url(#edge)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M307 292V731" fill="none" stroke="#fff" stroke-opacity=".2" stroke-width="3" stroke-linecap="round"/>
+</svg>

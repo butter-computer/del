@@ -164,8 +164,8 @@ impl ChatModel {
 
     /// Mark the user's own message and optimistically enter the running phase.
     pub fn push_user(&mut self, text: String, steer: bool) -> Change {
-        self.seal();
         if !steer {
+            self.seal();
             self.phase = Phase::Running;
         }
         self.push(Block::User { text, steer })
@@ -184,7 +184,12 @@ impl ChatModel {
 
     /// Stop streaming the open assistant/reasoning block, if any.
     fn seal(&mut self) {
-        match self.blocks.last_mut() {
+        match self.blocks.iter_mut().rev().find(|block| {
+            matches!(
+                block,
+                Block::Assistant { open: true, .. } | Block::Reasoning { open: true, .. }
+            )
+        }) {
             Some(Block::Assistant { open, .. }) | Some(Block::Reasoning { open, .. }) => {
                 *open = false
             }
@@ -228,8 +233,23 @@ impl ChatModel {
             })
     }
 
+    fn open_answer(&self, turn_id: &str) -> Option<usize> {
+        self.blocks.iter().rposition(|block| {
+            matches!(block,
+                Block::Assistant { turn_id: id, open: true, .. } if id == turn_id
+            )
+        })
+    }
+
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::UserMessage { text } => {
+                self.seal();
+                Some(self.push(Block::User {
+                    text: text.clone(),
+                    steer: false,
+                }))
+            }
             AgentEvent::SessionStarted { .. } => None,
             AgentEvent::TurnStarted { turn_id } => {
                 self.phase = Phase::Running;
@@ -238,15 +258,11 @@ impl ChatModel {
                 None
             }
             AgentEvent::AssistantTextDelta { turn_id, text } => {
-                if let Some(Block::Assistant {
-                    turn_id: t,
-                    text: buf,
-                    open: true,
-                }) = self.blocks.last_mut()
-                    && t == turn_id
-                {
-                    buf.push_str(text);
-                    return Some(Change::Updated(self.blocks.len() - 1));
+                if let Some(ix) = self.open_answer(turn_id) {
+                    if let Block::Assistant { text: buf, .. } = &mut self.blocks[ix] {
+                        buf.push_str(text);
+                    }
+                    return Some(Change::Updated(ix));
                 }
                 self.seal();
                 Some(self.push(Block::Assistant {
@@ -256,17 +272,15 @@ impl ChatModel {
                 }))
             }
             AgentEvent::AssistantMessage { turn_id, text } => {
-                if let Some(Block::Assistant {
-                    turn_id: t,
-                    text: buf,
-                    open,
-                }) = self.blocks.last_mut()
-                    && t == turn_id
-                    && *open
-                {
-                    *buf = text.clone();
-                    *open = false;
-                    return Some(Change::Updated(self.blocks.len() - 1));
+                if let Some(ix) = self.open_answer(turn_id) {
+                    if let Block::Assistant {
+                        text: buf, open, ..
+                    } = &mut self.blocks[ix]
+                    {
+                        *buf = text.clone();
+                        *open = false;
+                    }
+                    return Some(Change::Updated(ix));
                 }
                 self.seal();
                 Some(self.push(Block::Assistant {
@@ -447,6 +461,82 @@ mod tests {
             name: "bash".into(),
             input_summary: "ls".into(),
         }
+    }
+
+    #[test]
+    fn steering_during_streaming_keeps_one_complete_answer() {
+        let mut model = ChatModel::default();
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "t1".into(),
+        });
+        model.apply(&AgentEvent::AssistantTextDelta {
+            turn_id: "t1".into(),
+            text: "The lighthouse ".into(),
+        });
+        model.push_user("ok twin".into(), true);
+        model.apply(&AgentEvent::AssistantTextDelta {
+            turn_id: "t1".into(),
+            text: "keeper".into(),
+        });
+        model.apply(&AgentEvent::AssistantMessage {
+            turn_id: "t1".into(),
+            text: "The lighthouse keeper".into(),
+        });
+        let answers: Vec<_> = model
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, ["The lighthouse keeper"]);
+        assert_eq!(
+            model
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, Block::User { steer: true, .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn restored_conversation_renders_user_and_assistant_in_order() {
+        let mut model = ChatModel::default();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "old".into(),
+            },
+            AgentEvent::UserMessage {
+                text: "hello".into(),
+            },
+            AgentEvent::AssistantMessage {
+                turn_id: "old".into(),
+                text: "hi".into(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "old".into(),
+                status: TurnStatus::Completed,
+            },
+        ] {
+            model.apply(&event);
+        }
+        assert_eq!(
+            model.blocks,
+            vec![
+                Block::User {
+                    text: "hello".into(),
+                    steer: false
+                },
+                Block::Assistant {
+                    turn_id: "old".into(),
+                    text: "hi".into(),
+                    open: false
+                },
+            ]
+        );
+        assert!(!model.is_running());
     }
 
     #[test]

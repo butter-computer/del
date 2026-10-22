@@ -17,6 +17,8 @@ fn config() -> SessionConfig {
     SessionConfig {
         cwd: "/work".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         provider: Provider::Codex,
         permission_mode: PermissionMode::Ask,
     }
@@ -207,6 +209,194 @@ const THREAD: [&str; 2] = [
 ];
 
 #[tokio::test]
+async fn terminal_display_title_uses_exact_conversation_and_provider_preview_fallback() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/read","params":{"threadId":"terminal-conversation","includeTurns":false}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"terminal-conversation","name":null,"preview":"uhuh"}}}"#,
+        r#"> {"id":4,"method":"thread/read","params":{"threadId":"terminal-conversation","includeTurns":false}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"terminal-conversation","name":"Enjoying life","preview":"uhuh"}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let id = SessionId::new("terminal-conversation");
+    assert_eq!(
+        backend
+            .session_display_title(&id, std::path::Path::new("/work"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("uhuh")
+    );
+    assert_eq!(
+        backend
+            .session_display_title(&id, std::path::Path::new("/work"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("Enjoying life")
+    );
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","name":"Build a smooth sidebar","preview":"hello"}}}"#,
+        r#"> {"id":4,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"saved","name":"Renamed in Codex","preview":"hello"}}}"#,
+        r#"> {"id":5,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
+        r#"< {"id":5,"result":{"thread":{"id":"saved","name":null,"preview":"hello"}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = std::sync::Arc::new(CodexBackend::attach(opts(), client, rx).await.unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.jsonl");
+    let id = SessionId::new("saved");
+    let record = SessionRecord {
+        id: id.clone(),
+        provider: Provider::Codex,
+        cwd: "/work".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        permission_mode: PermissionMode::Ask,
+        title: Some("hello".into()),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        status: SessionStatus::Idle,
+    };
+    del_agent::index::SessionIndex::open(&path)
+        .unwrap()
+        .upsert(record.clone())
+        .unwrap();
+    let manager =
+        SessionManager::new(&path, [backend as std::sync::Arc<dyn AgentBackend>]).unwrap();
+    assert!(manager.refresh_titles().await.unwrap());
+    assert_eq!(
+        manager.list_sessions()[0].title.as_deref(),
+        Some("Build a smooth sidebar")
+    );
+    assert!(manager.refresh_titles().await.unwrap());
+    assert!(!manager.refresh_titles().await.unwrap());
+    let saved = del_agent::index::SessionIndex::open(&path)
+        .unwrap()
+        .list()
+        .remove(0);
+    assert_eq!(saved.title.as_deref(), Some("Renamed in Codex"));
+    assert_eq!(saved.updated_at_ms, record.updated_at_ms);
+    assert_eq!(saved.status, SessionStatus::Idle);
+    manager.shutdown().await;
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn resumed_history_reaches_chat_subscribers() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved"}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[{"id":"old-turn","status":"completed","items":[{"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello again"}]},{"type":"agentMessage","id":"a1","text":"Welcome back"}]}]}}}"#,
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"saved","input":[{"type":"text","text":"first after reopening"}]}}"#,
+        r#"< {"id":4,"result":{"turn":{"id":"new-turn"}}}"#,
+        r#"< {"method":"turn/started","params":{"threadId":"saved","turn":{"id":"new-turn"}}}"#,
+        r#"< {"method":"item/completed","params":{"threadId":"saved","turnId":"new-turn","item":{"type":"agentMessage","id":"a2","text":"First reply"}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"saved","turn":{"id":"new-turn","status":"completed"}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = std::sync::Arc::new(CodexBackend::attach(opts(), client, rx).await.unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.jsonl");
+    let id = SessionId::new("saved");
+    del_agent::index::SessionIndex::open(&path)
+        .unwrap()
+        .upsert(SessionRecord {
+            id: id.clone(),
+            provider: Provider::Codex,
+            cwd: "/work".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: PermissionMode::Ask,
+            title: Some("hello again".into()),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            status: SessionStatus::Idle,
+        })
+        .unwrap();
+    let manager =
+        SessionManager::new(&path, [backend as std::sync::Arc<dyn AgentBackend>]).unwrap();
+    // Sidebar selection and ChatView hydration can both request resume before
+    // the first RPC completes. They must share one attachment.
+    let (first, second) = tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::join!(manager.resume(&id), manager.resume(&id))
+    })
+    .await
+    .expect("concurrent reopen must reuse one resume RPC");
+    first.unwrap();
+    second.unwrap();
+    let (history, mut events) = manager.subscribe_with_history(&id).unwrap();
+    assert!(
+        history.iter().any(|event| matches!(event,
+            AgentEvent::AssistantMessage { text, .. } if text == "Welcome back"
+        )),
+        "saved messages must reach a newly opened chat: {history:?}"
+    );
+    assert_eq!(
+        history,
+        vec![
+            AgentEvent::SessionStarted {
+                session_id: id.clone()
+            },
+            AgentEvent::TurnStarted {
+                turn_id: "old-turn".into()
+            },
+            AgentEvent::UserMessage {
+                text: "hello again".into()
+            },
+            AgentEvent::AssistantMessage {
+                turn_id: "old-turn".into(),
+                text: "Welcome back".into()
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "old-turn".into(),
+                status: TurnStatus::Completed
+            },
+        ]
+    );
+    // Reopening an already-live session must not append the snapshot again.
+    manager.resume(&id).await.unwrap();
+    assert_eq!(manager.subscribe_with_history(&id).unwrap().0, history);
+    manager
+        .send_prompt(&id, UserInput::text("first after reopening"))
+        .await
+        .unwrap();
+    let live = until_turn_end(&mut events).await;
+    assert!(
+        live.iter().any(|event| matches!(event,
+            AgentEvent::AssistantMessage { text, .. } if text == "First reply"
+        )),
+        "the original chat subscription must survive reopening and the first send"
+    );
+    manager.shutdown().await;
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn not_logged_in_is_a_clear_error() {
     let lines = script(&[
         HANDSHAKE[0],
@@ -260,7 +450,7 @@ async fn steer_and_interrupt_use_the_active_turn_id() {
         r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
         r#"< {"id":4,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
         r#"< {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
-        r#"> {"id":5,"method":"turn/steer","params":{"threadId":"t1","expectedTurnId":"u1","input":[{"type":"text","text":"left please"}]}}"#,
+        r#"> {"id":5,"method":"turn/steer","params":{"threadId":"t1","expectedTurnId":"u1","input":[{"type":"text","text":"left please"},{"type":"localImage","path":"/work/picture.png"}]}}"#,
         r#"< {"id":5,"result":{"turnId":"u1"}}"#,
         r#"> {"id":6,"method":"turn/interrupt","params":{"threadId":"t1","turnId":"u1"}}"#,
         r#"< {"id":6,"result":{}}"#,
@@ -278,7 +468,19 @@ async fn steer_and_interrupt_use_the_active_turn_id() {
         backend.send_prompt(&h.id, UserInput::text("again")).await,
         Err(AgentError::Busy(_))
     ));
-    backend.steer(&h.id, "left please".into()).await.unwrap();
+    backend
+        .steer_input(
+            &h.id,
+            UserInput {
+                text: "left please".into(),
+                attachments: vec![Attachment {
+                    path: "/work/picture.png".into(),
+                    mime: Some("image/png".into()),
+                }],
+            },
+        )
+        .await
+        .unwrap();
     backend.interrupt(&h.id).await.unwrap();
     let evs = until_turn_end(&mut ev).await;
     assert!(matches!(
@@ -414,4 +616,55 @@ async fn server_exit_surfaces_error_event_and_fails_requests() {
         matches!(err, del_codex::ClientError::Disconnected(_)),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn model_effort_and_fast_changes_reach_next_turn_in_same_thread() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}],"model":"model-b","effort":"high","serviceTier":"priority","serviceTierForTurn":"priority"}}"#,
+        r#"< {"id":4,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[]}}}"#,
+        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"again"}],"model":"model-c","effort":"low","serviceTier":null,"serviceTierForTurn":"default"}}"#,
+        r#"< {"id":5,"result":{"turn":{"id":"u2","status":"inProgress","items":[]}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u2","status":"completed","items":[]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let h = backend.start_session(config()).await.unwrap();
+    let mut events = h.subscribe();
+    let mut settings = config();
+    settings.model = Some("model-b".into());
+    settings.reasoning_effort = Some("high".into());
+    settings.service_tier = Some("priority".into());
+    assert_eq!(
+        backend
+            .reconfigure(settings.clone(), &h.id)
+            .await
+            .unwrap()
+            .id,
+        h.id
+    );
+    backend
+        .send_prompt(&h.id, UserInput::text("go"))
+        .await
+        .unwrap();
+    until_turn_end(&mut events).await;
+    settings.model = Some("model-c".into());
+    settings.reasoning_effort = Some("low".into());
+    settings.service_tier = None;
+    backend.reconfigure(settings, &h.id).await.unwrap();
+    backend
+        .send_prompt(&h.id, UserInput::text("again"))
+        .await
+        .unwrap();
+    until_turn_end(&mut events).await;
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
 }

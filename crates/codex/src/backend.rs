@@ -49,6 +49,7 @@ struct SessionState {
     approvals: HashMap<String, PendingApproval>,
     /// A `turn/start` is in flight (guards double-submit).
     starting: bool,
+    turn_config: Option<SessionConfig>,
 }
 
 struct Session {
@@ -97,6 +98,12 @@ fn thread_params(config: &SessionConfig) -> serde_json::Map<String, Value> {
     p.insert("serviceName".into(), json!(CLIENT_NAME));
     if let Some(m) = &config.model {
         p.insert("model".into(), json!(m));
+    }
+    if let Some(effort) = &config.reasoning_effort {
+        p.insert("config".into(), json!({"model_reasoning_effort": effort}));
+    }
+    if let Some(tier) = &config.service_tier {
+        p.insert("serviceTier".into(), json!(tier));
     }
     p
 }
@@ -170,7 +177,14 @@ impl CodexBackend {
         {
             return Ok(c.clone());
         }
-        let (client, rx) = CodexClient::spawn(&self.opts.spawn)?;
+        let mut spawn = self.opts.spawn.clone();
+        if spawn.program == std::path::Path::new("codex") {
+            spawn.program = del_agent::detect::find_working_binary("codex")
+                .await
+                .map(|(path, _)| path)
+                .ok_or(CodexError::NotInstalled)?;
+        }
+        let (client, rx) = CodexClient::spawn(&spawn)?;
         let conn = self.handshake(client, rx).await?;
         *guard = Some(conn.clone());
         Ok(conn)
@@ -217,7 +231,17 @@ impl CodexBackend {
         let id = SessionId::new(resp.thread.id);
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
-        Ok(SessionHandle::new(id, provider, session.events.clone()))
+        let history = if thread.is_some() {
+            session
+                .state
+                .lock()
+                .unwrap()
+                .mapper
+                .history(&resp.thread.turns)
+        } else {
+            Vec::new()
+        };
+        Ok(SessionHandle::new(id, provider, session.events.clone()).with_history(history))
     }
 }
 
@@ -225,6 +249,87 @@ impl CodexBackend {
 impl AgentBackend for CodexBackend {
     fn provider(&self) -> Provider {
         Provider::Codex
+    }
+
+    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
+        let conn = self.connection().await?;
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page: Value = conn
+                .client
+                .call("model/list", json!({"cursor": cursor}))
+                .await
+                .map_err(be)?;
+            models.extend(crate::models::parse_models(&page)?);
+            let next = page["nextCursor"].as_str().map(str::to_owned);
+            if next.is_none() {
+                break;
+            }
+            if next == cursor {
+                return Err(be("model/list repeated its cursor"));
+            }
+            cursor = next;
+        }
+        Ok(models)
+    }
+
+    async fn session_title(
+        &self,
+        session: &SessionId,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        let conn = self.connection().await?;
+        let response: Value = conn
+            .client
+            .call(
+                "thread/read",
+                json!({
+                    "threadId": session.as_str(), "includeTurns": false,
+                }),
+            )
+            .await
+            .map_err(be)?;
+        Ok(["name", "title"].into_iter().find_map(|key| {
+            response["thread"][key]
+                .as_str()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+        }))
+    }
+
+    async fn session_display_title(
+        &self,
+        session: &SessionId,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        let conn = self.connection().await?;
+        let response: Value = conn
+            .client
+            .call(
+                "thread/read",
+                json!({
+                    "threadId": session.as_str(), "includeTurns": false,
+                }),
+            )
+            .await
+            .map_err(be)?;
+        Ok(["name", "title", "preview"].into_iter().find_map(|key| {
+            response["thread"][key]
+                .as_str()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(|title| {
+                    title
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(120)
+                        .collect()
+                })
+        }))
     }
 
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
@@ -247,6 +352,16 @@ impl AgentBackend for CodexBackend {
         .await
     }
 
+    async fn reconfigure(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
+        let session = self.session(id)?;
+        session.state.lock().unwrap().turn_config = Some(config);
+        Ok(SessionHandle::new(
+            id.clone(),
+            Provider::Codex,
+            session.events.clone(),
+        ))
+    }
+
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
         let s = self.session(session)?;
         {
@@ -257,13 +372,18 @@ impl AgentBackend for CodexBackend {
             st.starting = true;
         }
         let conn = self.connection().await?;
-        let result: std::result::Result<TurnResponse, ClientError> = conn
-            .client
-            .call(
-                "turn/start",
-                json!({ "threadId": session.as_str(), "input": turn_input(&input) }),
-            )
-            .await;
+        let mut params = json!({ "threadId": session.as_str(), "input": turn_input(&input) });
+        if let Some(config) = &s.state.lock().unwrap().turn_config {
+            params["model"] = json!(config.model);
+            params["effort"] = json!(config.reasoning_effort);
+            params["serviceTier"] = json!(config.service_tier);
+            // A null persistent override can inherit the prior tier. Explicitly
+            // select standard speed for this turn when Fast is switched off.
+            params["serviceTierForTurn"] =
+                json!(config.service_tier.as_deref().unwrap_or("default"));
+        }
+        let result: std::result::Result<TurnResponse, ClientError> =
+            conn.client.call("turn/start", params).await;
         let mut st = s.state.lock().unwrap();
         st.starting = false;
         let resp = result.map_err(be)?;
@@ -272,6 +392,10 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
+        self.steer_input(session, UserInput::text(text)).await
+    }
+
+    async fn steer_input(&self, session: &SessionId, input: UserInput) -> Result<()> {
         let s = self.session(session)?;
         let turn = s.state.lock().unwrap().mapper.turn_id().map(str::to_owned);
         let Some(turn) = turn else {
@@ -281,7 +405,7 @@ impl AgentBackend for CodexBackend {
         conn.client
             .request(
                 "turn/steer",
-                json!({ "threadId": session.as_str(), "expectedTurnId": turn, "input": [text_input(&text)] }),
+                json!({ "threadId": session.as_str(), "expectedTurnId": turn, "input": turn_input(&input) }),
             )
             .await
             .map_err(be)?;
@@ -440,5 +564,29 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+    #[test]
+    fn effort_is_forwarded_only_when_selected() {
+        let mut config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: Some("available-model".into()),
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Codex,
+            permission_mode: PermissionMode::Ask,
+        };
+        assert!(!thread_params(&config).contains_key("config"));
+        assert!(!thread_params(&config).contains_key("serviceTier"));
+        config.reasoning_effort = Some("high".into());
+        config.service_tier = Some("priority".into());
+        let params = thread_params(&config);
+        assert_eq!(params["model"], "available-model");
+        assert_eq!(params["config"]["model_reasoning_effort"], "high");
+        assert_eq!(params["serviceTier"], "priority");
     }
 }

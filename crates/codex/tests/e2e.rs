@@ -11,6 +11,8 @@ fn config(cwd: &std::path::Path, mode: PermissionMode) -> SessionConfig {
     SessionConfig {
         cwd: cwd.into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         provider: Provider::Codex,
         permission_mode: mode,
     }
@@ -36,6 +38,51 @@ async fn collect_until<F: Fn(&AgentEvent) -> bool>(
 
 fn is_end(e: &AgentEvent) -> bool {
     matches!(e, AgentEvent::TurnCompleted { .. })
+}
+
+/// Restores an existing local transcript without sending a model prompt.
+#[tokio::test]
+#[ignore]
+async fn saved_thread_restores_messages() {
+    let id = SessionId::new(std::env::var("DEL_TEST_SESSION_ID").expect("set DEL_TEST_SESSION_ID"));
+    let index =
+        del_agent::index::SessionIndex::open(del_agent::index::default_index_path().unwrap())
+            .unwrap();
+    let record = index.get(&id).expect("saved session exists");
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let handle = backend.resume(record.config(), &id).await.unwrap();
+    let users = handle
+        .history()
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::UserMessage { .. }))
+        .count();
+    let assistants = handle
+        .history()
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::AssistantMessage { .. }))
+        .count();
+    backend.shutdown().await.unwrap();
+    assert!(users > 0, "saved user messages missing");
+    assert!(assistants > 0, "saved assistant replies missing");
+    eprintln!("Restored {users} user messages and {assistants} assistant messages");
+}
+
+/// Read-only startup probe: no model turn and no token usage.
+#[tokio::test]
+#[ignore]
+async fn installed_cli_returns_model_catalog() {
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let result = backend.list_models(&std::env::current_dir().unwrap()).await;
+    backend.shutdown().await.unwrap();
+    let models = result.expect("installed Codex must return its model catalog");
+    assert!(!models.is_empty());
+    assert!(models.iter().any(|model| model.is_default));
 }
 
 #[tokio::test]

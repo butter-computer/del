@@ -40,6 +40,8 @@ async fn real_cli_prompt_approve_interrupt_resume() {
     let cfg = SessionConfig {
         cwd: dir.clone(),
         model: Some("haiku".into()),
+        reasoning_effort: None,
+        service_tier: None,
         provider: Provider::Claude,
         permission_mode: PermissionMode::Ask,
     };

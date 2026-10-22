@@ -26,6 +26,8 @@ fn config() -> SessionConfig {
     SessionConfig {
         cwd: std::env::temp_dir(),
         model: Some("mock".into()),
+        reasoning_effort: None,
+        service_tier: None,
         provider: Provider::Acp,
         permission_mode: PermissionMode::Ask,
     }

@@ -7,3 +7,5 @@ pub mod model;
 mod view;
 
 pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView};
+
+pub use blocks::pending_prompt;

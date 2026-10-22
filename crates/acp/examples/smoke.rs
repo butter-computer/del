@@ -27,6 +27,8 @@ async fn main() -> Result<()> {
             .start_session(SessionConfig {
                 provider: Provider::Acp,
                 model: selected,
+                reasoning_effort: None,
+                service_tier: None,
                 cwd: cwd.path().into(),
                 permission_mode: PermissionMode::Ask,
             })

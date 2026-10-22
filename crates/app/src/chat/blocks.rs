@@ -4,6 +4,7 @@ use super::model::{
     ApprovalBlock, ApprovalState, Block, DiffKind, FileChangeBlock, ToolCall, ToolState,
 };
 use super::view::{COLUMN_MAX_WIDTH, ChatView};
+use crate::appearance::{rgb, rgba};
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use gpui_kit::component::spinner::Spinner;
@@ -355,21 +356,26 @@ fn dot(rgba_color: u32) -> AnyElement {
 }
 
 fn user_message(text: String, steer: bool) -> impl IntoElement {
-    v_flex()
-        .gap_0p5()
+    h_flex()
+        .items_start()
+        .gap_2()
         .p_2p5()
         .rounded_lg()
         .bg(rgba(0xffffff12))
-        .when(steer, |col| {
-            col.child(
-                div()
-                    .text_size(px(TEXT_SM))
-                    .text_color(rgba(AMBER))
-                    .child("steer"),
+        .when(steer, |row| {
+            row.child(
+                svg()
+                    .path("icons/queue.svg")
+                    .size(px(14.0))
+                    .mt(px(3.5))
+                    .flex_none()
+                    .text_color(rgba(0xe8b04ab3)),
             )
         })
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .text_size(px(TEXT_MD))
                 .line_height(relative(1.5))
                 .text_color(rgb(STRONG))
@@ -431,4 +437,47 @@ fn turn_end(status: TurnStatus) -> impl IntoElement {
         .text_size(px(TEXT_SM))
         .text_color(rgba(FAINT))
         .child(label)
+}
+
+/// The opening message is rendered before there is a backend session to follow.
+pub fn pending_prompt(text: String, error: Option<String>) -> impl IntoElement {
+    let failed = error.is_some();
+    v_flex()
+        .size_full()
+        .child(
+            div()
+                .id("pending-message")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(
+                    h_flex().w_full().justify_center().px_3().pt_3().child(
+                        div()
+                            .w_full()
+                            .max_w(px(COLUMN_MAX_WIDTH))
+                            .child(user_message(text, false)),
+                    ),
+                ),
+        )
+        .child(
+            v_flex().w_full().items_center().px_3().pb_2().child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(COLUMN_MAX_WIDTH))
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(TEXT_SM))
+                    .text_color(rgba(MUTED))
+                    .when(!failed, |row| {
+                        row.child(Spinner::new().xsmall()).child("Starting agent…")
+                    })
+                    .when_some(error, |row, error| {
+                        row.child(
+                            div()
+                                .text_color(rgba(RED))
+                                .child(format!("Could not start: {error}. Send again to retry.")),
+                        )
+                    }),
+            ),
+        )
 }
