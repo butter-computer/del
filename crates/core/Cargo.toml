@@ -1,0 +1,8 @@
+[package]
+name = "del-core"
+description = "UI-agnostic domain logic for the del app."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+del-core = { path = "crates/core" }
+
+# GPUI is published by Zed as the `gpui-pre-*` crate family (snapshots of
+# zed-industries/zed's crates). gpui-kit bundles gpui, gpui_platform, gpui-base
+# and gpui-component against one exact snapshot. Both pins below are exact and
+# must move together: gpui-kit 0.8.0 is built against gpui-pre 0.3.9.
+gpui-kit = "=0.8.0"
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+
+[profile.dev]
+# gpui and its dependency tree are large; optimizing deps keeps the window snappy.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

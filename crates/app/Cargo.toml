@@ -1,0 +1,17 @@
+[package]
+name = "del-app"
+description = "GPUI desktop window for the del app."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "del"
+path = "src/main.rs"
+
+[dependencies]
+del-core.workspace = true
+gpui-kit.workspace = true
+# Listed explicitly so the exact GPUI snapshot is a hard constraint of this
+# workspace, not only an implementation detail of gpui-kit.
+gpui.workspace = true
