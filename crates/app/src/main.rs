@@ -321,7 +321,14 @@ impl AppShell {
                                 let id = select_id.clone();
                                 select.update(cx, |s, cx| s.select(id, cx));
                             })
-                            .child(div().min_w_0().truncate().child(title))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .h(px(16.0))
+                                    .line_height(px(16.0))
+                                    .truncate()
+                                    .child(title),
+                            )
                             .child(
                                 div()
                                     .id(SharedString::from(format!("close-{}", id.0)))
