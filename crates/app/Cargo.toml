@@ -15,3 +15,6 @@ gpui-kit.workspace = true
 # Listed explicitly so the exact GPUI snapshot is a hard constraint of this
 # workspace, not only an implementation detail of gpui-kit.
 gpui.workspace = true
+# Decodes the wallpaper ahead of the first frame. Same crate and version GPUI
+# uses internally, so it adds no new code to the build.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

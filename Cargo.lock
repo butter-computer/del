@@ -1197,6 +1197,7 @@ dependencies = [
  "del-core",
  "gpui-kit",
  "gpui-pre",
+ "image",
 ]
 
 [[package]]
