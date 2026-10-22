@@ -5,6 +5,8 @@ use crate::sessions::{self, Row};
 use crate::state::{AppState, Panel, Selection};
 use del_agent::{LoginState, SessionStatus};
 use del_core::typography::{TEXT_MD, TEXT_SM};
+use gpui_kit::assets::IconName as ActionIcon;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -30,17 +32,15 @@ fn dot(color: Rgba) -> Div {
     div().size(px(6.0)).flex_none().rounded_full().bg(color)
 }
 
-/// A small borderless text button that must not start a window drag.
-fn text_button(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_1()
-        .rounded_sm()
-        .text_size(px(TEXT_SM))
+/// Compact hover actions retain spoken names without visible text labels.
+fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(icon)
+        .tooltip(label)
+        .accessibility_label(label)
         .text_color(rgba(MUTED))
-        .cursor_pointer()
-        .hover(|b| b.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
-        .child(label)
 }
 
 fn row_item(
@@ -145,22 +145,30 @@ fn row_item(
                     .group_hover(hover_group, |a| a.opacity(1.0))
                     .when(!archived, |a| {
                         a.child(
-                            text_button(SharedString::from(format!("rn-{}", id.0)), "Rename")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let id = rename_id.clone();
-                                    rename_state.update(cx, |s, cx| s.start_rename(id, cx));
-                                }),
+                            action_button(
+                                SharedString::from(format!("rn-{}", id.0)),
+                                ActionIcon::Pencil,
+                                "Rename",
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let id = rename_id.clone();
+                                rename_state.update(cx, |s, cx| s.start_rename(id, cx));
+                            }),
                         )
                         .child(
-                            text_button(SharedString::from(format!("ar-{}", id.0)), "Archive")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let id = archive_id.clone();
-                                    archive_state.update(cx, |s, cx| s.archive(id, cx));
-                                }),
+                            action_button(
+                                SharedString::from(format!("ar-{}", id.0)),
+                                ActionIcon::Archive,
+                                "Archive",
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let id = archive_id.clone();
+                                archive_state.update(cx, |s, cx| s.archive(id, cx));
+                            }),
                         )
                     })
                     .when(archived, |a| {
