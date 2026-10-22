@@ -92,7 +92,8 @@ impl Rpc {
         cwd: &Path,
         handler: Arc<dyn Handler>,
     ) -> std::io::Result<Arc<Rpc>> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .current_dir(cwd)
@@ -100,8 +101,9 @@ impl Rpc {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .process_group(0)
-            .spawn()?;
+            .process_group(0);
+        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        let mut child = command.spawn()?;
         let pid = child.id();
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");

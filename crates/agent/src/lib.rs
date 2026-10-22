@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod detect;
+pub mod environment;
 pub mod index;
 pub mod manager;
 pub mod mock;

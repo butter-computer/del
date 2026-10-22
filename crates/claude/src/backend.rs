@@ -143,7 +143,8 @@ impl ClaudeBackend {
                 live.events.clone(),
             ));
         }
-        let mut child = Command::new(&self.options.binary)
+        let mut command = Command::new(&self.options.binary);
+        command
             .args(self.args(config, session_flag))
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
@@ -151,14 +152,14 @@ impl ClaudeBackend {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             // Own process group, so closing takes down the MCP servers and tools too.
-            .process_group(0)
-            .spawn()
-            .map_err(|e| {
-                AgentError::Backend(format!(
-                    "failed to start `{}`: {e}",
-                    self.options.binary.display()
-                ))
-            })?;
+            .process_group(0);
+        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        let mut child = command.spawn().map_err(|e| {
+            AgentError::Backend(format!(
+                "failed to start `{}`: {e}",
+                self.options.binary.display()
+            ))
+        })?;
         let pid = child.id();
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
