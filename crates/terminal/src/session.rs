@@ -73,6 +73,9 @@ pub struct TerminalSpec {
     pub program: Option<String>,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Names excluded from this child, even if also present in `env`. For
+    /// login-wrapped commands they are cleared again after shell startup.
+    pub env_remove: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub size: TerminalSize,
     pub scrollback: usize,
@@ -86,6 +89,7 @@ impl Default for TerminalSpec {
             program: None,
             args: Vec::new(),
             env: Vec::new(),
+            env_remove: Vec::new(),
             cwd: None,
             size: TerminalSize::default(),
             scrollback: 10_000,
@@ -107,6 +111,10 @@ impl TerminalSpec {
             args: args.into_iter().map(Into::into).collect(),
             ..Self::default()
         }
+    }
+    pub fn env_remove(mut self, key: impl Into<String>) -> Self {
+        self.env_remove.push(key.into());
+        self
     }
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
@@ -130,12 +138,22 @@ fn launch_command(spec: &TerminalSpec, shell: &str) -> (String, Vec<String>) {
     match &spec.program {
         None => (shell.into(), vec!["-l".into()]),
         Some(program) if spec.login_env => {
-            let script = if shell.rsplit('/').next() == Some("fish") {
-                "exec $argv"
-            } else {
-                "exec \"$0\" \"$@\""
+            let fish = shell.rsplit('/').next() == Some("fish");
+            let script = match (fish, spec.env_remove.is_empty()) {
+                (true, true) => "exec $argv",
+                (false, true) => "exec \"$0\" \"$@\"",
+                (true, false) => "exec /usr/bin/env $argv",
+                (false, false) => "exec /usr/bin/env \"$0\" \"$@\"",
             };
             let mut args: Vec<String> = ["-l", "-i", "-c", script].map(String::from).into();
+            // Pass names as argv, not shell source. The cleanup runs after
+            // login/interactive startup files, immediately before the program.
+            for name in &spec.env_remove {
+                args.extend(["-u".into(), name.clone()]);
+            }
+            if !spec.env_remove.is_empty() {
+                args.push("--".into());
+            }
             args.push(program.clone());
             args.extend(spec.args.iter().cloned());
             (shell.into(), args)
@@ -301,6 +319,9 @@ impl TerminalSession {
         }
         for (key, value) in base_env(&spec) {
             command.env(key, value);
+        }
+        for key in &spec.env_remove {
+            command.env_remove(key);
         }
         let pair = native_pty_system()
             .openpty(spec.size.pty_size())
@@ -526,5 +547,28 @@ mod tests {
         let env = base_env(&TerminalSpec::shell().env("TERM", "dumb"));
         assert_eq!(env["TERM"], "dumb");
         assert_eq!(env["COLORTERM"], "truecolor");
+    }
+    #[test]
+    fn removed_names_and_arguments_are_positional_after_shell_startup() {
+        let spec = TerminalSpec::command("/bin/echo", ["a b", "$(touch nope)"])
+            .env_remove("CLAUDECODE")
+            .env_remove("DEL_WORKER_ONLY");
+        let (_, args) = launch_command(&spec, "/bin/zsh");
+        assert_eq!(args[3], "exec /usr/bin/env \"$0\" \"$@\"");
+        assert_eq!(
+            &args[4..],
+            [
+                "-u",
+                "CLAUDECODE",
+                "-u",
+                "DEL_WORKER_ONLY",
+                "--",
+                "/bin/echo",
+                "a b",
+                "$(touch nope)"
+            ]
+        );
+        let (_, args) = launch_command(&spec, "/usr/local/bin/fish");
+        assert_eq!(args[3], "exec /usr/bin/env $argv");
     }
 }
