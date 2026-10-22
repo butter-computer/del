@@ -13,34 +13,45 @@ mod wallpaper;
 mod assets;
 mod chat;
 mod composer_ui;
+#[allow(dead_code)]
+mod mcp_bridge;
+mod mode_ui;
 mod providers;
 mod right_panel;
 mod sessions;
 mod sidebar;
 mod signin;
 mod state;
+#[allow(dead_code)]
+mod terminal_host;
+mod terminal_store;
 
 use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics, composer};
+use del_mcp::SessionMode;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use mcp_bridge::McpBridge;
+use mode_ui::PendingQuestion;
 use right_panel::RightPanel;
 use state::{AppState, Panel, Selection, Tab};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+use terminal_host::{TerminalHost, TerminalLauncher};
+use terminal_store::TerminalStore;
 
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
 /// The sidebar is reserved for something else for now: its code stays, but it is
 /// neither shown nor toggleable (button and Cmd-B) until this is turned on.
-const SIDEBAR_ENABLED: bool = false;
+const SIDEBAR_ENABLED: bool = true;
 
 /// Every tab is this wide once settled; it animates to and from 0.
 const TAB_WIDTH: f32 = 160.0;
@@ -134,6 +145,16 @@ struct AppShell {
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     metrics: ShellMetrics,
+    terminals: HashMap<SessionId, Entity<TerminalHost>>,
+    launchers: HashMap<u64, Entity<TerminalLauncher>>,
+    launcher_cwds: HashMap<u64, std::path::PathBuf>,
+    terminal_store: TerminalStore,
+    mcp: Option<McpBridge>,
+    questions: VecDeque<PendingQuestion>,
+    mcp_answer: Entity<InputState>,
+    notices: VecDeque<(SessionId, String, String)>,
+    reported: HashMap<SessionId, String>,
+    mode_focus: Option<(Selection, SessionMode)>,
 }
 
 impl AppShell {
@@ -184,7 +205,26 @@ impl AppShell {
 
         let right_root = state.read(cx).effective().2;
         let right = cx.new(|cx| RightPanel::new(right_root, window, cx));
-        Self {
+        let terminal_store = TerminalStore::load(&TerminalStore::path());
+        state.update(cx, |s, _| {
+            s.terminal_rows = terminal_store
+                .records
+                .iter()
+                .map(|r| sessions::TerminalRow {
+                    id: r.id.clone(),
+                    title: r.title.clone(),
+                    cwd: r.launch.cwd.clone(),
+                    provider: r.launch.provider(),
+                    active: false,
+                    summary: String::new(),
+                })
+                .collect();
+            if let Some(error) = &terminal_store.error {
+                s.error = Some(error.clone());
+            }
+        });
+        let mcp_answer = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
+        let mut shell = Self {
             state,
             composer,
             rename,
@@ -196,7 +236,19 @@ impl AppShell {
             right_toggles: 0,
             chats: HashMap::new(),
             metrics: ShellMetrics::default(),
-        }
+            terminals: HashMap::new(),
+            launchers: HashMap::new(),
+            launcher_cwds: HashMap::new(),
+            terminal_store,
+            mcp: None,
+            questions: VecDeque::new(),
+            mcp_answer,
+            notices: VecDeque::new(),
+            reported: HashMap::new(),
+            mode_focus: None,
+        };
+        shell.start_modes(window, cx);
+        shell
     }
 
     /// Make sure the open session has a live chat view.
@@ -247,6 +299,19 @@ impl AppShell {
     }
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Selection::Terminal(id) = &self.state.read(cx).selection
+            && let Some(terminal) = self.terminals.get(id)
+        {
+            terminal.update(cx, |t, cx| t.focus(window, cx));
+            return;
+        }
+        if self.state.read(cx).mode() == SessionMode::Terminal
+            && let Selection::Draft(key) = self.state.read(cx).selection
+            && let Some(launcher) = self.launchers.get(&key)
+        {
+            launcher.update(cx, |l, cx| l.focus(window, cx));
+            return;
+        }
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
@@ -254,7 +319,7 @@ impl AppShell {
     fn open_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
         match &self.state.read(cx).selection {
             Selection::Session(id) => self.chats.get(id).cloned(),
-            Selection::Draft(_) => None,
+            Selection::Draft(_) | Selection::Terminal(_) => None,
         }
     }
 
@@ -332,7 +397,7 @@ impl AppShell {
             let st = self.state.read(cx);
             // Live tabs, with just-closed ones (ghosts) kept at their old place
             // while they shrink away.
-            let mut tabs: Vec<(Option<Tab>, u64, String, Provider)> = st
+            let mut tabs: Vec<(Option<Tab>, u64, String, Option<Provider>)> = st
                 .tabs
                 .iter()
                 .map(|tab| {
@@ -420,7 +485,9 @@ impl AppShell {
                                     tab_key.as_ref().is_some_and(|t| selection == t.selection())
                                         && panel == Panel::Chat;
                                 let name = match &tab_key {
-                                    Some(Tab::Session(id)) => id.0.clone(),
+                                    Some(Tab::Session(id)) | Some(Tab::Terminal(id)) => {
+                                        id.0.clone()
+                                    }
                                     Some(Tab::Draft(k)) => format!("draft-{k}"),
                                     None => format!("closing-{uid}"),
                                 };
@@ -434,7 +501,7 @@ impl AppShell {
                                             let tab = select_tab.clone();
                                             select.update(cx, |s, cx| s.select_tab(&tab, cx));
                                         })
-                                        .child(composer_ui::provider_logo(provider, 14.0))
+                                        .child(mode_ui::tab_mark(provider))
                                         .child(tab_title(title))
                                         .child(
                                             div()
@@ -467,7 +534,7 @@ impl AppShell {
                                 } else {
                                     // Closing: same look, no handlers.
                                     el = el
-                                        .child(composer_ui::provider_logo(provider, 14.0))
+                                        .child(mode_ui::tab_mark(provider))
                                         .child(tab_title(title))
                                         .child(div().size(px(16.0)).flex_none());
                                 }
@@ -551,6 +618,9 @@ impl AppShell {
             (st.panel, st.error.clone())
         };
         let chat = self.open_chat(cx);
+        if panel == Panel::Chat && self.state.read(cx).mode() == SessionMode::Terminal {
+            return self.render_terminal_page(cx).into_any_element();
+        }
 
         div()
             .id("page")
@@ -602,6 +672,7 @@ impl AppShell {
                                         .text_color(rgb(0xf5f5f5))
                                         .child(HEADING),
                                 )
+                                .child(self.render_mode_picker(cx))
                                 .child(self.render_composer(cx))
                                 .when_some(error, |col, message| {
                                     col.child(
@@ -615,12 +686,22 @@ impl AppShell {
                         ),
                 ),
             })
+            .into_any_element()
     }
 }
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let inset = px(self.metrics.page_inset);
+        self.ensure_modes(window, cx);
+        let mode_key = (
+            self.state.read(cx).selection.clone(),
+            self.state.read(cx).mode(),
+        );
+        if self.state.read(cx).panel == Panel::Chat && self.mode_focus.as_ref() != Some(&mode_key) {
+            self.mode_focus = Some(mode_key);
+            self.focus_composer(window, cx);
+        }
         self.ensure_chat(cx);
         let root = self.state.read(cx).effective().2;
         self.right.update(cx, |r, cx| r.set_root(root, cx));
@@ -692,6 +773,7 @@ impl Render for AppShell {
                 this.state.update(cx, |s, cx| s.toggle_providers(cx));
             }))
             .child(self.render_topbar(cx))
+            .child(self.render_agent_messages(cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -750,6 +832,7 @@ fn main() {
         .run(|cx| {
             // Must run before any gpui-component feature is used.
             gpui_kit::init(cx);
+            del_terminal::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
             // The window root paints the theme background across the whole
             // window, which would hide the blurred window material behind it. The

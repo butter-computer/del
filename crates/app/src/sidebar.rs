@@ -183,7 +183,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
     let archived = s.archived_rows();
     let active = match &s.selection {
         Selection::Session(id) => Some(id.clone()),
-        Selection::Draft(_) => None,
+        Selection::Draft(_) | Selection::Terminal(_) => None,
     };
     let draft_selected = matches!(s.selection, Selection::Draft(_)) && s.panel == Panel::Chat;
     let providers_open = s.panel == Panel::Providers;
@@ -234,6 +234,51 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                     let selected = active.as_ref() == Some(&row.id) && !providers_open;
                     let renaming = s.renaming.as_ref() == Some(&row.id);
                     row_item(row, selected, renaming, rename, state, now, false)
+                }))
+                .child(
+                    div()
+                        .mt_3()
+                        .px_2()
+                        .text_size(px(TEXT_SM))
+                        .text_color(rgba(FAINT))
+                        .child("TERMINALS"),
+                )
+                .children(s.terminal_rows.iter().map(|row| {
+                    let selected =
+                        s.selection == Selection::Terminal(row.id.clone()) && !providers_open;
+                    let state = state.clone();
+                    let id = row.id.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("terminal-row-{}", id.0)))
+                        .h(px(ROW_HEIGHT))
+                        .px_2()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(selected, |r| r.bg(rgba(0xffffff14)))
+                        .hover(|r| r.bg(rgba(0xffffff0a)))
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |s, cx| s.select_terminal(id.clone(), cx))
+                        })
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SM))
+                                .text_color(rgba(MUTED))
+                                .child(">_"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(TEXT_MD))
+                                .child(row.title.clone()),
+                        )
+                        .child(dot(if row.active {
+                            rgb(0x4cc38a)
+                        } else {
+                            rgb(0x6e6e73)
+                        }))
                 }))
                 .when(!archived.is_empty(), |list| {
                     list.child(

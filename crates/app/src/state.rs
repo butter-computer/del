@@ -3,8 +3,9 @@
 //! the backends back into GPUI.
 
 use crate::providers;
-use crate::sessions::{self, Overrides, Row};
+use crate::sessions::{self, Overrides, Row, TerminalRow};
 use del_agent::*;
+use del_mcp::SessionMode;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ pub enum Selection {
     /// prompt, with the provider, model and folder its own pickers hold.
     Draft(u64),
     Session(SessionId),
+    Terminal(SessionId),
 }
 
 /// How long a tab takes to grow in or shrink away.
@@ -39,7 +41,7 @@ pub struct Ghost {
     /// Where it was in the tab list.
     pub at: usize,
     pub title: String,
-    pub provider: Provider,
+    pub provider: Option<Provider>,
 }
 
 /// One tab in the top bar.
@@ -47,6 +49,7 @@ pub struct Ghost {
 pub enum Tab {
     Draft(u64),
     Session(SessionId),
+    Terminal(SessionId),
 }
 
 impl Tab {
@@ -54,6 +57,7 @@ impl Tab {
         match self {
             Tab::Draft(k) => Selection::Draft(*k),
             Tab::Session(id) => Selection::Session(id.clone()),
+            Tab::Terminal(id) => Selection::Terminal(id.clone()),
         }
     }
 }
@@ -76,6 +80,9 @@ pub struct AppState {
     pub selection: Selection,
     drafts: HashMap<u64, SessionConfig>,
     next_draft: u64,
+    draft_modes: HashMap<u64, SessionMode>,
+    pub terminal_rows: Vec<TerminalRow>,
+    pub closed_terminals: Vec<SessionId>,
     pub panel: Panel,
     pub providers: Vec<ProviderStatus>,
     /// Provider whose sign-in is running in the user's terminal.
@@ -195,6 +202,9 @@ impl AppState {
             next_uid: 1,
             ghosts: Vec::new(),
             next_draft: 1,
+            draft_modes: HashMap::new(),
+            terminal_rows: Vec::new(),
+            closed_terminals: Vec::new(),
         }
     }
 
@@ -304,6 +314,15 @@ impl AppState {
 
     /// Provider, model and folder in effect: the open session's, or the draft's.
     pub fn effective(&self) -> (Provider, Option<String>, PathBuf) {
+        if let Selection::Terminal(id) = &self.selection
+            && let Some(row) = self.terminal_rows.iter().find(|r| &r.id == id)
+        {
+            return (
+                row.provider.unwrap_or(Provider::Claude),
+                None,
+                row.cwd.clone(),
+            );
+        }
         match self.active_row() {
             Some(r) => (r.provider, r.model, r.cwd),
             None => match self.draft() {
@@ -327,15 +346,67 @@ impl AppState {
     fn draft(&self) -> Option<&SessionConfig> {
         match self.selection {
             Selection::Draft(k) => self.drafts.get(&k),
-            Selection::Session(_) => None,
+            Selection::Session(_) | Selection::Terminal(_) => None,
         }
     }
 
     fn draft_mut(&mut self) -> Option<&mut SessionConfig> {
         match self.selection {
             Selection::Draft(k) => self.drafts.get_mut(&k),
-            Selection::Session(_) => None,
+            Selection::Session(_) | Selection::Terminal(_) => None,
         }
+    }
+
+    pub fn mode(&self) -> SessionMode {
+        match &self.selection {
+            Selection::Terminal(_) => SessionMode::Terminal,
+            Selection::Session(_) => SessionMode::Chat,
+            Selection::Draft(k) => self.draft_modes.get(k).copied().unwrap_or_default(),
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
+        if let Selection::Draft(key) = self.selection {
+            self.draft_modes.insert(key, mode);
+            cx.notify();
+        }
+    }
+
+    pub fn select_terminal(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        let tab = Tab::Terminal(id.clone());
+        if !self.tabs.contains(&tab) {
+            self.new_uid(tab.clone());
+            self.tabs.push(tab);
+        }
+        self.selection = Selection::Terminal(id);
+        self.panel = Panel::Chat;
+        cx.notify();
+    }
+
+    pub fn terminal_started(
+        &mut self,
+        draft: Option<u64>,
+        row: TerminalRow,
+        cx: &mut Context<Self>,
+    ) {
+        let id = row.id.clone();
+        if let Some(old) = self.terminal_rows.iter_mut().find(|r| r.id == id) {
+            *old = row;
+        } else {
+            self.terminal_rows.push(row);
+        }
+        if let Some(key) = draft {
+            if let Some(at) = self.tabs.iter().position(|t| *t == Tab::Draft(key)) {
+                let tab = Tab::Terminal(id.clone());
+                self.tabs[at] = tab.clone();
+                if let Some(uid) = self.uids.remove(&Tab::Draft(key)) {
+                    self.uids.insert(tab, uid);
+                }
+            }
+            self.drafts.remove(&key);
+            self.draft_modes.remove(&key);
+        }
+        self.select_terminal(id, cx);
     }
 
     /// Whether the open draft is being turned into a session.
@@ -404,6 +475,7 @@ impl AppState {
     pub fn select_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
         match tab {
             Tab::Session(id) => self.select(id.clone(), cx),
+            Tab::Terminal(id) => self.select_terminal(id.clone(), cx),
             Tab::Draft(k) => {
                 self.selection = Selection::Draft(*k);
                 self.panel = Panel::Chat;
@@ -436,8 +508,15 @@ impl AppState {
         })
         .detach();
         self.tabs.remove(at);
+        if let Tab::Terminal(id) = tab {
+            self.closed_terminals.push(id.clone());
+            if let Some(row) = self.terminal_rows.iter_mut().find(|r| &r.id == id) {
+                row.active = false;
+            }
+        }
         if let Tab::Draft(k) = tab {
             self.drafts.remove(k);
+            self.draft_modes.remove(k);
             self.starting.remove(k);
         }
         if self.selection == tab.selection() {
@@ -459,6 +538,7 @@ impl AppState {
         let tab = match &self.selection {
             Selection::Draft(k) => Tab::Draft(*k),
             Selection::Session(id) => Tab::Session(id.clone()),
+            Selection::Terminal(id) => Tab::Terminal(id.clone()),
         };
         self.close_tab(&tab, cx);
     }
@@ -505,6 +585,7 @@ impl AppState {
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         match self.selection.clone() {
+            Selection::Terminal(_) => return,
             Selection::Draft(key) => {
                 if !self.starting.insert(key) {
                     return;
@@ -600,15 +681,26 @@ impl AppState {
 
     /// The agent a session runs on.
     /// Title and agent shown on a tab.
-    pub fn tab_info(&self, tab: &Tab) -> (String, Provider) {
+    pub fn tab_info(&self, tab: &Tab) -> (String, Option<Provider>) {
         match tab {
-            Tab::Session(id) => (
-                self.current_title(id),
-                self.provider_of(id).unwrap_or(Provider::Claude),
-            ),
+            Tab::Session(id) => (self.current_title(id), self.provider_of(id)),
+            Tab::Terminal(id) => self
+                .terminal_rows
+                .iter()
+                .find(|r| &r.id == id)
+                .map(|r| (format!(">_ {}", r.title), r.provider))
+                .unwrap_or_else(|| ("Terminal".into(), None)),
             Tab::Draft(k) => (
-                sessions::DEFAULT_TITLE.to_string(),
-                self.drafts.get(k).map_or(Provider::Claude, |d| d.provider),
+                if self.draft_modes.get(k) == Some(&SessionMode::Terminal) {
+                    "New terminal".into()
+                } else {
+                    sessions::DEFAULT_TITLE.to_string()
+                },
+                if self.draft_modes.get(k) == Some(&SessionMode::Terminal) {
+                    None
+                } else {
+                    self.drafts.get(k).map(|d| d.provider)
+                },
             ),
         }
     }

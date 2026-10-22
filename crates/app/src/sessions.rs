@@ -36,6 +36,17 @@ pub struct Row {
     pub archived: bool,
 }
 
+/// A terminal session stays separate from the manager's chat index.
+#[derive(Debug, Clone)]
+pub struct TerminalRow {
+    pub id: SessionId,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub provider: Option<Provider>,
+    pub active: bool,
+    pub summary: String,
+}
+
 impl Overrides {
     fn meta(&mut self, id: &SessionId) -> &mut Meta {
         self.0.entry(id.0.clone()).or_default()

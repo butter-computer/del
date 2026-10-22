@@ -1404,6 +1404,8 @@ dependencies = [
  "del-claude",
  "del-codex",
  "del-core",
+ "del-mcp",
+ "del-terminal",
  "dirs 6.0.0",
  "gpui-kit",
  "gpui-pre",
