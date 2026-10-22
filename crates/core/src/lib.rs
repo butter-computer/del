@@ -3,6 +3,14 @@
 //! This crate has no dependency on GPUI or any other UI toolkit, so it can be
 //! unit-tested and reused from any front end.
 
+pub mod composer;
+pub mod shell;
+pub mod tabs;
+pub mod typography;
+pub mod wallpaper;
+
+pub use shell::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics};
+
 /// A simple counter with a greeting, used as placeholder domain logic.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counter {
