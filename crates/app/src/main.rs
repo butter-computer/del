@@ -35,6 +35,10 @@ use std::sync::Arc;
 /// Initial window size in logical pixels.
 const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
 
+/// The sidebar is reserved for something else for now: its code stays, but it is
+/// neither shown nor toggleable (button and Cmd-B) until this is turned on.
+const SIDEBAR_ENABLED: bool = false;
+
 /// The prompt above the composer.
 const HEADING: &str = "What are we building?";
 
@@ -264,7 +268,7 @@ impl AppShell {
                 .max_w(px(200.0))
                 .pl_2()
                 .pr_1()
-                .gap_1()
+                .gap_2()
                 .items_center()
                 .rounded_md()
                 .cursor_pointer()
@@ -288,32 +292,34 @@ impl AppShell {
                     .items_center()
                     .gap_0p5()
                     .pl_2()
-                    .child(
-                        div()
-                            .id("toggle-sidebar")
-                            .size(px(24.0))
-                            .mr_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|b| b.bg(rgba(0xffffff0a)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_open = !this.sidebar_open;
-                                cx.notify();
-                            }))
-                            .child(
-                                Icon::new(if self.sidebar_open {
-                                    IconName::PanelLeftClose
-                                } else {
-                                    IconName::PanelLeftOpen
-                                })
-                                .small()
-                                .text_color(muted),
-                            ),
-                    )
+                    .when(SIDEBAR_ENABLED, |row| {
+                        row.child(
+                            div()
+                                .id("toggle-sidebar")
+                                .size(px(24.0))
+                                .mr_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|b| b.bg(rgba(0xffffff0a)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sidebar_open = !this.sidebar_open;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    Icon::new(if self.sidebar_open {
+                                        IconName::PanelLeftClose
+                                    } else {
+                                        IconName::PanelLeftOpen
+                                    })
+                                    .small()
+                                    .text_color(muted),
+                                ),
+                        )
+                    })
                     .children(tabs.into_iter().map(|(id, title, provider)| {
                         let active =
                             selection == Selection::Session(id.clone()) && panel == Panel::Chat;
@@ -492,6 +498,9 @@ impl Render for AppShell {
             .size_full()
             .key_context("Shell")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                if !SIDEBAR_ENABLED {
+                    return;
+                }
                 this.sidebar_open = !this.sidebar_open;
                 cx.notify();
             }))
@@ -522,7 +531,7 @@ impl Render for AppShell {
                     .flex_1()
                     .min_h_0()
                     .bg(rgba(SHELL_SURFACE_RGBA))
-                    .when(self.sidebar_open, |row| {
+                    .when(SIDEBAR_ENABLED && self.sidebar_open, |row| {
                         row.child(sidebar::render(&self.state, &self.rename, cx))
                     })
                     .child(
