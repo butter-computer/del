@@ -88,7 +88,10 @@ impl AppShell {
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
-                    .bordered(false),
+                    .bordered(false)
+                    // Same token as the chips below, so the input and the
+                    // model selector read at one size.
+                    .text_size(px(TEXT_MD)),
             )
             .child(
                 h_flex()
