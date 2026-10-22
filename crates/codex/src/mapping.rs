@@ -29,7 +29,11 @@ impl ApprovalMethod {
                 json!({ "decision": if approve { "accept" } else { "decline" } })
             }
             ApprovalMethod::Permissions(requested) => {
-                let granted = if approve { requested.clone() } else { json!({}) };
+                let granted = if approve {
+                    requested.clone()
+                } else {
+                    json!({})
+                };
                 json!({ "permissions": granted, "scope": "turn" })
             }
         }
@@ -39,9 +43,15 @@ impl ApprovalMethod {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestAction {
     /// Surface to the user; answer later via [`ApprovalMethod::result`].
-    Approval { event: AgentEvent, method: ApprovalMethod },
+    Approval {
+        event: AgentEvent,
+        method: ApprovalMethod,
+    },
     /// We cannot service this request; reply with a JSON-RPC error.
-    Reject { message: String, event: Option<AgentEvent> },
+    Reject {
+        message: String,
+        event: Option<AgentEvent>,
+    },
 }
 
 /// Per-thread translation state.
@@ -86,22 +96,34 @@ impl Mapper {
                     if status == del_agent::TurnStatus::Failed
                         && let Some(e) = n.turn.error
                     {
-                        out.push(AgentEvent::Error { message: e.message, recoverable: false });
+                        out.push(AgentEvent::Error {
+                            message: e.message,
+                            recoverable: false,
+                        });
                     }
                     self.turn_id = None;
                     self.last_completed = Some(n.turn.id.clone());
                     self.item_detail.clear();
-                    out.push(AgentEvent::TurnCompleted { turn_id: n.turn.id, status });
+                    out.push(AgentEvent::TurnCompleted {
+                        turn_id: n.turn.id,
+                        status,
+                    });
                 }
             }
             "item/agentMessage/delta" => {
                 if let Some(d) = decode::<DeltaParams>(params) {
-                    out.push(AgentEvent::AssistantTextDelta { turn_id: d.turn_id, text: d.delta });
+                    out.push(AgentEvent::AssistantTextDelta {
+                        turn_id: d.turn_id,
+                        text: d.delta,
+                    });
                 }
             }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 if let Some(d) = decode::<DeltaParams>(params) {
-                    out.push(AgentEvent::ReasoningDelta { turn_id: d.turn_id, text: d.delta });
+                    out.push(AgentEvent::ReasoningDelta {
+                        turn_id: d.turn_id,
+                        text: d.delta,
+                    });
                 }
             }
             "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" => {
@@ -144,7 +166,10 @@ impl Mapper {
             }
             "error" => {
                 if let Some(e) = decode::<ErrorParams>(params) {
-                    out.push(AgentEvent::Error { message: e.error.message, recoverable: e.will_retry });
+                    out.push(AgentEvent::Error {
+                        message: e.error.message,
+                        recoverable: e.will_retry,
+                    });
                 }
             }
             // serverRequest/resolved is handled by the backend (pending approvals);
@@ -173,16 +198,28 @@ impl Mapper {
                     input_summary: summary,
                 });
             }
-            ThreadItem::McpToolCall { id, server, tool, arguments, .. } => {
+            ThreadItem::McpToolCall {
+                id,
+                server,
+                tool,
+                arguments,
+                ..
+            } => {
                 let summary = truncate(&arguments.to_string());
-                self.item_detail.insert(id.clone(), format!("{server}/{tool} {summary}"));
+                self.item_detail
+                    .insert(id.clone(), format!("{server}/{tool} {summary}"));
                 out.push(AgentEvent::ToolCallStarted {
                     id,
                     name: format!("{server}/{tool}"),
                     input_summary: summary,
                 });
             }
-            ThreadItem::DynamicToolCall { id, tool, arguments, .. } => {
+            ThreadItem::DynamicToolCall {
+                id,
+                tool,
+                arguments,
+                ..
+            } => {
                 out.push(AgentEvent::ToolCallStarted {
                     id,
                     name: tool,
@@ -205,16 +242,30 @@ impl Mapper {
             ThreadItem::AgentMessage { text, .. } => {
                 out.push(AgentEvent::AssistantMessage { turn_id, text });
             }
-            ThreadItem::CommandExecution { id, status, aggregated_output, exit_code, .. } => {
+            ThreadItem::CommandExecution {
+                id,
+                status,
+                aggregated_output,
+                exit_code,
+                ..
+            } => {
                 let mut summary = truncate(aggregated_output.as_deref().unwrap_or(""));
                 if let Some(code) = exit_code
                     && code != 0
                 {
                     summary.push_str(&format!("\n[exit code {code}]"));
                 }
-                out.push(AgentEvent::ToolCallFinished { id, status: tool_status(status), output_summary: summary });
+                out.push(AgentEvent::ToolCallFinished {
+                    id,
+                    status: tool_status(status),
+                    output_summary: summary,
+                });
             }
-            ThreadItem::FileChange { id, changes, status } => {
+            ThreadItem::FileChange {
+                id,
+                changes,
+                status,
+            } => {
                 let tool = tool_status(status);
                 if tool == ToolStatus::Completed {
                     for c in &changes {
@@ -230,9 +281,19 @@ impl Mapper {
                         });
                     }
                 }
-                out.push(AgentEvent::ToolCallFinished { id, status: tool, output_summary: change_summary(&changes) });
+                out.push(AgentEvent::ToolCallFinished {
+                    id,
+                    status: tool,
+                    output_summary: change_summary(&changes),
+                });
             }
-            ThreadItem::McpToolCall { id, status, result, error, .. } => {
+            ThreadItem::McpToolCall {
+                id,
+                status,
+                result,
+                error,
+                ..
+            } => {
                 let summary = match (error, result) {
                     (Some(e), _) => e.message,
                     (None, Some(r)) => mcp_text(&r),
@@ -244,13 +305,23 @@ impl Mapper {
                     output_summary: truncate(&summary),
                 });
             }
-            ThreadItem::DynamicToolCall { id, status, success, content_items, .. } => {
+            ThreadItem::DynamicToolCall {
+                id,
+                status,
+                success,
+                content_items,
+                ..
+            } => {
                 let mut st = tool_status(status);
                 if success == Some(false) {
                     st = ToolStatus::Failed;
                 }
                 let summary = content_items.map(|c| c.to_string()).unwrap_or_default();
-                out.push(AgentEvent::ToolCallFinished { id, status: st, output_summary: truncate(&summary) });
+                out.push(AgentEvent::ToolCallFinished {
+                    id,
+                    status: st,
+                    output_summary: truncate(&summary),
+                });
             }
             ThreadItem::WebSearch { id, .. } => {
                 out.push(AgentEvent::ToolCallFinished {
@@ -264,7 +335,12 @@ impl Mapper {
     }
 
     /// Handle a server-initiated request.
-    pub fn server_request(&mut self, id: &RequestId, method: &str, params: &Value) -> RequestAction {
+    pub fn server_request(
+        &mut self,
+        id: &RequestId,
+        method: &str,
+        params: &Value,
+    ) -> RequestAction {
         match method {
             "item/commandExecution/requestApproval" => {
                 let cmd = params["command"].as_str().unwrap_or("(unknown command)");
@@ -300,7 +376,9 @@ impl Mapper {
                 }
             }
             "item/permissions/requestApproval" => {
-                let reason = params["reason"].as_str().unwrap_or("additional permissions");
+                let reason = params["reason"]
+                    .as_str()
+                    .unwrap_or("additional permissions");
                 RequestAction::Approval {
                     event: AgentEvent::ApprovalRequested {
                         id: id.to_string(),
@@ -353,7 +431,11 @@ fn mcp_text(result: &Value) -> String {
         .as_array()
         .map(|a| a.iter().filter_map(|b| b["text"].as_str()).collect())
         .unwrap_or_default();
-    if texts.is_empty() { result.to_string() } else { texts.join("\n") }
+    if texts.is_empty() {
+        result.to_string()
+    } else {
+        texts.join("\n")
+    }
 }
 
 fn truncate(s: &str) -> String {

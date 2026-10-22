@@ -42,7 +42,9 @@ impl fmt::Display for RequestId {
 impl RequestId {
     /// Inverse of `Display`, for ids round-tripped through opaque strings.
     pub fn parse(s: &str) -> RequestId {
-        s.parse::<i64>().map(RequestId::Int).unwrap_or_else(|_| RequestId::Str(s.to_owned()))
+        s.parse::<i64>()
+            .map(RequestId::Int)
+            .unwrap_or_else(|_| RequestId::Str(s.to_owned()))
     }
 }
 
@@ -67,9 +69,15 @@ pub enum ClientError {
     #[error("codex app-server is not running: {0}")]
     Disconnected(String),
     #[error("could not start `{program}`: {source}")]
-    Spawn { program: String, source: std::io::Error },
+    Spawn {
+        program: String,
+        source: std::io::Error,
+    },
     #[error("unexpected response shape for `{method}`: {source}")]
-    Decode { method: String, source: serde_json::Error },
+    Decode {
+        method: String,
+        source: serde_json::Error,
+    },
     #[error("request `{0}` timed out")]
     Timeout(String),
 }
@@ -77,12 +85,21 @@ pub enum ClientError {
 /// Something the server sent that is not a response to one of our requests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
-    Notification { method: String, params: Value },
+    Notification {
+        method: String,
+        params: Value,
+    },
     /// A server-initiated request (approvals, user input). Must be answered
     /// with [`CodexClient::respond`] or [`CodexClient::respond_error`].
-    Request { id: RequestId, method: String, params: Value },
+    Request {
+        id: RequestId,
+        method: String,
+        params: Value,
+    },
     /// The transport ended (process exit / EOF). Always the last item.
-    Closed { reason: String },
+    Closed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +111,11 @@ pub struct BackoffPolicy {
 
 impl Default for BackoffPolicy {
     fn default() -> Self {
-        Self { max_retries: 6, initial: Duration::from_millis(200), max: Duration::from_secs(5) }
+        Self {
+            max_retries: 6,
+            initial: Duration::from_millis(200),
+            max: Duration::from_secs(5),
+        }
     }
 }
 
@@ -116,7 +137,11 @@ pub struct SpawnOptions {
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        Self { program: PathBuf::from("codex"), global_args: Vec::new(), env: Vec::new() }
+        Self {
+            program: PathBuf::from("codex"),
+            global_args: Vec::new(),
+            env: Vec::new(),
+        }
     }
 }
 
@@ -142,7 +167,9 @@ pub struct CodexClient {
 
 impl CodexClient {
     /// Spawn `codex app-server` (stdio transport) and connect to it.
-    pub fn spawn(opts: &SpawnOptions) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>), ClientError> {
+    pub fn spawn(
+        opts: &SpawnOptions,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>), ClientError> {
         let mut cmd = Command::new(&opts.program);
         cmd.args(&opts.global_args)
             .arg("app-server")
@@ -257,7 +284,13 @@ impl CodexClient {
 
     /// Recent stderr lines from the child (diagnostics only).
     pub fn stderr_tail(&self) -> Vec<String> {
-        self.inner.stderr_tail.lock().unwrap().iter().cloned().collect()
+        self.inner
+            .stderr_tail
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -266,7 +299,11 @@ impl CodexClient {
 
     /// Send a request and await its raw result. Retries with exponential
     /// backoff when the server answers `-32001` (overloaded).
-    pub async fn request(&self, method: &str, params: impl Serialize) -> Result<Value, ClientError> {
+    pub async fn request(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<Value, ClientError> {
         let params = serde_json::to_value(params).map_err(|source| ClientError::Decode {
             method: method.to_owned(),
             source,
@@ -292,8 +329,10 @@ impl CodexClient {
         params: impl Serialize,
     ) -> Result<R, ClientError> {
         let value = self.request(method, params).await?;
-        serde_json::from_value(value)
-            .map_err(|source| ClientError::Decode { method: method.to_owned(), source })
+        serde_json::from_value(value).map_err(|source| ClientError::Decode {
+            method: method.to_owned(),
+            source,
+        })
     }
 
     async fn request_once(&self, method: &str, params: &Value) -> Result<Value, ClientError> {
@@ -303,7 +342,9 @@ impl CodexClient {
             // Check `closed` under the lock so a concurrent fail_all cannot miss us.
             let mut pending = self.inner.pending.lock().unwrap();
             if self.inner.closed.load(Ordering::SeqCst) {
-                return Err(ClientError::Disconnected(self.inner.close_reason.lock().unwrap().clone()));
+                return Err(ClientError::Disconnected(
+                    self.inner.close_reason.lock().unwrap().clone(),
+                ));
             }
             pending.insert(id.clone(), tx);
         }
@@ -318,7 +359,9 @@ impl CodexClient {
         match rx.await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(ClientError::Rpc(e)),
-            Err(_) => Err(ClientError::Disconnected(self.inner.close_reason.lock().unwrap().clone())),
+            Err(_) => Err(ClientError::Disconnected(
+                self.inner.close_reason.lock().unwrap().clone(),
+            )),
         }
     }
 
@@ -342,7 +385,12 @@ impl CodexClient {
             .map_err(|_| ClientError::Disconnected("writer stopped".into()))
     }
 
-    pub fn respond_error(&self, id: &RequestId, code: i64, message: &str) -> Result<(), ClientError> {
+    pub fn respond_error(
+        &self,
+        id: &RequestId,
+        code: i64,
+        message: &str,
+    ) -> Result<(), ClientError> {
         self.inner
             .out
             .send(json!({ "id": id, "error": { "code": code, "message": message } }).to_string())
@@ -352,7 +400,10 @@ impl CodexClient {
     /// Perform the mandatory `initialize` / `initialized` handshake.
     pub async fn initialize(&self, name: &str, version: &str) -> Result<Value, ClientError> {
         let result = self
-            .request("initialize", json!({ "clientInfo": { "name": name, "version": version } }))
+            .request(
+                "initialize",
+                json!({ "clientInfo": { "name": name, "version": version } }),
+            )
             .await?;
         self.notify("initialized", None)?;
         Ok(result)
@@ -363,11 +414,11 @@ impl CodexClient {
         self.inner.fail_all("client shut down");
         self.inner.stop_writer.notify_one(); // writer drops stdin -> EOF for the server
         let child = self.inner.child.lock().await.take();
-        if let Some(mut child) = child {
-            if tokio::time::timeout(grace, child.wait()).await.is_err() {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
+        if let Some(mut child) = child
+            && tokio::time::timeout(grace, child.wait()).await.is_err()
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
     }
 }
@@ -382,22 +433,29 @@ impl Inner {
             return None; // non-JSON noise on stdout; ignore
         };
         let method = v.get("method").and_then(Value::as_str).map(str::to_owned);
-        let id = v.get("id").and_then(|i| serde_json::from_value::<RequestId>(i.clone()).ok());
+        let id = v
+            .get("id")
+            .and_then(|i| serde_json::from_value::<RequestId>(i.clone()).ok());
         match (method, id) {
             (Some(method), Some(id)) => Some(Incoming::Request {
                 id,
                 method,
                 params: v["params"].take(),
             }),
-            (Some(method), None) => Some(Incoming::Notification { method, params: v["params"].take() }),
+            (Some(method), None) => Some(Incoming::Notification {
+                method,
+                params: v["params"].take(),
+            }),
             (None, Some(id)) => {
                 let tx = self.pending.lock().unwrap().remove(&id)?;
                 let outcome = match v.get("error") {
-                    Some(err) => Err(serde_json::from_value::<RpcError>(err.clone()).unwrap_or(RpcError {
-                        code: -32603,
-                        message: err.to_string(),
-                        data: None,
-                    })),
+                    Some(err) => Err(serde_json::from_value::<RpcError>(err.clone()).unwrap_or(
+                        RpcError {
+                            code: -32603,
+                            message: err.to_string(),
+                            data: None,
+                        },
+                    )),
                     None => Ok(v["result"].take()),
                 };
                 let _ = tx.send(outcome);

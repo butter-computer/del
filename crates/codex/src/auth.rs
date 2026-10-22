@@ -13,7 +13,9 @@ pub const API_KEY_ENV: [&str; 2] = ["CODEX_API_KEY", "OPENAI_API_KEY"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodexError {
-    #[error("the `codex` CLI was not found. Install it (`npm i -g @openai/codex` or `brew install codex`) and run `codex login`")]
+    #[error(
+        "the `codex` CLI was not found. Install it (`npm i -g @openai/codex` or `brew install codex`) and run `codex login`"
+    )]
     NotInstalled,
     #[error(
         "Codex is not logged in. Run `codex login` in a terminal (ChatGPT sign-in), \
@@ -41,7 +43,10 @@ impl From<CodexError> for AgentError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthStatus {
-    ChatGpt { email: Option<String>, plan: Option<String> },
+    ChatGpt {
+        email: Option<String>,
+        plan: Option<String>,
+    },
     ApiKey,
     /// Some other Codex-managed credential (e.g. Bedrock).
     Other,
@@ -60,8 +65,9 @@ pub async fn ensure_authenticated(
     client: &CodexClient,
     api_key: Option<&str>,
 ) -> Result<AuthStatus, CodexError> {
-    let mut resp: GetAccountResponse =
-        client.call("account/read", json!({ "refreshToken": false })).await?;
+    let mut resp: GetAccountResponse = client
+        .call("account/read", json!({ "refreshToken": false }))
+        .await?;
     if resp.account.is_none() {
         let Some(key) = api_key else {
             return Err(if resp.requires_openai_auth {
@@ -72,16 +78,24 @@ pub async fn ensure_authenticated(
             });
         };
         client
-            .request("account/login/start", json!({ "type": "apiKey", "apiKey": key }))
+            .request(
+                "account/login/start",
+                json!({ "type": "apiKey", "apiKey": key }),
+            )
             .await
             .map_err(|e| match e {
                 ClientError::Rpc(r) => CodexError::ApiKeyRejected(r.message),
                 other => other.into(),
             })?;
-        resp = client.call("account/read", json!({ "refreshToken": false })).await?;
+        resp = client
+            .call("account/read", json!({ "refreshToken": false }))
+            .await?;
     }
     match resp.account {
-        Some(Account::Chatgpt { email, plan_type }) => Ok(AuthStatus::ChatGpt { email, plan: plan_type }),
+        Some(Account::Chatgpt { email, plan_type }) => Ok(AuthStatus::ChatGpt {
+            email,
+            plan: plan_type,
+        }),
         Some(Account::ApiKey) => Ok(AuthStatus::ApiKey),
         Some(Account::Other) => Ok(AuthStatus::Other),
         None => Err(CodexError::NotLoggedIn),

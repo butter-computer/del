@@ -106,14 +106,22 @@ fn turn_input(input: &UserInput) -> Vec<Value> {
     for a in &input.attachments {
         let path = a.path.display().to_string();
         let is_image = a.mime.as_deref().is_some_and(|m| m.starts_with("image/"));
-        items.push(if is_image { local_image_input(&path) } else { text_input(&format!("[attached file: {path}]")) });
+        items.push(if is_image {
+            local_image_input(&path)
+        } else {
+            text_input(&format!("[attached file: {path}]"))
+        });
     }
     items
 }
 
 impl CodexBackend {
     pub fn new(opts: CodexOptions) -> Self {
-        Self { opts, conn: tokio::sync::Mutex::new(None), sessions: Default::default() }
+        Self {
+            opts,
+            conn: tokio::sync::Mutex::new(None),
+            sessions: Default::default(),
+        }
     }
 
     /// Check that `codex` can be started and is authenticated, without
@@ -142,7 +150,9 @@ impl CodexBackend {
         incoming: mpsc::UnboundedReceiver<Incoming>,
     ) -> std::result::Result<Arc<Connection>, CodexError> {
         let setup = async {
-            client.initialize(CLIENT_NAME, &self.opts.client_version).await?;
+            client
+                .initialize(CLIENT_NAME, &self.opts.client_version)
+                .await?;
             auth::ensure_authenticated(&client, self.opts.api_key.as_deref()).await
         };
         if let Err(e) = setup.await {
@@ -177,21 +187,39 @@ impl CodexBackend {
 
     fn register(&self, thread_id: &str) -> Arc<Session> {
         let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let session = Arc::new(Session { events: tx, state: Mutex::new(SessionState::default()) });
-        self.sessions.lock().unwrap().insert(thread_id.to_owned(), session.clone());
+        let session = Arc::new(Session {
+            events: tx,
+            state: Mutex::new(SessionState::default()),
+        });
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(thread_id.to_owned(), session.clone());
         session
     }
 
-    async fn open(&self, method: &str, mut params: serde_json::Map<String, Value>, thread: Option<&SessionId>, provider: Provider) -> Result<SessionHandle> {
+    async fn open(
+        &self,
+        method: &str,
+        mut params: serde_json::Map<String, Value>,
+        thread: Option<&SessionId>,
+        provider: Provider,
+    ) -> Result<SessionHandle> {
         let conn = self.connection().await?;
         if let Some(t) = thread {
             params.insert("threadId".into(), json!(t.as_str()));
         }
-        let resp: ThreadResponse = conn.client.call(method, Value::Object(params)).await.map_err(be)?;
+        let resp: ThreadResponse = conn
+            .client
+            .call(method, Value::Object(params))
+            .await
+            .map_err(be)?;
         let id = SessionId::new(resp.thread.id);
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
-        session.emit(AgentEvent::SessionStarted { session_id: id.clone() });
+        session.emit(AgentEvent::SessionStarted {
+            session_id: id.clone(),
+        });
         Ok(SessionHandle::new(id, provider, session.events.clone()))
     }
 }
@@ -203,11 +231,23 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
-        self.open("thread/start", thread_params(&config), None, config.provider).await
+        self.open(
+            "thread/start",
+            thread_params(&config),
+            None,
+            config.provider,
+        )
+        .await
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
-        self.open("thread/resume", thread_params(&config), Some(session), config.provider).await
+        self.open(
+            "thread/resume",
+            thread_params(&config),
+            Some(session),
+            config.provider,
+        )
+        .await
     }
 
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
@@ -222,7 +262,10 @@ impl AgentBackend for CodexBackend {
         let conn = self.connection().await?;
         let result: std::result::Result<TurnResponse, ClientError> = conn
             .client
-            .call("turn/start", json!({ "threadId": session.as_str(), "input": turn_input(&input) }))
+            .call(
+                "turn/start",
+                json!({ "threadId": session.as_str(), "input": turn_input(&input) }),
+            )
             .await;
         let mut st = s.state.lock().unwrap();
         st.starting = false;
@@ -254,7 +297,10 @@ impl AgentBackend for CodexBackend {
         let Some(turn) = turn else { return Ok(()) }; // nothing running
         let conn = self.connection().await?;
         conn.client
-            .request("turn/interrupt", json!({ "threadId": session.as_str(), "turnId": turn }))
+            .request(
+                "turn/interrupt",
+                json!({ "threadId": session.as_str(), "turnId": turn }),
+            )
             .await
             .map_err(be)?;
         Ok(())
@@ -275,7 +321,9 @@ impl AgentBackend for CodexBackend {
             .remove(approval_id)
             .ok_or_else(|| AgentError::Backend(format!("no pending approval {approval_id}")))?;
         let conn = self.connection().await?;
-        conn.client.respond(&pending.rpc_id, pending.method.result(response)).map_err(be)
+        conn.client
+            .respond(&pending.rpc_id, pending.method.result(response))
+            .map_err(be)
     }
 
     async fn close(&self, session: &SessionId) -> Result<()> {
@@ -286,7 +334,13 @@ impl AgentBackend for CodexBackend {
         if let Some(conn) = self.conn.lock().await.clone()
             && !conn.client.is_closed()
         {
-            let _ = conn.client.request("thread/unsubscribe", json!({ "threadId": session.as_str() })).await;
+            let _ = conn
+                .client
+                .request(
+                    "thread/unsubscribe",
+                    json!({ "threadId": session.as_str() }),
+                )
+                .await;
         }
         Ok(())
     }
@@ -312,12 +366,18 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                 let Some(s) = find(&params) else { continue };
                 if method == "serverRequest/resolved" {
                     // Resolved server-side (e.g. interrupt): the answer is moot.
-                    if let Ok(id) = serde_json::from_value::<RequestId>(params["requestId"].clone()) {
+                    if let Ok(id) = serde_json::from_value::<RequestId>(params["requestId"].clone())
+                    {
                         s.state.lock().unwrap().approvals.remove(&id.to_string());
                     }
                     continue;
                 }
-                let events = s.state.lock().unwrap().mapper.notification(&method, &params);
+                let events = s
+                    .state
+                    .lock()
+                    .unwrap()
+                    .mapper
+                    .notification(&method, &params);
                 for e in events {
                     s.emit(e);
                 }
@@ -327,7 +387,12 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                     let _ = client.respond_error(&id, -32602, "unknown thread");
                     continue;
                 };
-                let action = s.state.lock().unwrap().mapper.server_request(&id, &method, &params);
+                let action = s
+                    .state
+                    .lock()
+                    .unwrap()
+                    .mapper
+                    .server_request(&id, &method, &params);
                 match action {
                     RequestAction::Approval { event, method } => {
                         s.state
@@ -358,7 +423,10 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                         st.starting = false;
                         st.mapper = Mapper::default();
                     }
-                    s.emit(AgentEvent::Error { message: msg.clone(), recoverable: false });
+                    s.emit(AgentEvent::Error {
+                        message: msg.clone(),
+                        recoverable: false,
+                    });
                 }
                 break;
             }
