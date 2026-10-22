@@ -45,6 +45,9 @@ const SIDEBAR_ENABLED: bool = false;
 /// Every tab is this wide once settled; it animates to and from 0.
 const TAB_WIDTH: f32 = 160.0;
 
+/// Space after each tab, animated together with it.
+const TAB_GAP: f32 = 2.0;
+
 /// The title inside a tab.
 fn tab_title(title: String) -> Div {
     div()
@@ -378,7 +381,7 @@ impl AppShell {
                         h_flex()
                             .h_full()
                             .items_center()
-                            .gap_0p5()
+                            .gap_0()
                             .pl_2()
                             .when(SIDEBAR_ENABLED, |row| {
                                 row.child(
@@ -467,21 +470,29 @@ impl AppShell {
                                         .child(tab_title(title))
                                         .child(div().size(px(16.0)).flex_none());
                                 }
-                                // Width grows from 0 on open and back to 0 on close;
-                                // afterwards the tab sizes itself as usual.
-                                el.overflow_hidden().with_animation(
-                                    SharedString::from(format!("tab-anim-{uid}-{live}")),
-                                    Animation::new(state::TAB_ANIM).with_easing(ease_out_quint()),
-                                    move |el, t| {
-                                        let t = if live { t } else { 1.0 - t };
-                                        // Always an explicit width, so there is no jump
-                                        // between the animated and the settled size.
-                                        el.min_w(px(0.0))
+                                // The tab keeps its full size inside a clip whose width
+                                // (tab plus the gap after it) animates from 0 on open and
+                                // back to 0 on close. Padding and gap live inside the clip,
+                                // so nothing is left behind at width 0 and nothing jumps
+                                // when a closed tab is finally removed.
+                                div()
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(
+                                        el.w(px(TAB_WIDTH))
+                                            .min_w(px(0.0))
                                             .max_w(px(TAB_WIDTH))
-                                            .flex_none()
-                                            .w(px(TAB_WIDTH * t))
-                                    },
-                                )
+                                            .flex_none(),
+                                    )
+                                    .with_animation(
+                                        SharedString::from(format!("tab-anim-{uid}-{live}")),
+                                        Animation::new(state::TAB_ANIM)
+                                            .with_easing(ease_out_quint()),
+                                        move |clip, t| {
+                                            let t = if live { t } else { 1.0 - t };
+                                            clip.w(px((TAB_WIDTH + TAB_GAP) * t))
+                                        },
+                                    )
                             }))
                             .child(
                                 div()
