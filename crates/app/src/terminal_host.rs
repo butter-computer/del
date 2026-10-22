@@ -447,8 +447,11 @@ impl TerminalHost {
             this.snapshot.last_output = output;
             match event {
                 TerminalEvent::TitleChanged(title) => {
-                    this.snapshot.title =
-                        title.clone().unwrap_or_else(|| this.fallback_title.clone())
+                    this.snapshot.title = title
+                        .as_ref()
+                        .filter(|title| !title.trim().is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| this.fallback_title.clone())
                 }
                 TerminalEvent::Exited { code }
                     if this.snapshot.status != TerminalHostStatus::Closed =>

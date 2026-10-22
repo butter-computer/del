@@ -212,7 +212,11 @@ impl AppShell {
                 .iter()
                 .map(|r| sessions::TerminalRow {
                     id: r.id.clone(),
-                    title: r.title.clone(),
+                    title: if r.title.trim().is_empty() {
+                        r.launch.label()
+                    } else {
+                        r.title.clone()
+                    },
                     cwd: r.launch.cwd.clone(),
                     provider: r.launch.provider(),
                     active: false,
