@@ -10,11 +10,12 @@
 /// page are painted with exactly this value so they read as a single
 /// continuous surface. Packed `0xRRGGBBAA`; the window is blurred behind it,
 /// so the alpha lets the blur show through.
-pub const SHELL_SURFACE_RGBA: u32 = 0x111113a6;
+pub const SHELL_SURFACE_RGBA: u32 = 0x1111138c;
 
 /// Colour of the rounded page: a deeper black than the shell around it, with
-/// the same translucency. Packed `0xRRGGBBAA`.
-pub const PAGE_SURFACE_RGBA: u32 = 0x000000a6;
+/// lighter translucency, because it is drawn on top of the shell colour and the
+/// two layers add up. Packed `0xRRGGBBAA`.
+pub const PAGE_SURFACE_RGBA: u32 = 0x0000004d;
 
 /// Diameter of a macOS traffic light button, in logical pixels.
 pub const TRAFFIC_LIGHT_SIZE: f32 = 12.0;

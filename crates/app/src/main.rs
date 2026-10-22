@@ -106,7 +106,10 @@ impl AppShell {
         TitleBar::new()
             .h(px(self.metrics.topbar_height))
             .border_b_0()
-            .bg(rgba(SHELL_SURFACE_RGBA))
+            // No fill of its own: the shell root already paints
+            // `SHELL_SURFACE_RGBA` behind it, and a second translucent layer
+            // here would make the top bar darker than the gutter.
+            .bg(gpui::transparent_black())
             .child(
                 h_flex().h_full().items_center().child(
                     div()
@@ -172,6 +175,12 @@ fn main() {
         // Must run before any gpui-component feature is used.
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        // The window root paints the theme background across the whole
+        // window, which would hide the blurred window material behind it. The
+        // shell paints its own translucent surfaces, so make this one clear.
+        Theme::update(cx, |theme| {
+            theme.colors.background = gpui::transparent_black()
+        });
 
         let metrics = ShellMetrics::default();
         let (light_x, light_y) = metrics.traffic_light_origin();
