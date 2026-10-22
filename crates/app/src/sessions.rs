@@ -132,15 +132,6 @@ pub fn relative_time(now: u64, then: u64) -> String {
     }
 }
 
-/// Plain-text provider glyph for the sidebar.
-pub fn glyph(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "CX",
-        Provider::Claude => "CL",
-        Provider::Acp => "AC",
-    }
-}
-
 /// Last path component, for compact display.
 pub fn folder_name(path: &Path) -> String {
     path.file_name()

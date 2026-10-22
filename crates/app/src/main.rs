@@ -70,8 +70,8 @@ fn tab_title(title: String) -> Div {
         .child(title)
 }
 
-/// How long the right panel takes to slide open or closed.
-const RIGHT_ANIM: Duration = Duration::from_millis(220);
+/// Shared timing for the left and right sidebar width transitions.
+const PANEL_ANIM: Duration = Duration::from_millis(220);
 
 /// The prompt above the composer.
 const HEADING: &str = "What are we building?";
@@ -135,6 +135,8 @@ struct AppShell {
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
     sidebar_open: bool,
+    sidebar_visible: bool,
+    sidebar_toggles: u64,
     right: Entity<RightPanel>,
     /// Where the right panel is heading (open or closed).
     right_open: bool,
@@ -234,6 +236,8 @@ impl AppShell {
             rename,
             renaming_loaded: None,
             sidebar_open: true,
+            sidebar_visible: true,
+            sidebar_toggles: 0,
             right,
             right_open: false,
             right_visible: false,
@@ -272,6 +276,30 @@ impl AppShell {
         self.chats.insert(id, chat);
     }
 
+    fn set_sidebar(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.sidebar_open == open {
+            return;
+        }
+        self.sidebar_open = open;
+        self.sidebar_toggles += 1;
+        if open {
+            self.sidebar_visible = true;
+        } else {
+            let toggle = self.sidebar_toggles;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PANEL_ANIM * 12 / 10).await;
+                let _ = this.update(cx, |this, cx| {
+                    if !this.sidebar_open && this.sidebar_toggles == toggle {
+                        this.sidebar_visible = false;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
     /// Open or close the right panel, animating its width.
     fn set_right(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.right_open == open {
@@ -284,7 +312,7 @@ impl AppShell {
         } else {
             // Keep it on screen until the close animation has finished.
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(RIGHT_ANIM * 12 / 10).await;
+                cx.background_executor().timer(PANEL_ANIM * 12 / 10).await;
                 let _ = this.update(cx, |this, cx| {
                     if !this.right_open {
                         this.right_visible = false;
@@ -469,8 +497,7 @@ impl AppShell {
                                             cx.stop_propagation()
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sidebar_open = !this.sidebar_open;
-                                            cx.notify();
+                                            this.set_sidebar(!this.sidebar_open, cx);
                                         }))
                                         .child(
                                             Icon::new(if self.sidebar_open {
@@ -730,8 +757,7 @@ impl Render for AppShell {
                 if !SIDEBAR_ENABLED {
                     return;
                 }
-                this.sidebar_open = !this.sidebar_open;
-                cx.notify();
+                this.set_sidebar(!this.sidebar_open, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| {
                 this.set_right(!this.right_open, cx);
@@ -783,8 +809,25 @@ impl Render for AppShell {
                     .flex_1()
                     .min_h_0()
                     .bg(rgba(SHELL_SURFACE_RGBA))
-                    .when(SIDEBAR_ENABLED && self.sidebar_open, |row| {
-                        row.child(sidebar::render(&self.state, &self.rename, cx))
+                    .when(SIDEBAR_ENABLED && self.sidebar_visible, |row| {
+                        let sidebar = div()
+                            .h_full()
+                            .flex_none()
+                            .overflow_hidden()
+                            .child(sidebar::render(&self.state, &self.rename, cx));
+                        if self.sidebar_toggles == 0 {
+                            row.child(sidebar.w(px(sidebar::SIDEBAR_WIDTH)))
+                        } else {
+                            let opening = self.sidebar_open;
+                            row.child(sidebar.with_animation(
+                                ("left-sidebar", self.sidebar_toggles),
+                                Animation::new(PANEL_ANIM).with_easing(ease_out_quint()),
+                                move |element, t| {
+                                    let t = if opening { t } else { 1.0 - t };
+                                    element.w(px(sidebar::SIDEBAR_WIDTH * t))
+                                },
+                            ))
+                        }
                     })
                     .child(
                         div()
@@ -818,7 +861,7 @@ impl Render for AppShell {
                                 )
                                 .with_animation(
                                     ("right-panel", self.right_toggles),
-                                    Animation::new(RIGHT_ANIM).with_easing(ease_out_quint()),
+                                    Animation::new(PANEL_ANIM).with_easing(ease_out_quint()),
                                     move |el, t| {
                                         let t = if opening { t } else { 1.0 - t };
                                         el.w(px(full * t))

@@ -1,9 +1,10 @@
 //! The sessions sidebar: new-session button, session rows, archived list and
 //! the providers entry. Borderless; rows are told apart by fill alone.
 
+use crate::composer_ui::provider_logo;
 use crate::sessions::{self, Row};
 use crate::state::{AppState, Panel, Selection};
-use del_agent::{LoginState, SessionStatus};
+use del_agent::LoginState;
 use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::assets::IconName as ActionIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -18,15 +19,6 @@ const ROW_HEIGHT: f32 = 28.0;
 const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
 const FAINT: u32 = 0xffffff52;
-
-pub fn status_color(status: SessionStatus) -> Rgba {
-    rgb(match status {
-        SessionStatus::Idle => 0x6e6e73,
-        SessionStatus::Running => 0x4da3ff,
-        SessionStatus::WaitingApproval => 0xf5a524,
-        SessionStatus::Error => 0xf0524f,
-    })
-}
 
 fn dot(color: Rgba) -> Div {
     div().size(px(6.0)).flex_none().rounded_full().bg(color)
@@ -70,16 +62,7 @@ fn row_item(
         .text_color(rgb(TEXT))
         .when(selected, |r| r.bg(rgba(0xffffff14)))
         .when(!selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
-        .child(dot(status_color(row.status)))
-        .child(
-            div()
-                .w(px(22.0))
-                .flex_none()
-                .whitespace_nowrap()
-                .text_size(px(TEXT_SM))
-                .text_color(rgba(FAINT))
-                .child(sessions::glyph(row.provider)),
-        );
+        .child(provider_logo(row.provider, 14.0));
 
     item = if renaming {
         item.child(
@@ -271,12 +254,14 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .on_click(move |_, _, cx| {
                             state.update(cx, |s, cx| s.select_terminal(id.clone(), cx))
                         })
-                        .child(
-                            div()
+                        .child(match row.provider {
+                            Some(provider) => provider_logo(provider, 14.0).into_any_element(),
+                            None => div()
                                 .text_size(px(TEXT_SM))
                                 .text_color(rgba(MUTED))
-                                .child(">_"),
-                        )
+                                .child(">_")
+                                .into_any_element(),
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -285,11 +270,6 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                 .text_size(px(TEXT_MD))
                                 .child(row.title.clone()),
                         )
-                        .child(dot(if row.active {
-                            rgb(0x4cc38a)
-                        } else {
-                            rgb(0x6e6e73)
-                        }))
                 }))
                 .when(!archived.is_empty(), |list| {
                     list.child(
