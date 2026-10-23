@@ -335,7 +335,7 @@ impl Render for Palette {
                     .child(
                         h_flex()
                             .gap_3()
-                            .child("/c · /t Filter")
+                            .child("/c /t")
                             .child("↑ ↓ Navigate")
                             .child(
                                 h_flex()
