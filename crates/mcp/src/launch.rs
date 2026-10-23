@@ -103,7 +103,12 @@ pub fn claude(c: &Credentials, transport: &Transport, dir: &Path) -> io::Result<
     let doc = json!({"mcpServers": {SERVER_NAME: server}});
     write_private(&path, &serde_json::to_string_pretty(&doc).expect("json"))?;
     Ok(LaunchConfig {
-        args: vec!["--mcp-config".into(), path.to_string_lossy().into_owned()],
+        args: vec![
+            "--mcp-config".into(),
+            path.to_string_lossy().into_owned(),
+            "--append-system-prompt".into(),
+            del_agent::backend::BROWSER_INSTRUCTIONS.into(),
+        ],
         env: vec![],
         files: vec![path],
     })

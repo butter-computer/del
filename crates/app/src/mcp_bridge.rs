@@ -26,6 +26,11 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot, watch};
 /// Handle these on the GPUI thread. Keep reply senders with the visible prompt
 /// or launch task; dropping a sender fails the tool instead of hanging it.
 pub enum BridgeEvent {
+    Browser {
+        caller: SessionId,
+        request: del_mcp::BrowserRequest,
+        reply: oneshot::Sender<HostResult<serde_json::Value>>,
+    },
     AskUser {
         request_id: u64,
         caller: SessionId,
@@ -217,6 +222,45 @@ fn tail(text: String) -> String {
 }
 
 impl BridgeHandle {
+    pub fn chat_browser_tools(&self) -> io::Result<del_agent::backend::BrowserTools> {
+        let server = self.service.server.lock().unwrap();
+        let server = server
+            .as_ref()
+            .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+        let id = SessionId::new(format!(
+            "browser-chat-{}-{}",
+            std::process::id(),
+            self.service
+                .host
+                .next_question
+                .fetch_add(1, Ordering::Relaxed)
+        ));
+        let credentials = server.register_browser_client(&id);
+        let config = launch::claude(&credentials, &Transport::Http, &self.service.config_dir)?;
+        let file = config
+            .files
+            .first()
+            .cloned()
+            .ok_or_else(|| io::Error::other("Missing browser MCP config"))?;
+        self.service
+            .files
+            .lock()
+            .unwrap()
+            .insert(id.clone(), config.files);
+        let (cancel, _) = watch::channel(false);
+        self.service
+            .host
+            .revocations
+            .lock()
+            .unwrap()
+            .insert(id, cancel);
+        Ok(del_agent::backend::BrowserTools {
+            url: credentials.url,
+            token: credentials.token,
+            claude_config: file,
+        })
+    }
+
     pub fn endpoint(&self) -> Option<String> {
         self.service
             .server
@@ -457,6 +501,20 @@ impl Drop for QuestionGuard {
 
 #[async_trait]
 impl McpHost for AppHost {
+    async fn browser(
+        &self,
+        caller: &SessionId,
+        request: del_mcp::BrowserRequest,
+    ) -> HostResult<serde_json::Value> {
+        let (reply, rx) = oneshot::channel();
+        self.emit(BridgeEvent::Browser {
+            caller: caller.clone(),
+            request,
+            reply,
+        })?;
+        self.reply(caller, rx).await?
+    }
+
     async fn report_status(
         &self,
         caller: &SessionId,
@@ -580,8 +638,14 @@ impl McpHost for AppHost {
             })?;
             self.reply(caller, rx).await?
         } else {
-            crate::providers::prepare_session_permissions(&self.manager, target)
-                .map_err(|e| failed(e.to_string()))?;
+            if self.manager.list_sessions().iter().any(|record| {
+                &record.id == target
+                    && matches!(record.provider, Provider::Codex | Provider::Claude)
+            }) {
+                self.manager
+                    .set_permission_mode(target, del_agent::PermissionMode::FullAuto)
+                    .map_err(|e| failed(e.to_string()))?;
+            }
             self.manager
                 .resume(target)
                 .await

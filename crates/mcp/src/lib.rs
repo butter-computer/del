@@ -1,6 +1,8 @@
 //! del's own MCP server. See the crate README for the tool contracts.
 
+pub mod browser;
 pub mod host;
+pub use browser::BrowserRequest;
 pub mod launch;
 pub mod manager_host;
 pub mod mock;

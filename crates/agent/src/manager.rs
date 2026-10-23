@@ -444,6 +444,12 @@ impl SessionManager {
     }
 
     /// Persist permissions for the next launch or idle-turn reconfiguration.
+    pub fn set_browser_tools(&self, tools: crate::backend::BrowserTools) {
+        for backend in self.shared.backends.values() {
+            backend.set_browser_tools(tools.clone());
+        }
+    }
+
     pub fn set_permission_mode(&self, id: &SessionId, mode: PermissionMode) -> Result<()> {
         let mut index = self.shared.index.lock().unwrap();
         let record = index

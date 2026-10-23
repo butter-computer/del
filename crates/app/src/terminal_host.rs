@@ -715,59 +715,13 @@ impl TerminalHost {
     }
 }
 impl Render for TerminalHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = match self.snapshot.status {
-            TerminalHostStatus::Running => "Running".into(),
-            TerminalHostStatus::Exited { code: Some(code) } => format!("Exited {code}"),
-            TerminalHostStatus::Exited { code: None } => "Ended by signal".into(),
-            TerminalHostStatus::Closed => "Closed".into(),
-        };
-        v_flex()
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
             .size_full()
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .child(
-                h_flex()
-                    .h(zpx(32.))
-                    .px_2()
-                    .gap_2()
-                    .flex_none()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(zpx(12.))
-                            .text_color(rgb(0xaaaaaa))
-                            .child(self.snapshot.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(zpx(11.))
-                            .text_color(rgb(0x888888))
-                            .child(status),
-                    )
-                    .child(
-                        Button::new("copy-terminal-output")
-                            .ghost()
-                            .small()
-                            .label("Copy output")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    this.snapshot.last_output.clone(),
-                                ));
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(self.terminal.clone()),
-            )
+            .child(self.terminal.clone())
     }
 }
 

@@ -14,6 +14,7 @@ mod wallpaper;
 mod appearance;
 mod assets;
 mod attachments;
+mod browser;
 mod chat;
 mod composer_ui;
 mod document_preview;
@@ -712,7 +713,61 @@ impl AppShell {
         }
     }
 
+    fn delete_browser_profile(&mut self, profile: String, cx: &mut Context<Self>) {
+        if let Err(error) = crate::browser::record_deletion(&profile, true) {
+            self.state.update(cx, |state, cx| {
+                state.error = Some(format!("Could not schedule browser data deletion: {error}"));
+                cx.notify();
+            });
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            for _ in 0..5 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let Ok(reply) = this.update(cx, |_, _| crate::browser::delete_profile(&profile))
+                else {
+                    return;
+                };
+                if matches!(reply.await, Ok(Ok(_))) {
+                    let _ = crate::browser::record_deletion(&profile, false);
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.state.update(cx, |state, cx| {
+                    state.error = Some(
+                        "Browser data cleanup is pending; Del will retry at next launch.".into(),
+                    );
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+
     fn sync_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let deleted = self
+            .state
+            .update(cx, |state, _| std::mem::take(&mut state.deleted_panels));
+        for (key, uid) in deleted {
+            let cached = self
+                .right_cache
+                .remove(&uid)
+                .map(|(panel, _)| panel.read(cx).snapshot(false));
+            let saved = self.right_store.remove(&key).or(cached);
+            if self.right_key.as_ref() == Some(&key) {
+                self.right_key = None;
+                self.right =
+                    cx.new(|cx| RightPanel::new(self.state.read(cx).effective().2, window, cx));
+                self.right_owner = u64::MAX;
+            }
+            if let Some(saved) = saved {
+                self.delete_browser_profile(saved.browser_profile().to_owned(), cx);
+            }
+            self.persist_right(cx);
+        }
         let state = self.state.read(cx);
         let (tab, key) = match &state.selection {
             Selection::Draft(id) => (Tab::Draft(*id), None),

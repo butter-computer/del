@@ -37,6 +37,9 @@ pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
 
 impl AppShell {
     pub(super) fn start_modes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for profile in crate::browser::pending_deletions() {
+            self.delete_browser_profile(profile, cx);
+        }
         let backend = self.state.read(cx).backend();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let config_dir = del_agent::data_dir()
@@ -50,6 +53,21 @@ impl AppShell {
             match start.await {
                 Ok(Ok(bridge)) => {
                     let _ = this.update_in(cx, |this, _, cx| {
+                        match bridge.handle().chat_browser_tools() {
+                            Ok(tools) => this
+                                .state
+                                .read(cx)
+                                .backend()
+                                .manager
+                                .set_browser_tools(tools),
+                            Err(error) => this.state.update(cx, |state, _| {
+                                state.error = Some(format!("Browser tools unavailable: {error}"))
+                            }),
+                        }
+                        this.state.update(cx, |state, cx| {
+                            state.browser_tools_ready = true;
+                            cx.notify();
+                        });
                         this.mcp = Some(bridge);
                         cx.notify();
                     });
@@ -607,6 +625,93 @@ impl AppShell {
     fn handle_bridge(&mut self, event: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
         let previous_question = self.questions.front().map(|q| q.id);
         match event {
+            BridgeEvent::Browser {
+                caller,
+                request,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                self.remember_right(cx);
+                let manager = self.state.read(cx).backend().manager;
+                let mut sessions: Vec<_> = manager.list_sessions().into_iter().map(|record| {
+                    let key = format!("chat:{}", record.id.as_str());
+                    serde_json::json!({"session_id":record.id.as_str(),"title":record.title,"mode":"chat","tabs":self.right_store.browser_tabs(&key)})
+                }).collect();
+                sessions.extend(self.state.read(cx).terminal_rows.iter().map(|row| {
+                    let key = format!("terminal:{}", row.id.as_str());
+                    serde_json::json!({"session_id":row.id.as_str(),"title":row.title,"mode":"terminal","tabs":self.right_store.browser_tabs(&key)})
+                }));
+                if request.action == "list_tabs"
+                    && request.session_id.is_none()
+                    && request.tab_id.is_none()
+                {
+                    let active = match &self.state.read(cx).selection {
+                        Selection::Session(id) | Selection::Terminal(id) => Some(id.as_str()),
+                        Selection::Draft(_) => None,
+                    };
+                    let _ = reply.send(Ok(
+                        serde_json::json!({"sessions":sessions,"active_session_id":active}),
+                    ));
+                    return;
+                }
+                let target = request
+                    .session_id
+                    .clone()
+                    .or_else(|| {
+                        request.tab_id.as_ref().and_then(|id| {
+                            sessions
+                                .iter()
+                                .find(|session| {
+                                    session["tabs"].as_array().is_some_and(|tabs| {
+                                        tabs.iter().any(|tab| tab["id"].as_str() == Some(id))
+                                    })
+                                })
+                                .and_then(|session| {
+                                    session["session_id"].as_str().map(str::to_owned)
+                                })
+                        })
+                    })
+                    .unwrap_or_else(|| caller.to_string());
+                let Some(session) = sessions
+                    .iter()
+                    .find(|session| session["session_id"].as_str() == Some(&target))
+                else {
+                    let _ = reply.send(Err(HostError::Failed(
+                        "Choose a session_id from browser list_tabs".into(),
+                    )));
+                    return;
+                };
+                let tab = if session["mode"] == "terminal" {
+                    crate::state::Tab::Terminal(SessionId::new(target))
+                } else {
+                    crate::state::Tab::Session(SessionId::new(target))
+                };
+                self.state
+                    .update(cx, |state, cx| state.select_tab(&tab, cx));
+                self.sync_right(window, cx);
+                self.set_right(true, cx);
+                let result = self.right.update(cx, |panel, cx| {
+                    panel.set_preview_visible(true, cx);
+                    panel.browser_command(request, window, cx)
+                });
+                match result {
+                    Err(error) => {
+                        let _ = reply.send(Err(HostError::Failed(error)));
+                    }
+                    Ok(result) => {
+                        cx.spawn(async move |_, _| {
+                            let result = result
+                                .await
+                                .map_err(|_| HostError::Failed("Browser closed".into()))
+                                .and_then(|result| result.map_err(HostError::Failed));
+                            let _ = reply.send(result);
+                        })
+                        .detach();
+                    }
+                }
+            }
             BridgeEvent::AskUser {
                 request_id,
                 caller,

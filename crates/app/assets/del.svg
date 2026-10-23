@@ -19,12 +19,17 @@
     <filter id="shadow" x="-30%" y="-25%" width="160%" height="170%">
       <feDropShadow dx="0" dy="22" stdDeviation="17" flood-color="#000" flood-opacity=".5"/>
     </filter>
-    <path id="d" fill-rule="evenodd" d="M306 270Q290 270 290 286V738Q290 754 306 754H490C652 754 750 659 750 512S652 270 490 270ZM402 378H486C582 378 638 429 638 512S582 646 486 646H402Z"/>
+    <!-- Three cut-glass strokes: a spine and two crossing diagonals forming an angular D. -->
+    <g id="d">
+      <path d="M300 230L356 254L356 780L312 804Z"/>
+      <path d="M242 252L302 266L790 598L737 596Z"/>
+      <path d="M262 781L286 728L780 392L755 454Z"/>
+    </g>
   </defs>
   <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#graphite)"/>
   <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#light)"/>
   <rect x="66" y="66" width="892" height="892" rx="204" fill="none" stroke="url(#rim)" stroke-width="3"/>
   <use href="#d" fill="url(#glass)" filter="url(#shadow)"/>
-  <use href="#d" fill="none" stroke="url(#edge)" stroke-width="4" stroke-linejoin="round"/>
-  <path d="M307 292V731" fill="none" stroke="#fff" stroke-opacity=".2" stroke-width="3" stroke-linecap="round"/>
+  <use href="#d" fill="none" stroke="url(#edge)" stroke-width="2" stroke-linejoin="miter"/>
+  <path d="M310 250L320 778M268 270L755 589M284 754L762 416" fill="none" stroke="#fff" stroke-opacity=".32" stroke-width="3"/>
 </svg>

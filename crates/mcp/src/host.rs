@@ -99,6 +99,14 @@ pub type HostResult<T> = Result<T, HostError>;
 /// any prompt they showed.
 #[async_trait]
 pub trait McpHost: Send + Sync + 'static {
+    async fn browser(
+        &self,
+        _caller: &SessionId,
+        _request: crate::BrowserRequest,
+    ) -> HostResult<serde_json::Value> {
+        Err(HostError::Failed("This host has no browser".into()))
+    }
+
     /// Record what `caller` is doing so del can show it.
     async fn report_status(
         &self,

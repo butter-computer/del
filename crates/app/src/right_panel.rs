@@ -1,4 +1,4 @@
-//! The right sidebar: a read-only file viewer and an interactive workspace PTY.
+//! The right sidebar: files, a workspace PTY, and an embedded browser.
 
 use crate::appearance::{rgb, rgba};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
@@ -52,6 +52,7 @@ enum Pane {
     #[default]
     Files,
     Terminal,
+    Browser,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -64,8 +65,16 @@ pub struct SavedPanel {
     show_hidden: bool,
     tree_height: f32,
     markdown_preview: bool,
+    browser_profile: String,
+    browser_tabs: Vec<crate::browser::SavedTab>,
+    browser_active: usize,
 }
 
+impl SavedPanel {
+    pub fn browser_profile(&self) -> &str {
+        &self.browser_profile
+    }
+}
 impl Default for SavedPanel {
     fn default() -> Self {
         Self {
@@ -76,6 +85,9 @@ impl Default for SavedPanel {
             show_hidden: false,
             tree_height: DEFAULT_TREE_HEIGHT,
             markdown_preview: false,
+            browser_profile: uuid::Uuid::new_v4().to_string(),
+            browser_tabs: vec![Default::default()],
+            browser_active: 0,
         }
     }
 }
@@ -93,6 +105,16 @@ impl PanelStore {
 
     pub fn get(&self, key: &str) -> SavedPanel {
         self.0.get(key).cloned().unwrap_or_default()
+    }
+
+    pub fn browser_tabs(&self, key: &str) -> Vec<crate::browser::SavedTab> {
+        self.0
+            .get(key)
+            .map(|panel| panel.browser_tabs.clone())
+            .unwrap_or_default()
+    }
+    pub fn remove(&mut self, key: &str) -> Option<SavedPanel> {
+        self.0.remove(key)
     }
 
     pub fn set(&mut self, key: String, panel: SavedPanel) -> bool {
@@ -188,6 +210,12 @@ pub struct RightPanel {
     document_preview: Option<crate::document_preview::DocumentPreview>,
     preview_visible: bool,
     terminal: Option<Entity<TerminalHost>>,
+    browser: Option<crate::browser::Browser>,
+    browser_profile: String,
+    browser_tabs: Vec<crate::browser::SavedTab>,
+    browser_active: usize,
+    browsers: HashMap<String, crate::browser::Browser>,
+    browser_watch: Option<Task<()>>,
     terminal_error: Option<String>,
     show_hidden: bool,
     file_tree_height: f32,
@@ -206,6 +234,9 @@ impl RightPanel {
         if !visible && let Some(preview) = &self.document_preview {
             preview.hide();
         }
+        if !visible && let Some(browser) = &self.browser {
+            browser.hide();
+        }
         if self.preview_visible != visible {
             self.preview_visible = visible;
             cx.notify();
@@ -215,6 +246,8 @@ impl RightPanel {
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pane == Pane::Terminal {
             self.ensure_terminal(window, cx);
+        } else if self.pane == Pane::Browser {
+            self.ensure_browser(cx);
         }
     }
     pub fn snapshot(&self, open: bool) -> SavedPanel {
@@ -232,11 +265,28 @@ impl RightPanel {
             show_hidden: self.show_hidden,
             tree_height: self.file_tree_height,
             markdown_preview: self.markdown_preview,
+            browser_profile: self.browser_profile.clone(),
+            browser_tabs: self.browser_snapshot(),
+            browser_active: self.browser_active,
         }
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.pane = saved.pane;
+        self.browser_profile = if uuid::Uuid::parse_str(&saved.browser_profile).is_ok() {
+            saved.browser_profile
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        self.browser_tabs = if saved.browser_tabs.is_empty() {
+            vec![Default::default()]
+        } else {
+            saved.browser_tabs
+        };
+        self.browser_active = saved.browser_active.min(self.browser_tabs.len() - 1);
+        self.browsers.clear();
+        self.browser = None;
+        self.browser_watch = None;
         self.markdown_preview = saved.markdown_preview;
         self.expanded = saved.expanded;
         self.show_hidden = saved.show_hidden;
@@ -249,8 +299,8 @@ impl RightPanel {
         if let Some(path) = saved.selected {
             self.open_file(path, cx);
         }
-        if saved.open && self.pane == Pane::Terminal {
-            self.ensure_terminal(window, cx);
+        if saved.open {
+            self.prepare_to_show(window, cx);
         }
     }
 
@@ -263,6 +313,12 @@ impl RightPanel {
             document_preview: None,
             preview_visible: true,
             terminal: None,
+            browser: None,
+            browser_profile: uuid::Uuid::new_v4().to_string(),
+            browser_tabs: vec![Default::default()],
+            browser_active: 0,
+            browsers: HashMap::new(),
+            browser_watch: None,
             terminal_error: None,
             show_hidden: false,
             file_tree_height: DEFAULT_TREE_HEIGHT,
@@ -306,6 +362,220 @@ impl RightPanel {
         self.ensure_terminal(window, cx);
         self.focus_terminal(window, cx);
         cx.notify();
+    }
+
+    fn ensure_browser(&mut self, cx: &mut Context<Self>) {
+        if self.browser.is_some() {
+            return;
+        }
+        let tab = &self.browser_tabs[self.browser_active];
+        let browser = self
+            .browsers
+            .entry(tab.id.clone())
+            .or_insert_with(|| crate::browser::Browser::new(&tab.url, &self.browser_profile))
+            .clone();
+        self.browser = Some(browser);
+        if self.browser_watch.is_some() {
+            return;
+        }
+        // Native navigation doesn't emit GPUI events. Persist URL changes through
+        // the same panel observer as file selection, without repainting each tick.
+        self.browser_watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        let tabs = this.browser_snapshot();
+                        if this.browser_tabs != tabs {
+                            this.browser_tabs = tabs;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn browser_snapshot(&self) -> Vec<crate::browser::SavedTab> {
+        self.browser_tabs
+            .iter()
+            .map(|tab| crate::browser::SavedTab {
+                id: tab.id.clone(),
+                url: self
+                    .browsers
+                    .get(&tab.id)
+                    .map_or_else(|| tab.url.clone(), |browser| browser.url()),
+            })
+            .collect()
+    }
+    fn select_browser_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(browser) = self.browser.take() {
+            browser.hide();
+        }
+        self.browser_tabs = self.browser_snapshot();
+        self.browser_active = index.min(self.browser_tabs.len() - 1);
+        self.ensure_browser(cx);
+        cx.notify();
+    }
+    fn new_browser_tab(&mut self, url: Option<String>, cx: &mut Context<Self>) -> String {
+        let mut tab = crate::browser::SavedTab::default();
+        if let Some(url) = url {
+            tab.url = url;
+        }
+        let id = tab.id.clone();
+        self.browser_tabs.push(tab);
+        self.select_browser_tab(self.browser_tabs.len() - 1, cx);
+        id
+    }
+    fn close_browser_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(browser) = self.browser.take() {
+            browser.hide();
+        }
+        let closed = self.browser_tabs.remove(index);
+        self.browsers.remove(&closed.id);
+        if self.browser_tabs.is_empty() {
+            self.browser_tabs.push(Default::default());
+        }
+        self.browser_active = if index < self.browser_active {
+            self.browser_active - 1
+        } else {
+            self.browser_active
+        }
+        .min(self.browser_tabs.len() - 1);
+        self.ensure_browser(cx);
+        cx.notify();
+    }
+    pub fn browser_command(
+        &mut self,
+        request: del_mcp::BrowserRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<crate::browser::BrowserReply, String> {
+        request.validate()?;
+        self.pane = Pane::Browser;
+        if let Some(id) = &request.tab_id {
+            let index = self
+                .browser_tabs
+                .iter()
+                .position(|tab| &tab.id == id)
+                .ok_or("Unknown browser tab")?;
+            self.select_browser_tab(index, cx);
+        }
+        self.ensure_browser(cx);
+        let immediate = match request.action.as_str() {
+            "new_tab" => {
+                self.new_browser_tab(request.url.clone(), cx);
+                true
+            }
+            "close_tab" => {
+                self.close_browser_tab(self.browser_active, cx);
+                true
+            }
+            "select_tab" | "list_tabs" => true,
+            _ => false,
+        };
+        cx.notify();
+        if immediate {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Ok(serde_json::json!({"tabs":self.browser_snapshot(),"active_tab":self.browser_tabs[self.browser_active].id})));
+            return Ok(rx);
+        }
+        let mut command = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+        if matches!(
+            request.action.as_str(),
+            "snapshot" | "click" | "fill" | "press_key" | "evaluate"
+        ) {
+            command["script"] = crate::browser::script_for(&request)?.into();
+        }
+        Ok(self.browser.as_ref().unwrap().command(command, window))
+    }
+    fn render_browser(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.preview_visible {
+            return div().into_any_element();
+        }
+        self.ensure_browser(cx);
+        let tabs = self.browser_snapshot();
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .h(zpx(28.))
+                    .flex_none()
+                    .min_w_0()
+                    .px_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .id("browser-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .children(tabs.iter().enumerate().map(|(index, tab)| {
+                                let label = if tab.url == "about:blank" {
+                                    "New tab"
+                                } else {
+                                    tab.url
+                                        .split("://")
+                                        .last()
+                                        .unwrap_or(&tab.url)
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or(&tab.url)
+                                };
+                                h_flex()
+                                    .id(("browser-tab", index))
+                                    .h(zpx(24.))
+                                    .max_w(zpx(150.))
+                                    .px_2()
+                                    .gap_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(zpx(11.))
+                                    .when(index == self.browser_active, |row| {
+                                        row.bg(rgba(0xffffff14))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_browser_tab(index, cx)
+                                    }))
+                                    .child(div().truncate().child(label.to_owned()))
+                                    .child(
+                                        div().id(("close-browser-tab", index)).child("×").on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.close_browser_tab(index, cx);
+                                            }),
+                                        ),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("new-browser-tab")
+                            .px_2()
+                            .cursor_pointer()
+                            .child("+")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.new_browser_tab(None, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    // Leave the shell's 5px splitter above the GPUI surface.
+                    // Native WebKit subviews otherwise intercept its mouse-down.
+                    .pl(zpx(6.))
+                    .child(self.browser.as_ref().unwrap().element()),
+            )
+            .into_any_element()
     }
 
     fn ensure_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,6 +706,8 @@ impl RightPanel {
                 if pane == Pane::Terminal {
                     this.ensure_terminal(window, cx);
                     this.focus_terminal(window, cx);
+                } else if pane == Pane::Browser {
+                    this.ensure_browser(cx);
                 } else {
                     this.refresh_tree(cx);
                 }
@@ -791,10 +1063,16 @@ impl Render for RightPanel {
         {
             preview.hide();
         }
+        if (!self.preview_visible || self.pane != Pane::Browser)
+            && let Some(browser) = &self.browser
+        {
+            browser.hide();
+        }
         let show_hidden = self.show_hidden;
         let body = match self.pane {
             Pane::Files => self.render_files(cx).into_any_element(),
             Pane::Terminal => self.render_terminal(cx),
+            Pane::Browser => self.render_browser(cx),
         };
         v_flex()
             .size_full()
@@ -813,6 +1091,7 @@ impl Render for RightPanel {
                     .items_center()
                     .child(self.tab("tab-files", "Files", Pane::Files, cx))
                     .child(self.tab("tab-terminal", "Terminal", Pane::Terminal, cx))
+                    .child(self.tab("tab-browser", "Browser", Pane::Browser, cx))
                     .when(self.pane == Pane::Files, |row| {
                         row.child(div().flex_1()).child(
                             h_flex()
@@ -1118,6 +1397,28 @@ mod tests {
                 point(px(-120.0), px(-400.0))
             );
         });
+    }
+
+    #[::core::prelude::v1::test]
+    fn browser_profiles_and_tabs_are_independent_and_persisted() {
+        let a = SavedPanel::default();
+        let b = SavedPanel::default();
+        assert_ne!(a.browser_profile, b.browser_profile);
+        assert_ne!(a.browser_tabs[0].id, b.browser_tabs[0].id);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("panels.json");
+        let mut store = PanelStore::default();
+        store.set("chat:a".into(), a.clone());
+        store.set("chat:b".into(), b.clone());
+        store.save(&path).unwrap();
+        let mut restored = PanelStore::load(&path);
+        assert_eq!(restored.get("chat:a").browser_profile, a.browser_profile);
+        assert_eq!(
+            restored.get("chat:a").browser_tabs[0].id,
+            a.browser_tabs[0].id
+        );
+        restored.remove("chat:a");
+        assert_eq!(restored.get("chat:b").browser_profile, b.browser_profile);
     }
 
     #[::core::prelude::v1::test]

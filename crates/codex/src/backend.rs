@@ -70,6 +70,7 @@ struct Connection {
 }
 
 pub struct CodexBackend {
+    browser_tools: Mutex<Option<del_agent::backend::BrowserTools>>,
     opts: CodexOptions,
     conn: tokio::sync::Mutex<Option<Arc<Connection>>>,
     sessions: Sessions,
@@ -126,6 +127,7 @@ impl CodexBackend {
     pub fn new(opts: CodexOptions) -> Self {
         Self {
             opts,
+            browser_tools: Mutex::new(None),
             conn: tokio::sync::Mutex::new(None),
             sessions: Default::default(),
         }
@@ -220,6 +222,9 @@ impl CodexBackend {
         provider: Provider,
     ) -> Result<SessionHandle> {
         let conn = self.connection().await?;
+        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
+            apply_browser_tools(&mut params, tools);
+        }
         if let Some(t) = thread {
             params.insert("threadId".into(), json!(t.as_str()));
         }
@@ -247,6 +252,10 @@ impl CodexBackend {
 
 #[async_trait]
 impl AgentBackend for CodexBackend {
+    fn set_browser_tools(&self, tools: del_agent::backend::BrowserTools) {
+        *self.browser_tools.lock().unwrap() = Some(tools);
+    }
+
     fn provider(&self) -> Provider {
         Provider::Codex
     }
@@ -574,8 +583,50 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
     }
 }
 
+fn apply_browser_tools(
+    params: &mut serde_json::Map<String, Value>,
+    tools: &del_agent::backend::BrowserTools,
+) {
+    let config = params
+        .entry("config".to_owned())
+        .or_insert_with(|| json!({}));
+    config["mcp_servers.del_browser"] =
+        json!({"url":tools.url,"http_headers":{"Authorization":format!("Bearer {}",tools.token)}});
+    let existing = params
+        .get("developerInstructions")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let policy = del_agent::backend::BROWSER_INSTRUCTIONS;
+    let instructions = if existing.is_empty() {
+        policy.to_owned()
+    } else {
+        format!("{existing}\n\n{policy}")
+    };
+    params.insert("developerInstructions".into(), instructions.into());
+}
+
 #[cfg(test)]
 mod model_config_tests {
+    #[test]
+    fn browser_routing_is_included_without_losing_thread_settings() {
+        let mut params = serde_json::json!({"config":{"model_reasoning_effort":"high"},"developerInstructions":"Existing instructions"}).as_object().unwrap().clone();
+        super::apply_browser_tools(
+            &mut params,
+            &del_agent::backend::BrowserTools {
+                url: "http://127.0.0.1:1234/mcp".into(),
+                token: "fixture".into(),
+                claude_config: "/tmp/browser.json".into(),
+            },
+        );
+        assert_eq!(params["config"]["model_reasoning_effort"], "high");
+        assert_eq!(
+            params["config"]["mcp_servers.del_browser"]["url"],
+            "http://127.0.0.1:1234/mcp"
+        );
+        let instructions = params["developerInstructions"].as_str().unwrap();
+        assert!(instructions.starts_with("Existing instructions\n\n"));
+        assert!(instructions.contains(del_agent::backend::BROWSER_INSTRUCTIONS));
+    }
     #[test]
     fn mixed_attachments_keep_documents_as_files_and_images_as_images() {
         let input = del_agent::UserInput {

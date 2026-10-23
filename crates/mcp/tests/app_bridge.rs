@@ -602,3 +602,51 @@ async fn http_disconnect_removes_its_pending_question() {
     assert!(matches!(closed, BridgeEvent::QuestionClosed { request_id } if request_id == id));
     assert!(reply.is_closed());
 }
+
+#[tokio::test]
+async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
+    let mut f = Fixture::new(Default::default()).await;
+    let config = f.config.clone();
+    let pending = tokio::spawn(async move {
+        call(
+            &config,
+            "browser",
+            json!({"action":"snapshot","session_id":"parent","tab_id":"tab-a"}),
+        )
+        .await
+    });
+    match f.event().await {
+        BridgeEvent::Browser {
+            caller,
+            request,
+            reply,
+        } => {
+            assert_eq!(caller.as_str(), "parent");
+            assert_eq!(request.action, "snapshot");
+            assert_eq!(request.tab_id.as_deref(), Some("tab-a"));
+            reply.send(Ok(json!({"title":"Fixture"}))).unwrap();
+        }
+        _ => panic!("expected browser command"),
+    }
+    assert_eq!(
+        pending.await.unwrap()["structuredContent"]["title"],
+        "Fixture"
+    );
+    let tools = f.handle.chat_browser_tools().unwrap();
+    let config = LaunchConfig {
+        args: vec![],
+        env: vec![
+            ("DEL_MCP_URL".into(), tools.url),
+            ("DEL_MCP_TOKEN".into(), tools.token),
+        ],
+        files: vec![],
+    };
+    assert!(tools.claude_config.exists());
+    let (_, listing) = post(&config, "tools/list", json!({})).await;
+    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["result"]["tools"][0]["name"], "browser");
+    let denied = call(&config, "list_sessions", json!({})).await;
+    assert_eq!(denied["isError"], true);
+    f.bridge.shutdown();
+    assert!(!tools.claude_config.exists());
+}

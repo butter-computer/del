@@ -74,6 +74,7 @@ impl Live {
 
 #[derive(Default)]
 pub struct ClaudeBackend {
+    browser_tools: Mutex<Option<del_agent::backend::BrowserTools>>,
     options: ClaudeOptions,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
     titles: Arc<Mutex<crate::titles::Titles>>,
@@ -83,6 +84,7 @@ impl ClaudeBackend {
     pub fn new(options: ClaudeOptions) -> Self {
         Self {
             options,
+            browser_tools: Mutex::new(None),
             sessions: Mutex::default(),
             titles: Default::default(),
         }
@@ -131,6 +133,14 @@ impl ClaudeBackend {
         }
         if let Some(s) = &self.options.setting_sources {
             a.extend(["--setting-sources".into(), s.clone()]);
+        }
+        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
+            a.extend([
+                "--mcp-config".into(),
+                tools.claude_config.to_string_lossy().into_owned(),
+                "--append-system-prompt".into(),
+                del_agent::backend::BROWSER_INSTRUCTIONS.into(),
+            ]);
         }
         a.extend(self.options.extra_args.iter().cloned());
         a
@@ -272,6 +282,10 @@ async fn input_line(input: &UserInput) -> Result<String> {
 
 #[async_trait]
 impl AgentBackend for ClaudeBackend {
+    fn set_browser_tools(&self, tools: del_agent::backend::BrowserTools) {
+        *self.browser_tools.lock().unwrap() = Some(tools);
+    }
+
     fn provider(&self) -> Provider {
         Provider::Claude
     }
@@ -427,6 +441,37 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
 #[cfg(test)]
 mod model_config_tests {
     use super::*;
+    #[test]
+    fn browser_routing_is_appended_for_new_and_resumed_chats() {
+        let backend = ClaudeBackend::new(ClaudeOptions::default());
+        backend.set_browser_tools(del_agent::backend::BrowserTools {
+            url: "http://127.0.0.1:1234/mcp".into(),
+            token: "fixture".into(),
+            claude_config: "/tmp/browser.json".into(),
+        });
+        let config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Claude,
+            permission_mode: PermissionMode::FullAuto,
+        };
+        for flag in ["--session-id", "--resume"] {
+            let args = backend.args(&config, [flag, "test"]);
+            assert!(args.windows(2).any(|pair| pair
+                == [
+                    "--append-system-prompt",
+                    del_agent::backend::BROWSER_INSTRUCTIONS
+                ]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--mcp-config", "/tmp/browser.json"])
+            );
+            assert!(!args.contains(&"--system-prompt".into()));
+        }
+    }
+
     #[test]
     fn full_access_bypasses_permissions_for_new_and_resumed_chats() {
         let backend = ClaudeBackend::new(ClaudeOptions::default());

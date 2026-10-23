@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const HOVER_DURATION: Duration = Duration::from_millis(90);
+
 #[derive(Clone, Default)]
 pub struct HoverMotion(Rc<RefCell<Motion>>);
 #[derive(Default)]
@@ -35,9 +37,9 @@ struct RowPresentation {
 
 impl Motion {
     fn y(&self) -> f32 {
-        let t = self
-            .started
-            .map_or(1.0, |s| (s.elapsed().as_secs_f32() / 0.16).min(1.0));
+        let t = self.started.map_or(1.0, |s| {
+            (s.elapsed().as_secs_f32() / HOVER_DURATION.as_secs_f32()).min(1.0)
+        });
         self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3))
     }
 }
@@ -305,7 +307,7 @@ impl HoverMotion {
             .size_full()
             .with_animation(
                 ("group-hover", generation),
-                Animation::new(Duration::from_millis(170)),
+                Animation::new(HOVER_DURATION),
                 |canvas, _| canvas,
             ),
         )

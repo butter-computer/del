@@ -127,6 +127,8 @@ mod tests {
         cx.simulate_keystrokes("cmd--");
         assert_eq!(del_core::zoom::percent(), 110);
         cx.simulate_keystrokes("cmd-=");
+        assert_eq!(del_core::zoom::percent(), 110);
+        cx.simulate_keystrokes("cmd-0");
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(del_core::zoom::percent(), 100);
         assert_eq!(super::read(&path), 100);
@@ -153,7 +155,7 @@ fn install(cx: &mut App, path: PathBuf) {
         KeyBinding::new("cmd-+", ZoomIn, None),
         KeyBinding::new("cmd-shift-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
-        KeyBinding::new("cmd-=", ResetZoom, None),
+        KeyBinding::new("cmd-0", ResetZoom, None),
     ]);
     let apply = move |percent, cx: &mut App| {
         del_core::zoom::set(percent);

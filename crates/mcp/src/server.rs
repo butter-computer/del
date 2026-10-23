@@ -69,6 +69,7 @@ impl std::fmt::Debug for Credentials {
 struct Scope {
     /// token -> session it authenticates as.
     tokens: HashMap<String, SessionId>,
+    browser_only: HashSet<SessionId>,
     children: HashMap<SessionId, HashSet<SessionId>>,
     parent: HashMap<SessionId, SessionId>,
     spawned_total: usize,
@@ -160,6 +161,16 @@ impl McpServer {
     }
 
     /// Invalidate every token of `session`.
+    pub fn register_browser_client(&self, session: &SessionId) -> Credentials {
+        self.inner
+            .scope
+            .lock()
+            .unwrap()
+            .browser_only
+            .insert(session.clone());
+        self.register_session(session)
+    }
+
     pub fn revoke_session(&self, session: &SessionId) {
         let mut s = self.inner.scope.lock().unwrap();
         s.tokens.retain(|_, v| v != session);
@@ -324,12 +335,22 @@ impl Inner {
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "del", "title": "del", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": format!(
-                        "You are running inside del as session `{caller}`. Use report_status to show what you are doing and ask_user when you need a decision from the person at the keyboard."
+                        "You are connected to Del as `{caller}`. Use only tools in tools/list. {}",
+                        del_agent::backend::BROWSER_INSTRUCTIONS
                     )
                 })
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools": tools::tool_list()}),
+            "tools/list" => {
+                let mut catalogue = tools::tool_list();
+                if self.scope.lock().unwrap().browser_only.contains(caller) {
+                    catalogue
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|tool| tool["name"] == "browser");
+                }
+                json!({"tools":catalogue})
+            }
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params
@@ -365,7 +386,34 @@ impl Inner {
                 .map_err(|e| ToolFail::Invalid(format!("invalid arguments: {e}")))
         }
         let host = &self.host;
+        if name != "browser" && self.scope.lock().unwrap().browser_only.contains(caller) {
+            return Ok(tool_err("This credential grants browser tools only"));
+        }
         match name {
+            "browser" => {
+                let request: crate::BrowserRequest = parse(args)?;
+                if let Err(error) = request.validate() {
+                    return Ok(tool_err(error));
+                }
+                Ok(
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        host.browser(caller, request),
+                    )
+                    .await
+                    {
+                        Ok(Ok(value)) => {
+                            if let Some(image) = value.get("image").and_then(Value::as_str) {
+                                json!({"content":[{"type":"image","data":image,"mimeType":"image/png"}],"isError":false})
+                            } else {
+                                tool_text(value.to_string(), Some(value), false)
+                            }
+                        }
+                        Ok(Err(error)) => tool_err(error.to_string()),
+                        Err(_) => tool_err("Browser action timed out"),
+                    },
+                )
+            }
             "report_status" => {
                 let a: ReportStatusArgs = parse(args)?;
                 if let Some(s) = &a.session_id

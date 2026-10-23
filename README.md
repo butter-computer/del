@@ -79,8 +79,8 @@ a running bundle, then checks that replacements preserve its macOS signing
 identity and retired bundles are cleaned up after exit. Neither script grants
 permissions or inspects the user's TCC database.
 
-The editable app icon is `crates/app/assets/del.svg`; PNG and ICNS exports are
-checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
+The glass app icon uses three tapered strokes forming an angular D. Its editable
+source is `crates/app/assets/del.svg`; PNG and ICNS exports are checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
 `sharp` Node package is available. Bundle builds use the checked-in exports.
 Direct development launches also set the Dock icon from the embedded ICNS asset.
 
@@ -218,9 +218,9 @@ Steering during streaming keeps the current assistant answer in one block.
 Sent steering messages use a small muted yellow queue icon beside the text,
 without a separate “steer” heading.
 
-## Files and terminals
+## Files, terminals, and browser
 
-The right sidebar has **Files** and **Terminal** panes. The file tree loads
+The right sidebar has **Files**, **Terminal**, and **Browser** panes. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
 `target`/`node_modules` trees. Selection highlights fit the file label. The tree
 and preview have a draggable split. The file tree has no opaque edge overlays
@@ -242,6 +242,8 @@ hides native previews; closing the preview releases its document.
 Click **TERMINALS** in the left sidebar to collapse or expand the list, with a
 short transition and no disclosure-arrow icon. Row highlights fade and clip with
 the list. Reduce Motion makes the transition instant.
+
+Terminal content fills its pane without a title/status/Copy output header.
 
 The workspace terminal starts the shell selected by `$SHELL` as a login shell,
 falling back to `/bin/zsh`. Its terminal engine is `alacritty_terminal`, rendered
@@ -274,9 +276,35 @@ the setting when reopened; there is currently no in-chat permission toggle.
 ACP sessions and custom shell commands keep their existing permission behavior.
 
 Del's MCP bridge provides scoped session coordination, status, notifications,
-and user questions for supported terminal agents. Launch-specific credentials
+and user questions for supported terminal agents. Browser tools are also available
+to Codex and Claude chat sessions. Launch-specific credentials
 and MCP configuration are kept separate from saved launch history. See
 [the MCP documentation](crates/mcp/README.md) for tools, transport, and scope.
+
+### Browser
+
+On macOS 14 or later, the Browser pane embeds WebKit with an address field,
+back/forward navigation, reload/stop, and multiple tabs. HTTP(S) and localhost
+pages open inside Del. Browser zoom follows the app's zoom setting. The sidebar
+remains resizable while a browser tab is open. Pop-up links currently open in the
+same tab; downloads and browser extensions are not supported.
+
+Each saved chat or terminal session has its own persistent WebKit profile.
+Its tabs, cookies, site storage, and sign-ins remain across tab closing, session
+unload, archiving, and app restarts. Different sessions do not share sign-ins.
+Only **Permanently delete** removes that session's browser profile; normal site
+expiry and server-side sign-outs still apply. If WebKit is still releasing a
+profile, its website data is cleared and remaining cleanup retries at next launch.
+
+Codex and Claude agents can use Del's authenticated `browser` MCP tool to discover,
+create, select, close, and navigate tabs, inspect page text/elements, click, fill,
+send keys, evaluate page JavaScript, and take screenshots. These actions target the
+same visible browser and saved profiles. Del is the default browser for agent
+requests; external browsers are used only when explicitly requested by the user.
+Agents can choose any saved session's browser with its session/tab ID; chat
+credentials expose only browser operations.
+Page content is treated as untrusted data. ACP browser-tool injection is not yet
+implemented.
 
 ## Harness updates
 
@@ -306,6 +334,9 @@ prompt acceptance times; model-side first-token latency can still vary.
 
 ## Settings and shortcuts
 
+Sidebar and context-menu hover highlights move between rows in 90 ms with smooth
+easing. Reduce Motion keeps these transitions instant.
+
 Del opens as a centered window at roughly 70% of the available display width and
 76% of its height, with a minimum size of **960 × 640 logical pixels**.
 
@@ -330,7 +361,7 @@ session shortcuts.
 | Command-W | Close the active tab |
 | Command-+ (Command-Shift-=) | Zoom the entire interface in |
 | Command-- | Zoom the entire interface out |
-| Command-= | Reset zoom to 100% |
+| Command-0 | Reset zoom to 100% |
 | Control-Tab / Control-Shift-Tab | Next / previous tab |
 | Command-Shift-] / Command-Shift-[ | Next / previous tab |
 | Command-L | Focus composer |
@@ -358,11 +389,16 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | `terminals.json` | Terminal launches and provider conversation identities |
 | `followups/` | Per-conversation queued messages and delivery state |
 | `attachments/` | Local file copies used by drafts and queued messages |
-| `right-panels.json` | Per-chat file/terminal pane state |
+| `right-panels.json` | Per-session file/terminal/browser state, profile IDs, and tabs |
+| `browser-profile-deletions.json` | Pending WebKit profile cleanup |
 | `sidebar-widths.json` | Sidebar sizes |
 | `appearance.json` | Light/Dark preference |
 | `zoom.json` | Interface zoom percentage |
 | `acp-agents.json` | ACP registry overrides |
+
+WebKit owns website data under its app-specific Library directories;
+`right-panels.json` stores the UUID connecting each session to its profile.
+Browser data is not stored in the conversation transcript.
 
 The macOS development-signing identity uses the fixed directory described above.
 See [ACP configuration](crates/acp/README.md) for custom installed agents.
@@ -415,4 +451,12 @@ clang -fobjc-arc -Wno-incompatible-pointer-types scripts/test-document-preview.m
   crates/app/src/document_preview.m -framework AppKit -framework Quartz \
   -o /tmp/del-document-preview-test
 /tmp/del-document-preview-test
+```
+
+The native browser check uses a local HTTP fixture, verifies navigation, page
+JavaScript, screenshots, isolated profiles, cookie/local-storage persistence
+across process restarts, profile deletion, and pointer routing during sidebar resizing:
+
+```sh
+python3 scripts/test-browser.py
 ```

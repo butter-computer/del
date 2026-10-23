@@ -65,6 +65,7 @@ impl Tab {
 /// Results coming back from the runtime.
 enum Msg {
     Refresh,
+    PanelDeleted(String, u64),
     ReplyFinished(SessionId),
     Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
@@ -109,12 +110,14 @@ pub struct AppState {
     draft_modes: HashMap<u64, SessionMode>,
     pub terminal_rows: Vec<TerminalRow>,
     readiness: Option<crate::readiness::Readiness>,
+    pub browser_tools_ready: bool,
     unread_motion: HashMap<SessionId, (f32, std::time::Instant)>,
     pub terminal_title_loading: std::collections::HashSet<SessionId>,
     pub closed_terminals: Vec<SessionId>,
     pub unloaded_chats: Vec<SessionId>,
     unloading: std::collections::HashSet<SessionId>,
     pub removed_terminals: Vec<SessionId>,
+    pub deleted_panels: Vec<(String, u64)>,
     pub terminal_pin_changes: Vec<(SessionId, bool)>,
     pub panel: Panel,
     pub preferences_open: bool,
@@ -295,10 +298,12 @@ impl AppState {
             terminal_title_loading: Default::default(),
             unread_motion: HashMap::new(),
             readiness: Some(readiness),
+            browser_tools_ready: false,
             closed_terminals: Vec::new(),
             unloaded_chats: Vec::new(),
             unloading: Default::default(),
             removed_terminals: Vec::new(),
+            deleted_panels: Vec::new(),
             terminal_pin_changes: Vec::new(),
         }
     }
@@ -333,6 +338,9 @@ impl AppState {
                         ));
                     }
                 }
+            }
+            Msg::PanelDeleted(key, uid) => {
+                self.deleted_panels.push((key, uid));
             }
             Msg::Refresh => self.records = self.manager.list_sessions(),
             Msg::Unloaded(id) => {
@@ -427,6 +435,9 @@ impl AppState {
     }
 
     fn refresh_readiness(&self) {
+        if !self.browser_tools_ready {
+            return;
+        }
         let Some(readiness) = &self.readiness else {
             return;
         };
@@ -668,6 +679,13 @@ impl AppState {
         if !self.terminal_rows.iter().any(|row| &row.id == id) {
             return;
         }
+        self.deleted_panels.push((
+            format!("terminal:{}", id.as_str()),
+            self.uids
+                .get(&Tab::Terminal(id.clone()))
+                .copied()
+                .unwrap_or(u64::MAX),
+        ));
         self.close_tab(&Tab::Terminal(id.clone()), cx);
         self.terminal_rows.retain(|row| &row.id != id);
         self.removed_terminals.push(id.clone());
@@ -1247,6 +1265,11 @@ impl AppState {
             self.remove_terminal(&id, cx);
             return;
         }
+        let uid = self
+            .uids
+            .get(&Tab::Session(id.clone()))
+            .copied()
+            .unwrap_or(u64::MAX);
         self.close_tab(&Tab::Session(id.clone()), cx);
         self.records.retain(|record| record.id != id);
         self.overrides.remove(&id);
@@ -1255,6 +1278,8 @@ impl AppState {
         self.rt.spawn(async move {
             if let Err(error) = manager.delete(&id).await {
                 let _ = tx.send(Msg::Error(format!("Could not delete session: {error}")));
+            } else {
+                let _ = tx.send(Msg::PanelDeleted(format!("chat:{}", id.as_str()), uid));
             }
             let _ = tx.send(Msg::Refresh);
         });
@@ -1602,10 +1627,12 @@ mod tests {
             terminal_title_loading: Default::default(),
             unread_motion: HashMap::new(),
             readiness: None,
+            browser_tools_ready: true,
             closed_terminals: vec![],
             unloaded_chats: vec![],
             unloading: Default::default(),
             removed_terminals: vec![],
+            deleted_panels: vec![],
             terminal_pin_changes: vec![],
             panel: Panel::Chat,
             preferences_open: true,

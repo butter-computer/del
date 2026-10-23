@@ -107,6 +107,12 @@ async fn initialize_and_list_tools() {
             .unwrap()
             .contains("`me`")
     );
+    assert!(
+        r["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(del_agent::backend::BROWSER_INSTRUCTIONS)
+    );
     let r = rpc(&e.me, "initialize", json!({"protocolVersion":"1999-01-01"})).await;
     assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
 
@@ -116,6 +122,7 @@ async fn initialize_and_list_tools() {
     assert_eq!(
         names,
         [
+            "browser",
             "report_status",
             "ask_user",
             "list_sessions",
@@ -377,7 +384,7 @@ async fn stdio_proxy_round_trip() {
     assert_eq!(lines.len(), 1);
     let v: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(v["id"], 7);
-    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 8);
 
     // Bad token surfaces as a JSON-RPC error for requests.
     let out = Buf::default();
@@ -633,4 +640,33 @@ fn launch_timeouts_cover_the_user_wait_without_process_wide_overrides() {
                 .all(|(name, _)| name == launch::ENV_URL || name == launch::ENV_TOKEN)
         );
     }
+}
+
+#[tokio::test]
+async fn chat_browser_credentials_cannot_call_session_or_notification_tools() {
+    let e = env().await;
+    let id = SessionId::new("browser-chat");
+    let credential = e.server.register_browser_client(&id);
+    let list = rpc(&credential, "tools/list", json!({})).await;
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(list["result"]["tools"][0]["name"], "browser");
+    assert!(is_error(
+        &call(&credential, "list_sessions", json!({})).await
+    ));
+    assert!(is_error(
+        &call(&credential, "notify", json!({"title":"no","body":"no"})).await
+    ));
+    assert!(is_error(
+        &call(&credential, "browser", json!({"action":"not-real"})).await
+    ));
+    let invalid = call(
+        &credential,
+        "browser",
+        json!({"action":"list_tabs","unexpected":true}),
+    )
+    .await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    e.server.revoke_session(&id);
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(post(&credential.url, auth(&credential), body).await.0, 401);
 }

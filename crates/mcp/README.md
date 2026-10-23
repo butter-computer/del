@@ -1,6 +1,6 @@
 # del-mcp
 
-del's own MCP server, the one TUI-mode agents (Claude Code, Codex) connect to.
+Del's MCP server for terminal agents and Codex/Claude chat browser access.
 No GPUI dependency: the server talks to the app through the `McpHost` trait.
 
 MCP is implemented directly (JSON-RPC 2.0: `initialize`, `ping`, `tools/list`,
@@ -23,11 +23,14 @@ auth, scoping and the blocking `ask_user`.
   you spawned and the session that spawned you; spawn quotas
   (`max_spawn_per_session` 8, `max_spawn_total` 32); `ask_user` times out after
   `ask_timeout` (30 min). Input lengths are capped.
-- No filesystem, shell or network tools. Tool failures return `isError: true`;
+- No raw filesystem or shell tools. The browser tool can access websites and
+  interact with signed-in pages. Tool failures return `isError: true`;
   malformed arguments return JSON-RPC `-32602`.
 - `Credentials` and `LaunchConfig` redact tokens in `Debug`. Claude config files
   have unique names, are created exclusively, and use mode 0600. Codex gets the
-  token via an env var, never argv.
+  terminal token via an env var, never argv. Codex chat receives its browser-only
+  configuration through thread/start or thread/resume; Claude chat gets a private
+  MCP config file. Browser-only credentials cannot call coordination tools.
 
 ## Tools
 
@@ -37,6 +40,7 @@ rejected. Object results carry both `content[0].text` (JSON) and
 
 | tool | input | result |
 | --- | --- | --- |
+| `browser` | `action`, optional `session_id`, `tab_id`, `url`, `selector`, `value`, `key`, `script` | page/tab JSON or PNG image content |
 | `report_status` | `state` (`working\|idle\|blocked\|done\|error`), `summary` (≤500), `session_id?` (must equal your own) | text `status recorded` |
 | `ask_user` | `question` (≤4000), `options?` (≤8 strings, ≤200 each) | `{answered: true, answer, option_index?}` or `{answered: false, dismissed: true}`; blocks until the user answers in del; error on timeout |
 | `list_sessions` | none | `{sessions: [{id, provider, cwd, title, status, reported_state, is_self}]}` |
@@ -47,11 +51,36 @@ rejected. Object results carry both `content[0].text` (JSON) and
 
 `initialize` returns instructions telling the agent its own session id.
 
+### Browser actions
+
+Del is the default for browser requests unless the user explicitly names another
+browser or destination. This routing instruction is supplied to Codex/Claude chats
+and in MCP initialization/tool metadata.
+
+`list_tabs` without a session lists saved sessions, their browser tabs, and
+`active_session_id` for the visible session. Choose an explicit `session_id` or a returned `tab_id` for subsequent actions. Operations
+open/select the corresponding visible pane. Tabs in one session share its profile;
+different sessions use separate profiles. Closing tabs and unloading sessions
+retain website data; permanent session deletion removes it.
+
+Actions: `new_tab` (optional `url`), `select_tab`, `close_tab`, `navigate` (`url`),
+`back`, `forward`, `reload`, `snapshot`, `screenshot`, `click` (`selector`), `fill`
+(`selector`, `value`), `press_key` (`key`), and `evaluate` (`script`). Snapshot returns
+page text and CSS selectors for interactive elements. JavaScript is a function
+body with `return` and optional `await`, executed only in the webpage. Key events
+support Enter, Tab, Escape, and arrows. Navigation acknowledges load start; inspect
+snapshot readiness before using the new page. Operations time out after 30 seconds.
+Screenshots return MCP image content. Page text and scripts have bounded sizes.
+
+Chat backends get a browser-only credential; terminal agents retain the complete
+tool set. Page text is untrusted content, not instructions. Website actions remain
+subject to the user's authorization, including forms and signed-in accounts.
+
 ## Host contract
 
 ```rust
 #[async_trait]
-trait McpHost { report_status, ask_user, list_sessions, session_summary,
+trait McpHost { browser, report_status, ask_user, list_sessions, session_summary,
                 spawn_session, send_to_session, notify }  // each gets `caller: &SessionId`
 ```
 
@@ -84,15 +113,13 @@ and prints ready-to-use commands for both CLIs.
 ## Verification
 
 `cargo test -p del-mcp` exercises HTTP auth/revocation, caller identity,
-parent/child messaging, spawn quotas, blocked questions and timeout, all seven
+parent/child messaging, spawn quotas, blocked questions and timeout, all eight
 tools, the stdio proxy, launch-file privacy, malformed requests, and the
 `ManagerHost` adapter with a real `SessionManager` and mock backend.
 
-The installed Claude Code and Codex CLIs also discovered all seven tools over
-both HTTP and stdio. Claude was checked through SDK control requests
-(`initialize`, `mcp_status`); Codex through app-server `mcpServerStatus/list`.
-Those checks used isolated temporary configuration directories and launch
-flags, without model prompts or changes to global configuration.
+Codex browser configuration was checked through the installed app-server's
+thread/start, using a local MCP fixture without sending a model prompt. Native
+WebKit validation is available through `python3 scripts/test-browser.py`.
 
 App wiring remains with the TUI integration: keep the server alive for the
 app lifetime, register each session before launch, apply its `LaunchConfig`,
