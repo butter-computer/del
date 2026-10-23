@@ -1,7 +1,7 @@
 //! Model and reasoning controls backed by the selected provider's catalog.
 use crate::appearance::{rgb, rgba};
 use crate::state::{AppState, Selection};
-use del_agent::EffortOption;
+use del_agent::{EffortOption, Provider};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
@@ -187,7 +187,10 @@ impl Render for ModelPanel {
         };
         let catalog = state.model_catalog();
         let (provider, selected, _) = state.effective();
-        let accent = rgb(crate::composer_ui::provider_brand(provider).1);
+        let accent = rgb(match provider {
+            Provider::Codex => 0x007aff,
+            _ => crate::composer_ui::provider_brand(provider).1,
+        });
         let info = state.model_info();
         let effort = state.effort();
         let fast = state.service_tier().is_some();

@@ -86,6 +86,9 @@ checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
 ## Conversations and workspace
 
 - Choose a provider, model, and project folder in a new-session composer.
+- Each New Session action opens an independent draft tab; existing drafts are
+  preserved. The tab bar scrolls when tabs overflow and reveals the selected tab.
+  Dragged tabs stay inside the tab strip, beyond the left-sidebar toggle.
 - The project folder and Chat/Terminal controls sit in a darker footer beneath
   the input, keeping workspace selection distinct from the message area.
 - **Chat / Terminal** selects how the first prompt will run. Choosing Terminal
@@ -104,8 +107,10 @@ checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
 - Session titles use the available sidebar width, reserving extra action space
-  on hover. New-session, new-tab, sidebar, archive, and pin controls use matching
-  icon sizes.
+  on hover so terminal pin/close buttons do not overlap their titles. New-session,
+  new-tab, tab-close, sidebar, archive, and pin icons share the same 15 px size.
+  Sidebar rows keep their minimum height and single-line titles in
+  short or narrow windows; the list scrolls instead of compressing rows.
 - General application, session-start, model-loading, and message-delivery failures
   appear in dismissible toasts. Failed messages remain available to retry or edit.
 
@@ -129,7 +134,8 @@ default is labeled **Default**.
 
 Selecting a model opens its reasoning controls. Slider stops correspond to
 advertised effort levels, and the accent follows the selected provider (including
-Claude orange). Fast mode is enabled only when the model advertises support.
+Codex blue and Claude orange). Fast mode is enabled only when the model
+advertises support.
 Reset clears explicit effort/fast settings and refreshes the catalog.
 
 Model, effort, and service-tier selections are stored with the conversation.
@@ -161,8 +167,10 @@ apply the old 20 MiB image-only limit. Unreadable files report individual errors
 while other files in the selection are retained.
 
 **⌘V** pastes copied images or Finder files into the composer; ordinary text
-paste still works normally. PNG, JPEG, and WebP show thumbnails of the actual
-image. Other formats show one file-type icon, a compact filename, and extension.
+paste still works normally on both new-session and conversation pages. Clipboard
+bitmap formats such as TIFF and BMP are converted to PNG in the background.
+PNG, JPEG, and WebP show thumbnails of the actual image. Other formats show one
+file-type icon, a compact filename, and extension.
 Cards form a single horizontal scrolling row with no scrollbar. Wide, subtle
 edge fades appear only on sides with more offscreen content. Each card reveals
 a bright **×** on hover that remains visible while hovered or pressed. Click

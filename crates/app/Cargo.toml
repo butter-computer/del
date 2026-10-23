@@ -24,7 +24,7 @@ gpui-kit.workspace = true
 gpui.workspace = true
 # Decodes the wallpaper ahead of the first frame. Same crate and version GPUI
 # uses internally, so it adds no new code to the build.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff", "bmp", "gif", "ico", "pnm"] }
 del-codex = { path = "../codex" }
 del-claude = { path = "../claude" }
 del-acp = { path = "../acp" }

@@ -77,18 +77,26 @@ struct DraggedTab {
     title: String,
     provider: Option<Provider>,
     start_pointer_y: Pixels,
+    cursor_offset_x: Pixels,
+    strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     start_pointer_x: std::rc::Rc<std::cell::Cell<Pixels>>,
 }
 
 impl Render for DraggedTab {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let bounds = self.strip_bounds.get();
+        let width = px(TAB_WIDTH).min(bounds.size.width.max(px(0.)));
+        let natural_left = window.mouse_position().x - self.cursor_offset_x;
+        let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
         // GPUI places drag previews at the pointer. Cancel its vertical movement
         // inside a fixed-size wrapper, keeping the original grab offset intact.
         div().w(px(TAB_WIDTH)).h(px(24.)).child(
             h_flex()
                 .relative()
                 .top(self.start_pointer_y - window.mouse_position().y)
-                .w(px(TAB_WIDTH))
+                .left(left - natural_left)
+                .w(width)
+                .overflow_hidden()
                 .h(px(24.))
                 .px_2()
                 .gap_2()
@@ -248,10 +256,12 @@ struct AppShell {
     sidebar_widths: SidebarWidths,
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
     tab_drag_origin: std::rc::Rc<std::cell::Cell<Pixels>>,
+    tab_strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     sidebar_open: bool,
     sidebar_visible: bool,
     sidebar_toggles: u64,
     tab_scroll: ScrollHandle,
+    tab_reveal: Option<(u64, std::time::Instant)>,
     right: Entity<RightPanel>,
     right_owner: u64,
     right_key: Option<String>,
@@ -506,10 +516,12 @@ impl AppShell {
             sidebar_widths: SidebarWidths::load(),
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
+            tab_strip_bounds: Default::default(),
             sidebar_open: true,
             sidebar_visible: true,
             sidebar_toggles: 0,
             tab_scroll: ScrollHandle::new(),
+            tab_reveal: None,
             right,
             right_owner: 0,
             right_key: None,
@@ -840,6 +852,7 @@ impl AppShell {
         let (shell, state_p, state_f) = (cx.entity(), self.state.clone(), self.state.clone());
         let shell_stop = shell.clone();
         let shell_attach = shell.clone();
+        let shell_paste = shell.clone();
         let retry_state = self.state.clone();
         let owner = self.composer_owner(cx);
         let has_attachments = self
@@ -867,7 +880,10 @@ impl AppShell {
         .on_folder(move |_, cx| state_f.update(cx, |s, cx| s.pick_folder(cx)))
         .attachments(has_attachments)
         .attachment_content(has_attachments.then(|| self.render_attachments(cx).into_any_element()))
-        .on_attach(move |_, cx| shell_attach.update(cx, |this, cx| this.pick_attachments(cx)));
+        .on_attach(move |_, cx| shell_attach.update(cx, |this, cx| this.pick_attachments(cx)))
+        .on_paste(move |item, _, cx| {
+            shell_paste.update(cx, |this, cx| this.paste_attachments(item, cx))
+        });
         v_flex()
             .w_full()
             .max_w(px(COMPOSER_MAX_WIDTH))
@@ -916,6 +932,12 @@ impl AppShell {
             }
             (tabs, st.selection.clone(), st.panel)
         };
+        if let Some((uid, started)) = self.tab_reveal
+            && started.elapsed() <= state::TAB_ANIM + Duration::from_millis(50)
+            && let Some(index) = tabs.iter().position(|(_, tab_uid, _, _)| *tab_uid == uid)
+        {
+            self.tab_scroll.scroll_to_item(index);
+        }
         let dragging_tab = self.dragging_tab;
         let drag_target = self.drag_target;
         let previous_drag_target = self.previous_drag_target;
@@ -945,6 +967,8 @@ impl AppShell {
 
         TitleBar::new()
             .h(px(self.metrics.topbar_height))
+            .min_h(px(self.metrics.topbar_height))
+            .flex_none()
             .border_b_0()
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
@@ -975,6 +999,14 @@ impl AppShell {
                             .items_center()
                             .gap_0()
                             .pl_2()
+                            .on_children_prepainted({
+                                let strip_bounds = self.tab_strip_bounds.clone();
+                                move |bounds, _, _| {
+                                    if let Some(bounds) = bounds.get(usize::from(SIDEBAR_ENABLED)) {
+                                        strip_bounds.set(*bounds);
+                                    }
+                                }
+                            })
                             .on_drag_move(cx.listener(
                                 |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
                                     let count = this.state.read(cx).tabs.len();
@@ -1121,6 +1153,8 @@ impl AppShell {
                                                     title: title.clone(),
                                                     provider,
                                                     start_pointer_y: Pixels::ZERO,
+                                                    cursor_offset_x: Pixels::ZERO,
+                                                    strip_bounds: self.tab_strip_bounds.clone(),
                                                     start_pointer_x: self.tab_drag_origin.clone(),
                                                 };
                                                 let start_x = drag.start_pointer_x.clone();
@@ -1131,11 +1165,12 @@ impl AppShell {
                                                             start_x.set(event.position.x)
                                                         },
                                                     )
-                                                    .on_drag(drag, move |drag, _, window, cx| {
+                                                    .on_drag(drag, move |drag, offset, window, cx| {
                                                         drag_shell.update(cx, |this, cx| {
                                                             this.begin_tab_drag(drag.uid, cx)
                                                         });
                                                         let mut preview = drag.clone();
+                                                        preview.cursor_offset_x = offset.x;
                                                         preview.start_pointer_y =
                                                             window.mouse_position().y;
                                                         cx.new(|_| preview)
@@ -1190,7 +1225,7 @@ impl AppShell {
                                                             })
                                                             .child(
                                                                 Icon::new(IconName::Close)
-                                                                    .xsmall()
+                                                                    .with_size(px(sidebar::CONTROL_ICON_SIZE))
                                                                     .text_color(muted),
                                                             ),
                                                     );
@@ -1587,6 +1622,10 @@ impl Render for AppShell {
         }
         self.ensure_chat(cx);
         self.sync_composer_draft(window, cx);
+        let selected_uid = self.composer_owner(cx);
+        if self.tab_reveal.is_none_or(|(uid, _)| uid != selected_uid) {
+            self.tab_reveal = Some((selected_uid, std::time::Instant::now()));
+        }
         self.sync_right(window, cx);
         self.right
             .update(cx, |panel, cx| panel.set_preview_visible(right_visible, cx));
@@ -1613,16 +1652,6 @@ impl Render for AppShell {
             .size_full()
             .track_focus(&self.shell_focus)
             .key_context("Shell")
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.composer.read(cx).focus_handle(cx).is_focused(window)
-                    && event.keystroke.modifiers.platform
-                    && event.keystroke.key == "v"
-                    && this.paste_attachments(cx)
-                {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }
-            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && this.state.read(cx).panel == Panel::Providers
                 {

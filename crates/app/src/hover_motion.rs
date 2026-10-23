@@ -30,6 +30,10 @@ impl Motion {
     }
 }
 impl HoverMotion {
+    pub fn is_hovered(&self, key: &str) -> bool {
+        self.0.borrow().current.as_deref() == Some(key)
+    }
+
     pub fn menu(cx: &mut App) -> Self {
         let motion = Self::default();
         let weak = Rc::downgrade(&motion.0);

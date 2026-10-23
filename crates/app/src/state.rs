@@ -864,25 +864,8 @@ impl AppState {
         matches!(self.selection, Selection::Draft(k) if self.starting.contains(&k))
     }
 
-    /// Focus an unused draft if available; otherwise inherit the current settings.
+    /// Open an independent draft, inheriting the current provider settings.
     pub fn new_session(&mut self, cx: &mut Context<Self>) {
-        let reusable = |tab: &&Tab| {
-            matches!(tab, Tab::Draft(key)
-            if self.drafts.contains_key(key)
-                && !self.starting.contains(key)
-                && !self.pending_prompts.contains_key(key))
-        };
-        let existing = self
-            .tabs
-            .iter()
-            .filter(reusable)
-            .find(|tab| tab.selection() == self.selection)
-            .or_else(|| self.tabs.iter().find(reusable))
-            .cloned();
-        if let Some(tab) = existing {
-            self.select_tab(&tab, cx);
-            return;
-        }
         let (provider, model, cwd) = self.effective();
         let effort = self.effort();
         let tier = self.service_tier();
@@ -1832,25 +1815,26 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn repeated_new_session_reuses_the_existing_draft(cx: &mut gpui::TestAppContext) {
+    fn repeated_new_session_creates_independent_tabs(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
-            for _ in 0..10 {
+            let config = s.draft().unwrap().clone();
+            for key in 1..=100 {
                 s.new_session(cx);
+                assert_eq!(s.selection, Selection::Draft(key));
+                assert_eq!(s.tabs.len(), key as usize + 1);
+                assert_eq!(s.draft().unwrap().cwd, config.cwd);
+                assert_eq!(s.draft().unwrap().provider, config.provider);
             }
-            assert_eq!(s.tabs, vec![Tab::Draft(0)]);
-            s.selection = Selection::Session(del_agent::SessionId::new("another"));
-            s.new_session(cx);
-            assert_eq!(s.selection, Selection::Draft(0));
-            assert_eq!(s.tabs.len(), 1);
+            let ids: std::collections::HashSet<_> =
+                s.tabs.iter().map(|tab| s.uid_of(tab)).collect();
+            assert_eq!(ids.len(), 101);
+            s.select_tab(&Tab::Draft(0), cx);
             s.send("starting".into(), cx);
             s.new_session(cx);
-            assert_eq!(s.tabs.len(), 2);
-            let selected = s.selection.clone();
-            s.new_session(cx);
-            assert_eq!(s.selection, selected);
-            assert_eq!(s.tabs.len(), 2);
+            assert_eq!(s.selection, Selection::Draft(101));
             assert_eq!(s.pending_prompts.get(&0).unwrap().text, "starting");
+            assert!(!s.is_starting());
         });
     }
     #[gpui::test]

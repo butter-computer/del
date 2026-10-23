@@ -2,6 +2,74 @@
 use del_agent::Attachment;
 use std::path::Path;
 
+pub enum ImportSource {
+    File(std::path::PathBuf),
+    ClipboardImage(gpui_kit::Image),
+}
+
+impl ImportSource {
+    pub fn label(&self) -> String {
+        match self {
+            Self::File(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            Self::ClipboardImage(_) => "Clipboard image".into(),
+        }
+    }
+
+    pub fn import(self, directory: &Path) -> Result<Attachment, String> {
+        match self {
+            Self::File(path) => import_file(&path, directory),
+            Self::ClipboardImage(image) => import_clipboard_image(&image, directory),
+        }
+    }
+}
+
+pub fn clipboard_sources(item: &gpui_kit::ClipboardItem) -> Vec<ImportSource> {
+    item.entries
+        .iter()
+        .flat_map(|entry| match entry {
+            gpui_kit::ClipboardEntry::ExternalPaths(paths) => {
+                paths.0.iter().cloned().map(ImportSource::File).collect()
+            }
+            gpui_kit::ClipboardEntry::Image(image) => {
+                vec![ImportSource::ClipboardImage(image.clone())]
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn import_clipboard_image(image: &gpui_kit::Image, directory: &Path) -> Result<Attachment, String> {
+    use gpui_kit::ImageFormat;
+    let (bytes, extension, mime) = match image.format() {
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Svg => (
+            image.bytes().to_vec(),
+            image.format().extension(),
+            image.format().mime_type(),
+        ),
+        _ => {
+            // macOS applications often put TIFF bitmap data on the clipboard.
+            // Normalize raster formats that the providers cannot accept to PNG.
+            let decoded = image::load_from_memory(image.bytes()).map_err(|e| e.to_string())?;
+            let mut output = std::io::Cursor::new(Vec::new());
+            decoded
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            (output.into_inner(), "png", "image/png")
+        }
+    };
+    std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    let path = directory.join(format!("clipboard-{}.{}", uuid::Uuid::new_v4(), extension));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(Attachment {
+        path,
+        mime: Some(mime.into()),
+    })
+}
+
 pub fn import_file(source: &Path, directory: &Path) -> Result<Attachment, String> {
     let metadata = std::fs::metadata(source).map_err(|e| e.to_string())?;
     if !metadata.is_file() {
@@ -130,6 +198,36 @@ pub fn terminal_prompt(text: &str, attachments: &[Attachment]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_bitmaps_become_provider_ready_images() {
+        let storage = tempfile::tempdir().unwrap();
+        for (format, clipboard_format) in [
+            (image::ImageFormat::Png, gpui_kit::ImageFormat::Png),
+            (image::ImageFormat::Tiff, gpui_kit::ImageFormat::Tiff),
+            (image::ImageFormat::Bmp, gpui_kit::ImageFormat::Bmp),
+        ] {
+            let original = image::RgbaImage::from_pixel(3, 2, image::Rgba([20, 80, 180, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            original.write_to(&mut bytes, format).unwrap();
+            let bitmap = gpui_kit::Image::from_bytes(clipboard_format, bytes.into_inner());
+            let item = gpui_kit::ClipboardItem::new_image(&bitmap);
+            let sources = clipboard_sources(&item);
+            assert_eq!(sources.len(), 1);
+            let attachment = sources
+                .into_iter()
+                .next()
+                .unwrap()
+                .import(storage.path())
+                .unwrap();
+            assert_eq!(attachment.mime.as_deref(), Some("image/png"));
+            assert!(is_image(&attachment));
+            assert_eq!(image::open(attachment.path).unwrap().to_rgba8(), original);
+        }
+        assert!(
+            clipboard_sources(&gpui_kit::ClipboardItem::new_string("plain text".into())).is_empty()
+        );
+    }
 
     #[test]
     fn compact_cards_preserve_extensions_and_unicode_boundaries() {

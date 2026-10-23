@@ -233,6 +233,8 @@ fn row_item(
         .relative()
         .group(group.clone())
         .h(px(ROW_HEIGHT))
+        .min_h(px(ROW_HEIGHT))
+        .flex_none()
         .px_2()
         .gap_1p5()
         .items_center()
@@ -295,10 +297,13 @@ fn row_item(
             .child(pinned_mark(row.pinned, group.clone(), action_right))
             .child(
                 // Reserve space so titles never overlap the hover actions.
-                div()
-                    .flex_none()
-                    .w(px(if row.pinned { 20.0 } else { 0.0 }))
-                    .group_hover(group.clone(), |spacer| spacer.w(px(38.0))),
+                div().flex_none().w(px(if motion.is_hovered(&row.id.0) {
+                    44.0
+                } else if row.pinned {
+                    20.0
+                } else {
+                    0.0
+                })),
             )
             .child(unread_dot(&row.id, state.read(cx), cx))
             .child(
@@ -455,6 +460,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
 
     v_flex()
         .w_full()
+        .min_w_0()
+        .whitespace_nowrap()
         .h_full()
         .flex_none()
         .gap_0p5()
@@ -464,6 +471,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
             h_flex()
                 .id("new-session")
                 .h(px(ROW_HEIGHT))
+                .min_h(px(ROW_HEIGHT))
+                .flex_none()
                 .px_2()
                 .gap_1p5()
                 .items_center()
@@ -479,7 +488,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .with_size(px(CONTROL_ICON_SIZE))
                         .text_color(rgba(MUTED)),
                 )
-                .child(div().flex_1().child("New session"))
+                .child(div().flex_1().min_w_0().truncate().child("New session"))
                 .child(
                     div()
                         .text_size(px(TEXT_SM))
@@ -499,6 +508,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                     let renaming = s.renaming.as_ref() == Some(&row.id);
                     let animation_id = SharedString::from(format!("session-row-{}", row.id.0));
                     div()
+                        .flex_none()
                         .overflow_hidden()
                         .child(row_item(row, selected, renaming, rename, state, false, cx))
                         .with_animation(
@@ -511,6 +521,10 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 .child(
                     div()
                         .id("terminals-toggle")
+                        .flex_none()
+                        .min_h(px(ROW_HEIGHT))
+                        .flex()
+                        .items_center()
                         .role(gpui::Role::Button)
                         .aria_label(if s.terminals_collapsed {
                             "Expand terminals"
@@ -529,6 +543,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 )
                 .child(
                     v_flex()
+                        .flex_none()
                         .gap_0p5()
                         .overflow_hidden()
                         .children(
@@ -560,10 +575,11 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                     let hover_key = id.0.clone();
                                     h_flex()
                                         .id(SharedString::from(format!("terminal-row-{}", id.0)))
-                                        .flex_none()
                                         .relative()
                                         .group(group.clone())
                                         .h(px(ROW_HEIGHT))
+                                        .min_h(px(ROW_HEIGHT))
+                                        .flex_none()
                                         .px_2()
                                         .gap_2()
                                         .rounded_md()
@@ -629,20 +645,17 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                 })
                                                 .into_any_element()
                                         })
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .w(px(if row.pinned { 20.0 } else { 0.0 }))
-                                                .group_hover(group.clone(), |spacer| {
-                                                    spacer.w(px(38.0))
-                                                }),
-                                        )
+                                        .child(div().flex_none().w(px(
+                                            if motion.is_hovered(&row.id.0) {
+                                                44.0
+                                            } else if row.pinned {
+                                                20.0
+                                            } else {
+                                                0.0
+                                            },
+                                        )))
                                         .child(unread_dot(&row.id, s, cx))
-                                        .child(pinned_mark(
-                                            row.pinned,
-                                            group.clone(),
-                                            action_right + 24.0,
-                                        ))
+                                        .child(pinned_mark(row.pinned, group.clone(), action_right))
                                         .child(
                                             h_flex()
                                                 .absolute()
@@ -732,6 +745,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                             h_flex()
                                 .id("archived-toggle")
                                 .h(px(ROW_HEIGHT))
+                                .min_h(px(ROW_HEIGHT))
+                                .flex_none()
                                 .px_2()
                                 .mt_1()
                                 .items_center()
@@ -763,6 +778,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                 h_flex()
                                     .id(SharedString::from(format!("archived-terminal-{}", id.0)))
                                     .h(px(ROW_HEIGHT))
+                                    .min_h(px(ROW_HEIGHT))
+                                    .flex_none()
                                     .px_2()
                                     .gap_2()
                                     .rounded_md()
@@ -797,6 +814,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
         .child(
             h_flex()
                 .h(px(ROW_HEIGHT))
+                .min_h(px(ROW_HEIGHT))
+                .flex_none()
                 .gap_1()
                 .items_center()
                 .child(

@@ -99,6 +99,21 @@ impl AppShell {
         .detach();
     }
     pub(super) fn attach_paths(&mut self, owner: u64, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.attach_sources(
+            owner,
+            paths
+                .into_iter()
+                .map(crate::attachments::ImportSource::File)
+                .collect(),
+            cx,
+        );
+    }
+    fn attach_sources(
+        &mut self,
+        owner: u64,
+        sources: Vec<crate::attachments::ImportSource>,
+        cx: &mut Context<Self>,
+    ) {
         let work = self
             .state
             .read(cx)
@@ -110,13 +125,11 @@ impl AppShell {
                     .join("attachments");
                 let mut files = Vec::new();
                 let mut errors = Vec::new();
-                for path in paths {
-                    match crate::attachments::import_file(&path, &directory) {
+                for source in sources {
+                    let label = source.label();
+                    match source.import(&directory) {
                         Ok(file) => files.push(file),
-                        Err(error) => errors.push(format!(
-                            "{}: {error}",
-                            path.file_name().unwrap_or_default().to_string_lossy()
-                        )),
+                        Err(error) => errors.push(format!("{label}: {error}")),
                     }
                 }
                 (files, errors)
@@ -145,49 +158,16 @@ impl AppShell {
         })
         .detach();
     }
-    pub(super) fn paste_attachments(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return false;
-        };
-        let owner = self.composer_owner(cx);
-        let mut paths = Vec::new();
-        for entry in clipboard.entries {
-            match entry {
-                ClipboardEntry::ExternalPaths(files) => paths.extend(files.0),
-                ClipboardEntry::Image(image) => {
-                    let directory = del_agent::data_dir()
-                        .unwrap_or_else(std::env::temp_dir)
-                        .join("attachments");
-                    if let Err(error) = std::fs::create_dir_all(&directory) {
-                        self.state.update(cx, |state, cx| {
-                            state.error = Some(format!("Could not paste the image: {error}"));
-                            cx.notify();
-                        });
-                        return true;
-                    }
-                    let path = directory.join(format!(
-                        "clipboard-{}.{}",
-                        uuid::Uuid::new_v4(),
-                        image.format().extension()
-                    ));
-                    match std::fs::write(&path, image.bytes()) {
-                        Ok(()) => paths.push(path),
-                        Err(error) => {
-                            self.state.update(cx, |state, cx| {
-                                state.error = Some(format!("Could not paste the image: {error}"));
-                                cx.notify();
-                            });
-                            return true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if paths.is_empty() {
+    pub(super) fn paste_attachments(
+        &mut self,
+        clipboard: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let sources = crate::attachments::clipboard_sources(clipboard);
+        if sources.is_empty() {
             false
         } else {
-            self.attach_paths(owner, paths, cx);
+            self.attach_sources(self.composer_owner(cx), sources, cx);
             true
         }
     }

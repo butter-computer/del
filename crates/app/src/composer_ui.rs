@@ -25,6 +25,7 @@ pub const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
+type PasteHandler = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
 type ChoiceHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
@@ -42,6 +43,7 @@ pub struct ComposerCard {
     starting: bool,
     on_send: Handler,
     on_attach: Handler,
+    on_paste: PasteHandler,
     has_attachments: bool,
     attachment_content: Option<AnyElement>,
     on_stop: Handler,
@@ -75,6 +77,7 @@ impl ComposerCard {
             starting: false,
             on_send: noop.clone(),
             on_attach: noop.clone(),
+            on_paste: Rc::new(|_, _, _| false),
             has_attachments: false,
             attachment_content: None,
             on_stop: noop.clone(),
@@ -93,6 +96,13 @@ impl ComposerCard {
     }
     pub fn on_attach(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_attach = Rc::new(handler);
+        self
+    }
+    pub fn on_paste(
+        mut self,
+        handler: impl Fn(&ClipboardItem, &mut Window, &mut App) -> bool + 'static,
+    ) -> Self {
+        self.on_paste = Rc::new(handler);
         self
     }
     pub fn show_folder(mut self, show: bool) -> Self {
@@ -164,6 +174,7 @@ impl RenderOnce for ComposerCard {
             starting,
             on_send,
             on_attach,
+            on_paste,
             has_attachments: _,
             attachment_content,
             on_stop,
@@ -264,6 +275,7 @@ impl RenderOnce for ComposerCard {
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 Textarea::new(&input)
+                    .on_paste(move |item, window, cx| on_paste(item, window, cx))
                     .appearance(false)
                     .bordered(false)
                     .text_size(px(TEXT_MD)),
