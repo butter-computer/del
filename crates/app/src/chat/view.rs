@@ -75,6 +75,7 @@ pub struct ChatView {
     closed: bool,
     loading: bool,
     completed_turns: u64,
+    pub pending_errors: Vec<String>,
 }
 
 impl ChatView {
@@ -115,6 +116,7 @@ impl ChatView {
             closed: false,
             loading: session.is_some(),
             completed_turns: 0,
+            pending_errors: Vec::new(),
         };
         if let Some(text) = first_prompt {
             let change = view.model.push_user(text, false);
@@ -129,6 +131,11 @@ impl ChatView {
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             self.completed_turns += 1;
+        }
+        if !self.loading
+            && let AgentEvent::Error { message, .. } = event
+        {
+            self.pending_errors.push(message.clone());
         }
         let change = self.model.apply(event);
         self.sync(change, cx);
@@ -242,6 +249,9 @@ impl ChatView {
                 if busy {
                     this.queue.wait(&item_id);
                 } else {
+                    if let Err(error) = &result {
+                        this.pending_errors.push(format!("Could not send your message: {error}. It remains in the queue; try Steer again or edit it."));
+                    }
                     this.queue
                         .finish(&item_id, result.as_ref().err().map(ToString::to_string));
                 }
@@ -383,7 +393,7 @@ impl ChatView {
         self.closed
     }
 
-    /// Run a backend call on the tokio runtime; failures become error banners.
+    /// Run a backend call on the tokio runtime; failures become toast notifications.
     fn run(
         &mut self,
         cx: &mut Context<Self>,
@@ -403,7 +413,7 @@ impl ChatView {
         let waiting = self.model.has_pending_approval();
         let (label, hint) = match (self.model.phase, self.model.last_status) {
             (Phase::Running, _) if waiting => ("Waiting for your approval", ""),
-            (Phase::Running, _) => ("Working", "Enter queues · ⌘Enter steers"),
+            (Phase::Running, _) => ("Working", "Enter queues · ⌘ + Enter steers"),
             (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => ("Done", ""),
             (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => ("Stopped", ""),
             (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => ("Turn failed", ""),
@@ -445,10 +455,11 @@ impl ChatView {
     }
 }
 
-/// Show a backend failure as a banner (and stop the running phase).
+/// Report a backend failure as a toast (and stop the running phase).
 fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
     let _ = this.update(cx, |this, cx| {
         this.loading = false;
+        this.pending_errors.push(message.clone());
         let change = this.model.push_error(message, false);
         this.sync(Some(change), cx);
     });

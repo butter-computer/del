@@ -57,7 +57,10 @@ for line in sys.stdin:
         assert params['sessionId'] == remote
         active = id
         prompt = params['prompt'][0]['text']
-        if prompt == 'wait':
+        if prompt == 'inspect-attachments':
+            text(json.dumps(params['prompt']))
+            finish()
+        elif prompt == 'wait':
             text('waiting')
         elif prompt == 'fail':
             send(dict(id=id, error=dict(code=-32603, message='mock failure')))

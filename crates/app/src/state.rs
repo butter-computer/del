@@ -127,6 +127,9 @@ pub struct AppState {
     /// Session being renamed in the sidebar.
     pub renaming: Option<SessionId>,
     pub show_archived: bool,
+    pub terminals_collapsed: bool,
+    pub terminals_motion: Option<(std::time::Instant, f32)>,
+    pub terminals_toggle: u64,
     /// Last problem worth telling the user about.
     pub error: Option<String>,
     /// The prompt that started each session opened this run, for its chat's
@@ -267,6 +270,9 @@ impl AppState {
             caffeine_enabled: false,
             renaming: None,
             show_archived: false,
+            terminals_collapsed: false,
+            terminals_motion: None,
+            terminals_toggle: 0,
             error,
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
@@ -312,7 +318,12 @@ impl AppState {
                         catalog.models = models;
                         catalog.error = None;
                     }
-                    Err(error) => catalog.error = Some(error),
+                    Err(error) => {
+                        catalog.error = Some(error.clone());
+                        self.error = Some(format!(
+                            "Could not load models: {error}. Try Refresh again."
+                        ));
+                    }
                 }
             }
             Msg::Refresh => self.records = self.manager.list_sessions(),
@@ -390,6 +401,9 @@ impl AppState {
                 }
             }
             Msg::StartFailed(key, error) => {
+                self.error = Some(format!(
+                    "Could not start the session: {error}. Your message is saved; use Retry message."
+                ));
                 self.starting.remove(&key);
                 if let Some(pending) = self.pending_prompts.get_mut(&key) {
                     pending.error = Some(error);
@@ -550,6 +564,7 @@ impl AppState {
     }
 
     pub fn terminal_start_failed(&mut self, key: u64, error: String, cx: &mut Context<Self>) {
+        self.error = Some(format!("Could not start terminal: {error}"));
         self.starting.remove(&key);
         if let Some(pending) = self.pending_prompts.get_mut(&key) {
             pending.error = Some(error);
@@ -1355,6 +1370,22 @@ impl AppState {
 
     // ---- providers ----
 
+    pub fn terminals_fraction(&self) -> f32 {
+        let target = if self.terminals_collapsed { 0.0 } else { 1.0 };
+        self.terminals_motion.map_or(target, |(start, from)| {
+            let t = (start.elapsed().as_secs_f32() / 0.24).min(1.0);
+            from + (target - from) * (1.0 - (1.0 - t).powi(4))
+        })
+    }
+
+    pub fn toggle_terminals(&mut self, cx: &mut Context<Self>) {
+        let from = self.terminals_fraction();
+        self.terminals_collapsed = !self.terminals_collapsed;
+        self.terminals_motion = Some((std::time::Instant::now(), from));
+        self.terminals_toggle += 1;
+        cx.notify();
+    }
+
     pub fn toggle_providers(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Providers {
             Panel::Chat
@@ -1441,6 +1472,31 @@ mod tests {
     use gpui::AppContext as _;
     use gpui::Entity;
 
+    #[gpui::test]
+    fn closing_settings_preserves_selection_and_terminal_toggle_keeps_sessions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let selection = s.selection.clone();
+            s.panel = Panel::Providers;
+            s.toggle_providers(cx);
+            assert_eq!(s.panel, Panel::Chat);
+            assert_eq!(s.selection, selection);
+            s.toggle_terminals(cx);
+            assert!(s.terminals_collapsed);
+            s.terminals_motion = Some((
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+                1.0,
+            ));
+            assert_eq!(s.terminals_fraction(), 0.0);
+            s.toggle_terminals(cx);
+            assert!(!s.terminals_collapsed);
+            assert!(s.terminals_fraction() < 0.1);
+            assert_eq!(s.selection, selection);
+        });
+    }
+
     // A parked runtime makes startup deterministically slow: no provider work
     // can finish before we check the UI state after send().
     fn draft(cx: &mut gpui::TestAppContext) -> Entity<AppState> {
@@ -1491,6 +1547,9 @@ mod tests {
             caffeine_enabled: false,
             renaming: None,
             show_archived: false,
+            terminals_collapsed: false,
+            terminals_motion: None,
+            terminals_toggle: 0,
             error: None,
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),

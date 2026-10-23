@@ -16,7 +16,7 @@ use gpui_kit::*;
 
 pub const SIDEBAR_WIDTH: f32 = 216.0;
 const ROW_HEIGHT: f32 = 28.0;
-const PIN_ICON_SIZE: f32 = 15.0;
+pub const CONTROL_ICON_SIZE: f32 = 15.0;
 
 const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
@@ -123,7 +123,7 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
                 } else {
                     "icons/pin-outline.svg"
                 })
-                .with_size(px(PIN_ICON_SIZE)),
+                .with_size(px(CONTROL_ICON_SIZE)),
         )
 }
 
@@ -138,7 +138,7 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .child(
             Icon::default()
                 .path("icons/archive.svg")
-                .with_size(px(15.0)),
+                .with_size(px(CONTROL_ICON_SIZE)),
         )
 }
 
@@ -200,7 +200,7 @@ fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
             mark.child(
                 Icon::default()
                     .path("icons/pin-filled.svg")
-                    .with_size(px(PIN_ICON_SIZE))
+                    .with_size(px(CONTROL_ICON_SIZE))
                     .text_color(rgba(MUTED)),
             )
         })
@@ -295,7 +295,10 @@ fn row_item(
             .child(pinned_mark(row.pinned, group.clone(), action_right))
             .child(
                 // Reserve space so titles never overlap the hover actions.
-                div().flex_none().w(px(44.0)),
+                div()
+                    .flex_none()
+                    .w(px(if row.pinned { 20.0 } else { 0.0 }))
+                    .group_hover(group.clone(), |spacer| spacer.w(px(38.0))),
             )
             .child(unread_dot(&row.id, state.read(cx), cx))
             .child(
@@ -448,6 +451,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
     let prov_state = state.clone();
     let caffeine_state = state.clone();
     let arch_state = state.clone();
+    let terminal_state = state.clone();
 
     v_flex()
         .w_full()
@@ -470,7 +474,11 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 .when(draft_selected, |r| r.bg(rgba(0xffffff14)))
                 .when(!draft_selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
                 .on_click(move |_, _, cx| new_state.update(cx, |s, cx| s.new_session(cx)))
-                .child(Icon::new(IconName::Plus).small().text_color(rgba(MUTED)))
+                .child(
+                    Icon::new(IconName::Plus)
+                        .with_size(px(CONTROL_ICON_SIZE))
+                        .text_color(rgba(MUTED)),
+                )
                 .child(div().flex_1().child("New session"))
                 .child(
                     div()
@@ -502,163 +510,220 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 }))
                 .child(
                     div()
+                        .id("terminals-toggle")
+                        .role(gpui::Role::Button)
+                        .aria_label(if s.terminals_collapsed {
+                            "Expand terminals"
+                        } else {
+                            "Collapse terminals"
+                        })
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            terminal_state.update(cx, |s, cx| s.toggle_terminals(cx))
+                        })
                         .mt_3()
                         .px_2()
                         .text_size(px(TEXT_SM))
                         .text_color(rgba(FAINT))
                         .child("TERMINALS"),
                 )
-                .children(
-                    s.terminal_rows
-                        .iter()
-                        .filter(|row| !s.terminal_archived(&row.id))
-                        .map(|row| {
-                            let menu_state = state.clone();
-                            let menu_id = row.id.clone();
-                            let pinned = row.pinned;
-                            let renaming = s.renaming.as_ref() == Some(&row.id);
-                            let title = s.current_title(&row.id);
-                            let title_loading = s.title_loading(&row.id);
-                            let selected = s.selection == Selection::Terminal(row.id.clone())
-                                && !providers_open;
-                            let state = state.clone();
-                            let pin_state = state.clone();
-                            let close_state = state.clone();
-                            let id = row.id.clone();
-                            let pin_id = row.id.clone();
-                            let close_id = row.id.clone();
-                            let group = SharedString::from(format!("terminal-actions-{}", id.0));
-                            let action_right = if s.terminal_unread(&id) { 20.0 } else { 8.0 };
-                            let motion = s.sidebar_hover.clone();
-                            let hover = motion.clone();
-                            let hover_key = id.0.clone();
-                            h_flex()
-                                .id(SharedString::from(format!("terminal-row-{}", id.0)))
-                                .relative()
-                                .group(group.clone())
-                                .h(px(ROW_HEIGHT))
-                                .px_2()
-                                .gap_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .on_hover(move |entered, window, cx| {
-                                    hover.hover(&hover_key, *entered, window, cx)
-                                })
-                                .child(motion.background(
-                                    row.id.0.clone(),
-                                    if selected {
-                                        rgba(0xffffff14)
-                                    } else {
-                                        rgba(0xffffff00)
-                                    },
-                                    rgba(0xffffff0a),
-                                ))
-                                .on_click(move |_, _, cx| {
-                                    if !renaming {
-                                        state.update(cx, |s, cx| s.select_terminal(id.clone(), cx));
-                                    }
-                                })
-                                .child(match row.provider {
-                                    Some(provider) => {
-                                        provider_logo(provider, 14.0).into_any_element()
-                                    }
-                                    None => div()
-                                        .text_size(px(TEXT_SM))
-                                        .text_color(rgba(MUTED))
-                                        .child(">_")
-                                        .into_any_element(),
-                                })
-                                .child(if renaming {
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            Input::new(rename)
-                                                .appearance(false)
-                                                .bordered(false)
-                                                .text_size(px(TEXT_MD)),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(TEXT_MD))
-                                        .font_weight(FontWeight::NORMAL)
-                                        .child(if title_loading {
-                                            gpui_kit::component::shimmer::ShimmerText::new(title)
-                                                .id(SharedString::from(format!(
-                                                    "sidebar-title-{}",
-                                                    row.id.0
-                                                )))
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .overflow_hidden()
+                        .children(
+                            s.terminal_rows
+                                .iter()
+                                .filter(|row| !s.terminal_archived(&row.id))
+                                .map(|row| {
+                                    let menu_state = state.clone();
+                                    let menu_id = row.id.clone();
+                                    let pinned = row.pinned;
+                                    let renaming = s.renaming.as_ref() == Some(&row.id);
+                                    let title = s.current_title(&row.id);
+                                    let title_loading = s.title_loading(&row.id);
+                                    let selected = s.selection
+                                        == Selection::Terminal(row.id.clone())
+                                        && !providers_open;
+                                    let state = state.clone();
+                                    let pin_state = state.clone();
+                                    let close_state = state.clone();
+                                    let id = row.id.clone();
+                                    let pin_id = row.id.clone();
+                                    let close_id = row.id.clone();
+                                    let group =
+                                        SharedString::from(format!("terminal-actions-{}", id.0));
+                                    let action_right =
+                                        if s.terminal_unread(&id) { 20.0 } else { 8.0 };
+                                    let motion = s.sidebar_hover.clone();
+                                    let hover = motion.clone();
+                                    let hover_key = id.0.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("terminal-row-{}", id.0)))
+                                        .flex_none()
+                                        .relative()
+                                        .group(group.clone())
+                                        .h(px(ROW_HEIGHT))
+                                        .px_2()
+                                        .gap_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .on_hover(move |entered, window, cx| {
+                                            hover.hover(&hover_key, *entered, window, cx)
+                                        })
+                                        .child(motion.background(
+                                            row.id.0.clone(),
+                                            if selected {
+                                                rgba(0xffffff14)
+                                            } else {
+                                                rgba(0xffffff00)
+                                            },
+                                            rgba(0xffffff0a),
+                                        ))
+                                        .on_click(move |_, _, cx| {
+                                            if !renaming {
+                                                state.update(cx, |s, cx| {
+                                                    s.select_terminal(id.clone(), cx)
+                                                });
+                                            }
+                                        })
+                                        .child(match row.provider {
+                                            Some(provider) => {
+                                                provider_logo(provider, 14.0).into_any_element()
+                                            }
+                                            None => div()
+                                                .text_size(px(TEXT_SM))
+                                                .text_color(rgba(MUTED))
+                                                .child(">_")
+                                                .into_any_element(),
+                                        })
+                                        .child(if renaming {
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(
+                                                    Input::new(rename)
+                                                        .appearance(false)
+                                                        .bordered(false)
+                                                        .text_size(px(TEXT_MD)),
+                                                )
                                                 .into_any_element()
                                         } else {
-                                            div().truncate().child(title).into_any_element()
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(TEXT_MD))
+                                                .font_weight(FontWeight::NORMAL)
+                                                .child(if title_loading {
+                                                    gpui_kit::component::shimmer::ShimmerText::new(
+                                                        title,
+                                                    )
+                                                    .id(SharedString::from(format!(
+                                                        "sidebar-title-{}",
+                                                        row.id.0
+                                                    )))
+                                                    .into_any_element()
+                                                } else {
+                                                    div().truncate().child(title).into_any_element()
+                                                })
+                                                .into_any_element()
                                         })
-                                        .into_any_element()
-                                })
-                                .child(div().flex_none().w(px(44.0)))
-                                .child(unread_dot(&row.id, s, cx))
-                                .child(pinned_mark(row.pinned, group.clone(), action_right + 24.0))
-                                .child(
-                                    h_flex()
-                                        .absolute()
-                                        .right(px(action_right))
-                                        .top(px((ROW_HEIGHT - 20.0) / 2.0))
-                                        .h(px(20.0))
-                                        .w(px(44.0))
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .rounded_sm()
-                                        .opacity(0.0)
-                                        .group_hover(group, |actions| actions.opacity(1.0))
                                         .child(
-                                            pin_button(
-                                                SharedString::from(format!(
-                                                    "pin-terminal-{}",
-                                                    pin_id.0
-                                                )),
-                                                row.pinned,
-                                            )
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(
-                                                move |_, _, cx| {
-                                                    cx.stop_propagation();
-                                                    pin_state.update(cx, |s, cx| {
-                                                        s.toggle_terminal_pin(&pin_id, cx)
-                                                    });
-                                                },
-                                            ),
+                                            div()
+                                                .flex_none()
+                                                .w(px(if row.pinned { 20.0 } else { 0.0 }))
+                                                .group_hover(group.clone(), |spacer| {
+                                                    spacer.w(px(38.0))
+                                                }),
                                         )
+                                        .child(unread_dot(&row.id, s, cx))
+                                        .child(pinned_mark(
+                                            row.pinned,
+                                            group.clone(),
+                                            action_right + 24.0,
+                                        ))
                                         .child(
-                                            action_button(
-                                                SharedString::from(format!(
-                                                    "close-terminal-{}",
-                                                    close_id.0
-                                                )),
-                                                ActionIcon::Close,
-                                                "Close terminal",
-                                            )
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(
-                                                move |_, _, cx| {
-                                                    cx.stop_propagation();
-                                                    close_state.update(cx, |s, cx| {
-                                                        s.remove_terminal(&close_id, cx)
-                                                    });
-                                                },
-                                            ),
-                                        ),
-                                )
-                                .context_menu(move |menu, _, cx| {
-                                    session_menu(menu, &menu_state, &menu_id, pinned, cx)
-                                })
-                        }),
+                                            h_flex()
+                                                .absolute()
+                                                .right(px(action_right))
+                                                .top(px((ROW_HEIGHT - 20.0) / 2.0))
+                                                .h(px(20.0))
+                                                .w(px(44.0))
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .rounded_sm()
+                                                .opacity(0.0)
+                                                .group_hover(group, |actions| actions.opacity(1.0))
+                                                .child(
+                                                    pin_button(
+                                                        SharedString::from(format!(
+                                                            "pin-terminal-{}",
+                                                            pin_id.0
+                                                        )),
+                                                        row.pinned,
+                                                    )
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                        pin_state.update(cx, |s, cx| {
+                                                            s.toggle_terminal_pin(&pin_id, cx)
+                                                        });
+                                                    }),
+                                                )
+                                                .child(
+                                                    action_button(
+                                                        SharedString::from(format!(
+                                                            "close-terminal-{}",
+                                                            close_id.0
+                                                        )),
+                                                        ActionIcon::Close,
+                                                        "Close terminal",
+                                                    )
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                        close_state.update(cx, |s, cx| {
+                                                            s.remove_terminal(&close_id, cx)
+                                                        });
+                                                    }),
+                                                ),
+                                        )
+                                        .context_menu(move |menu, _, cx| {
+                                            session_menu(menu, &menu_state, &menu_id, pinned, cx)
+                                        })
+                                }),
+                        )
+                        .with_animation(
+                            ("terminal-section", s.terminals_toggle),
+                            Animation::new(std::time::Duration::from_millis(240)),
+                            {
+                                let motion = s.terminals_motion;
+                                let target = if s.terminals_collapsed { 0.0 } else { 1.0 };
+                                let reduced = cx.reduce_motion();
+                                let height = s
+                                    .terminal_rows
+                                    .iter()
+                                    .filter(|row| !s.terminal_archived(&row.id))
+                                    .count() as f32
+                                    * (ROW_HEIGHT + 2.0);
+                                move |list, _| {
+                                    let fraction = if reduced {
+                                        target
+                                    } else {
+                                        motion.map_or(target, |(start, from)| {
+                                            let t = (start.elapsed().as_secs_f32() / 0.24).min(1.0);
+                                            from + (target - from) * (1.0 - (1.0 - t).powi(4))
+                                        })
+                                    };
+                                    list.h(px(height * fraction)).opacity(fraction)
+                                }
+                            },
+                        ),
                 )
                 .when(
                     !archived.is_empty() || !archived_terminals.is_empty(),
@@ -756,6 +821,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .on_click(move |_, _, cx| {
                             prov_state.update(cx, |s, cx| s.toggle_providers(cx))
                         })
+                        .gap_1p5()
+                        .child(Icon::new(IconName::Settings).small())
                         .child("Settings"),
                 )
                 .child(

@@ -579,10 +579,10 @@ impl TerminalHost {
             let workspace = cwd.clone();
             cx.spawn(async move |this, cx| {
                 let started = std::time::Instant::now();
-                let mut observed = None;
+                let mut last_attempt = None;
                 while started.elapsed() < std::time::Duration::from_secs(120) {
                     cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
+                        .timer(std::time::Duration::from_millis(100))
                         .await;
                     let keep_waiting = this.update(cx, |this, cx| {
                         let session = this.terminal.read(cx).session();
@@ -592,17 +592,18 @@ impl TerminalHost {
                         let screen = screen_tail(session);
                         let Some(key) = claude_workspace_trust_key(&screen, &workspace) else {
                             // Once the recognized dialog disappears, stop.
-                            return observed.is_none();
+                            return last_attempt.is_none();
                         };
-                        let seen = observed.get_or_insert_with(std::time::Instant::now);
-                        // Claude briefly ignores confirmation input while the
-                        // dialog mounts. Wait before selecting or confirming.
-                        if seen.elapsed() < std::time::Duration::from_secs(2) {
+                        // Respond immediately. Some CLI versions briefly ignore
+                        // input while mounting; retry only while this exact
+                        // workspace dialog is still on screen.
+                        let now = std::time::Instant::now();
+                        if !trust_confirmation_due(last_attempt, now) {
                             return true;
                         }
                         session.write(key.to_vec());
-                        *seen = std::time::Instant::now();
-                        key != b"\r"
+                        last_attempt = Some(now);
+                        true
                     });
                     if !matches!(keep_waiting, Ok(true)) {
                         break;
@@ -794,6 +795,14 @@ fn screen_tail(session: &TerminalSession) -> String {
     })
 }
 
+fn trust_confirmation_due(
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    last_attempt
+        .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_millis(250))
+}
+
 fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'static [u8]> {
     let lines: Vec<_> = screen.lines().map(str::trim).collect();
     if !lines.contains(&"Accessing workspace:")
@@ -823,6 +832,21 @@ fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'s
 mod tests {
     use super::{TerminalLaunchKind, TerminalLaunchSpec};
     use std::path::PathBuf;
+
+    #[test]
+    fn trust_confirmation_is_immediate_with_short_bounded_retries() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(super::trust_confirmation_due(None, now));
+        assert!(!super::trust_confirmation_due(
+            Some(now),
+            now + Duration::from_millis(100)
+        ));
+        assert!(super::trust_confirmation_due(
+            Some(now),
+            now + Duration::from_millis(250)
+        ));
+    }
 
     #[test]
     fn claude_only_confirms_the_selected_workspace_trust_dialog() {

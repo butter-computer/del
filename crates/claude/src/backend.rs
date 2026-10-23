@@ -447,6 +447,36 @@ mod model_config_tests {
 mod image_input_tests {
     use super::*;
     #[tokio::test]
+    async fn documents_and_videos_are_file_references_not_image_payloads() {
+        for (name, mime) in [
+            ("report.pdf", "application/pdf"),
+            (
+                "book.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            ("notes.md", "text/markdown"),
+            ("clip.mp4", "video/mp4"),
+        ] {
+            let input = UserInput {
+                text: "Read this".into(),
+                attachments: vec![del_agent::Attachment {
+                    path: format!("/attachments/{name}").into(),
+                    mime: Some(mime.into()),
+                }],
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&input_line(&input).await.unwrap()).unwrap();
+            let block = &value["message"]["content"][1];
+            assert_eq!(block["type"], "text");
+            assert!(
+                block["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("/attachments/{name}"))
+            );
+        }
+    }
+    #[tokio::test]
     async fn images_are_encoded_in_the_message_not_only_named_in_text() {
         let path =
             std::env::temp_dir().join(format!("del-image-wire-{}.png", uuid::Uuid::new_v4()));

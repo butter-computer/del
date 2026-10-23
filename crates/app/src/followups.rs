@@ -129,10 +129,22 @@ mod tests {
         let first = queue.push(UserInput::text("first"));
         let input = UserInput {
             text: "picture".into(),
-            attachments: vec![del_agent::Attachment {
-                path: "/tmp/picture.png".into(),
-                mime: Some("image/png".into()),
-            }],
+            attachments: vec![
+                del_agent::Attachment {
+                    path: "/tmp/picture.png".into(),
+                    mime: Some("image/png".into()),
+                },
+                del_agent::Attachment {
+                    path: "/tmp/report.pdf".into(),
+                    mime: Some("application/pdf".into()),
+                },
+                del_agent::Attachment {
+                    path: "/tmp/book.xlsx".into(),
+                    mime: Some(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+                    ),
+                },
+            ],
         };
         let second = queue.push(input.clone());
         queue.reorder(&second, &first);

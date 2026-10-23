@@ -12,8 +12,10 @@ mod wallpaper;
 
 mod appearance;
 mod assets;
+mod attachments;
 mod chat;
 mod composer_ui;
+mod document_preview;
 mod followup_ui;
 mod followups;
 mod hover_motion;
@@ -37,7 +39,7 @@ use crate::appearance::{rgb, rgba};
 use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
-use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
+use del_core::typography::{TEXT_LG, TEXT_MD};
 use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics};
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -235,6 +237,8 @@ fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 
 }
 
 struct AppShell {
+    shell_focus: FocusHandle,
+    settings_focused: bool,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
     model_picker: Entity<model_picker::ModelPicker>,
@@ -266,7 +270,8 @@ struct AppShell {
     chats: HashMap<SessionId, Entity<ChatView>>,
     composer_owner: u64,
     composer_drafts: HashMap<u64, String>,
-    composer_images: HashMap<u64, Vec<del_agent::Attachment>>,
+    composer_attachments: HashMap<u64, Vec<del_agent::Attachment>>,
+    attachment_scroll: ScrollHandle,
     queue_hovered: Option<String>,
     metrics: ShellMetrics,
     terminals: HashMap<SessionId, Entity<TerminalHost>>,
@@ -489,8 +494,10 @@ impl AppShell {
             }
         });
         let mcp_answer = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
-        let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), cx));
+        let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), window, cx));
         let mut shell = Self {
+            shell_focus: cx.focus_handle(),
+            settings_focused: false,
             state,
             composer,
             model_picker,
@@ -517,7 +524,8 @@ impl AppShell {
             chats: HashMap::new(),
             composer_owner: 0,
             composer_drafts: HashMap::new(),
-            composer_images: HashMap::new(),
+            composer_attachments: HashMap::new(),
+            attachment_scroll: ScrollHandle::new(),
             queue_hovered: None,
             metrics: ShellMetrics::default(),
             terminals: HashMap::new(),
@@ -766,7 +774,7 @@ impl AppShell {
         let owner = self.composer_owner(cx);
         let text = self.composer.read(cx).value().trim().to_string();
         let attachments = self
-            .composer_images
+            .composer_attachments
             .get(&owner)
             .cloned()
             .unwrap_or_default();
@@ -789,11 +797,7 @@ impl AppShell {
             return;
         }
         if self.state.read(cx).terminal_draft().is_some() {
-            if !attachments.is_empty() {
-                self.set_mode_error("Use Chat mode to send image attachments.".into(), cx);
-            } else {
-                self.submit_terminal_prompt(&text, window, cx);
-            }
+            self.submit_terminal_prompt(&text, &attachments, window, cx);
             return;
         }
         if chat.as_ref().is_some_and(|chat| chat.read(cx).is_loading())
@@ -802,7 +806,7 @@ impl AppShell {
             return;
         }
         let input = del_agent::UserInput { text, attachments };
-        self.composer_images.remove(&owner);
+        self.composer_attachments.remove(&owner);
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         match chat {
@@ -838,8 +842,8 @@ impl AppShell {
         let shell_attach = shell.clone();
         let retry_state = self.state.clone();
         let owner = self.composer_owner(cx);
-        let has_images = self
-            .composer_images
+        let has_attachments = self
+            .composer_attachments
             .get(&owner)
             .is_some_and(|images| !images.is_empty());
         let composer = ComposerCard::new(
@@ -861,8 +865,9 @@ impl AppShell {
         .on_stop(move |_, cx| shell_stop.update(cx, |this, cx| this.stop(cx)))
         .on_provider(move |p, _, cx| state_p.update(cx, |s, cx| s.set_provider(p, cx)))
         .on_folder(move |_, cx| state_f.update(cx, |s, cx| s.pick_folder(cx)))
-        .attachments(has_images)
-        .on_attach(move |_, cx| shell_attach.update(cx, |this, cx| this.pick_images(cx)));
+        .attachments(has_attachments)
+        .attachment_content(has_attachments.then(|| self.render_attachments(cx).into_any_element()))
+        .on_attach(move |_, cx| shell_attach.update(cx, |this, cx| this.pick_attachments(cx)));
         v_flex()
             .w_full()
             .max_w(px(COMPOSER_MAX_WIDTH))
@@ -885,7 +890,6 @@ impl AppShell {
                 },
             )
             .child(self.render_followups(cx))
-            .child(self.render_images(cx))
             .child(composer)
     }
 
@@ -1028,6 +1032,8 @@ impl AppShell {
                                 row.child(
                                     div()
                                         .id("toggle-sidebar")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("Toggle left sidebar")
                                         .flex_none()
                                         .size(px(24.0))
                                         .mr_1()
@@ -1049,7 +1055,7 @@ impl AppShell {
                                             } else {
                                                 IconName::PanelLeftOpen
                                             })
-                                            .small()
+                                            .with_size(px(sidebar::CONTROL_ICON_SIZE))
                                             .text_color(muted),
                                         ),
                                 )
@@ -1276,6 +1282,8 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("New tab")
                                     .flex_none()
                                     .when(dragging_tab.is_some(), |plus| plus.opacity(0.0))
                                     .size(px(24.0))
@@ -1295,7 +1303,7 @@ impl AppShell {
                                         this.state.update(cx, |s, cx| s.new_session(cx));
                                         this.focus_composer(window, cx);
                                     }))
-                                    .child(Icon::new(IconName::Plus).small().text_color(muted)),
+                                    .child(Icon::new(IconName::Plus).with_size(px(sidebar::CONTROL_ICON_SIZE)).text_color(muted)),
                             ),
                     )
                     .child(
@@ -1324,7 +1332,7 @@ impl AppShell {
                                 } else {
                                     IconName::PanelRightOpen
                                 })
-                                .small()
+                                .with_size(px(sidebar::CONTROL_ICON_SIZE))
                                 .text_color(muted),
                             ),
                     ),
@@ -1333,9 +1341,9 @@ impl AppShell {
 
     fn render_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let radius = px(self.metrics.page_radius);
-        let (panel, error, selection) = {
+        let (panel, selection) = {
             let st = self.state.read(cx);
-            (st.panel, st.error.clone(), st.selection.clone())
+            (st.panel, st.selection.clone())
         };
         let chat = self.open_chat(cx);
         if panel == Panel::Chat
@@ -1481,16 +1489,7 @@ impl AppShell {
                                                 .child(self.render_new_session_options(cx)),
                                         )
                                         .child(div().relative().child(self.render_composer(cx))),
-                                )
-                                .when_some(error, |col, message| {
-                                    col.child(
-                                        div()
-                                            .pl(px(17.5))
-                                            .text_size(px(TEXT_SM))
-                                            .text_color(rgb(0xf0524f))
-                                            .child(message),
-                                    )
-                                }),
+                                ),
                         ),
                 ),
             })
@@ -1518,6 +1517,34 @@ impl Render for AppShell {
             self.state
                 .update(cx, |state, _| state.shortcut_hints = false);
         }
+        if let Some(error) = self.state.update(cx, |state, _| state.error.take()) {
+            window.defer(cx, move |window, cx| {
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::error(error)
+                        .title("Something went wrong")
+                        .autohide(false),
+                    cx,
+                );
+            });
+        }
+        for chat in self.chats.values() {
+            let errors = chat.update(cx, |chat, _| std::mem::take(&mut chat.pending_errors));
+            for error in errors {
+                window.defer(cx, move |window, cx| {
+                    window.push_notification(
+                        gpui_kit::component::notification::Notification::error(error)
+                            .title("Session error")
+                            .autohide(false),
+                        cx,
+                    );
+                });
+            }
+        }
+        let settings_open = self.state.read(cx).panel == Panel::Providers;
+        if settings_open && !self.settings_focused {
+            self.shell_focus.focus(window, cx);
+        }
+        self.settings_focused = settings_open;
         self.sync_caffeine(cx);
         self.sync_terminal_sidebar_actions(cx);
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
@@ -1561,6 +1588,13 @@ impl Render for AppShell {
         self.ensure_chat(cx);
         self.sync_composer_draft(window, cx);
         self.sync_right(window, cx);
+        self.right
+            .update(cx, |panel, cx| panel.set_preview_visible(right_visible, cx));
+        for (panel, _) in self.right_cache.values() {
+            if panel != &self.right {
+                panel.update(cx, |panel, cx| panel.set_preview_visible(false, cx));
+            }
+        }
 
         // Load the title into the rename field when a rename starts.
         let renaming = self.state.read(cx).renaming.clone();
@@ -1577,13 +1611,24 @@ impl Render for AppShell {
 
         v_flex()
             .size_full()
+            .track_focus(&self.shell_focus)
             .key_context("Shell")
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.composer.read(cx).focus_handle(cx).is_focused(window)
                     && event.keystroke.modifiers.platform
                     && event.keystroke.key == "v"
-                    && this.paste_images(cx)
+                    && this.paste_attachments(cx)
                 {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.state.read(cx).panel == Panel::Providers
+                {
+                    this.state
+                        .update(cx, |state, cx| state.toggle_providers(cx));
+                    this.focus_composer(window, cx);
                     cx.stop_propagation();
                     window.prevent_default();
                 }

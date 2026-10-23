@@ -43,6 +43,7 @@ pub struct ComposerCard {
     on_send: Handler,
     on_attach: Handler,
     has_attachments: bool,
+    attachment_content: Option<AnyElement>,
     on_stop: Handler,
     on_folder: Handler,
     on_provider: ChoiceHandler<Provider>,
@@ -75,6 +76,7 @@ impl ComposerCard {
             on_send: noop.clone(),
             on_attach: noop.clone(),
             has_attachments: false,
+            attachment_content: None,
             on_stop: noop.clone(),
             on_folder: noop,
             on_provider: Rc::new(|_, _, _| {}),
@@ -83,6 +85,10 @@ impl ComposerCard {
 
     pub fn attachments(mut self, has: bool) -> Self {
         self.has_attachments = has;
+        self
+    }
+    pub fn attachment_content(mut self, content: Option<AnyElement>) -> Self {
+        self.attachment_content = content;
         self
     }
     pub fn on_attach(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -159,6 +165,7 @@ impl RenderOnce for ComposerCard {
             on_send,
             on_attach,
             has_attachments: _,
+            attachment_content,
             on_stop,
             on_folder,
             on_provider,
@@ -254,6 +261,7 @@ impl RenderOnce for ComposerCard {
             .gap_1()
             .rounded(px(14.0))
             .bg(rgba(COMPOSER_SURFACE_RGBA))
+            .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 Textarea::new(&input)
                     .appearance(false)
@@ -269,10 +277,10 @@ impl RenderOnce for ComposerCard {
                             .items_center()
                             .gap_0p5()
                             .child(
-                                chip("attach-images")
+                                chip("attach-files")
                                     .icon(IconName::Plus)
-                                    .tooltip("Attach images")
-                                    .accessibility_label("Attach images")
+                                    .tooltip("Attach files")
+                                    .accessibility_label("Attach files")
                                     .on_click(move |_, window, cx| on_attach(window, cx)),
                             )
                             .child(agent_el)

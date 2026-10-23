@@ -4,12 +4,22 @@ use crate::state::{AppState, Selection};
 use del_agent::EffortOption;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
+    input::{Input, InputEvent, InputState},
     popover::Popover,
     *,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::{cell::Cell, rc::Rc};
+
+fn model_label(selected: Option<&str>, info: Option<&del_agent::ModelInfo>) -> String {
+    match selected {
+        None | Some("default") => "Default".into(),
+        Some(id) => info
+            .map(|model| model.name.clone())
+            .unwrap_or_else(|| id.into()),
+    }
+}
 
 #[derive(Clone)]
 struct EffortDrag;
@@ -23,11 +33,12 @@ impl Render for EffortDrag {
 pub struct ModelPicker {
     state: Entity<AppState>,
     panel: Entity<ModelPanel>,
+    open: bool,
     trigger_bottom: Rc<Cell<Pixels>>,
 }
 
 impl ModelPicker {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, _, cx| {
             this.state
                 .update(cx, |state, cx| state.load_models(false, cx));
@@ -35,11 +46,17 @@ impl ModelPicker {
         })
         .detach();
         let trigger_bottom = Rc::new(Cell::new(Pixels::ZERO));
-        let panel = cx.new(|cx| ModelPanel::new(state.clone(), trigger_bottom.clone(), cx));
+        let panel = cx.new(|cx| ModelPanel::new(state.clone(), trigger_bottom.clone(), window, cx));
+        cx.subscribe(&panel, |this, _, _: &CloseModelPicker, cx| {
+            this.open = false;
+            cx.notify();
+        })
+        .detach();
         state.update(cx, |state, cx| state.load_models(false, cx));
         Self {
             state,
             panel,
+            open: false,
             trigger_bottom,
         }
     }
@@ -51,14 +68,9 @@ impl Render for ModelPicker {
         let above = matches!(state.selection, Selection::Session(_));
         let (_, model, _) = state.effective();
         let info = state.model_info();
-        let label = info
-            .as_ref()
-            .map(|model| model.name.clone())
-            .or_else(|| model.as_deref().map(|id| id.to_string()))
-            .unwrap_or_else(|| "Default".into());
+        let label = model_label(model.as_deref(), info.as_ref());
         let effort = state.effort().map(|e| EffortOption::named(e).name);
         let panel = self.panel.clone();
-        let on_open = self.panel.clone();
         let trigger_bottom = self.trigger_bottom.clone();
         div()
             .on_children_prepainted(move |bounds, _, _| {
@@ -68,6 +80,7 @@ impl Render for ModelPicker {
             })
             .child(
                 Popover::new("model-picker")
+                    .open(self.open)
                     .appearance(false)
                     .anchor(if above {
                         Anchor::BottomLeft
@@ -91,20 +104,29 @@ impl Render for ModelPicker {
                                 },
                             )),
                     )
-                    .on_open_change(move |open, _, cx| {
+                    .on_open_change(cx.listener(|this, open: &bool, window, cx| {
+                        this.open = *open;
                         if *open {
-                            on_open.update(cx, |panel, cx| {
+                            this.panel.update(cx, |panel, cx| {
                                 panel.models = true;
+                                panel.highlighted = None;
+                                panel.search.update(cx, |search, cx| {
+                                    search.set_value("", window, cx);
+                                    search.focus(window, cx);
+                                });
                                 panel.model_scroll.set_offset(point(px(0.), px(0.)));
                                 panel.state.update(cx, |s, cx| s.load_models(false, cx));
                                 cx.notify();
                             });
                         }
-                    })
+                        cx.notify();
+                    }))
                     .content(move |_, _, _| panel.clone()),
             )
     }
 }
+
+struct CloseModelPicker;
 
 struct ModelPanel {
     state: Entity<AppState>,
@@ -114,15 +136,31 @@ struct ModelPanel {
     previous_effort_index: usize,
     trigger_bottom: Rc<Cell<Pixels>>,
     model_scroll: ScrollHandle,
+    search: Entity<InputState>,
+    focus: FocusHandle,
+    choices: Vec<Option<String>>,
+    highlighted: Option<usize>,
 }
+
+impl EventEmitter<CloseModelPicker> for ModelPanel {}
 
 impl ModelPanel {
     fn new(
         state: Entity<AppState>,
         trigger_bottom: Rc<Cell<Pixels>>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models…"));
+        cx.subscribe(&search, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.highlighted = None;
+                this.model_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             state,
             models: true,
@@ -131,6 +169,10 @@ impl ModelPanel {
             previous_effort_index: 0,
             trigger_bottom,
             model_scroll: ScrollHandle::new(),
+            search,
+            focus: cx.focus_handle(),
+            choices: Vec::new(),
+            highlighted: None,
         }
     }
 }
@@ -153,6 +195,15 @@ impl Render for ModelPanel {
         let locked = state.is_starting();
         let muted = rgba(0xffffff80);
         let root = v_flex()
+            .id("model-panel")
+            .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.emit(CloseModelPicker);
+                }
+            }))
             .w(px(278.))
             .p_3()
             .gap_3()
@@ -160,57 +211,81 @@ impl Render for ModelPanel {
             .bg(rgb(0x222222))
             .text_size(px(13.));
         if self.models {
-            let model_count = catalog
+            let query = self.search.read(cx).value().to_string();
+            let show_default = fuzzy_model_matches(&query, "Default recommended");
+            let models: Vec<_> = catalog
                 .models
                 .iter()
-                .filter(|model| !(model.id == "default" && model.is_default))
-                .count();
-            let list_height = px((model_count + 1) as f32 * 42.)
+                .enumerate()
+                .filter(|(_, model)| !(model.id == "default" && model.is_default))
+                .filter(|(_, model)| {
+                    fuzzy_model_matches(&query, &model.name)
+                        || fuzzy_model_matches(&query, &model.id)
+                })
+                .collect();
+            self.choices = show_default
+                .then_some(None)
+                .into_iter()
+                .chain(models.iter().map(|(_, model)| Some(model.id.clone())))
+                .collect();
+            let model_count = self.choices.len();
+            self.highlighted = self.highlighted.filter(|index| *index < model_count);
+            let list_height = px(model_count.max(1) as f32 * 42.)
                 .min((available_height - px(84.)).clamp(px(60.), px(240.)));
             let scroll = self.model_scroll.clone();
-            let mut list = v_flex().gap_0p5().child(
-                Button::new("model-default")
-                    .accessibility_label("Default model")
-                    .ghost()
-                    .w_full()
-                    .h_auto()
-                    .flex_none()
-                    .py_1p5()
-                    .text_size(px(12.))
-                    .justify_start()
-                    .disabled(locked)
-                    .when(
-                        selected.is_none() || selected.as_deref() == Some("default"),
-                        |b| b.icon(IconName::Check),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_start()
-                            .gap_0p5()
-                            .child("Default")
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(muted)
-                                    .child("Use the provider’s recommended model"),
-                            ),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.set_model(None, cx));
-                        this.models = false;
-                        cx.notify();
-                    })),
-            );
-            for (i, model) in catalog.models.iter().enumerate() {
-                if model.id == "default" && model.is_default {
-                    continue;
-                }
+            let mut list = v_flex().gap_0p5().when(show_default, |list| {
+                list.child(
+                    Button::new("model-default")
+                        .accessibility_label("Default model")
+                        .when(self.highlighted == Some(0), |button| {
+                            button.bg(rgba(0xffffff14))
+                        })
+                        .ghost()
+                        .w_full()
+                        .h_auto()
+                        .flex_none()
+                        .py_1p5()
+                        .text_size(px(12.))
+                        .justify_start()
+                        .disabled(locked)
+                        .when(
+                            selected.is_none() || selected.as_deref() == Some("default"),
+                            |b| b.icon(IconName::Check),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .items_start()
+                                .gap_0p5()
+                                .child("Default")
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(muted)
+                                        .child("Use the provider’s recommended model"),
+                                ),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.state.update(cx, |s, cx| s.set_model(None, cx));
+                            this.focus.focus(window, cx);
+                            this.models = false;
+                            cx.notify();
+                        })),
+                )
+            });
+            if model_count == 0 && !catalog.loading {
+                list = list.child(div().p_2().text_color(muted).child("No matching models"));
+            }
+            for (visible_index, (i, model)) in models.into_iter().enumerate() {
+                let choice_index = visible_index + usize::from(show_default);
                 let id = model.id.clone();
                 list = list.child(
                     Button::new(("model-choice", i))
                         .accessibility_label(model.name.clone())
+                        .when(self.highlighted == Some(choice_index), |button| {
+                            button.bg(rgba(0xffffff14))
+                        })
                         .ghost()
                         .w_full()
                         .h_auto()
@@ -240,15 +315,59 @@ impl Render for ModelPanel {
                                     )
                                 }),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.state
                                 .update(cx, |s, cx| s.set_model(Some(id.clone()), cx));
+                            this.focus.focus(window, cx);
                             this.models = false;
                             cx.notify();
                         })),
                 );
             }
             return root
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.modifiers.platform
+                        || event.keystroke.modifiers.control
+                        || event.keystroke.modifiers.alt
+                    {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "up" | "down" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            if this.state.read(cx).is_starting() {
+                                return;
+                            }
+                            this.highlighted = next_model_index(
+                                this.highlighted,
+                                this.choices.len(),
+                                event.keystroke.key == "down",
+                            );
+                            if let Some(index) = this.highlighted {
+                                this.model_scroll.scroll_to_item(index);
+                            }
+                            cx.notify();
+                        }
+                        "enter" => {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            if this.state.read(cx).is_starting() {
+                                return;
+                            }
+                            if let Some(model) =
+                                this.choices.get(this.highlighted.unwrap_or(0)).cloned()
+                            {
+                                this.state
+                                    .update(cx, |state, cx| state.set_model(model, cx));
+                                this.focus.focus(window, cx);
+                                this.models = false;
+                                cx.notify();
+                            }
+                        }
+                        _ => {}
+                    }
+                }))
                 .p_2p5()
                 .gap_2()
                 .text_size(px(12.))
@@ -256,7 +375,17 @@ impl Render for ModelPanel {
                     h_flex()
                         .justify_between()
                         .items_center()
-                        .child(div().text_color(muted).child("Select model"))
+                        .gap_2()
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Input::new(&self.search)
+                                    .small()
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .cleanable(true)
+                                    .prefix(Icon::new(IconName::Search).xsmall().text_color(muted)),
+                            ),
+                        )
                         .child(
                             Button::new("refresh-models")
                                 .ghost()
@@ -275,14 +404,6 @@ impl Render for ModelPanel {
                 .when(catalog.loading, |col| {
                     col.child(div().text_color(muted).child("Loading available models…"))
                 })
-                .when_some(catalog.error, |col, error| {
-                    col.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(0xe9a285))
-                            .child(error),
-                    )
-                })
                 .child(
                     div()
                         .relative()
@@ -290,12 +411,10 @@ impl Render for ModelPanel {
                         .flex_none()
                         .overflow_hidden()
                         .child(
-                            div()
-                                .id("model-list")
+                            list.id("model-list")
                                 .size_full()
                                 .overflow_y_scroll()
-                                .track_scroll(&self.model_scroll)
-                                .child(list),
+                                .track_scroll(&self.model_scroll),
                         )
                         .child(
                             canvas(
@@ -341,11 +460,7 @@ impl Render for ModelPanel {
             .as_ref()
             .and_then(|id| self.levels.iter().find(|e| &e.id == id))
             .map(|e| e.name.clone());
-        let model_name = info
-            .as_ref()
-            .map(|m| m.name.clone())
-            .or(selected)
-            .unwrap_or_else(|| "Select model".into());
+        let model_name = model_label(selected.as_deref(), info.as_ref());
         root.child(
             h_flex()
                 .w_full()
@@ -400,8 +515,10 @@ impl Render for ModelPanel {
                                         .text_color(rgba(0xffffff62)),
                                 ),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.models = true;
+                            this.search
+                                .update(cx, |search, cx| search.focus(window, cx));
                             cx.notify();
                         })),
                 )
@@ -545,5 +662,59 @@ impl Render for ModelPanel {
             )
         })
         .into_any_element()
+    }
+}
+
+fn next_model_index(current: Option<usize>, count: usize, down: bool) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(match (current.filter(|index| *index < count), down) {
+        (None, true) => 0,
+        (None, false) => count - 1,
+        (Some(index), true) => (index + 1) % count,
+        (Some(0), false) => count - 1,
+        (Some(index), false) => index - 1,
+    })
+}
+
+/// Case-insensitive subsequence matching, ignoring spaces and punctuation.
+/// Names and provider IDs are searched separately to avoid cross-field matches.
+fn fuzzy_model_matches(query: &str, candidate: &str) -> bool {
+    let mut candidate = candidate
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric());
+    query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric())
+        .all(|needle| candidate.by_ref().any(|c| c == needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fuzzy_model_matches, next_model_index};
+
+    #[test]
+    fn model_navigation_wraps_and_handles_filtered_or_empty_results() {
+        assert_eq!(next_model_index(None, 3, true), Some(0));
+        assert_eq!(next_model_index(None, 3, false), Some(2));
+        assert_eq!(next_model_index(Some(2), 3, true), Some(0));
+        assert_eq!(next_model_index(Some(0), 3, false), Some(2));
+        assert_eq!(next_model_index(Some(8), 2, true), Some(0));
+        assert_eq!(next_model_index(Some(0), 0, true), None);
+    }
+
+    #[test]
+    fn model_search_matches_abbreviations_case_and_separators() {
+        assert!(fuzzy_model_matches("GPT 61", "gpt-6.1-sol"));
+        assert!(fuzzy_model_matches("gptstr", "GPT-6-Astra"));
+        assert!(fuzzy_model_matches("ops55", "Opus 5.5"));
+        assert!(fuzzy_model_matches("", "Any model"));
+        assert!(fuzzy_model_matches("recommended", "Default recommended"));
+        assert!(!fuzzy_model_matches("opus", "GPT-6-Sol"));
+        assert!(!fuzzy_model_matches("66", "GPT-6-Sol"));
+        assert!(!fuzzy_model_matches("solgpt", "GPT-6-Sol"));
     }
 }

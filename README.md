@@ -103,6 +103,11 @@ checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
 - Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
+- Session titles use the available sidebar width, reserving extra action space
+  on hover. New-session, new-tab, sidebar, archive, and pin controls use matching
+  icon sizes.
+- General application, session-start, model-loading, and message-delivery failures
+  appear in dismissible toasts. Failed messages remain available to retry or edit.
 
 ## Models and reasoning
 
@@ -110,6 +115,11 @@ The picker uses provider-advertised choices, not a hardcoded list of model names
 All visible catalog entries remain accessible in a bounded scrolling list, without
 a scrollbar; the bottom fades while more entries are below. Refresh retries
 catalog discovery. Availability depends on the installed CLI, agent, and account.
+The picker opens with a **Search models…** field. It fuzzy-filters names and
+provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
+choices. Opening the picker again starts with an empty search. Use **↑/↓** to
+navigate results, **Enter** to select, and **Escape** to close. The provider
+default is labeled **Default**.
 
 | Provider | Model discovery and controls |
 | --- | --- |
@@ -129,26 +139,40 @@ model clears incompatible effort/tier choices. Provider changes use a new draft.
 Catalog discovery submits no prompt, but can start a CLI process; ACP discovery
 may create a temporary session.
 
-## Follow-up queue and images
+## Follow-up queue and attachments
 
-While a reply runs, **Enter** queues the current draft. **Command-Enter** submits
+While a reply runs, **Enter** queues the current draft. **⌘ + Enter** submits
 it as steering input; with an empty composer, it submits the top queued item.
 Completed turns advance remaining follow-ups in order. A busy provider leaves
 an undelivered message waiting instead of displaying a failed-send error or
 incorrectly changing the running status to Done.
 
 Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
-images to the composer; an existing draft is preserved as another queued item.
-A drag handle appears on hover for reordering. Rows have subtle separators and a
-surface just darker than the composer. Around four rows fit before the list
-scrolls, with a bottom fade and no scrollbar.
+attachments to the composer; an existing draft is preserved as another queued item.
+Drag from the left edge to reorder, without an extra hover icon. Rows have subtle
+separators and a surface just darker than the composer. Around four rows fit
+before the list scrolls, with a bottom fade and no scrollbar.
 
-Attach images using the plus button, paste, or file drop. PNG, JPEG, and WebP
-inputs are decoded and saved as local PNG attachments; input files are limited
-to 20 MiB each. Images appear as thumbnails in the composer and queue and remain
-attached through edit, reorder, and retry. Codex receives local image references;
-Claude and ACP receive encoded image content, subject to provider/model support.
-The Terminal-mode opening composer currently accepts text prompts only.
+Attach any regular file using the plus button, paste, or file drop: PDFs,
+spreadsheets, Markdown, documents, images, video, audio, archives, and unknown
+formats are accepted. Del copies each file into its own attachment directory,
+preserving the original name and bytes without collisions. Imports no longer
+apply the old 20 MiB image-only limit. Unreadable files report individual errors
+while other files in the selection are retained.
+
+**⌘V** pastes copied images or Finder files into the composer; ordinary text
+paste still works normally. PNG, JPEG, and WebP show thumbnails of the actual
+image. Other formats show one file-type icon, a compact filename, and extension.
+Cards form a single horizontal scrolling row with no scrollbar. Wide, subtle
+edge fades appear only on sides with more offscreen content. Each card reveals
+a bright **×** on hover that remains visible while hovered or pressed. Click
+a card to preview its original file in the Files sidebar. Attachments survive
+queue editing, reordering, and retry. Codex receives local image references;
+Claude and ACP receive encoded image content. Other files
+are supplied as local paths for the harness's tools to read. This does not embed
+PDF/spreadsheet contents in the prompt or transcode video; interpretation and
+access depend on the harness's tools and permissions. Terminal-mode opening
+prompts include paths for all attached files, including images.
 
 Queues persist per conversation. Known busy rejections are recoverable;
 uncertain deliveries interrupted before acknowledgement require review rather
@@ -167,12 +191,25 @@ without a separate “steer” heading.
 The right sidebar has **Files** and **Terminal** panes. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
 `target`/`node_modules` trees. Selection highlights fit the file label. The tree
-and preview have a draggable split and subtle edge fades.
+and preview have a draggable split. The file tree has no opaque edge overlays
+over its translucent background.
 
 The viewer is read-only. Text files show line numbers; Markdown supports
 **Markdown / Preview** modes. Text previews are capped at 512 KiB and 3,000 lines.
+On macOS, PDFs render with PDFKit in a continuous vertical scroll without floating
+page-arrow controls. Word documents (`.doc`/`.docx`) render inside the sidebar using
+[Quick Look](https://developer.apple.com/documentation/quicklookui/qlpreviewview),
+with native document scrolling. Supported spreadsheets, presentations, rich text,
+and image formats use the same viewer. Document previews bypass the plain-text
+size limit and stay local. Rendering capabilities depend on the installed macOS
+Quick Look providers; encrypted or damaged files may not be previewable.
 Expanded folders, selected file, dotfile preference, split height, and Markdown
-mode are saved per chat.
+mode are saved per chat. Switching panes, opening Settings, or closing the sidebar
+hides native previews; closing the preview releases its document.
+
+Click **TERMINALS** in the left sidebar to collapse or expand the list, with a
+short transition and no disclosure-arrow icon. Reduce Motion makes the transition
+instant.
 
 Terminals use a real PTY, support shell and agent sessions, and retain colored
 terminal cells while letting the normal chat surface show through their default
@@ -184,10 +221,12 @@ workspace. Unresolved identity is reported rather than choosing the latest chat.
 Built-in Codex and Claude terminal launches automatically trust the workspace
 opened in Del, including resumed sessions. Codex receives a launch-scoped
 [`projects.<path>.trust_level`](https://developers.openai.com/codex/config-reference/)
-override. Claude's recognized startup trust dialog is selected and confirmed;
-Claude then persists its own decision. This does not change tool approval or
-sandbox settings. Claude confirmation is limited to startup (two minutes), the
-exact workspace, and one acceptance. Unrecognized dialogs stay interactive.
+override. Claude's recognized startup trust dialog is selected and confirmed
+as soon as it appears (100 ms polling), with short retries only while the exact
+workspace prompt remains visible. Claude persists its own decision. This does not
+change tool approval or sandbox settings. Claude confirmation is limited to
+startup (two minutes) and the exact workspace, and stops once the prompt
+disappears. Unrecognized dialogs stay interactive.
 Shell/custom commands and arbitrary ACP agents keep their own trust setup.
 
 Del's MCP bridge provides scoped session coordination, status, notifications,
@@ -216,7 +255,9 @@ arbitrary applications on the computer.
 ## Settings and shortcuts
 
 Settings has **Preferences** (persisted Light/Dark appearance) and **Providers**
-(sign-in status, sign-in, and re-check). The right sidebar is hidden in Settings.
+(sign-in status, sign-in, and re-check). The sidebar entry includes a gear icon.
+The right sidebar is hidden in Settings; **Escape** closes Settings and returns
+to the selected conversation, terminal, or draft.
 Hold Command to see numeric hints on the top tabs. There are no numeric sidebar
 session shortcuts.
 
@@ -236,6 +277,7 @@ session shortcuts.
 | Command-Backslash / Command-Shift-B | Toggle the file sidebar |
 | Command-J / Control-Backtick | Open the workspace terminal pane |
 | Command-Comma | Settings |
+| Escape in Settings | Return to the previous workspace view |
 | Command-Q | Quit |
 
 ## Local data
@@ -250,7 +292,7 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | `sidebar.json` | Local names, pins, archive/unread metadata |
 | `terminals.json` | Terminal launches and provider conversation identities |
 | `followups/` | Per-conversation queued messages and delivery state |
-| `attachments/` | Local image copies used by drafts and queued messages |
+| `attachments/` | Local file copies used by drafts and queued messages |
 | `right-panels.json` | Per-chat file/terminal pane state |
 | `sidebar-widths.json` | Sidebar sizes |
 | `appearance.json` | Light/Dark preference |
@@ -295,3 +337,12 @@ run those explicitly when validating live-provider behavior. Signing continuity
 and installation while running have separate macOS regression scripts.
 Automated tests do not replace visual checks
 of hover, dragging, scrolling, and native permission dialogs.
+
+The native PDF/Word integration check can be run on macOS with:
+
+```sh
+clang -fobjc-arc -Wno-incompatible-pointer-types scripts/test-document-preview.m \
+  crates/app/src/document_preview.m -framework AppKit -framework Quartz \
+  -o /tmp/del-document-preview-test
+/tmp/del-document-preview-test
+```

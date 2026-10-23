@@ -61,6 +61,50 @@ async fn approval(rx: &mut broadcast::Receiver<AgentEvent>) -> String {
 }
 
 #[tokio::test]
+async fn non_image_attachments_reach_the_agent_as_file_references() {
+    let backend = backend(&[]);
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut rx = handle.subscribe();
+    backend
+        .send_prompt(
+            &handle.id,
+            UserInput {
+                text: "inspect-attachments".into(),
+                attachments: [
+                    ("report.pdf", "application/pdf"),
+                    (
+                        "book.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                    ("clip.mp4", "video/mp4"),
+                ]
+                .into_iter()
+                .map(|(name, mime)| Attachment {
+                    path: format!("/attachments/{name}").into(),
+                    mime: Some(mime.into()),
+                })
+                .collect(),
+            },
+        )
+        .await
+        .unwrap();
+    let events = completed(&mut rx).await;
+    let response = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::AssistantMessage { text, .. } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    let blocks: serde_json::Value = serde_json::from_str(response).unwrap();
+    for (index, name) in ["report.pdf", "book.xlsx", "clip.mp4"].iter().enumerate() {
+        assert_eq!(blocks[index + 1]["type"], "text");
+        assert!(blocks[index + 1]["text"].as_str().unwrap().contains(name));
+    }
+    backend.close(&handle.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn handshake_prompt_stream_tool_diff_and_reuse() {
     let backend = backend(&[]);
     let handle = backend.start_session(config()).await.unwrap();

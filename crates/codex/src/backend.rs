@@ -569,6 +569,29 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
 
 #[cfg(test)]
 mod model_config_tests {
+    #[test]
+    fn mixed_attachments_keep_documents_as_files_and_images_as_images() {
+        let input = del_agent::UserInput {
+            text: "inspect".into(),
+            attachments: [
+                ("report.pdf", "application/pdf"),
+                ("clip.mp4", "video/mp4"),
+                ("image.png", "image/png"),
+            ]
+            .into_iter()
+            .map(|(name, mime)| del_agent::Attachment {
+                path: format!("/attachments/{name}").into(),
+                mime: Some(mime.into()),
+            })
+            .collect(),
+        };
+        let items = super::turn_input(&input);
+        assert_eq!(items[1]["type"], "text");
+        assert!(items[1]["text"].as_str().unwrap().contains("report.pdf"));
+        assert_eq!(items[2]["type"], "text");
+        assert!(items[2]["text"].as_str().unwrap().contains("clip.mp4"));
+        assert_eq!(items[3]["type"], "localImage");
+    }
     use super::*;
     #[test]
     fn effort_is_forwarded_only_when_selected() {

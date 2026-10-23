@@ -44,10 +44,7 @@ impl ChatView {
             Block::Tool(tool) => self.tool_card(ix, tool, cx).into_any_element(),
             Block::FileChange(change) => self.file_card(ix, change, cx).into_any_element(),
             Block::Approval(approval) => self.approval_card(approval, cx).into_any_element(),
-            Block::Error {
-                message,
-                recoverable,
-            } => error_banner(message, recoverable).into_any_element(),
+            Block::Error { .. } => div().h_0().into_any_element(),
             Block::TurnEnd { status } => turn_end(status).into_any_element(),
         };
         h_flex()
@@ -398,34 +395,6 @@ fn assistant_message(ix: usize, text: String) -> impl IntoElement {
         )
 }
 
-fn error_banner(message: String, recoverable: bool) -> impl IntoElement {
-    h_flex()
-        .p_2p5()
-        .gap_2()
-        .items_start()
-        .rounded_lg()
-        .bg(rgba(0xf0716b1f))
-        .child(div().mt(px(5.0)).child(dot(RED)))
-        .child(
-            v_flex()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_size(px(TEXT_MD))
-                        .text_color(rgb(STRONG))
-                        .child(message),
-                )
-                .when(!recoverable, |col| {
-                    col.child(
-                        div()
-                            .text_size(px(TEXT_SM))
-                            .text_color(rgba(MUTED))
-                            .child("The session cannot continue."),
-                    )
-                }),
-        )
-}
-
 fn turn_end(status: TurnStatus) -> impl IntoElement {
     let label = match status {
         TurnStatus::Completed => "Completed",
@@ -470,13 +439,6 @@ pub fn pending_prompt(text: String, error: Option<String>) -> impl IntoElement {
                     .text_color(rgba(MUTED))
                     .when(!failed, |row| {
                         row.child(Spinner::new().xsmall()).child("Starting agent…")
-                    })
-                    .when_some(error, |row, error| {
-                        row.child(
-                            div()
-                                .text_color(rgba(RED))
-                                .child(format!("Could not start: {error}. Send again to retry.")),
-                        )
                     }),
             ),
         )

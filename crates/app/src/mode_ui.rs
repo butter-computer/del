@@ -145,6 +145,7 @@ impl AppShell {
     pub(super) fn submit_terminal_prompt(
         &mut self,
         prompt: &str,
+        attachments: &[del_agent::Attachment],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -161,9 +162,11 @@ impl AppShell {
                 return true;
             }
         };
+        let prompt = crate::attachments::terminal_prompt(prompt, attachments);
         self.state.update(cx, |state, cx| {
             state.begin_terminal_prompt(key, prompt.to_owned(), cx)
         });
+        self.composer_attachments.remove(&self.composer_owner(cx));
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.begin_terminal(
@@ -815,9 +818,7 @@ impl AppShell {
             }
             Selection::Draft(_) | Selection::Session(_) => {}
         }
-        if let Some(error) = self.state.read(cx).error.clone() {
-            page = page.child(div().p_3().text_color(rgb(0xf08b8b)).child(error));
-        }
+
         page.into_any_element()
     }
 

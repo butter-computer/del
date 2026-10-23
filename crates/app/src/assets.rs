@@ -29,6 +29,16 @@ impl AssetSource for AppAssets {
             "icons/grip.svg" => Some(include_bytes!("../assets/icons/grip.svg")),
             "icons/queue.svg" => Some(include_bytes!("../assets/icons/queue.svg")),
             "icons/archive.svg" => Some(include_bytes!("../assets/icons/archive.svg")),
+            "icons/filetypes/pdf.png" => Some(include_bytes!("../assets/icons/filetypes/pdf.png")),
+            "icons/filetypes/docx.png" => {
+                Some(include_bytes!("../assets/icons/filetypes/docx.png"))
+            }
+            "icons/filetypes/xlsx.png" => {
+                Some(include_bytes!("../assets/icons/filetypes/xlsx.png"))
+            }
+            "icons/filetypes/pptx.png" => {
+                Some(include_bytes!("../assets/icons/filetypes/pptx.png"))
+            }
             _ => None,
         };
         match bytes {

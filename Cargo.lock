@@ -1467,6 +1467,7 @@ name = "del-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cc",
  "del-acp",
  "del-agent",
  "del-claude",
@@ -1478,6 +1479,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "image",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tempfile",

@@ -161,6 +161,9 @@ fn cached_tree_rows(
 
 enum Viewer {
     None,
+    Document {
+        path: PathBuf,
+    },
     Text {
         path: PathBuf,
         lines: std::sync::Arc<Vec<String>>,
@@ -181,6 +184,8 @@ pub struct RightPanel {
     root: PathBuf,
     expanded: HashSet<PathBuf>,
     viewer: Viewer,
+    document_preview: Option<crate::document_preview::DocumentPreview>,
+    preview_visible: bool,
     terminal: Option<Entity<TerminalHost>>,
     terminal_error: Option<String>,
     show_hidden: bool,
@@ -196,6 +201,16 @@ pub struct RightPanel {
 }
 
 impl RightPanel {
+    pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if !visible && let Some(preview) = &self.document_preview {
+            preview.hide();
+        }
+        if self.preview_visible != visible {
+            self.preview_visible = visible;
+            cx.notify();
+        }
+    }
+
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pane == Pane::Terminal {
             self.ensure_terminal(window, cx);
@@ -208,7 +223,8 @@ impl RightPanel {
             expanded: self.expanded.clone(),
             selected: match &self.viewer {
                 Viewer::None => None,
-                Viewer::Text { path, .. }
+                Viewer::Document { path }
+                | Viewer::Text { path, .. }
                 | Viewer::Note { path, .. }
                 | Viewer::Loading { path } => Some(path.clone()),
             },
@@ -243,6 +259,8 @@ impl RightPanel {
             root,
             expanded: HashSet::new(),
             viewer: Viewer::None,
+            document_preview: None,
+            preview_visible: true,
             terminal: None,
             terminal_error: None,
             show_hidden: false,
@@ -270,6 +288,7 @@ impl RightPanel {
             self.directory_entries.clear();
             self.rows.clear();
             self.expanded.clear();
+            self.document_preview = None;
             self.file_request += 1;
             self.viewer = Viewer::None;
             self.refresh_tree(cx);
@@ -297,7 +316,16 @@ impl RightPanel {
                 self.terminal = Some(terminal);
                 self.terminal_error = None;
             }
-            Err(error) => self.terminal_error = Some(format!("Could not open terminal: {error}")),
+            Err(error) => {
+                let message = format!("Could not open terminal: {error}");
+                self.terminal_error = Some(message.clone());
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::error(message)
+                        .title("Terminal unavailable")
+                        .autohide(false),
+                    cx,
+                );
+            }
         }
     }
 
@@ -305,6 +333,11 @@ impl RightPanel {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
+    }
+
+    pub fn preview_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.pane = Pane::Files;
+        self.open_file(path, cx);
     }
 
     fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -320,6 +353,12 @@ impl RightPanel {
             let viewer = load.await;
             let _ = this.update(cx, |this, cx| {
                 if this.file_request == request {
+                    this.document_preview = match &viewer {
+                        Viewer::Document { path } => {
+                            Some(crate::document_preview::DocumentPreview::new(path))
+                        }
+                        _ => None,
+                    };
                     this.viewer = viewer;
                     cx.notify();
                 }
@@ -407,9 +446,10 @@ impl RightPanel {
     fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows.clone();
         let selected = match &self.viewer {
-            Viewer::Text { path, .. } | Viewer::Note { path, .. } | Viewer::Loading { path } => {
-                Some(path.clone())
-            }
+            Viewer::Document { path }
+            | Viewer::Text { path, .. }
+            | Viewer::Note { path, .. }
+            | Viewer::Loading { path } => Some(path.clone()),
             Viewer::None => None,
         };
         let muted = rgba(0xffffff8c);
@@ -482,6 +522,12 @@ impl RightPanel {
             }));
 
         let viewer = match &self.viewer {
+            Viewer::Document { .. } => self
+                .document_preview
+                .as_ref()
+                .filter(|_| self.preview_visible)
+                .map(|preview| preview.element().into_any_element())
+                .unwrap_or_else(|| div().child("Loading document…").into_any_element()),
             Viewer::None => div()
                 .p_3()
                 .whitespace_nowrap()
@@ -640,6 +686,7 @@ impl RightPanel {
                                 .hover(|button| button.bg(rgba(0xffffff14)))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.file_request += 1;
+                                    this.document_preview = None;
                                     this.viewer = Viewer::None;
                                     this.file_scroll = UniformListScrollHandle::new();
                                     cx.notify();
@@ -676,21 +723,7 @@ impl RightPanel {
                     .flex_none()
                     .h(px(self.file_tree_height))
                     .overflow_hidden()
-                    .child(tree)
-                    .children([true, false].into_iter().map(|top| {
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .h(px(10.0))
-                            .when(top, |fade| fade.top_0())
-                            .when(!top, |fade| fade.bottom_0())
-                            .bg(linear_gradient(
-                                if top { 180.0 } else { 0.0 },
-                                linear_color_stop(rgba(0x111111cc), 0.0),
-                                linear_color_stop(rgba(0x11111100), 1.0),
-                            ))
-                    })),
+                    .child(tree),
             )
             .child(
                 div()
@@ -736,18 +769,25 @@ impl RightPanel {
         div()
             .p_3()
             .text_size(px(TEXT_SM))
-            .text_color(rgb(0xe58b8b))
-            .child(
-                self.terminal_error
-                    .clone()
-                    .unwrap_or_else(|| "Opening terminal…".into()),
-            )
+            .text_color(rgba(0xffffff8c))
+            .child(if self.terminal_error.is_some() {
+                "Terminal unavailable. Switch back to Terminal to retry."
+            } else {
+                "Opening terminal…"
+            })
             .into_any_element()
     }
 }
 
 impl Render for RightPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if (!self.preview_visible
+            || self.pane != Pane::Files
+            || !matches!(self.viewer, Viewer::Document { .. }))
+            && let Some(preview) = &self.document_preview
+        {
+            preview.hide();
+        }
         let show_hidden = self.show_hidden;
         let body = match self.pane {
             Pane::Files => self.render_files(cx).into_any_element(),
@@ -834,6 +874,9 @@ impl Render for RightPanel {
 }
 
 fn read_viewer(path: PathBuf) -> Viewer {
+    if crate::document_preview::supports(&path) && path.is_file() {
+        return Viewer::Document { path };
+    }
     match std::fs::metadata(&path) {
         Ok(m) if m.len() > MAX_FILE_BYTES => Viewer::Note {
             path,
@@ -887,6 +930,26 @@ fn read_viewer(path: PathBuf) -> Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn large_documents_bypass_the_text_limit_and_missing_documents_still_report_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["large.pdf", "formatted.docx", "legacy.doc"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, vec![0; MAX_FILE_BYTES as usize + 1]).unwrap();
+            assert!(
+                matches!(read_viewer(path.clone()), Viewer::Document { path: selected } if selected == path)
+            );
+        }
+        assert!(matches!(
+            read_viewer(dir.path().join("missing.pdf")),
+            Viewer::Note { .. }
+        ));
+        let text = dir.path().join("large.txt");
+        std::fs::write(&text, vec![b'a'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        assert!(matches!(read_viewer(text), Viewer::Note { .. }));
+    }
 
     #[::gpui::test]
     fn folder_loading_is_deferred_and_obsolete_requests_cannot_replace_new_state(
