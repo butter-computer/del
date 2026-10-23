@@ -1451,7 +1451,7 @@ impl AppShell {
                                     .flex_1()
                                     .min_h_0()
                                     .child(chat::pending_prompt(
-                                        state.pending_prompt().unwrap().to_owned(),
+                                        state.pending_input().unwrap().clone(),
                                         state.pending_error().map(str::to_owned),
                                     ))
                                     .with_animation(

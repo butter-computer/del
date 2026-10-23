@@ -5,6 +5,7 @@
 //! touches at most one block, which `apply` reports as a `Change` so the view
 //! can keep its virtual list in step without diffing.
 
+use super::attachments::AttachmentSummary;
 use del_agent::{
     AgentEvent, ApprovalKind, ApprovalResponse, FileChangeKind, ToolStatus, TurnStatus,
 };
@@ -72,6 +73,7 @@ pub enum Block {
     User {
         text: String,
         steer: bool,
+        attachments: AttachmentSummary,
     },
     /// `open` while its deltas are still arriving.
     Assistant {
@@ -168,7 +170,19 @@ impl ChatModel {
             self.seal();
             self.phase = Phase::Running;
         }
-        self.push(Block::User { text, steer })
+        self.push(Block::User {
+            text,
+            steer,
+            attachments: AttachmentSummary::default(),
+        })
+    }
+
+    pub fn push_input(&mut self, input: &del_agent::UserInput, steer: bool) -> Change {
+        let change = self.push_user(input.text.clone(), steer);
+        if let Some(Block::User { attachments, .. }) = self.blocks.last_mut() {
+            *attachments = AttachmentSummary::from_input(input);
+        }
+        change
     }
 
     pub fn push_error(&mut self, message: String, recoverable: bool) -> Change {
@@ -245,9 +259,11 @@ impl ChatModel {
         match event {
             AgentEvent::UserMessage { text } => {
                 self.seal();
+                let (text, attachments) = AttachmentSummary::from_history(text);
                 Some(self.push(Block::User {
-                    text: text.clone(),
+                    text,
                     steer: false,
+                    attachments,
                 }))
             }
             AgentEvent::SessionStarted { .. } => None,
@@ -464,6 +480,32 @@ mod tests {
     }
 
     #[test]
+    fn attached_messages_keep_prose_separate_from_summary_live_and_replayed() {
+        let input = del_agent::UserInput {
+            text: "inspect these".into(),
+            attachments: vec![del_agent::Attachment {
+                path: "/tmp/photo.png".into(),
+                mime: Some("image/png".into()),
+            }],
+        };
+        let mut live = ChatModel::default();
+        live.push_input(&input, false);
+        let mut replayed = ChatModel::default();
+        replayed.apply(&AgentEvent::UserMessage {
+            text: "inspect these\n[attached image: /tmp/photo.png]".into(),
+        });
+        assert_eq!(live.blocks, replayed.blocks);
+        let Block::User {
+            text, attachments, ..
+        } = &live.blocks[0]
+        else {
+            panic!("user row");
+        };
+        assert_eq!(text, "inspect these");
+        assert_eq!(attachments.label().as_deref(), Some("1 attachment"));
+    }
+
+    #[test]
     fn steering_during_streaming_keeps_one_complete_answer() {
         let mut model = ChatModel::default();
         model.apply(&AgentEvent::TurnStarted {
@@ -527,7 +569,8 @@ mod tests {
             vec![
                 Block::User {
                     text: "hello".into(),
-                    steer: false
+                    steer: false,
+                    attachments: Default::default(),
                 },
                 Block::Assistant {
                     turn_id: "old".into(),
@@ -815,7 +858,8 @@ mod tests {
             m.blocks[1],
             Block::User {
                 text: "also this".into(),
-                steer: true
+                steer: true,
+                attachments: Default::default(),
             }
         );
     }

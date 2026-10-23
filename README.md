@@ -193,6 +193,8 @@ paste still works normally on both new-session and conversation pages. Clipboard
 bitmap formats such as TIFF and BMP are converted to PNG in the background.
 PNG, JPEG, and WebP show thumbnails of the actual image. Other formats show one
 file-type icon, a compact filename, and extension.
+Sent messages show a muted attachment count (for example, “4 attachments”)
+instead of listing filenames, combining images and files into one total.
 Cards form a single horizontal scrolling row with no scrollbar. Wide, subtle
 edge fades appear only on sides with more offscreen content. Each card reveals
 a bright **×** on hover that remains visible while hovered or pressed. Click

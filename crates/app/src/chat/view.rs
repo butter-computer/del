@@ -68,11 +68,11 @@ impl ChatView {
     /// A chat for `session`, which the app has already started. The view
     /// replays what the session emitted so far (so nothing sent before this
     /// view existed is missed), then follows it live. `first_prompt` is the
-    /// text the app sent to start the session, shown as the opening user row.
+    /// input the app sent to start the session, shown as the opening user row.
     pub fn new(
         backend: Backend,
         session: Option<SessionId>,
-        first_prompt: Option<String>,
+        first_prompt: Option<UserInput>,
         cx: &mut Context<Self>,
     ) -> Self {
         let scroller = ListState::new(0, ListAlignment::Top, zpx(400.0));
@@ -105,8 +105,8 @@ impl ChatView {
             first_chunks: Default::default(),
             pending_errors: Vec::new(),
         };
-        if let Some(text) = first_prompt {
-            let change = view.model.push_user(text, false);
+        if let Some(input) = first_prompt {
+            let change = view.model.push_input(&input, false);
             view.sync(Some(change), cx);
         }
         if let Some(id) = session {
@@ -217,23 +217,7 @@ impl ChatView {
         cx.emit(PromptSubmitted);
         self.save_queue();
         let backend = self.backend.clone();
-        let text = if input.attachments.is_empty() {
-            input.text.clone()
-        } else {
-            format!(
-                "{}\n{}",
-                input.text,
-                input
-                    .attachments
-                    .iter()
-                    .map(|a| format!(
-                        "[{}]",
-                        a.path.file_name().unwrap_or_default().to_string_lossy()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        };
+        let displayed_input = input.clone();
         let row_index = self.model.blocks.len();
         let completed_turns = self.completed_turns;
         let delivery = self.backend.runtime.spawn(async move {
@@ -292,7 +276,7 @@ impl ChatView {
             });
         })
         .detach();
-        let change = self.model.push_user(text, steer);
+        let change = self.model.push_input(&displayed_input, steer);
         self.sync(Some(change), cx);
         self.scroller.scroll_to_end();
     }

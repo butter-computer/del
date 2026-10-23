@@ -1,5 +1,6 @@
 //! Rendering of one transcript row per `Block`.
 
+use super::attachments::AttachmentSummary;
 use super::model::{
     ApprovalBlock, ApprovalState, Block, DiffKind, FileChangeBlock, ToolCall, ToolState,
 };
@@ -34,7 +35,11 @@ impl ChatView {
             return div().into_any_element();
         };
         let content = match block {
-            Block::User { text, steer } => user_message(text, steer).into_any_element(),
+            Block::User {
+                text,
+                steer,
+                attachments,
+            } => user_message(text, steer, attachments).into_any_element(),
             Block::Assistant { text, turn_id, .. } => {
                 let started = self
                     .first_chunks
@@ -361,7 +366,8 @@ fn dot(rgba_color: u32) -> AnyElement {
         .into_any_element()
 }
 
-fn user_message(text: String, steer: bool) -> impl IntoElement {
+fn user_message(text: String, steer: bool, attachments: AttachmentSummary) -> impl IntoElement {
+    let label = attachments.label();
     h_flex()
         .items_start()
         .gap_2()
@@ -379,13 +385,27 @@ fn user_message(text: String, steer: bool) -> impl IntoElement {
             )
         })
         .child(
-            div()
+            v_flex()
                 .flex_1()
                 .min_w_0()
-                .text_size(zpx(TEXT_MD))
-                .line_height(relative(1.5))
-                .text_color(rgb(STRONG))
-                .child(text),
+                .gap_1()
+                .when(!text.is_empty(), |column| {
+                    column.child(
+                        div()
+                            .text_size(zpx(TEXT_MD))
+                            .line_height(relative(1.5))
+                            .text_color(rgb(STRONG))
+                            .child(text),
+                    )
+                })
+                .when_some(label, |column, label| {
+                    column.child(
+                        div()
+                            .text_size(zpx(TEXT_SM))
+                            .text_color(rgba(MUTED))
+                            .child(label),
+                    )
+                }),
         )
 }
 
@@ -453,7 +473,7 @@ fn turn_end(status: TurnStatus) -> impl IntoElement {
 }
 
 /// The opening message is rendered before there is a backend session to follow.
-pub fn pending_prompt(text: String, error: Option<String>) -> impl IntoElement {
+pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> impl IntoElement {
     let failed = error.is_some();
     v_flex()
         .size_full()
@@ -473,7 +493,11 @@ pub fn pending_prompt(text: String, error: Option<String>) -> impl IntoElement {
                                 div()
                                     .w_full()
                                     .max_w(zpx(COLUMN_MAX_WIDTH))
-                                    .child(user_message(text, false)),
+                                    .child(user_message(
+                                        input.text.clone(),
+                                        false,
+                                        AttachmentSummary::from_input(&input),
+                                    )),
                             ),
                         ),
                 ),

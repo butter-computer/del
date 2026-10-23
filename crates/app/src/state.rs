@@ -135,7 +135,7 @@ pub struct AppState {
     pub error: Option<String>,
     /// The prompt that started each session opened this run, for its chat's
     /// first row (taken once by the chat view).
-    first_prompts: HashMap<SessionId, String>,
+    first_prompts: HashMap<SessionId, UserInput>,
     /// Submitted text stays visible while startup runs, including on failure.
     pending_prompts: HashMap<u64, PendingPrompt>,
     /// Tabs in the top bar, in order: new-session drafts and sessions opened this run.
@@ -386,8 +386,12 @@ impl AppState {
                 self.providers = list;
             }
             Msg::Started(key, id, prompt) => {
-                self.first_prompts.insert(id.clone(), prompt);
-                self.pending_prompts.remove(&key);
+                let input = self
+                    .pending_prompts
+                    .remove(&key)
+                    .map(|pending| pending.input)
+                    .unwrap_or_else(|| UserInput::text(prompt));
+                self.first_prompts.insert(id.clone(), input);
                 self.starting.remove(&key);
                 self.drafts.remove(&key);
                 // The draft tab turns into the session's tab, in place.
@@ -458,7 +462,7 @@ impl AppState {
     }
 
     /// The prompt that started `id` in this run, once.
-    pub fn take_first_prompt(&mut self, id: &SessionId) -> Option<String> {
+    pub fn take_first_prompt(&mut self, id: &SessionId) -> Option<UserInput> {
         self.first_prompts.remove(id)
     }
 
@@ -716,6 +720,13 @@ impl AppState {
             return None;
         };
         self.pending_prompts.get(&key).map(|p| p.text.as_str())
+    }
+
+    pub fn pending_input(&self) -> Option<&UserInput> {
+        let Selection::Draft(key) = self.selection else {
+            return None;
+        };
+        self.pending_prompts.get(&key).map(|pending| &pending.input)
     }
 
     pub fn retry_pending(&mut self, cx: &mut Context<Self>) {
@@ -1819,13 +1830,21 @@ mod tests {
     fn startup_hands_opening_message_to_chat_once(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
-            s.send("first".into(), cx);
+            let input = del_agent::UserInput {
+                text: "first".into(),
+                attachments: vec![del_agent::Attachment {
+                    path: "/tmp/first.png".into(),
+                    mime: Some("image/png".into()),
+                }],
+            };
+            s.send_input(input.clone(), cx);
+            assert_eq!(s.pending_input(), Some(&input));
             let id = del_agent::SessionId::new("ready");
             s.apply(super::Msg::Started(0, id.clone(), "first".into()), cx);
             assert_eq!(s.selection, Selection::Session(id.clone()));
             assert!(!s.is_starting());
             assert!(s.pending_prompts.is_empty());
-            assert_eq!(s.take_first_prompt(&id).as_deref(), Some("first"));
+            assert_eq!(s.take_first_prompt(&id), Some(input));
             assert_eq!(s.take_first_prompt(&id), None);
         });
     }
