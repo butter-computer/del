@@ -35,6 +35,16 @@ int main(int argc,char **argv) {
         NSString *url=[NSString stringWithUTF8String:argv[1]];
         if (argc==4) {
             NSString *profile=[NSString stringWithUTF8String:argv[3]];
+            if (strcmp(argv[2],"delete")==0) {
+                // Fresh process: cleanup must work before any WebKit view/store exists.
+                __block struct Reply reply={0};
+                del_browser_delete_profile(profile.UTF8String,Reply,&reply);
+                Wait(^BOOL { return reply.done; });
+                NSString *result=(__bridge_transfer NSString *)reply.json;
+                NSCAssert(![result containsString:@"error"],@"cold-start profile deletion: %@",result);
+                puts("Browser profile deletion before WebKit initialization passed");
+                return 0;
+            }
             BOOL write=strcmp(argv[2],"write")==0;
             @autoreleasepool {
                 NSWindow *window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,420,650) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
@@ -57,12 +67,7 @@ int main(int argc,char **argv) {
             }
             NSDate *end=[NSDate dateWithTimeIntervalSinceNow:1];
             while(end.timeIntervalSinceNow>0) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
-            if(!write) {
-                __block struct Reply reply={0};del_browser_delete_profile(profile.UTF8String,Reply,&reply);Wait(^BOOL { return reply.done; });
-                NSString *result=(__bridge_transfer NSString *)reply.json;
-                NSCAssert(![result containsString:@"error"],@"delete restarted profile: %@",result);
-            }
-            puts(write ? "Browser persistence fixture saved" : "Browser cookies and storage survived process restart; profile deleted");
+            puts(write ? "Browser persistence fixture saved" : "Browser cookies and storage survived process restart");
             return 0;
         }
         NSString *profileA=NSUUID.UUID.UUIDString,*profileB=NSUUID.UUID.UUIDString;

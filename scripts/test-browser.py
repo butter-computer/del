@@ -29,5 +29,6 @@ with tempfile.TemporaryDirectory(prefix="del-browser-test-") as directory:
         profile = str(uuid.uuid4())
         subprocess.run([binary, url, "write", profile], check=True, timeout=30)
         subprocess.run([binary, url, "read", profile], check=True, timeout=30)
+        subprocess.run([binary, url, "delete", profile], check=True, timeout=30)
     finally:
         server.shutdown()

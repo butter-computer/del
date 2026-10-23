@@ -146,7 +146,9 @@ conversation. Unloading a running session also stops its current work.
 - Sessions have tabs and sidebar entries, with rename, pin, unread, archive,
   restore, and permanent-delete actions. Terminal entries share the session
   context menu. Chat titles are generated in the background by the session’s
-  provider after its first reply, then refreshed every six user turns: Codex uses
+  provider as soon as the first message is sent, without waiting for the reply,
+  then refreshed every six user turns. The title prompt requests 1–3 words, ideally
+  under 24 characters, without conversational filler. Codex uses
   GPT-5.6 Luna with reasoning disabled; Claude uses Haiku 5.5 with thinking
   disabled. These small requests use the existing provider login and do not
   change the conversation’s model. The tab and sidebar title shimmer while a
@@ -405,6 +407,8 @@ unload, archiving, and app restarts. Different sessions do not share sign-ins.
 Only **Permanently delete** removes that session's browser profile; normal site
 expiry and server-side sign-outs still apply. If WebKit is still releasing a
 profile, its website data is cleared and remaining cleanup retries at next launch.
+Startup cleanup initializes WebKit first, so pending deletions cannot crash the app
+before its first browser view opens.
 
 Codex and Claude agents can use Del's authenticated `browser` MCP tool to discover,
 create, select, close, and navigate tabs, inspect page text/elements, click, fill,

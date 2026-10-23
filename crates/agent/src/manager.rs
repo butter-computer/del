@@ -15,6 +15,9 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManagerEvent {
+    PromptSent {
+        session: SessionId,
+    },
     TitleLoading {
         session: SessionId,
         loading: bool,
@@ -60,7 +63,7 @@ struct Shared {
     all_tx: broadcast::Sender<ManagerEvent>,
     standby: Mutex<Option<Standby>>,
     preparation: tokio::sync::Mutex<()>,
-    title_generation: tokio::sync::Mutex<()>,
+    title_generation: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Cheap to clone; all clones share state.
@@ -166,11 +169,19 @@ impl SessionManager {
         Ok(changed)
     }
 
-    /// One lightweight request after the first reply, then every six user turns.
-    /// Serialized separately from foreground sends; failed generation leaves the
-    /// fallback title intact and can retry on a later reply.
+    /// One lightweight request on the first sent prompt, then every six user turns.
+    /// Serialized per session, separately from foreground sends; failed generation leaves the
+    /// fallback title intact and can retry on a later prompt.
     pub async fn generate_title(&self, id: &SessionId) -> Result<bool> {
-        let _generation = self.shared.title_generation.lock().await;
+        let lock = self
+            .shared
+            .title_generation
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _generation = lock.lock().await;
         let record = self
             .shared
             .index
@@ -232,7 +243,7 @@ impl SessionManager {
                 all_tx,
                 standby: Mutex::new(None),
                 preparation: tokio::sync::Mutex::new(()),
-                title_generation: tokio::sync::Mutex::new(()),
+                title_generation: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -592,6 +603,9 @@ impl SessionManager {
                 r.title = Some(title);
             }
         });
+        let _ = self.shared.all_tx.send(ManagerEvent::PromptSent {
+            session: id.clone(),
+        });
         Ok(())
     }
 
@@ -655,6 +669,9 @@ impl SessionManager {
         if let Some(session) = self.shared.live.lock().unwrap().get_mut(id) {
             session.history.push(AgentEvent::UserMessage { text });
         }
+        let _ = self.shared.all_tx.send(ManagerEvent::PromptSent {
+            session: id.clone(),
+        });
         Ok(())
     }
 
@@ -810,6 +827,54 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {want:?}"));
+    }
+
+    #[tokio::test]
+    async fn prompt_sent_can_generate_title_before_the_reply_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = MockBackend::new(Provider::Codex).with_delay(Duration::from_secs(1));
+        backend.title_response = Some("Chess board".into());
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [Arc::new(backend) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("Build a chess board"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    ManagerEvent::PromptSent { session } => {
+                        assert_eq!(session, h.id);
+                        break;
+                    }
+                    ManagerEvent::Event {
+                        event: AgentEvent::TurnCompleted { .. },
+                        ..
+                    } => panic!("Title trigger waited for reply"),
+                    _ => {}
+                }
+            }
+            assert!(m.generate_title(&h.id).await.unwrap());
+        })
+        .await
+        .unwrap();
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Running));
+        assert_eq!(m.list_sessions()[0].title.as_deref(), Some("Chess board"));
+        // Rejected sends must not schedule another title request.
+        while events.try_recv().is_ok() {}
+        assert!(
+            m.send_prompt(&h.id, UserInput::text("second prompt"))
+                .await
+                .is_err()
+        );
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, ManagerEvent::PromptSent { .. }));
+        }
+        m.shutdown().await;
     }
 
     #[tokio::test]

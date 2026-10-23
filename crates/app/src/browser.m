@@ -285,9 +285,14 @@ void del_browser_command(void *pointer, const char *command, DelBrowserReply rep
     }];
 }
 void del_browser_delete_profile(const char *profileID, DelBrowserReply reply, void *context) {
+    if (![NSThread isMainThread]) { DelReply(reply,context,nil,@"Browser cleanup requires the main thread"); return; }
     NSUUID *profile = [[NSUUID alloc] initWithUUIDString:[NSString stringWithUTF8String:profileID]];
     if (!profile) { DelReply(reply,context,nil,@"Invalid browser profile"); return; }
     if (@available(macOS 14.0, *)) {
+        // WebKit's deletion callback needs its main run loop initialized, even
+        // when cleanup runs before the first browser view has been created.
+        // Initialize the default store, not the profile we are about to delete.
+        (void)[WKWebsiteDataStore defaultDataStore];
         [WKWebsiteDataStore removeDataStoreForIdentifier:profile completionHandler:^(NSError *error) {
             if (!error) { DelReply(reply,context,@YES,nil); return; }
             // Erase website data even if WebKit is still retiring a closed view.

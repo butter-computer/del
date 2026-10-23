@@ -38,7 +38,7 @@ through the types below. Tokio-based; no UI dependencies.
   `send_prompt`, `steer`, `steer_input`, `set_model_settings`, `list_models`,
   `refresh_titles`, `generate_title`, `interrupt`, `respond_approval`, `close`, `delete`,
   `status`, `list_sessions`, `subscribe(id)`, `subscribe_all()` (yields
-  `ManagerEvent::{Event, StatusChanged, TitleLoading}`), `shutdown()`. Status is
+  `ManagerEvent::{Event, StatusChanged, PromptSent, TitleLoading}`), `shutdown()`. Status is
   `Idle | Running | WaitingApproval | Error` (`Error` after a non-recoverable
   `Error` event, cleared by the next prompt). The index is JSON lines at
   `default_index_path()` (`<data dir>/del/sessions.jsonl`), written atomically;

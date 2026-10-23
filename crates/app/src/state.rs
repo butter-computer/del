@@ -205,7 +205,9 @@ impl AppState {
                                 ..
                             },
                     }) => {
-                        let _ = events_tx.send(Msg::ReplyFinished(session.clone()));
+                        let _ = events_tx.send(Msg::ReplyFinished(session));
+                    }
+                    Ok(ManagerEvent::PromptSent { session }) => {
                         let manager = title_events_manager.clone();
                         let tx = events_tx.clone();
                         tokio::spawn(async move {
