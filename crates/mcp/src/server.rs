@@ -70,6 +70,7 @@ struct Scope {
     /// token -> session it authenticates as.
     tokens: HashMap<String, SessionId>,
     browser_only: HashSet<SessionId>,
+    chat_tools: HashSet<SessionId>,
     children: HashMap<SessionId, HashSet<SessionId>>,
     parent: HashMap<SessionId, SessionId>,
     spawned_total: usize,
@@ -167,6 +168,17 @@ impl McpServer {
             .lock()
             .unwrap()
             .browser_only
+            .insert(session.clone());
+        self.register_session(session)
+    }
+
+    /// Browser and own-goal tools only, authenticated as the real chat session.
+    pub fn register_chat_client(&self, session: &SessionId) -> Credentials {
+        self.inner
+            .scope
+            .lock()
+            .unwrap()
+            .chat_tools
             .insert(session.clone());
         self.register_session(session)
     }
@@ -349,6 +361,17 @@ impl Inner {
                         .unwrap()
                         .retain(|tool| tool["name"] == "browser");
                 }
+                if self.scope.lock().unwrap().chat_tools.contains(caller) {
+                    catalogue
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|tool| tool["name"] == "browser" || tool["name"] == "goal");
+                } else {
+                    catalogue
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|tool| tool["name"] != "goal");
+                }
                 json!({"tools":catalogue})
             }
             "tools/call" => {
@@ -389,6 +412,19 @@ impl Inner {
         if name != "browser" && self.scope.lock().unwrap().browser_only.contains(caller) {
             return Ok(tool_err("This credential grants browser tools only"));
         }
+        if name == "goal" && !self.scope.lock().unwrap().chat_tools.contains(caller) {
+            return Ok(tool_err(
+                "Goal controls require a session-scoped chat credential",
+            ));
+        }
+        if name != "browser"
+            && name != "goal"
+            && self.scope.lock().unwrap().chat_tools.contains(caller)
+        {
+            return Ok(tool_err(
+                "This credential grants browser and own-goal tools only",
+            ));
+        }
         match name {
             "browser" => {
                 let request: crate::BrowserRequest = parse(args)?;
@@ -413,6 +449,18 @@ impl Inner {
                         Err(_) => tool_err("Browser action timed out"),
                     },
                 )
+            }
+            "goal" => {
+                let args: GoalArgs = parse(args)?;
+                let action = match args.action() {
+                    Ok(action) => action,
+                    Err(error) => return Ok(tool_err(error)),
+                };
+                let queued = action.is_some();
+                Ok(match self.host.goal(caller, action).await {
+                    Ok(goal) => tool_json(json!({"goal":goal,"queued":queued})),
+                    Err(error) => tool_err(error.to_string()),
+                })
             }
             "report_status" => {
                 let a: ReportStatusArgs = parse(args)?;

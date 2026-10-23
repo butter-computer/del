@@ -74,14 +74,16 @@ impl AppShell {
         let owner = self.composer_owner(cx);
         if owner != self.composer_owner {
             self.attachment_scroll.set_offset(point(zpx(0.), zpx(0.)));
-            self.composer_drafts.insert(
-                self.composer_owner,
-                self.composer.read(cx).value().to_string(),
-            );
-            let text = self.composer_drafts.remove(&owner).unwrap_or_default();
+            self.composer_drafts
+                .insert(self.composer_owner, self.composer.read(cx).content());
+            let text = self
+                .composer_drafts
+                .remove(&owner)
+                .unwrap_or_else(|| gpui_kit::component::input::InputContent::new(""));
             self.composer
                 .update(cx, |input, cx| input.set_value(text, window, cx));
             self.composer_owner = owner;
+            self.sync_goal_placeholder(window, cx);
         }
     }
     pub(super) fn pick_attachments(&mut self, cx: &mut Context<Self>) {
@@ -181,6 +183,11 @@ impl AppShell {
         };
         let owner = self.composer_owner(cx);
         let current = UserInput {
+            command: self
+                .command_menu
+                .read(cx)
+                .selected_command(self.composer.read(cx).value().as_ref(), cx),
+            skills: crate::command_menu::selected_skills(&self.composer.read(cx).content()),
             text: self.composer.read(cx).value().to_string(),
             attachments: self.composer_attachments.remove(&owner).unwrap_or_default(),
         };
@@ -189,9 +196,10 @@ impl AppShell {
                 chat.enqueue(current, cx);
             });
         }
+        let content = crate::command_menu::restore_skill_tokens(&input);
         self.composer_attachments.insert(owner, input.attachments);
         self.composer.update(cx, |composer, cx| {
-            composer.set_value(input.text, window, cx);
+            composer.set_value(content, window, cx);
             composer.focus(window, cx);
         });
         cx.notify();

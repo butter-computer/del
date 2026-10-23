@@ -142,6 +142,12 @@ impl Mapper {
     pub fn notification(&mut self, method: &str, params: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match method {
+            "thread/goal/updated" => {
+                if let Some(goal) = crate::commands::goal(&params["goal"]) {
+                    out.push(AgentEvent::GoalUpdated { goal: Some(goal) });
+                }
+            }
+            "thread/goal/cleared" => out.push(AgentEvent::GoalUpdated { goal: None }),
             "turn/started" => {
                 if let Some(n) = decode::<TurnNotification>(params) {
                     self.turn_id = Some(n.turn.id.clone());

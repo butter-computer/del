@@ -106,8 +106,9 @@ impl ChatView {
             Block::User {
                 text,
                 steer,
+                goal,
                 attachments,
-            } => user_message(text, steer, attachments).into_any_element(),
+            } => user_message(text, steer, goal, attachments).into_any_element(),
             Block::Assistant { text, turn_id, .. } => {
                 let started = self
                     .first_chunks
@@ -434,8 +435,21 @@ fn dot(rgba_color: u32) -> AnyElement {
         .into_any_element()
 }
 
-fn user_message(text: String, steer: bool, attachments: AttachmentSummary) -> impl IntoElement {
+fn user_message(
+    text: String,
+    steer: bool,
+    goal: bool,
+    attachments: AttachmentSummary,
+) -> impl IntoElement {
     let label = attachments.label();
+    let objective = del_agent::split_command(&text).and_then(|(name, args)| {
+        (name == "goal"
+            && !args.is_empty()
+            && !matches!(args, "clear" | "pause" | "resume" | "status"))
+        .then(|| args.to_owned())
+    });
+    let sent_as_goal = goal || objective.is_some();
+    let text = objective.unwrap_or(text);
     h_flex()
         .items_start()
         .gap_2()
@@ -464,6 +478,14 @@ fn user_message(text: String, steer: bool, attachments: AttachmentSummary) -> im
                             .line_height(relative(1.5))
                             .text_color(rgb(STRONG))
                             .child(text),
+                    )
+                })
+                .when(sent_as_goal, |column| {
+                    column.child(
+                        div()
+                            .text_size(zpx(11.))
+                            .text_color(rgba(MUTED))
+                            .child("◎  Sent as goal"),
                     )
                 })
                 .when_some(label, |column, label| {
@@ -564,6 +586,9 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                                     .child(user_message(
                                         input.text.clone(),
                                         false,
+                                        input.command.as_ref().is_some_and(|c| {
+                                            c.kind == del_agent::CommandKind::Goal
+                                        }),
                                         AttachmentSummary::from_input(&input),
                                     )),
                             ),

@@ -406,7 +406,7 @@ impl CodexClient {
         let result = self
             .request(
                 "initialize",
-                json!({ "clientInfo": { "name": name, "version": version } }),
+                json!({ "clientInfo": { "name": name, "version": version }, "capabilities": {"experimentalApi": true} }),
             )
             .await?;
         self.notify("initialized", None)?;

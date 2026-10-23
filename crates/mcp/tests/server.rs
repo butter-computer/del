@@ -670,3 +670,42 @@ async fn chat_browser_credentials_cannot_call_session_or_notification_tools() {
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
     assert_eq!(post(&credential.url, auth(&credential), body).await.0, 401);
 }
+
+#[tokio::test]
+async fn chat_credentials_expose_only_browser_and_own_goal() {
+    let e = env().await;
+    let chat = e.server.register_chat_client(&SessionId::new("chat"));
+    let list = rpc(&chat, "tools/list", json!({})).await;
+    let names: Vec<_> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["goal", "browser"]);
+    assert!(is_error(
+        &call(
+            &chat,
+            "spawn_session",
+            json!({"provider":"claude","cwd":"/tmp","prompt":"hi"})
+        )
+        .await
+    ));
+    let target = call(
+        &chat,
+        "goal",
+        json!({"action":"clear","session_id":"other"}),
+    )
+    .await;
+    assert!(target.get("error").is_some());
+    assert!(is_error(
+        &call(&chat, "goal", json!({"action":"set","objective":" "})).await
+    ));
+    assert!(is_error(
+        &call(&chat, "goal", json!({"action":"set","objective":"clear"})).await
+    ));
+    let browser = e.server.register_browser_client(&SessionId::new("browser"));
+    assert!(is_error(
+        &call(&browser, "goal", json!({"action":"get"})).await
+    ));
+}

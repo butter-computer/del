@@ -2,6 +2,8 @@
 //! a scriptable mock, a session supervisor and CLI detection.
 
 pub mod backend;
+pub mod commands;
+pub use commands::{CommandKind, ComposerCommand, Goal, GoalAction, GoalStatus, split_command};
 pub mod detect;
 pub mod environment;
 pub mod index;
@@ -19,3 +21,5 @@ pub use types::*;
 
 mod models;
 pub use models::{EffortOption, ModelInfo};
+
+pub mod titles;

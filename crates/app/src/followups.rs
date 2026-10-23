@@ -128,6 +128,8 @@ mod tests {
         let mut queue = Queue::default();
         let first = queue.push(UserInput::text("first"));
         let input = UserInput {
+            command: None,
+            skills: Vec::new(),
             text: "picture".into(),
             attachments: vec![
                 del_agent::Attachment {

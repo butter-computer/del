@@ -65,6 +65,8 @@ mod tests {
     #[test]
     fn summaries_count_types_without_exposing_names_or_changing_payloads() {
         let input = UserInput {
+            command: None,
+            skills: Vec::new(),
             text: "what are these?".into(),
             attachments: (0..4)
                 .map(|i| Attachment {

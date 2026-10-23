@@ -273,6 +273,7 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         service_tier: None,
         permission_mode: PermissionMode::Ask,
         title: Some("hello".into()),
+        title_turns: 0,
         created_at_ms: 1,
         updated_at_ms: 2,
         status: SessionStatus::Idle,
@@ -311,6 +312,8 @@ async fn resumed_history_reaches_chat_subscribers() {
         ACCOUNT_OK[1],
         r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved"}}"#,
         r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[{"id":"old-turn","status":"completed","items":[{"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello again"}]},{"type":"agentMessage","id":"a1","text":"Welcome back"}]}]}}}"#,
+        r#"> {"id":30,"method":"thread/goal/get","params":{"threadId":"saved"}}"#,
+        r#"< {"id":30,"result":{"goal":null}}"#,
         r#"> {"id":4,"method":"turn/start","params":{"threadId":"saved","input":[{"type":"text","text":"first after reopening"}]}}"#,
         r#"< {"id":4,"result":{"turn":{"id":"new-turn"}}}"#,
         r#"< {"method":"turn/started","params":{"threadId":"saved","turn":{"id":"new-turn"}}}"#,
@@ -333,6 +336,7 @@ async fn resumed_history_reaches_chat_subscribers() {
             service_tier: None,
             permission_mode: PermissionMode::Ask,
             title: Some("hello again".into()),
+            title_turns: 0,
             created_at_ms: 1,
             updated_at_ms: 1,
             status: SessionStatus::Idle,
@@ -376,6 +380,7 @@ async fn resumed_history_reaches_chat_subscribers() {
                 turn_id: "old-turn".into(),
                 status: TurnStatus::Completed
             },
+            AgentEvent::GoalUpdated { goal: None },
         ]
     );
     // Reopening an already-live session must not append the snapshot again.
@@ -472,6 +477,8 @@ async fn steer_and_interrupt_use_the_active_turn_id() {
         .steer_input(
             &h.id,
             UserInput {
+                command: None,
+                skills: Vec::new(),
                 text: "left please".into(),
                 attachments: vec![Attachment {
                     path: "/work/picture.png".into(),
@@ -667,6 +674,127 @@ async fn model_effort_and_fast_changes_reach_next_turn_in_same_thread() {
         .await
         .unwrap();
     until_turn_end(&mut events).await;
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn selected_skills_reach_native_input_and_local_goal_status_finishes() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"skills/list","params":{"cwds":["/work"],"forceReload":true}}"#,
+        r#"< {"id":4,"result":{"data":[{"skills":[{"name":"review","path":"/work/SKILL.md","description":"Review","enabled":true},{"name":"check","path":"/work/check/SKILL.md","description":"Check","enabled":true}]}]}}"#,
+        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"/review /check check this"},{"type":"skill","name":"review","path":"/work/SKILL.md"},{"type":"skill","name":"check","path":"/work/check/SKILL.md"}]}}"#,
+        r#"< {"id":5,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+        r#"< {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[]}}}"#,
+        r#"> {"id":6,"method":"thread/goal/get","params":{"threadId":"t1"}}"#,
+        r#"< {"id":6,"result":{"goal":null}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut events = handle.subscribe();
+    let commands = backend
+        .list_commands(std::path::Path::new("/work"))
+        .await
+        .unwrap();
+    backend
+        .invoke_command(
+            &handle.id,
+            commands[0].clone(),
+            UserInput {
+                skills: commands
+                    .iter()
+                    .filter(|c| c.kind == CommandKind::Skill)
+                    .cloned()
+                    .collect(),
+                ..UserInput::text("/review /check check this")
+            },
+        )
+        .await
+        .unwrap();
+    until_turn_end(&mut events).await;
+    let goal = commands
+        .into_iter()
+        .find(|command| command.kind == CommandKind::Goal)
+        .unwrap();
+    backend
+        .invoke_command(&handle.id, goal, UserInput::text("/goal"))
+        .await
+        .unwrap();
+    let events = until_turn_end(&mut events).await;
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::AssistantMessage { text, .. } if text.contains("No goal set"))));
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn goal_controls_use_native_rpcs_and_preserve_literal_objectives() {
+    use serde_json::json;
+    let mut lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+    ]);
+    for (id, method, params, status) in [
+        (
+            4,
+            "thread/goal/set",
+            json!({"threadId":"t1","objective":"clear","status":"active"}),
+            Some("active"),
+        ),
+        (
+            5,
+            "thread/goal/set",
+            json!({"threadId":"t1","status":"paused"}),
+            Some("paused"),
+        ),
+        (
+            6,
+            "thread/goal/set",
+            json!({"threadId":"t1","status":"active"}),
+            Some("active"),
+        ),
+        (7, "thread/goal/clear", json!({"threadId":"t1"}), None),
+    ] {
+        lines.push(format!(
+            "> {}",
+            json!({"id":id,"method":method,"params":params})
+        ));
+        let goal = status.map(|status| json!({"objective":"clear","status":status,"timeUsedSeconds":4,"tokensUsed":50}));
+        lines.push(format!("< {}", json!({"id":id,"result":{"goal":goal}})));
+    }
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut events = handle.subscribe();
+    for (action, status) in [
+        (GoalAction::Set("clear".into()), Some(GoalStatus::Active)),
+        (GoalAction::Pause, Some(GoalStatus::Paused)),
+        (GoalAction::Resume, Some(GoalStatus::Active)),
+        (GoalAction::Clear, None),
+    ] {
+        backend.control_goal(&handle.id, action).await.unwrap();
+        let AgentEvent::GoalUpdated { goal } = next(&mut events).await else {
+            panic!("expected goal state")
+        };
+        assert_eq!(goal.as_ref().map(|g| g.status), status);
+        if let Some(goal) = goal {
+            assert_eq!(goal.objective, "clear");
+            assert_eq!(goal.time_used_seconds, 4);
+        }
+    }
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

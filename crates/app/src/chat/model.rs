@@ -73,6 +73,7 @@ pub enum Block {
     User {
         text: String,
         steer: bool,
+        goal: bool,
         attachments: AttachmentSummary,
     },
     /// `open` while its deltas are still arriving.
@@ -133,6 +134,8 @@ pub enum Change {
 #[derive(Debug, Clone, Default)]
 pub struct ChatModel {
     pub blocks: Vec<Block>,
+    pub goal: Option<del_agent::Goal>,
+    goal_updated_at: Option<std::time::Instant>,
     pub phase: Phase,
     /// Status of the most recently finished turn.
     pub last_status: Option<TurnStatus>,
@@ -145,6 +148,16 @@ pub struct ChatModel {
 }
 
 impl ChatModel {
+    pub fn goal(&self) -> Option<del_agent::Goal> {
+        let mut goal = self.goal.clone()?;
+        if goal.status == del_agent::GoalStatus::Active {
+            goal.time_used_seconds += self
+                .goal_updated_at
+                .map_or(0, |time| time.elapsed().as_secs());
+        }
+        Some(goal)
+    }
+
     pub fn is_running(&self) -> bool {
         self.phase == Phase::Running
     }
@@ -173,14 +186,22 @@ impl ChatModel {
         self.push(Block::User {
             text,
             steer,
+            goal: false,
             attachments: AttachmentSummary::default(),
         })
     }
 
     pub fn push_input(&mut self, input: &del_agent::UserInput, steer: bool) -> Change {
         let change = self.push_user(input.text.clone(), steer);
-        if let Some(Block::User { attachments, .. }) = self.blocks.last_mut() {
+        if let Some(Block::User {
+            attachments, goal, ..
+        }) = self.blocks.last_mut()
+        {
             *attachments = AttachmentSummary::from_input(input);
+            *goal = input
+                .command
+                .as_ref()
+                .is_some_and(|c| c.kind == del_agent::CommandKind::Goal);
         }
         change
     }
@@ -257,12 +278,27 @@ impl ChatModel {
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::GoalUpdated { goal } => {
+                if let (Some(old), Some(next)) = (self.goal(), goal)
+                    && old.objective == next.objective
+                    && old.status == next.status
+                {
+                    let mut next = next.clone();
+                    next.time_used_seconds = next.time_used_seconds.max(old.time_used_seconds);
+                    self.goal = Some(next);
+                } else {
+                    self.goal = goal.clone();
+                }
+                self.goal_updated_at = Some(std::time::Instant::now());
+                None
+            }
             AgentEvent::UserMessage { text } => {
                 self.seal();
                 let (text, attachments) = AttachmentSummary::from_history(text);
                 Some(self.push(Block::User {
                     text,
                     steer: false,
+                    goal: false,
                     attachments,
                 }))
             }
@@ -482,6 +518,8 @@ mod tests {
     #[test]
     fn attached_messages_keep_prose_separate_from_summary_live_and_replayed() {
         let input = del_agent::UserInput {
+            command: None,
+            skills: Vec::new(),
             text: "inspect these".into(),
             attachments: vec![del_agent::Attachment {
                 path: "/tmp/photo.png".into(),
@@ -570,6 +608,7 @@ mod tests {
                 Block::User {
                     text: "hello".into(),
                     steer: false,
+                    goal: false,
                     attachments: Default::default(),
                 },
                 Block::Assistant {
@@ -859,6 +898,7 @@ mod tests {
             Block::User {
                 text: "also this".into(),
                 steer: true,
+                goal: false,
                 attachments: Default::default(),
             }
         );
@@ -900,5 +940,55 @@ mod tests {
         assert_eq!(compact_count(999), "999");
         assert_eq!(compact_count(1200), "1.2k");
         assert_eq!(compact_count(2_500_000), "2.5m");
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    #[test]
+    fn native_resume_restarts_timer_and_completion_freezes_it() {
+        let mut model = ChatModel::default();
+        let mut goal = del_agent::Goal {
+            objective: "test".into(),
+            status: del_agent::GoalStatus::Complete,
+            time_used_seconds: 11,
+            tokens_used: 0,
+            can_pause: false,
+        };
+        model.apply(&AgentEvent::GoalUpdated {
+            goal: Some(goal.clone()),
+        });
+        model.goal_updated_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        assert_eq!(model.goal().unwrap().time_used_seconds, 11);
+        goal.status = del_agent::GoalStatus::Active;
+        goal.time_used_seconds = 0;
+        model.apply(&AgentEvent::GoalUpdated { goal: Some(goal) });
+        model.goal_updated_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        assert!(model.goal().unwrap().time_used_seconds >= 4);
+    }
+
+    #[test]
+    fn turn_completion_does_not_complete_the_goal() {
+        let mut model = ChatModel::default();
+        model.apply(&AgentEvent::GoalUpdated {
+            goal: Some(del_agent::Goal {
+                objective: "Ship".into(),
+                status: del_agent::GoalStatus::Active,
+                time_used_seconds: 2,
+                tokens_used: 10,
+                can_pause: true,
+            }),
+        });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "one".into(),
+        });
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "one".into(),
+            status: TurnStatus::Completed,
+        });
+        assert_eq!(model.goal().unwrap().status, del_agent::GoalStatus::Active);
+        model.apply(&AgentEvent::GoalUpdated { goal: None });
+        assert!(model.goal().is_none());
     }
 }

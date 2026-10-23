@@ -285,7 +285,13 @@ fn row_item(
                     rgba(0xffffffcc)
                 })
                 .font_weight(FontWeight::NORMAL)
-                .child(row.title.clone()),
+                .child(if state.read(cx).title_loading(&id) {
+                    gpui_kit::component::shimmer::ShimmerText::new(row.title.clone())
+                        .id(SharedString::from(format!("sidebar-title-{}", id.0)))
+                        .into_any_element()
+                } else {
+                    div().truncate().child(row.title.clone()).into_any_element()
+                }),
         )
     };
 

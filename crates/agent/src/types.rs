@@ -85,14 +85,54 @@ pub struct Attachment {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct UserInput {
     pub text: String,
+    /// Preserve an explicit menu selection through queues and draft startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<crate::ComposerCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<crate::ComposerCommand>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
 }
 
 impl UserInput {
+    /// Native goal APIs accept an objective, not structured skill input items.
+    /// Preserve explicit skill identities as requirements of the persistent goal.
+    pub fn goal_objective(&self) -> String {
+        if self.skills.is_empty() {
+            return self.text.clone();
+        }
+        let mut objective = self.text.trim();
+        for skill in &self.skills {
+            if let Some(rest) = objective.strip_prefix(&format!("/{}", skill.name))
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            {
+                objective = rest.trim_start();
+            }
+        }
+        let requirements = self
+            .skills
+            .iter()
+            .map(|skill| match &skill.target {
+                Some(path) => format!(
+                    "- Use /{} by reading and following the skill at {}.",
+                    skill.name,
+                    serde_json::to_string(path).expect("path serializes")
+                ),
+                None => format!(
+                    "- Invoke the /{} skill using the native Skill tool.",
+                    skill.name
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{objective}\n\nRequired skills for this goal:\n{requirements}")
+    }
+
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            command: None,
+            skills: Vec::new(),
             attachments: Vec::new(),
         }
     }
@@ -142,6 +182,9 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    GoalUpdated {
+        goal: Option<crate::Goal>,
+    },
     /// A user message restored from the provider's saved transcript.
     UserMessage {
         text: String,

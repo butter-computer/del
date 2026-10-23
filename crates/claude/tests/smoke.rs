@@ -142,3 +142,100 @@ async fn real_cli_prompt_approve_interrupt_resume() {
     be2.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Native catalog and local command path: no model turn or token usage.
+#[tokio::test]
+#[ignore]
+async fn installed_cli_commands_and_goal_status() {
+    let cwd = std::env::current_dir().unwrap();
+    let backend = ClaudeBackend::new(ClaudeOptions {
+        extra_args: vec!["--no-session-persistence".into()],
+        ..Default::default()
+    });
+    let commands = backend.list_commands(&cwd).await.unwrap();
+    let goal = commands
+        .into_iter()
+        .find(|command| command.kind == CommandKind::Goal)
+        .expect("native goal command");
+    let handle = backend
+        .start_session(SessionConfig {
+            cwd,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Claude,
+            permission_mode: PermissionMode::Ask,
+        })
+        .await
+        .unwrap();
+    let mut events = handle.subscribe();
+    backend
+        .invoke_command(&handle.id, goal, UserInput::text("/goal"))
+        .await
+        .unwrap();
+    let events = next_until(&mut events, |event| {
+        matches!(event, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    backend.shutdown().await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::GoalUpdated { goal: None }))
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Error { .. } | AgentEvent::ToolCallStarted { .. }
+    )));
+}
+
+/// Exercises only disposable test goals, using the real native transcript.
+#[tokio::test]
+#[ignore]
+async fn real_goal_ui_set_interrupt_restore_clear_and_complete() {
+    let dir = std::env::temp_dir().join(format!("del-goal-ui-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = SessionConfig {
+        cwd: dir.clone(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        provider: Provider::Claude,
+        permission_mode: PermissionMode::Ask,
+    };
+    let backend = ClaudeBackend::new(ClaudeOptions {
+        setting_sources: Some("project".into()),
+        extra_args: vec!["--tools".into(), "".into()],
+        ..Default::default()
+    });
+    let result = tokio::time::timeout(Duration::from_secs(55), async {
+        let handle = backend.start_session(config.clone()).await.unwrap();
+        let mut events = handle.subscribe();
+        backend.control_goal(&handle.id, GoalAction::Set("Reply READY, then wait for the user to say BLUE. The goal is only met after the user says BLUE. Do not use tools.".into())).await.unwrap();
+        next_until(&mut events, |e| matches!(e, AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Active)).await;
+        backend.interrupt(&handle.id).await.unwrap();
+        next_until(&mut events, |e| matches!(e, AgentEvent::TurnCompleted { .. })).await;
+        backend.close(&handle.id).await.unwrap();
+        let resumed = backend.resume(config, &handle.id).await.unwrap();
+        let mut events = resumed.subscribe();
+        next_until(&mut events, |e| matches!(e, AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Active)).await;
+        backend.control_goal(&handle.id, GoalAction::Clear).await.unwrap();
+        next_until(&mut events, |e| matches!(e, AgentEvent::GoalUpdated { goal: None })).await;
+        next_until(&mut events, |e| matches!(e, AgentEvent::TurnCompleted { .. })).await;
+        backend.control_goal(&handle.id, GoalAction::Set("Reply with the single word DONE. This goal is met once you have replied. Do not use tools.".into())).await.unwrap();
+        next_until(&mut events, |e| matches!(e, AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Complete)).await;
+        backend.control_goal(&handle.id, GoalAction::Clear).await.unwrap();
+    }).await;
+    backend.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    result.expect("native goal UI lifecycle timed out");
+}
+
+#[tokio::test]
+#[ignore]
+async fn real_haiku_title_without_thinking() {
+    let backend = ClaudeBackend::default();
+    let title = backend.generate_title("User: Build a simple chess game with a dark board and legal move highlighting.\nAssistant: I will implement the board and move validation.").await.unwrap().expect("title");
+    eprintln!("Haiku title: {title}");
+    assert!(title.to_lowercase().contains("chess"));
+}

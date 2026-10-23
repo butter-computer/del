@@ -48,6 +48,7 @@ const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct Live {
     events: broadcast::Sender<AgentEvent>,
+    goal: Mutex<Option<del_agent::Goal>>,
     stdin: AsyncMutex<ChildStdin>,
     translator: Mutex<Translator>,
     child: AsyncMutex<Child>,
@@ -59,6 +60,9 @@ struct Live {
 impl Live {
     fn emit(&self, evs: Vec<AgentEvent>) {
         for e in evs {
+            if let AgentEvent::GoalUpdated { goal } = &e {
+                *self.goal.lock().unwrap() = goal.clone();
+            }
             let _ = self.events.send(e);
         }
     }
@@ -131,6 +135,11 @@ impl ClaudeBackend {
         if let Some(effort) = &config.reasoning_effort {
             a.extend(["--effort".into(), effort.clone()]);
         }
+        a.extend([
+            "--settings".into(),
+            serde_json::json!({"fastMode": config.service_tier.as_deref() == Some("fast")})
+                .to_string(),
+        ]);
         if let Some(s) = &self.options.setting_sources {
             a.extend(["--setting-sources".into(), s.clone()]);
         }
@@ -160,8 +169,25 @@ impl ClaudeBackend {
             ));
         }
         let mut command = Command::new(&self.options.binary);
+        let mut args = self.args(config, session_flag);
+        if let Some(factory) = self
+            .browser_tools
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|tools| tools.claude_session_config.clone())
+        {
+            let path = factory(&id)?;
+            if let Some(index) = args.iter().position(|arg| arg == "--mcp-config") {
+                args[index + 1] = path.to_string_lossy().into_owned();
+            }
+            if let Some(index) = args.iter().position(|arg| arg == "--append-system-prompt") {
+                args[index + 1].push_str("\n\n");
+                args[index + 1].push_str(del_agent::backend::GOAL_INSTRUCTIONS);
+            }
+        }
         command
-            .args(self.args(config, session_flag))
+            .args(args)
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -183,6 +209,7 @@ impl ClaudeBackend {
         let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let live = Arc::new(Live {
             events: tx.clone(),
+            goal: Mutex::new(None),
             stdin: AsyncMutex::new(stdin),
             translator: Mutex::new(Translator::new()),
             child: AsyncMutex::new(child),
@@ -238,8 +265,39 @@ impl ClaudeBackend {
                     recoverable: false,
                 }]);
             }
+            reader
+                .closing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
+        let watcher = live.clone();
+        let goal_cwd = config.cwd.clone();
+        let goal_id = id.as_str().to_owned();
+        tokio::spawn(async move {
+            let mut reader = crate::goals::Reader::new();
+            let mut path = None;
+            let mut last = None;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if watcher.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                if path.is_none() {
+                    path = crate::history::path(&goal_cwd, &goal_id);
+                }
+                if let Some(path) = &path
+                    && let Ok(events) = reader.read(path, &goal_id)
+                {
+                    // Only the newest state matters on initial restore.
+                    if let Some(event) = events.last()
+                        && last.as_ref() != Some(event)
+                    {
+                        watcher.emit(vec![event.clone()]);
+                        last = Some(event.clone());
+                    }
+                }
+            }
+        });
         self.sessions.lock().unwrap().insert(id.clone(), live);
         Ok(SessionHandle::new(id, Provider::Claude, tx))
     }
@@ -248,14 +306,23 @@ impl ClaudeBackend {
         let live = self.live(session)?;
         let line = input_line(&input).await?;
         let turn_id = uuid::Uuid::new_v4().to_string();
-        live.write_line(&line).await?;
         let evs = live.translator.lock().unwrap().enqueue_turn(turn_id);
         live.emit(evs);
+        if let Err(error) = live.write_line(&line).await {
+            let events = live.translator.lock().unwrap().abort();
+            live.emit(events);
+            return Err(error);
+        }
         Ok(())
     }
 }
 
 async fn input_line(input: &UserInput) -> Result<String> {
+    if input.skills.len() > 6 {
+        return Err(AgentError::Backend(
+            "Claude Code supports up to six skills per message.".into(),
+        ));
+    }
     let mut content = vec![serde_json::json!({"type":"text", "text":input.text})];
     for attachment in &input.attachments {
         if let Some(mime) = attachment
@@ -290,8 +357,126 @@ impl AgentBackend for ClaudeBackend {
         Provider::Claude
     }
 
+    async fn generate_title(&self, context: &str) -> Result<Option<String>> {
+        let mut command = Command::new(&self.options.binary);
+        command
+            .args([
+                "-p",
+                "--model",
+                "claude-haiku-5-5",
+                "--effort",
+                "low",
+                "--thinking",
+                "disabled",
+                "--output-format",
+                "json",
+                "--no-session-persistence",
+                "--max-turns",
+                "1",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--mcp-config",
+                "{\"mcpServers\":{}}",
+                "--setting-sources",
+                "",
+                "--settings",
+                "{\"disableAllHooks\":true,\"alwaysThinkingEnabled\":false}",
+                "--system-prompt",
+                del_agent::titles::INSTRUCTIONS,
+            ])
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        let mut child = command.spawn()?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin.write_all(context.as_bytes()).await?;
+        drop(stdin);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+                .await
+                .map_err(|_| AgentError::Backend("Title generation timed out".into()))??;
+        if !output.status.success() {
+            return Err(AgentError::Backend("Claude title generation failed".into()));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| AgentError::Backend(e.to_string()))?;
+        if value["is_error"] == true {
+            return Err(AgentError::Backend(
+                "Claude could not generate a title".into(),
+            ));
+        }
+        Ok(value["result"].as_str().and_then(del_agent::titles::clean))
+    }
+
     async fn list_models(&self, cwd: &std::path::Path) -> Result<Vec<del_agent::ModelInfo>> {
         crate::models::discover(&self.options, cwd).await
+    }
+
+    async fn list_commands(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<del_agent::ComposerCommand>> {
+        let catalog = crate::models::discover_catalog(&self.options, cwd).await?;
+        Ok(crate::models::parse_commands(&catalog))
+    }
+
+    async fn invoke_command(
+        &self,
+        session: &SessionId,
+        command: del_agent::ComposerCommand,
+        mut input: UserInput,
+    ) -> Result<()> {
+        if command.kind == del_agent::CommandKind::Goal && !input.text.starts_with("/goal") {
+            input.text = format!("/goal {}", input.goal_objective());
+        }
+        // stream-json executes native slash commands, including goals and
+        // skills; their local output and continuation arrive on the same stream.
+        self.send_prompt(session, input).await
+    }
+
+    async fn control_goal(&self, session: &SessionId, action: del_agent::GoalAction) -> Result<()> {
+        let text = match action {
+            del_agent::GoalAction::Set(objective) => format!("/goal {objective}"),
+            del_agent::GoalAction::Clear => {
+                self.interrupt(session).await?;
+                "/goal clear".into()
+            }
+            _ => return Err(AgentError::Backend("Claude supports setting and clearing goals, but has no native pause/resume command.".into())),
+        };
+        self.submit(session, UserInput::text(text)).await
+    }
+
+    async fn agent_goal(
+        &self,
+        session: &SessionId,
+        action: Option<del_agent::GoalAction>,
+    ) -> Result<Option<del_agent::Goal>> {
+        let goal = self.live(session)?.goal.lock().unwrap().clone();
+        let text = match action {
+            None => return Ok(goal),
+            Some(del_agent::GoalAction::Set(objective)) => format!("/goal {objective}"),
+            Some(del_agent::GoalAction::Resume) => format!(
+                "/goal {}",
+                goal.as_ref()
+                    .ok_or_else(|| AgentError::Backend(
+                        "No goal to resume. Set an objective first.".into()
+                    ))?
+                    .objective
+            ),
+            Some(del_agent::GoalAction::Clear) => "/goal clear".into(),
+            Some(del_agent::GoalAction::Pause) => {
+                return Err(AgentError::Backend(
+                    "Claude Code does not expose native goal pause; use clear to stop it.".into(),
+                ));
+            }
+        };
+        // Queue the native slash control without interrupting its calling tool.
+        self.submit(session, UserInput::text(text)).await?;
+        Ok(goal)
     }
 
     async fn session_title(
@@ -442,12 +627,39 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
 mod model_config_tests {
     use super::*;
     #[test]
+    fn fast_mode_is_session_scoped_for_new_and_resumed_chats() {
+        let backend = ClaudeBackend::new(ClaudeOptions::default());
+        let mut config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: Some("fast".into()),
+            provider: Provider::Claude,
+            permission_mode: PermissionMode::Ask,
+        };
+        for flag in ["--session-id", "--resume"] {
+            let args = backend.args(&config, [flag, "test"]);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--settings", "{\"fastMode\":true}"])
+            );
+        }
+        config.service_tier = None;
+        assert!(
+            backend
+                .args(&config, ["--resume", "test"])
+                .windows(2)
+                .any(|pair| pair == ["--settings", "{\"fastMode\":false}"])
+        );
+    }
+    #[test]
     fn browser_routing_is_appended_for_new_and_resumed_chats() {
         let backend = ClaudeBackend::new(ClaudeOptions::default());
         backend.set_browser_tools(del_agent::backend::BrowserTools {
             url: "http://127.0.0.1:1234/mcp".into(),
             token: "fixture".into(),
             claude_config: "/tmp/browser.json".into(),
+            claude_session_config: None,
         });
         let config = SessionConfig {
             cwd: "/tmp".into(),
@@ -527,6 +739,33 @@ mod model_config_tests {
 mod image_input_tests {
     use super::*;
     #[tokio::test]
+    async fn multiple_skills_are_one_native_chained_message() {
+        let mut input = UserInput::text("/review /plugin:check inspect this");
+        input.skills = ["review", "plugin:check"]
+            .into_iter()
+            .map(|name| del_agent::ComposerCommand {
+                name: name.into(),
+                description: String::new(),
+                argument_hint: String::new(),
+                kind: del_agent::CommandKind::Skill,
+                source: "Claude Code".into(),
+                target: None,
+            })
+            .collect();
+        let value: serde_json::Value =
+            serde_json::from_str(&input_line(&input).await.unwrap()).unwrap();
+        assert_eq!(value["message"]["content"], input.text);
+        input.skills = vec![input.skills[0].clone(); 7];
+        assert!(
+            input_line(&input)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("six skills")
+        );
+    }
+
+    #[tokio::test]
     async fn documents_and_videos_are_file_references_not_image_payloads() {
         for (name, mime) in [
             ("report.pdf", "application/pdf"),
@@ -538,6 +777,8 @@ mod image_input_tests {
             ("clip.mp4", "video/mp4"),
         ] {
             let input = UserInput {
+                command: None,
+                skills: Vec::new(),
                 text: "Read this".into(),
                 attachments: vec![del_agent::Attachment {
                     path: format!("/attachments/{name}").into(),
@@ -562,6 +803,8 @@ mod image_input_tests {
             std::env::temp_dir().join(format!("del-image-wire-{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&path, [1, 2, 3]).unwrap();
         let input = UserInput {
+            command: None,
+            skills: Vec::new(),
             text: "look".into(),
             attachments: vec![del_agent::Attachment {
                 path: path.clone(),

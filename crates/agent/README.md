@@ -8,7 +8,11 @@ through the types below. Tokio-based; no UI dependencies.
 - `Provider { Codex, Claude, Acp }`.
 - `SessionConfig { cwd, model: Option<String>, reasoning_effort: Option<String>,
   service_tier: Option<String>, provider, permission_mode }`,
-  `UserInput { text, attachments }`, `ApprovalResponse { Approve, Deny }`.
+  `UserInput { text, attachments, command, skills }`, `ApprovalResponse { Approve, Deny }`.
+  Optional command metadata preserves an explicitly selected skill through queues
+  and session startup. Backends advertise `ComposerCommand` entries through
+  `list_commands` and execute selections through `invoke_command`; an unsupported
+  harness advertises no commands by default. Native goal loops stay in the harness.
 - `AgentEvent` (serde, `{"type": "snake_case", ...}`): `SessionStarted`,
   `TurnStarted`, `AssistantTextDelta`, `AssistantMessage`, `ReasoningDelta`,
   `ToolCallStarted/Updated/Finished`, `FileChange{path,kind,diff?}`,
@@ -20,7 +24,7 @@ through the types below. Tokio-based; no UI dependencies.
   `Arc<dyn AgentBackend>`): `start_session`, `send_prompt`, `steer`, `interrupt`,
   `resume(config, id)`, `respond_approval(session, approval_id, response)`,
   `steer_input`, `reconfigure`, `list_models`, `session_title`,
-  `session_display_title`, `close`, `shutdown`.
+  `session_display_title`, `generate_title`, `close`, `shutdown`.
   `start_session`/`resume` return a `SessionHandle`
   (`id`, `provider`, `history()`, `subscribe() -> broadcast::Receiver<AgentEvent>`).
   The manager records `SessionStarted` as the first history event. Backends can
@@ -32,9 +36,9 @@ through the types below. Tokio-based; no UI dependencies.
   or `tool` selects a scripted scenario; anything else streams plain text.
 - `SessionManager::new(index_path, backends)`: `start_session`, `resume(id)`,
   `send_prompt`, `steer`, `steer_input`, `set_model_settings`, `list_models`,
-  `refresh_titles`, `interrupt`, `respond_approval`, `close`, `delete`,
+  `refresh_titles`, `generate_title`, `interrupt`, `respond_approval`, `close`, `delete`,
   `status`, `list_sessions`, `subscribe(id)`, `subscribe_all()` (yields
-  `ManagerEvent::{Event, StatusChanged}`), `shutdown()`. Status is
+  `ManagerEvent::{Event, StatusChanged, TitleLoading}`), `shutdown()`. Status is
   `Idle | Running | WaitingApproval | Error` (`Error` after a non-recoverable
   `Error` event, cleared by the next prompt). The index is JSON lines at
   `default_index_path()` (`<data dir>/del/sessions.jsonl`), written atomically;
@@ -63,3 +67,11 @@ ACP has no standard steering operation.
 
 Real Codex, Claude, and ACP adapters implement `AgentBackend` and are registered
 with the manager. The mock is for isolated tests and has no model catalog.
+
+## Native goals
+
+`GoalAction::{Set, Pause, Resume, Clear}` is an out-of-band control contract.
+`AgentEvent::GoalUpdated { goal: Option<Goal> }` carries the native objective,
+status, elapsed usage, and pause capability; `None` means cleared. A turn ending
+does not imply a goal is complete. Backends restore state from their own native
+store. Unsupported controls return an error; the UI shows only supported actions.

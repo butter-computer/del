@@ -12,4 +12,5 @@ mod models;
 
 mod titles;
 
+mod goals;
 pub mod history;

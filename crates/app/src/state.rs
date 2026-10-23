@@ -64,6 +64,7 @@ impl Tab {
 
 /// Results coming back from the runtime.
 enum Msg {
+    TitleLoading(SessionId, bool),
     Refresh,
     PanelDeleted(String, u64),
     ReplyFinished(SessionId),
@@ -112,6 +113,7 @@ pub struct AppState {
     readiness: Option<crate::readiness::Readiness>,
     pub browser_tools_ready: bool,
     unread_motion: HashMap<SessionId, (f32, std::time::Instant)>,
+    chat_title_loading: std::collections::HashSet<SessionId>,
     pub terminal_title_loading: std::collections::HashSet<SessionId>,
     pub closed_terminals: Vec<SessionId>,
     pub unloaded_chats: Vec<SessionId>,
@@ -184,10 +186,14 @@ impl AppState {
         // Status changes anywhere refresh the sidebar.
         let mut events = manager.subscribe_all();
         let events_tx = tx.clone();
+        let title_events_manager = manager.clone();
         rt.spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
             loop {
                 match events.recv().await {
+                    Ok(ManagerEvent::TitleLoading { session, loading }) => {
+                        let _ = events_tx.send(Msg::TitleLoading(session, loading));
+                    }
                     Ok(ManagerEvent::StatusChanged { .. }) | Err(RecvError::Lagged(_)) => {
                         let _ = events_tx.send(Msg::Refresh);
                     }
@@ -199,7 +205,14 @@ impl AppState {
                                 ..
                             },
                     }) => {
-                        let _ = events_tx.send(Msg::ReplyFinished(session));
+                        let _ = events_tx.send(Msg::ReplyFinished(session.clone()));
+                        let manager = title_events_manager.clone();
+                        let tx = events_tx.clone();
+                        tokio::spawn(async move {
+                            if manager.generate_title(&session).await.unwrap_or(false) {
+                                let _ = tx.send(Msg::Refresh);
+                            }
+                        });
                     }
                     Ok(_) => {}
                     Err(RecvError::Closed) => break,
@@ -296,6 +309,7 @@ impl AppState {
             draft_modes: HashMap::new(),
             terminal_rows: Vec::new(),
             terminal_title_loading: Default::default(),
+            chat_title_loading: Default::default(),
             unread_motion: HashMap::new(),
             readiness: Some(readiness),
             browser_tools_ready: false,
@@ -341,6 +355,14 @@ impl AppState {
             }
             Msg::PanelDeleted(key, uid) => {
                 self.deleted_panels.push((key, uid));
+            }
+            Msg::TitleLoading(id, loading) => {
+                if loading {
+                    self.chat_title_loading.insert(id);
+                } else {
+                    self.chat_title_loading.remove(&id);
+                }
+                self.records = self.manager.list_sessions();
             }
             Msg::Refresh => self.records = self.manager.list_sessions(),
             Msg::Unloaded(id) => {
@@ -1326,7 +1348,8 @@ impl AppState {
     }
 
     pub fn title_loading(&self, id: &SessionId) -> bool {
-        self.terminal_title_loading.contains(id) && self.overrides.title(id).is_none()
+        (self.terminal_title_loading.contains(id) || self.chat_title_loading.contains(id))
+            && self.overrides.title(id).is_none()
     }
 
     pub fn current_title(&self, id: &SessionId) -> String {
@@ -1625,6 +1648,7 @@ mod tests {
             draft_modes: HashMap::new(),
             terminal_rows: vec![],
             terminal_title_loading: Default::default(),
+            chat_title_loading: Default::default(),
             unread_motion: HashMap::new(),
             readiness: None,
             browser_tools_ready: true,
@@ -1875,6 +1899,8 @@ mod tests {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let input = del_agent::UserInput {
+                command: None,
+                skills: Vec::new(),
                 text: "first".into(),
                 attachments: vec![del_agent::Attachment {
                     path: "/tmp/first.png".into(),

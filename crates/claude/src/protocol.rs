@@ -101,7 +101,41 @@ impl Translator {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
-        match v["type"].as_str() {
+        if let Some(event) = crate::goals::record(&v) {
+            return vec![event];
+        }
+        // Acknowledgements are native local-command records, never inferred
+        // from assistant prose (which can quote arbitrary goal instructions).
+        if v["local_command_run"]["command"] == "goal" {
+            let text = v["message"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            if let Some(objective) = text.strip_prefix("Goal set: ") {
+                return vec![AgentEvent::GoalUpdated {
+                    goal: Some(del_agent::Goal {
+                        objective: objective.into(),
+                        status: del_agent::GoalStatus::Active,
+                        time_used_seconds: 0,
+                        tokens_used: 0,
+                        can_pause: false,
+                    }),
+                }];
+            }
+            if text.starts_with("Goal cleared:") || text.starts_with("No goal set") {
+                return vec![AgentEvent::GoalUpdated { goal: None }];
+            }
+        }
+        // Native goals can start another turn without a user message. Give
+        // those turns their own lifecycle so Stop, queues and streaming work.
+        let starts_native_turn = self.turns.is_empty()
+            && (v["type"] == "assistant"
+                || (v["type"] == "stream_event" && v["event"]["type"] == "message_start"));
+        let mut events = if starts_native_turn {
+            self.enqueue_turn(format!("claude-{}", uuid::Uuid::new_v4()))
+        } else {
+            vec![]
+        };
+        events.extend(match v["type"].as_str() {
             Some("system") => {
                 if v["subtype"] == "init" {
                     self.session_id = v["session_id"].as_str().map(str::to_owned);
@@ -114,7 +148,8 @@ impl Translator {
             Some("control_request") => self.control_request(&v),
             Some("result") => self.result(&v),
             _ => vec![],
-        }
+        });
+        events
     }
 
     fn stream_event(&self, ev: &Value) -> Vec<AgentEvent> {

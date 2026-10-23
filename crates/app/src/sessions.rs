@@ -165,6 +165,7 @@ mod tests {
             service_tier: None,
             permission_mode: Default::default(),
             title: title.map(str::to_string),
+            title_turns: 0,
             created_at_ms: 0,
             updated_at_ms: updated_ms,
             status: SessionStatus::Idle,

@@ -357,3 +357,127 @@ async fn missing_binary_reports_not_installed() {
         .unwrap_err();
     assert!(err.to_string().contains("was not found"), "{err}");
 }
+
+/// Native catalog and local goal status: no model turn or token usage.
+#[tokio::test]
+#[ignore]
+async fn installed_cli_commands_and_goal_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let commands = backend.list_commands(dir.path()).await.unwrap();
+    let goal = commands
+        .into_iter()
+        .find(|command| command.kind == CommandKind::Goal)
+        .expect("native goals");
+    let handle = backend
+        .start_session(config(dir.path(), PermissionMode::Ask))
+        .await
+        .unwrap();
+    let mut events = handle.subscribe();
+    let result = backend
+        .invoke_command(&handle.id, goal, UserInput::text("/goal"))
+        .await;
+    if let Err(error) = result {
+        backend.shutdown().await.unwrap();
+        panic!("goal command failed: {error}");
+    }
+    let events = collect_until(&mut events, is_end).await;
+    backend.shutdown().await.unwrap();
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::AssistantMessage { text, .. } if text.contains("No goal set"))));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Error { .. } | AgentEvent::ToolCallStarted { .. }
+    )));
+}
+
+/// Bounded live verification of the harness's own goal loop.
+#[tokio::test]
+#[ignore]
+async fn real_native_goal_starts_work_and_can_be_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let commands = backend.list_commands(dir.path()).await.unwrap();
+    let goal = commands
+        .into_iter()
+        .find(|command| command.kind == CommandKind::Goal)
+        .unwrap();
+    let handle = backend
+        .start_session(config(dir.path(), PermissionMode::Ask))
+        .await
+        .unwrap();
+    let mut events = handle.subscribe();
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        backend.invoke_command(&handle.id, goal.clone(), UserInput::text("/goal Reply with the single word DONE and mark this goal complete once that response is delivered. Do not access files, run commands, or use external services.")).await?;
+        let mut started = false;
+        let mut answered = false;
+        loop {
+            let event = events.recv().await.map_err(|error| AgentError::Backend(error.to_string()))?;
+            match event {
+                AgentEvent::TurnStarted { .. } => started = true,
+                AgentEvent::AssistantMessage { text, .. } if text.trim() == "DONE" => answered = true,
+                AgentEvent::TurnCompleted { .. } if started && answered => return Ok::<_, AgentError>(()),
+                AgentEvent::Error { message, .. } => return Err(AgentError::Backend(message)),
+                _ => {}
+            }
+        }
+    }).await;
+    let clear = backend
+        .invoke_command(&handle.id, goal, UserInput::text("/goal clear"))
+        .await;
+    backend.shutdown().await.unwrap();
+    clear.expect("clear smoke-test goal");
+    result
+        .expect("native goal turn timed out")
+        .expect("native goal execution");
+}
+
+#[tokio::test]
+#[ignore]
+async fn real_goal_ui_pause_resume_clear_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let config = config(dir.path(), PermissionMode::Ask);
+    let handle = backend.start_session(config.clone()).await.unwrap();
+    let mut events = handle.subscribe();
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        backend.control_goal(&handle.id, GoalAction::Set("Reply with DONE and mark this goal complete after replying. Do not use tools, files, or external services.".into())).await.unwrap();
+        backend.control_goal(&handle.id, GoalAction::Pause).await.unwrap();
+        loop {
+            if matches!(events.recv().await.unwrap(), AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Paused) { break; }
+        }
+        backend.close(&handle.id).await.unwrap();
+        let resumed = backend.resume(config, &handle.id).await.unwrap();
+        assert!(resumed.history().iter().any(|e| matches!(e, AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Paused)));
+        let mut events = resumed.subscribe();
+        backend.control_goal(&handle.id, GoalAction::Resume).await.unwrap();
+        loop {
+            if matches!(events.recv().await.unwrap(), AgentEvent::GoalUpdated { goal: Some(g) } if g.status == GoalStatus::Active) { break; }
+        }
+        backend.control_goal(&handle.id, GoalAction::Clear).await.unwrap();
+        loop {
+            if matches!(events.recv().await.unwrap(), AgentEvent::GoalUpdated { goal: None }) { break; }
+        }
+    }).await;
+    backend.shutdown().await.unwrap();
+    result.expect("native goal UI controls timed out");
+}
+
+#[tokio::test]
+#[ignore]
+async fn real_luna_title_without_reasoning() {
+    let backend = CodexBackend::new(Default::default());
+    let result = backend.generate_title("User: Build a simple chess game with a dark board and legal move highlighting.\nAssistant: I will implement the board and move validation.").await;
+    backend.shutdown().await.unwrap();
+    let title = result.unwrap().expect("title");
+    eprintln!("Luna title: {title}");
+    assert!(title.to_lowercase().contains("chess"));
+}

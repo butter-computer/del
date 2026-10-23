@@ -87,6 +87,7 @@ pub struct ChatView {
     /// The session's event stream ended (session closed or app quitting).
     closed: bool,
     loading: bool,
+    first_prompt: Option<String>,
     completed_turns: u64,
     pub(super) first_chunks: std::collections::HashMap<String, std::time::Instant>,
     pub pending_errors: Vec<String>,
@@ -97,6 +98,10 @@ pub struct ChatView {
 impl EventEmitter<PromptSubmitted> for ChatView {}
 
 impl ChatView {
+    pub fn goal(&self) -> Option<del_agent::Goal> {
+        self.model.goal()
+    }
+
     /// A chat for `session`, which the app has already started. The view
     /// replays what the session emitted so far (so nothing sent before this
     /// view existed is missed), then follows it live. `first_prompt` is the
@@ -133,6 +138,7 @@ impl ChatView {
             session: session.clone(),
             closed: false,
             loading: session.is_some(),
+            first_prompt: first_prompt.as_ref().map(|input| input.text.clone()),
             completed_turns: 0,
             first_chunks: Default::default(),
             pending_errors: Vec::new(),
@@ -446,7 +452,19 @@ impl ChatView {
                 Err(err) => return report(&this, cx, err.to_string()),
             };
             let replayed = this.update(cx, |this, cx| {
+                // The initial row already includes attachment/goal metadata.
+                // Skip its plain-text history counterpart exactly once.
+                let first_prompt = this.first_prompt.take();
+                let mut opening_user = true;
                 for event in &history {
+                    if let AgentEvent::UserMessage { text } = event
+                        && opening_user
+                    {
+                        opening_user = false;
+                        if first_prompt.as_deref() == Some(text.as_str()) {
+                            continue;
+                        }
+                    }
                     this.on_event(event, cx);
                 }
                 this.scroller.set_follow_mode(FollowMode::Tail);
@@ -543,7 +561,11 @@ impl ChatView {
             .w_full()
             .max_w(zpx(COLUMN_MAX_WIDTH))
             .h(zpx(20.0))
-            .px_2()
+            .px(if self.model.goal.is_some() {
+                zpx(crate::goal_ui::GOAL_INSET + 10.)
+            } else {
+                zpx(8.)
+            })
             .items_center()
             .justify_between()
             .text_size(zpx(TEXT_SM))
@@ -936,6 +958,66 @@ mod tests {
         });
         runtime.block_on(manager.shutdown());
     }
+    #[gpui::test]
+    fn first_prompt_replay_shows_exactly_one_user_row(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            [
+                Arc::new(del_agent::MockBackend::new(del_agent::Provider::Codex))
+                    as Arc<dyn del_agent::AgentBackend>,
+            ],
+        )
+        .unwrap();
+        let input = UserInput::text("Build a chess board");
+        let session = runtime.block_on(async {
+            let h = manager
+                .start_session(del_agent::SessionConfig {
+                    cwd: dir.path().into(),
+                    provider: del_agent::Provider::Codex,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    permission_mode: Default::default(),
+                })
+                .await
+                .unwrap();
+            manager.send_prompt(&h.id, input.clone()).await.unwrap();
+            h
+        });
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager: manager.clone(),
+        };
+        let view = cx.new(|cx| ChatView::new(backend, Some(session.id), Some(input), cx));
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if !view.read_with(cx, |view, _| view.loading) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            });
+        }
+        view.read_with(cx, |view, _| {
+            assert!(!view.loading);
+            assert_eq!(
+                view.model
+                    .blocks
+                    .iter()
+                    .filter(|b| matches!(b, Block::User { .. }))
+                    .count(),
+                1
+            );
+        });
+        runtime.block_on(manager.shutdown());
+    }
+
     #[gpui::test]
     fn busy_followup_waits_for_the_running_turn_without_showing_an_error(
         cx: &mut gpui::TestAppContext,

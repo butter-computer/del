@@ -125,3 +125,13 @@ App wiring remains with the TUI integration: keep the server alive for the
 app lifetime, register each session before launch, apply its `LaunchConfig`,
 and revoke credentials and remove launch files when the session ends. Route
 `McpUi` callbacks onto the UI thread; resolve `ask_user` when the person answers.
+
+### Claude chat goal controls
+
+Claude streaming chats get a separate credential scoped to their own session,
+exposing only `browser` and `goal`. The `goal` tool accepts `get`, `set` with an
+objective, `resume`, and `clear`; it does not accept a target session ID. Goal
+mutations queue native commands behind the calling turn and return `queued: true`.
+The model must finish that turn before native confirmation updates the goal card.
+Ordinary browser-only credentials cannot control goals. Other session tools and
+sibling spawning are not exposed to these chat credentials.

@@ -15,6 +15,10 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManagerEvent {
+    TitleLoading {
+        session: SessionId,
+        loading: bool,
+    },
     Event {
         session: SessionId,
         event: AgentEvent,
@@ -56,6 +60,7 @@ struct Shared {
     all_tx: broadcast::Sender<ManagerEvent>,
     standby: Mutex<Option<Standby>>,
     preparation: tokio::sync::Mutex<()>,
+    title_generation: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; all clones share state.
@@ -97,6 +102,13 @@ impl Shared {
 }
 
 impl SessionManager {
+    pub async fn list_commands(
+        &self,
+        provider: Provider,
+        cwd: &Path,
+    ) -> Result<Vec<crate::ComposerCommand>> {
+        self.backend(provider)?.list_commands(cwd).await
+    }
     pub async fn list_models(
         &self,
         provider: Provider,
@@ -124,6 +136,9 @@ impl SessionManager {
     pub async fn refresh_titles(&self) -> Result<bool> {
         let mut changed = false;
         for record in self.list_sessions() {
+            if record.title_turns > 0 {
+                continue;
+            }
             let Ok(backend) = self.backend(record.provider) else {
                 continue;
             };
@@ -142,13 +157,64 @@ impl SessionManager {
             let mut index = self.shared.index.lock().unwrap();
             if index
                 .get(&record.id)
-                .is_some_and(|r| r.title.as_deref() != Some(title))
+                .is_some_and(|r| r.title_turns == 0 && r.title.as_deref() != Some(title))
             {
                 index.update(&record.id, |r| r.title = Some(title.to_owned()))?;
                 changed = true;
             }
         }
         Ok(changed)
+    }
+
+    /// One lightweight request after the first reply, then every six user turns.
+    /// Serialized separately from foreground sends; failed generation leaves the
+    /// fallback title intact and can retry on a later reply.
+    pub async fn generate_title(&self, id: &SessionId) -> Result<bool> {
+        let _generation = self.shared.title_generation.lock().await;
+        let record = self
+            .shared
+            .index
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        let (turns, context) = {
+            let live = self.shared.live.lock().unwrap();
+            let Some(session) = live.get(id) else {
+                return Ok(false);
+            };
+            crate::titles::context(&session.history)
+        };
+        if !crate::titles::due(record.title_turns, turns) {
+            return Ok(false);
+        }
+        let backend = self.backend(record.provider)?;
+        let _ = self.shared.all_tx.send(ManagerEvent::TitleLoading {
+            session: id.clone(),
+            loading: true,
+        });
+        let result = async {
+            let title = backend.generate_title(&context).await?;
+            let Some(title) = title.and_then(|s| crate::titles::clean(&s)) else {
+                return Ok(false);
+            };
+            let mut index = self.shared.index.lock().unwrap();
+            if index.get(id).is_none() {
+                return Ok(false);
+            }
+            index.update(id, |record| {
+                record.title = Some(title);
+                record.title_turns = turns;
+            })?;
+            Ok(true)
+        }
+        .await;
+        let _ = self.shared.all_tx.send(ManagerEvent::TitleLoading {
+            session: id.clone(),
+            loading: false,
+        });
+        result
     }
 
     /// `index_path` is typically [`default_index_path`].
@@ -166,6 +232,7 @@ impl SessionManager {
                 all_tx,
                 standby: Mutex::new(None),
                 preparation: tokio::sync::Mutex::new(()),
+                title_generation: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -341,6 +408,7 @@ impl SessionManager {
             service_tier: config.service_tier,
             permission_mode: config.permission_mode,
             title: None,
+            title_turns: 0,
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
@@ -380,6 +448,75 @@ impl SessionManager {
         Ok(handle)
     }
 
+    pub async fn control_goal(&self, id: &SessionId, action: crate::GoalAction) -> Result<()> {
+        let provider = self.live_provider(id)?;
+        self.backend(provider)?.control_goal(id, action).await
+    }
+
+    pub async fn agent_goal(
+        &self,
+        id: &SessionId,
+        action: Option<crate::GoalAction>,
+    ) -> Result<Option<crate::Goal>> {
+        self.backend(self.live_provider(id)?)?
+            .agent_goal(id, action)
+            .await
+    }
+
+    async fn resolve_command(
+        &self,
+        backend: &dyn AgentBackend,
+        cwd: &Path,
+        input: &UserInput,
+    ) -> Result<Option<crate::ComposerCommand>> {
+        let catalog = if !input.skills.is_empty()
+            || input.command.is_some()
+            || crate::split_command(&input.text).is_some()
+        {
+            backend.list_commands(cwd).await?
+        } else {
+            Vec::new()
+        };
+        for skill in &input.skills {
+            if skill.kind != crate::CommandKind::Skill
+                || !catalog.iter().any(|available| {
+                    available.kind == crate::CommandKind::Skill
+                        && available.name == skill.name
+                        && available.target == skill.target
+                })
+            {
+                return Err(AgentError::Backend(format!(
+                    "Selected skill /{} is no longer available. Select it again from the / menu.",
+                    skill.name
+                )));
+            }
+        }
+        let selected_goal = input
+            .command
+            .as_ref()
+            .filter(|c| c.kind == crate::CommandKind::Goal);
+        let parsed = crate::split_command(&input.text);
+        let command =
+            if let Some((name, _)) = selected_goal.map(|c| (c.name.as_str(), "")).or(parsed) {
+                catalog.into_iter().find(|command| {
+                    command.name == name
+                        && input
+                            .command
+                            .as_ref()
+                            .is_none_or(|selected| selected.target == command.target)
+                })
+            } else {
+                None
+            };
+        if input.command.is_some() && command.is_none() {
+            return Err(AgentError::Backend(
+                "The selected command is no longer available. Select it again from the / menu."
+                    .into(),
+            ));
+        }
+        Ok(command)
+    }
+
     pub async fn send_prompt(&self, id: &SessionId, input: UserInput) -> Result<()> {
         let lock = self
             .shared
@@ -415,16 +552,46 @@ impl SessionManager {
                 ));
             }
             let handle = self.backend(p)?.reconfigure(config.clone(), id).await?;
-            self.attach(handle, config);
+            self.attach(handle, config.clone());
         }
         let title: String = input.text.trim().chars().take(60).collect();
-        self.backend(p)?.send_prompt(id, input).await?;
+        let backend = self.backend(p)?;
+        let command = self.resolve_command(&*backend, &config.cwd, &input).await?;
+        // Local commands can finish before the call returns. Never overwrite
+        // their completion (or a very fast provider result) with Running.
+        let previous = self.status(id).unwrap_or(SessionStatus::Idle);
+        let title_input = AgentEvent::UserMessage {
+            text: input.text.clone(),
+        };
+        let title_position = {
+            let mut live = self.shared.live.lock().unwrap();
+            let session = live
+                .get_mut(id)
+                .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+            let position = session.history.len();
+            session.history.push(title_input.clone());
+            position
+        };
+        self.shared.set_status(id, SessionStatus::Running);
+        let result = if let Some(command) = command {
+            backend.invoke_command(id, command, input).await
+        } else {
+            backend.send_prompt(id, input).await
+        };
+        if let Err(error) = result {
+            if let Some(session) = self.shared.live.lock().unwrap().get_mut(id)
+                && session.history.get(title_position) == Some(&title_input)
+            {
+                session.history.remove(title_position);
+            }
+            self.shared.set_status(id, previous);
+            return Err(error);
+        }
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
             if r.title.is_none() && !title.is_empty() {
                 r.title = Some(title);
             }
         });
-        self.shared.set_status(id, SessionStatus::Running);
         Ok(())
     }
 
@@ -462,13 +629,33 @@ impl SessionManager {
     }
 
     pub async fn steer(&self, id: &SessionId, text: String) -> Result<()> {
-        self.backend(self.live_provider(id)?)?.steer(id, text).await
+        self.steer_input(id, UserInput::text(text)).await
     }
 
     pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
-        self.backend(self.live_provider(id)?)?
-            .steer_input(id, input)
-            .await
+        let backend = self.backend(self.live_provider(id)?)?;
+        if crate::split_command(&input.text).is_some() || !input.skills.is_empty() {
+            let cwd = self
+                .shared
+                .index
+                .lock()
+                .unwrap()
+                .get(id)
+                .ok_or_else(|| AgentError::UnknownSession(id.clone()))?
+                .cwd
+                .clone();
+            if let Some(command) = self.resolve_command(&*backend, &cwd, &input).await? {
+                // Backends either execute a native control immediately or return
+                // Busy, leaving the command queued for the end of this turn.
+                return backend.invoke_command(id, command, input).await;
+            }
+        }
+        let text = input.text.clone();
+        backend.steer_input(id, input).await?;
+        if let Some(session) = self.shared.live.lock().unwrap().get_mut(id) {
+            session.history.push(AgentEvent::UserMessage { text });
+        }
+        Ok(())
     }
 
     pub async fn interrupt(&self, id: &SessionId) -> Result<()> {
@@ -623,6 +810,77 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {want:?}"));
+    }
+
+    #[tokio::test]
+    async fn generated_titles_persist_without_reordering_and_retry_invalid_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i.jsonl");
+        let mut backend = MockBackend::new(Provider::Codex);
+        backend.title_response = Some("Chess Board Design".into());
+        let m = SessionManager::new(&path, [Arc::new(backend) as Arc<dyn AgentBackend>]).unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        assert!(!m.generate_title(&h.id).await.unwrap());
+        let mut events = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("Build a chess board"))
+            .await
+            .unwrap();
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        let before = m.list_sessions()[0].updated_at_ms;
+        assert!(m.generate_title(&h.id).await.unwrap());
+        assert!(!m.generate_title(&h.id).await.unwrap());
+        let mut loading = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ManagerEvent::TitleLoading { loading: value, .. } = event {
+                loading.push(value);
+            }
+        }
+        assert_eq!(loading, [true, false]);
+        let saved = SessionIndex::open(&path)
+            .unwrap()
+            .get(&h.id)
+            .unwrap()
+            .clone();
+        assert_eq!(saved.title.as_deref(), Some("Chess Board Design"));
+        assert_eq!(saved.title_turns, 1);
+        assert_eq!(saved.updated_at_ms, before);
+        for _ in 0..6 {
+            m.send_prompt(&h.id, UserInput::text("Add a feature"))
+                .await
+                .unwrap();
+            wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        }
+        assert!(m.generate_title(&h.id).await.unwrap());
+        assert_eq!(m.list_sessions()[0].title_turns, 7);
+        m.shutdown().await;
+
+        let mut backend = MockBackend::new(Provider::Codex);
+        backend.title_response = Some("Title\nInvalid explanation".into());
+        let m = SessionManager::new(
+            dir.path().join("invalid.jsonl"),
+            [Arc::new(backend) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("Fallback title"))
+            .await
+            .unwrap();
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        assert!(!m.generate_title(&h.id).await.unwrap());
+        assert_eq!(
+            m.list_sessions()[0].title.as_deref(),
+            Some("Fallback title")
+        );
+        assert_eq!(m.list_sessions()[0].title_turns, 0);
+        let mut loading = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ManagerEvent::TitleLoading { loading: value, .. } = event {
+                loading.push(value);
+            }
+        }
+        assert_eq!(loading, [true, false]);
+        m.shutdown().await;
     }
 
     #[tokio::test]

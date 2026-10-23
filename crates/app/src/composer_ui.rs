@@ -43,6 +43,8 @@ pub struct ComposerCard {
     running: bool,
     starting: bool,
     on_send: Handler,
+    goal_mode: bool,
+    on_cancel_goal: Handler,
     on_voice: Handler,
     dictation: crate::dictation::Phase,
     on_attach: Handler,
@@ -79,6 +81,8 @@ impl ComposerCard {
             running,
             starting: false,
             on_send: noop.clone(),
+            goal_mode: false,
+            on_cancel_goal: noop.clone(),
             on_voice: noop.clone(),
             dictation: Default::default(),
             on_attach: noop.clone(),
@@ -91,6 +95,14 @@ impl ComposerCard {
         }
     }
 
+    pub fn goal_mode(mut self, enabled: bool) -> Self {
+        self.goal_mode = enabled;
+        self
+    }
+    pub fn on_cancel_goal(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_cancel_goal = Rc::new(handler);
+        self
+    }
     pub fn attachments(mut self, has: bool) -> Self {
         self.has_attachments = has;
         self
@@ -187,6 +199,8 @@ impl RenderOnce for ComposerCard {
             running,
             starting,
             on_send,
+            goal_mode,
+            on_cancel_goal,
             on_voice,
             dictation,
             on_attach,
@@ -321,6 +335,21 @@ impl RenderOnce for ComposerCard {
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 Textarea::new(&input)
+                    .token(|token, _, _| {
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(zpx(TEXT_MD))
+                            .text_color(rgb(0x579fff))
+                            .child(
+                                svg()
+                                    .path("icons/skill.svg")
+                                    .size(zpx(13.))
+                                    .flex_none()
+                                    .text_color(rgb(0x579fff)),
+                            )
+                            .child(token.token().label().clone())
+                    })
                     .on_paste(move |item, window, cx| on_paste(item, window, cx))
                     .appearance(false)
                     .bordered(false)
@@ -343,6 +372,16 @@ impl RenderOnce for ComposerCard {
                             )
                             .child(agent_el)
                             .child(model_picker)
+                            .when(goal_mode, |row| {
+                                row.child(
+                                    chip("goal-mode")
+                                        .icon(gpui_kit::assets::IconName::Target)
+                                        .label("Goal")
+                                        .tooltip("Cancel goal mode")
+                                        .accessibility_label("Cancel goal mode")
+                                        .on_click(move |_, window, cx| on_cancel_goal(window, cx)),
+                                )
+                            })
                             .when(show_folder, |row| row.child(folder_el)),
                     )
                     .child(h_flex().items_center().gap_1().child(voice).child(action)),

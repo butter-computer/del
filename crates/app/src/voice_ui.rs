@@ -39,7 +39,16 @@ impl AppShell {
         if value != current {
             let end = value.len();
             self.composer.update(cx, |input, cx| {
-                input.set_value(value, window, cx);
+                let previous = input.content();
+                let mut content = gpui_kit::component::input::InputContent::new(value);
+                for span in previous.tokens() {
+                    if content.text().get(span.range()) == Some(span.token().text().as_ref()) {
+                        content = content
+                            .with_token(span.range(), span.token().clone())
+                            .expect("unchanged token range");
+                    }
+                }
+                input.set_value(content, window, cx);
                 input.set_selected_range(end..end, cx);
             });
         }

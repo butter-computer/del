@@ -214,3 +214,19 @@ fn garbage_lines_are_ignored() {
     assert!(t.handle_line("not json").is_empty());
     assert!(t.handle_line(r#"{"type":"rate_limit_event"}"#).is_empty());
 }
+
+#[test]
+fn native_goal_continuations_get_distinct_turns_and_can_be_interrupted() {
+    let mut translator = Translator::new();
+    for _ in 0..2 {
+        let events = translator.handle_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"native"}}}"#,
+        );
+        assert!(matches!(&events[..], [E::TurnStarted { turn_id }] if !turn_id.is_empty()));
+        assert!(translator.is_busy());
+        translator.mark_interrupting();
+        let events = translator.handle_line(r#"{"type":"result","is_error":false,"usage":{}}"#);
+        assert!(events.iter().any(|event| matches!(event, E::TurnCompleted { status: TurnStatus::Interrupted, turn_id } if !turn_id.is_empty())));
+        assert!(!translator.is_busy());
+    }
+}

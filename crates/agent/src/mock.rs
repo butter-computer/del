@@ -34,6 +34,8 @@ struct Inner {
 pub struct MockBackend {
     provider: Provider,
     delay: Duration,
+    #[cfg(test)]
+    pub title_response: Option<String>,
     sessions: Arc<Mutex<HashMap<SessionId, Arc<SessionState>>>>,
 }
 
@@ -42,6 +44,8 @@ impl MockBackend {
         Self {
             provider,
             delay: Duration::ZERO,
+            #[cfg(test)]
+            title_response: None,
             sessions: Default::default(),
         }
     }
@@ -259,6 +263,12 @@ async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, del
 impl AgentBackend for MockBackend {
     fn provider(&self) -> Provider {
         self.provider
+    }
+
+    #[cfg(test)]
+    async fn generate_title(&self, context: &str) -> Result<Option<String>> {
+        assert!(context.contains("User:"));
+        Ok(self.title_response.clone())
     }
 
     async fn start_session(&self, _config: SessionConfig) -> Result<SessionHandle> {

@@ -11,4 +11,5 @@ pub use auth::{AuthStatus, CodexError};
 pub use backend::{CodexBackend, CodexOptions};
 pub use rpc::{ClientError, CodexClient, Incoming, RequestId, SpawnOptions};
 
+mod commands;
 mod models;

@@ -16,12 +16,16 @@ mod assets;
 mod attachments;
 mod browser;
 mod chat;
+mod command_menu;
 mod composer_ui;
 mod conversation_search;
 mod dictation;
 mod document_preview;
 mod followup_ui;
 mod followups;
+#[cfg(test)]
+mod goal_integration;
+mod goal_ui;
 mod hover_motion;
 #[allow(dead_code)]
 mod mcp_bridge;
@@ -183,7 +187,7 @@ pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
         Arc::new(del_acp::AcpBackend::default()),
         // Keep permission selection explicit in each session's launch arguments.
         Arc::new(del_claude::ClaudeBackend::new(del_claude::ClaudeOptions {
-            setting_sources: Some("project".into()),
+            setting_sources: None,
             ..Default::default()
         })),
     ]
@@ -258,6 +262,7 @@ struct AppShell {
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
+    command_menu: Entity<command_menu::CommandMenu>,
     dictation: Option<dictation::Dictation>,
     dictation_generation: u64,
     model_picker: Entity<model_picker::ModelPicker>,
@@ -293,7 +298,10 @@ struct AppShell {
     search_open: bool,
     terminal_search_generation: u64,
     composer_owner: u64,
-    composer_drafts: HashMap<u64, String>,
+    composer_drafts: HashMap<u64, gpui_kit::component::input::InputContent>,
+    goal_modes: HashMap<u64, del_agent::ComposerCommand>,
+    goal_expanded: HashSet<u64>,
+    goal_controls: HashSet<SessionId>,
     composer_attachments: HashMap<u64, Vec<del_agent::Attachment>>,
     attachment_scroll: ScrollHandle,
     queue_hovered: Option<String>,
@@ -530,12 +538,24 @@ impl AppShell {
         });
         let mcp_answer = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
         let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), window, cx));
+        let command_menu =
+            cx.new(|cx| command_menu::CommandMenu::new(composer.clone(), state.clone(), cx));
+        cx.observe(&command_menu, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &command_menu,
+            window,
+            |this, _, event: &command_menu::GoalSelected, window, cx| {
+                this.begin_goal(event.0.clone(), window, cx);
+            },
+        )
+        .detach();
         let mut shell = Self {
             shell_focus: cx.focus_handle(),
             settings_focused: false,
             zoom_percent: del_core::zoom::percent(),
             state,
             composer,
+            command_menu,
             model_picker,
             rename,
             renaming_loaded: None,
@@ -567,6 +587,9 @@ impl AppShell {
             dictation_generation: 0,
             composer_owner: 0,
             composer_drafts: HashMap::new(),
+            goal_modes: HashMap::new(),
+            goal_expanded: HashSet::new(),
+            goal_controls: HashSet::new(),
             composer_attachments: HashMap::new(),
             attachment_scroll: ScrollHandle::new(),
             queue_hovered: None,
@@ -591,6 +614,28 @@ impl AppShell {
             drag_target: None,
             previous_drag_target: None,
         };
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.open_chat(cx).is_some_and(|chat| {
+                            chat.read(cx)
+                                .goal()
+                                .is_some_and(|goal| goal.status == del_agent::GoalStatus::Active)
+                        }) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -886,6 +931,12 @@ impl AppShell {
         if self.dictation.is_some() {
             return;
         }
+        if self
+            .command_menu
+            .update(cx, |menu, cx| menu.submit_control(window, cx))
+        {
+            return;
+        }
         let owner = self.composer_owner(cx);
         let text = self.composer.read(cx).value().trim().to_string();
         let attachments = self
@@ -893,6 +944,13 @@ impl AppShell {
             .get(&owner)
             .cloned()
             .unwrap_or_default();
+        if self.goal_modes.contains_key(&owner) && !attachments.is_empty() {
+            self.state.update(cx, |state, cx| {
+                state.error = Some("Send attachments in a message before setting a goal.".into());
+                cx.notify();
+            });
+            return;
+        }
         self.ensure_chat(cx);
         let chat = self.open_chat(cx);
         if text.is_empty() && attachments.is_empty() {
@@ -912,7 +970,14 @@ impl AppShell {
             return;
         }
         if self.state.read(cx).terminal_draft().is_some() {
+            let text = if self.goal_modes.contains_key(&owner) {
+                format!("/goal {text}")
+            } else {
+                text
+            };
             self.submit_terminal_prompt(&text, &attachments, window, cx);
+            self.goal_modes.remove(&owner);
+            self.sync_goal_placeholder(window, cx);
             return;
         }
         if chat.as_ref().is_some_and(|chat| chat.read(cx).is_loading())
@@ -920,7 +985,19 @@ impl AppShell {
         {
             return;
         }
-        let input = del_agent::UserInput { text, attachments };
+        let command = self
+            .goal_modes
+            .get(&owner)
+            .cloned()
+            .or_else(|| self.command_menu.read(cx).selected_command(&text, cx));
+        let input = del_agent::UserInput {
+            skills: command_menu::selected_skills(&self.composer.read(cx).content()),
+            command,
+            text,
+            attachments,
+        };
+        self.goal_modes.remove(&owner);
+        self.sync_goal_placeholder(window, cx);
         self.composer_attachments.remove(&owner);
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -957,6 +1034,7 @@ impl AppShell {
         let shell_attach = shell.clone();
         let shell_paste = shell.clone();
         let shell_voice = shell.clone();
+        let shell_goal = shell.clone();
         let retry_state = self.state.clone();
         let owner = self.composer_owner(cx);
         let has_attachments = self
@@ -973,6 +1051,10 @@ impl AppShell {
             locked,
             running,
         )
+        .goal_mode(self.goal_modes.contains_key(&self.composer_owner(cx)))
+        .on_cancel_goal(move |window, cx| {
+            shell_goal.update(cx, |this, cx| this.cancel_goal_mode(window, cx))
+        })
         .dictation(
             self.dictation
                 .as_ref()
@@ -1018,7 +1100,21 @@ impl AppShell {
                 },
             )
             .child(self.render_followups(cx))
-            .child(composer)
+            .child(self.render_goal_bar(cx))
+            .child(
+                div().relative().child(composer).child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .bottom_full()
+                            .mb_2()
+                            .left_0()
+                            .w_full()
+                            .child(self.command_menu.clone()),
+                    )
+                    .with_priority(10),
+                ),
+            )
     }
 
     /// Session tabs in the top bar, with a plus button for a new session. The
@@ -1249,7 +1345,7 @@ impl AppShell {
                                                 None => format!("closing-{uid}"),
                                             };
                                             let title_loading = match &tab_key {
-                                                Some(Tab::Terminal(id)) => self.state.read(cx).title_loading(id),
+                                                Some(Tab::Terminal(id) | Tab::Session(id)) => self.state.read(cx).title_loading(id),
                                                 _ => false,
                                             };
 
@@ -1750,6 +1846,55 @@ impl Render for AppShell {
             .size_full()
             .track_focus(&self.shell_focus)
             .key_context("Shell")
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::MoveDown, _, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.navigate(1, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::MoveUp, _, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.navigate(-1, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .capture_action(cx.listener(
+                |this, action: &gpui_kit::component::input::Enter, window, cx| {
+                    if !action.shift
+                        && !action.secondary
+                        && this
+                            .command_menu
+                            .update(cx, |menu, cx| menu.accept(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.accept(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
+                    if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && this.state.read(cx).panel == Panel::Providers
                 {

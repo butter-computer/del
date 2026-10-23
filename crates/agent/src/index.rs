@@ -17,6 +17,8 @@ pub struct SessionRecord {
     pub service_tier: Option<String>,
     pub permission_mode: PermissionMode,
     pub title: Option<String>,
+    #[serde(default)]
+    pub title_turns: u32,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub status: SessionStatus,
@@ -158,6 +160,7 @@ mod tests {
             service_tier: None,
             permission_mode: PermissionMode::Ask,
             title: None,
+            title_turns: 0,
             created_at_ms: at,
             updated_at_ms: at,
             status,

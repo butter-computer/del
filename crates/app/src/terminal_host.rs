@@ -116,6 +116,13 @@ impl TerminalLaunchSpec {
     }
 
     fn apply_model_settings(&mut self, config: &del_agent::SessionConfig) {
+        if self.kind == TerminalLaunchKind::Claude {
+            self.args.extend([
+                "--settings".into(),
+                serde_json::json!({"fastMode": config.service_tier.as_deref() == Some("fast")})
+                    .to_string(),
+            ]);
+        }
         if let Some(model) = &config.model {
             self.args.extend(["--model".into(), model.clone()]);
         }
@@ -1002,7 +1009,12 @@ mod tests {
             let prepared = spec
                 .prepare(vec!["--".into(), prompt.into()], vec![])
                 .unwrap();
-            let mut expected = vec!["--model", "chosen-model"];
+            let mut expected = if kind == TerminalLaunchKind::Claude {
+                vec!["--settings", "{\"fastMode\":false}"]
+            } else {
+                vec![]
+            };
+            expected.extend(["--model", "chosen-model"]);
             expected.extend(effort_args);
             let trust = format!(
                 "projects.{}.trust_level=\"trusted\"",

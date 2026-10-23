@@ -145,8 +145,14 @@ conversation. Unloading a running session also stops its current work.
   with static placeholders when Reduce Motion is enabled.
 - Sessions have tabs and sidebar entries, with rename, pin, unread, archive,
   restore, and permanent-delete actions. Terminal entries share the session
-  context menu. Provider-owned titles update from conversation metadata; manual
-  renames take precedence.
+  context menu. Chat titles are generated in the background by the session’s
+  provider after its first reply, then refreshed every six user turns: Codex uses
+  GPT-5.6 Luna with reasoning disabled; Claude uses Haiku 5.5 with thinking
+  disabled. These small requests use the existing provider login and do not
+  change the conversation’s model. The tab and sidebar title shimmer while a
+  name is being generated. Titles persist across restarts, manual
+  renames take precedence, and failed requests retain the first-message fallback.
+  Empty drafts remain “New session.” Terminal titles follow provider metadata.
 - A blue dot at the far right marks unread conversations, including background
   replies that finish before being opened. Hover actions make room for the dot.
 - Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
@@ -175,7 +181,7 @@ default is labeled **Default**.
 | Provider | Model discovery and controls |
 | --- | --- |
 | Codex | Paginated app-server `model/list`; advertised reasoning levels and priority/fast tier |
-| Claude | CLI initialization metadata; advertised models and effort settings passed through `--effort` |
+| Claude | CLI initialization metadata; advertised effort levels and Fast support, applied with `--effort` and session-scoped `--settings` |
 | ACP | Installed registry agents and their advertised model/config options; `thought_level` is exposed for the agent's default entry when available |
 
 Selecting a model opens its reasoning controls. Slider stops correspond to
@@ -191,6 +197,54 @@ reconfiguration path; they do not rewrite a turn already in flight. Changing a
 model clears incompatible effort/tier choices. Provider changes use a new draft.
 Catalog discovery submits no prompt, but can start a CLI process; ACP discovery
 may create a temporary session.
+
+### Skills and slash commands
+
+Type **/** at the start of the composer to browse the selected harness's skills
+and commands. Type to filter, use **↑/↓** to navigate, **Enter** or **Tab** to
+select a command, and **Escape** to dismiss. Selected skills become blue inline
+tokens; their full provider identity survives editing, undo, and switching drafts.
+Type **/** again after a selected skill to add another; each selection stays a
+separate blue token. Select **/goal** before or after adding skills to combine them
+with goal mode; the selected skills remain requirements of the native goal.
+Add your instructions after the skills, then send them together.
+Selections survive queued-message editing too. Claude Code supports up to six
+skills per message; Codex sends every selected skill as a native input item.
+The bounded menu shows descriptions and argument hints, with skills first.
+`/skills` narrows the menu to skills. Reopening it refreshes discovery.
+
+- **Codex:** uses app-server `skills/list`, including enabled global, project,
+  system, and plugin skills returned by the CLI. Selected skills are sent as
+  native `skill` input items with their exact paths, alongside text and attachments.
+- **Claude Code:** uses the CLI's initialization command catalog and native
+  stream-json slash-command execution. User, project, and local settings load
+  normally, so personal and installed plugin skills are available too.
+- **Fast:** `/fast`, `/fast on`, and `/fast off` use the same saved session
+  setting as the model picker. Codex uses its advertised service tier; Claude
+  uses `fastMode` in session-scoped settings. Only supported models can enable
+  it; account access and usage charges remain controlled by the provider.
+- **Goals:** select `/goal` to enter goal mode: the composer shows a Goal control
+  and asks for a measurable objective. Click Goal to cancel that mode without
+  losing the draft. Sending shows **Sent as goal** on the message and a compact
+  status bar above the composer with the objective, elapsed time, and expandable
+  details. The bar follows the selected session and restores from provider state.
+  Codex offers native pause/resume and clear controls; Claude offers native clear
+  (there is no Claude pause/resume command). Clear removes only the goal.
+  `/goal <objective>` and provider-supported lifecycle commands still work.
+  Completion is read from native goal state, independently of individual turns.
+  Codex uses goal RPCs and notifications; Claude follows native transcript status
+  records without sending status prompts. The harness owns persistence and
+  automatic continuation; Del keeps streaming, queues, and Stop connected.
+  Claude chats also receive a session-scoped `goal` MCP tool: the agent can inspect,
+  set, resume (including completed goals), or clear its native goal when asked.
+  Changes requested during a tool call queue until the current turn ends; the card
+  and timer update from native confirmation, never from assistant prose.
+
+The shared `AgentBackend::list_commands`, `invoke_command`, and `control_goal` contracts own
+discovery and execution. The composer consumes provider-neutral command and goal state;
+new harnesses can implement that contract without adding provider branches to
+the menu. Backends without command support return an empty catalog. ACP adapters
+currently use that default rather than advertising commands they cannot execute.
 
 ## Follow-up queue and attachments
 

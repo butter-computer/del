@@ -7,6 +7,50 @@ use tokio::{
     process::Command,
 };
 
+pub fn parse_commands(response: &Value) -> Vec<del_agent::ComposerCommand> {
+    use del_agent::{CommandKind, ComposerCommand};
+    response["commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let name = row["name"].as_str()?;
+            // These controls require the CLI's own terminal UI.
+            if row["description"]
+                .as_str()
+                .is_some_and(|description| description.starts_with("(removed)"))
+                || name.starts_with('_')
+                || matches!(name, "color" | "focus" | "reload-plugins")
+            {
+                return None;
+            }
+            Some(ComposerCommand {
+                name: name.into(),
+                description: row["description"].as_str().unwrap_or_default().into(),
+                argument_hint: if name == "goal" {
+                    "<objective> · clear"
+                } else {
+                    row["argumentHint"].as_str().unwrap_or_default()
+                }
+                .into(),
+                kind: match name {
+                    "goal" => CommandKind::Goal,
+                    "fast" => CommandKind::Fast,
+                    _ if row["builtin"] == true => CommandKind::Action,
+                    _ => CommandKind::Skill,
+                },
+                source: if row["builtin"] == true {
+                    "Claude Code"
+                } else {
+                    "Skill"
+                }
+                .into(),
+                target: None,
+            })
+        })
+        .collect()
+}
+
 pub fn parse_models(response: &Value) -> Result<Vec<ModelInfo>> {
     let rows = response["models"]
         .as_array()
@@ -31,13 +75,17 @@ pub fn parse_models(response: &Value) -> Result<Vec<ModelInfo>> {
                 },
                 default_effort: m["defaultEffort"].as_str().map(str::to_owned),
                 is_default: m["value"] == "default",
-                fast_tier: None,
+                fast_tier: (m["supportsFastMode"] == true).then(|| "fast".into()),
             })
         })
         .collect())
 }
 
 pub async fn discover(options: &ClaudeOptions, cwd: &Path) -> Result<Vec<ModelInfo>> {
+    parse_models(&discover_catalog(options, cwd).await?)
+}
+
+pub async fn discover_catalog(options: &ClaudeOptions, cwd: &Path) -> Result<Value> {
     let mut cmd = Command::new(&options.binary);
     cmd.args([
         "-p",
@@ -72,7 +120,7 @@ pub async fn discover(options: &ClaudeOptions, cwd: &Path) -> Result<Vec<ModelIn
                 if v["response"]["subtype"] == "error" {
                     return Err(AgentError::Backend(v["response"]["error"].as_str().unwrap_or("Claude model discovery failed").into()));
                 }
-                return parse_models(&v["response"]["response"]);
+                return Ok(v["response"]["response"].clone());
             }
         }
         Err(AgentError::Backend("Claude exited before returning models".into()))
@@ -89,11 +137,13 @@ mod tests {
     #[test]
     fn unsupported_models_do_not_inherit_another_models_effort() {
         let models = parse_models(&json!({"models":[
-            {"value":"default","displayName":"Recommended","supportsEffort":true,"supportedEffortLevels":["low","max"]},
+            {"value":"default","displayName":"Recommended","supportsEffort":true,"supportedEffortLevels":["low","max"],"supportsFastMode":true},
             {"value":"fast","displayName":"Fast"}
         ]})).unwrap();
         assert!(models[0].is_default);
         assert!(models[0].supports_effort("max"));
         assert!(models[1].efforts.is_empty());
+        assert_eq!(models[0].fast_tier.as_deref(), Some("fast"));
+        assert!(models[1].fast_tier.is_none());
     }
 }

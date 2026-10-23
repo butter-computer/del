@@ -99,6 +99,14 @@ pub type HostResult<T> = Result<T, HostError>;
 /// any prompt they showed.
 #[async_trait]
 pub trait McpHost: Send + Sync + 'static {
+    async fn goal(
+        &self,
+        _caller: &SessionId,
+        _action: Option<del_agent::GoalAction>,
+    ) -> HostResult<Option<del_agent::Goal>> {
+        Err(HostError::Failed("This host has no goal controls".into()))
+    }
+
     async fn browser(
         &self,
         _caller: &SessionId,

@@ -258,6 +258,36 @@ impl BridgeHandle {
             url: credentials.url,
             token: credentials.token,
             claude_config: file,
+            claude_session_config: Some({
+                let service = Arc::downgrade(&self.service);
+                Arc::new(move |id| {
+                    let service = service
+                        .upgrade()
+                        .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+                    let server = service.server.lock().unwrap();
+                    let server = server
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+                    server.revoke_session(id);
+                    let credentials = server.register_chat_client(id);
+                    let config =
+                        launch::claude(&credentials, &Transport::Http, &service.config_dir)?;
+                    let file = config.files[0].clone();
+                    service
+                        .files
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), config.files);
+                    let (cancel, _) = watch::channel(false);
+                    service
+                        .host
+                        .revocations
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), cancel);
+                    Ok(file)
+                })
+            }),
         })
     }
 
@@ -501,6 +531,17 @@ impl Drop for QuestionGuard {
 
 #[async_trait]
 impl McpHost for AppHost {
+    async fn goal(
+        &self,
+        caller: &SessionId,
+        action: Option<del_agent::GoalAction>,
+    ) -> HostResult<Option<del_agent::Goal>> {
+        self.manager
+            .agent_goal(caller, action)
+            .await
+            .map_err(|error| failed(error.to_string()))
+    }
+
     async fn browser(
         &self,
         caller: &SessionId,

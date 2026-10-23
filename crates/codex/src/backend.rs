@@ -120,6 +120,11 @@ fn turn_input(input: &UserInput) -> Vec<Value> {
             text_input(&format!("[attached file: {path}]"))
         });
     }
+    for skill in &input.skills {
+        if let Some(path) = &skill.target {
+            items.push(json!({"type":"skill","name":skill.name,"path":path}));
+        }
+    }
     items
 }
 
@@ -131,6 +136,42 @@ impl CodexBackend {
             conn: tokio::sync::Mutex::new(None),
             sessions: Default::default(),
         }
+    }
+
+    async fn start_turn(&self, session: &SessionId, items: Vec<Value>) -> Result<()> {
+        let s = self.session(session)?;
+        {
+            let mut st = s.state.lock().unwrap();
+            if st.starting || st.mapper.turn_id().is_some() {
+                return Err(AgentError::Busy("a turn is already running".into()));
+            }
+            st.starting = true;
+        }
+        let conn = self.connection().await?;
+        let mut params = json!({ "threadId": session.as_str(), "input": items });
+        if let Some(config) = &s.state.lock().unwrap().turn_config {
+            let (approval, sandbox) = policy_for(config.permission_mode);
+            params["approvalPolicy"] = json!(approval);
+            params["sandboxPolicy"] = json!({"type": match sandbox {
+                SandboxMode::ReadOnly => "readOnly",
+                SandboxMode::WorkspaceWrite => "workspaceWrite",
+                SandboxMode::DangerFullAccess => "dangerFullAccess",
+            }});
+            params["model"] = json!(config.model);
+            params["effort"] = json!(config.reasoning_effort);
+            params["serviceTier"] = json!(config.service_tier);
+            // A null persistent override can inherit the prior tier. Explicitly
+            // select standard speed for this turn when Fast is switched off.
+            params["serviceTierForTurn"] =
+                json!(config.service_tier.as_deref().unwrap_or("default"));
+        }
+        let result: std::result::Result<TurnResponse, ClientError> =
+            conn.client.call("turn/start", params).await;
+        let mut st = s.state.lock().unwrap();
+        st.starting = false;
+        let resp = result.map_err(be)?;
+        st.mapper.note_turn(&resp.turn.id);
+        Ok(())
     }
 
     /// Check that `codex` can be started and is authenticated, without
@@ -180,6 +221,9 @@ impl CodexBackend {
             return Ok(c.clone());
         }
         let mut spawn = self.opts.spawn.clone();
+        spawn
+            .global_args
+            .extend(["-c".into(), "features.goals=true".into()]);
         if spawn.program == std::path::Path::new("codex") {
             spawn.program = del_agent::detect::find_working_binary("codex")
                 .await
@@ -236,7 +280,7 @@ impl CodexBackend {
         let id = SessionId::new(resp.thread.id);
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
-        let history = if thread.is_some() {
+        let mut history = if thread.is_some() {
             session
                 .state
                 .lock()
@@ -246,6 +290,16 @@ impl CodexBackend {
         } else {
             Vec::new()
         };
+        if thread.is_some()
+            && let Ok(response) = conn
+                .client
+                .request("thread/goal/get", json!({"threadId": id.as_str()}))
+                .await
+        {
+            history.push(AgentEvent::GoalUpdated {
+                goal: crate::commands::goal(&response["goal"]),
+            });
+        }
         Ok(SessionHandle::new(id, provider, session.events.clone()).with_history(history))
     }
 }
@@ -258,6 +312,168 @@ impl AgentBackend for CodexBackend {
 
     fn provider(&self) -> Provider {
         Provider::Codex
+    }
+
+    async fn list_commands(&self, cwd: &std::path::Path) -> Result<Vec<ComposerCommand>> {
+        let conn = self.connection().await.map_err(be)?;
+        let response = conn
+            .client
+            .request("skills/list", json!({"cwds":[cwd],"forceReload":true}))
+            .await
+            .map_err(be)?;
+        Ok(crate::commands::catalog(&response))
+    }
+
+    async fn invoke_command(
+        &self,
+        id: &SessionId,
+        command: ComposerCommand,
+        input: UserInput,
+    ) -> Result<()> {
+        let arguments = split_command(&input.text)
+            .map(|(_, args)| args)
+            .unwrap_or_default();
+        match command.kind {
+            CommandKind::Skill => {
+                let path = command
+                    .target
+                    .ok_or_else(|| be("Skill is missing its provider path"))?;
+                // Preserve the typed command in the provider's saved transcript.
+                let mut items = turn_input(&input);
+                if !input
+                    .skills
+                    .iter()
+                    .any(|skill| skill.name == command.name && skill.target.as_ref() == Some(&path))
+                {
+                    items.push(json!({"type":"skill","name":command.name,"path":path}));
+                }
+                self.start_turn(id, items).await
+            }
+            CommandKind::Goal => {
+                if !input.attachments.is_empty() {
+                    return Err(be("Send attachments in a message before setting a goal."));
+                }
+                if input
+                    .command
+                    .as_ref()
+                    .is_some_and(|c| c.kind == CommandKind::Goal)
+                    && !input.text.starts_with("/goal")
+                {
+                    self.control_goal(id, del_agent::GoalAction::Set(input.goal_objective()))
+                        .await?;
+                    let session = self.session(id)?;
+                    if session.state.lock().unwrap().mapper.turn_id().is_none() {
+                        session.emit(AgentEvent::TurnCompleted {
+                            turn_id: "goal-control".into(),
+                            status: del_agent::TurnStatus::Completed,
+                        });
+                    }
+                    return Ok(());
+                }
+                let conn = self.connection().await.map_err(be)?;
+                let (method, params) = crate::commands::goal_request(id.as_str(), arguments);
+                let response = conn.client.request(method, params).await.map_err(be)?;
+                let session = self.session(id)?;
+                session.emit(AgentEvent::GoalUpdated {
+                    goal: crate::commands::goal(&response["goal"]),
+                });
+                let state = session.state.lock().unwrap();
+                let turn_id = format!(
+                    "goal-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                session.emit(AgentEvent::AssistantMessage {
+                    turn_id: turn_id.clone(),
+                    text: crate::commands::goal_message(method, &response),
+                });
+                // Activating a goal can immediately start a native turn. Do not
+                // finish that turn when reporting the command's local result.
+                if state.mapper.turn_id().is_none() {
+                    session.emit(AgentEvent::TurnCompleted {
+                        turn_id,
+                        status: del_agent::TurnStatus::Completed,
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(be("Change Fast mode using the composer control.")),
+        }
+    }
+
+    async fn control_goal(&self, id: &SessionId, action: del_agent::GoalAction) -> Result<()> {
+        use del_agent::GoalAction;
+        let conn = self.connection().await.map_err(be)?;
+        let (method, params) = match action {
+            GoalAction::Set(objective) => (
+                "thread/goal/set",
+                json!({"threadId":id.as_str(), "objective":objective, "status":"active"}),
+            ),
+            GoalAction::Pause => crate::commands::goal_request(id.as_str(), "pause"),
+            GoalAction::Resume => crate::commands::goal_request(id.as_str(), "resume"),
+            GoalAction::Clear => crate::commands::goal_request(id.as_str(), "clear"),
+        };
+        let response = conn.client.request(method, params).await.map_err(be)?;
+        self.session(id)?.emit(AgentEvent::GoalUpdated {
+            goal: crate::commands::goal(&response["goal"]),
+        });
+        Ok(())
+    }
+
+    async fn generate_title(&self, context: &str) -> Result<Option<String>> {
+        let conn = self.connection().await?;
+        let response: Value = conn.client.request("thread/start", json!({
+            "model":"gpt-5.6-luna", "ephemeral":true, "cwd":std::env::temp_dir(),
+            "approvalPolicy":"never", "sandbox":"read-only", "serviceName":"del-title",
+            "baseInstructions":del_agent::titles::INSTRUCTIONS,
+            "config":{"model_reasoning_effort":"none", "features.shell_tool":false, "features.multi_agent":false, "web_search":"disabled"}
+        })).await.map_err(be)?;
+        let id = response["thread"]["id"]
+            .as_str()
+            .ok_or_else(|| be("Title thread has no id"))?
+            .to_owned();
+        let (events, mut rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        self.sessions.lock().unwrap().insert(
+            id.clone(),
+            Arc::new(Session {
+                events,
+                state: Mutex::new(SessionState::default()),
+            }),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            conn.client
+                .request(
+                    "turn/start",
+                    json!({"threadId":id,"input":[text_input(context)],"effort":"none"}),
+                )
+                .await
+                .map_err(be)?;
+            let mut title = String::new();
+            loop {
+                match rx.recv().await.map_err(be)? {
+                    AgentEvent::AssistantMessage { text, .. } => title = text,
+                    AgentEvent::TurnCompleted {
+                        status: del_agent::TurnStatus::Completed,
+                        ..
+                    } => return Ok(del_agent::titles::clean(&title)),
+                    AgentEvent::Error { message, .. } => return Err(be(message)),
+                    AgentEvent::TurnCompleted { .. }
+                    | AgentEvent::ToolCallStarted { .. }
+                    | AgentEvent::ApprovalRequested { .. } => {
+                        return Err(be("Title request did not produce a plain reply"));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| be("Title generation timed out"))
+        .and_then(|result| result);
+        let _ = self.interrupt(&SessionId::new(id.clone())).await;
+        let _ = self.close(&SessionId::new(id)).await;
+        result
     }
 
     async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
@@ -372,39 +588,7 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
-        let s = self.session(session)?;
-        {
-            let mut st = s.state.lock().unwrap();
-            if st.starting || st.mapper.turn_id().is_some() {
-                return Err(AgentError::Busy("a turn is already running".into()));
-            }
-            st.starting = true;
-        }
-        let conn = self.connection().await?;
-        let mut params = json!({ "threadId": session.as_str(), "input": turn_input(&input) });
-        if let Some(config) = &s.state.lock().unwrap().turn_config {
-            let (approval, sandbox) = policy_for(config.permission_mode);
-            params["approvalPolicy"] = json!(approval);
-            params["sandboxPolicy"] = json!({"type": match sandbox {
-                SandboxMode::ReadOnly => "readOnly",
-                SandboxMode::WorkspaceWrite => "workspaceWrite",
-                SandboxMode::DangerFullAccess => "dangerFullAccess",
-            }});
-            params["model"] = json!(config.model);
-            params["effort"] = json!(config.reasoning_effort);
-            params["serviceTier"] = json!(config.service_tier);
-            // A null persistent override can inherit the prior tier. Explicitly
-            // select standard speed for this turn when Fast is switched off.
-            params["serviceTierForTurn"] =
-                json!(config.service_tier.as_deref().unwrap_or("default"));
-        }
-        let result: std::result::Result<TurnResponse, ClientError> =
-            conn.client.call("turn/start", params).await;
-        let mut st = s.state.lock().unwrap();
-        st.starting = false;
-        let resp = result.map_err(be)?;
-        st.mapper.note_turn(&resp.turn.id);
-        Ok(())
+        self.start_turn(session, turn_input(&input)).await
     }
 
     async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
@@ -616,6 +800,7 @@ mod model_config_tests {
                 url: "http://127.0.0.1:1234/mcp".into(),
                 token: "fixture".into(),
                 claude_config: "/tmp/browser.json".into(),
+                claude_session_config: None,
             },
         );
         assert_eq!(params["config"]["model_reasoning_effort"], "high");
@@ -630,6 +815,8 @@ mod model_config_tests {
     #[test]
     fn mixed_attachments_keep_documents_as_files_and_images_as_images() {
         let input = del_agent::UserInput {
+            command: None,
+            skills: Vec::new(),
             text: "inspect".into(),
             attachments: [
                 ("report.pdf", "application/pdf"),

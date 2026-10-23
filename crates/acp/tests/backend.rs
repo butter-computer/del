@@ -69,6 +69,8 @@ async fn non_image_attachments_reach_the_agent_as_file_references() {
         .send_prompt(
             &handle.id,
             UserInput {
+                command: None,
+                skills: Vec::new(),
                 text: "inspect-attachments".into(),
                 attachments: [
                     ("report.pdf", "application/pdf"),
