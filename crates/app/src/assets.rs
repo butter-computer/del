@@ -45,6 +45,7 @@ impl AssetSource for AppAssets {
             "icons/steer.svg" => Some(include_bytes!("../assets/icons/steer.svg")),
             "icons/grip.svg" => Some(include_bytes!("../assets/icons/grip.svg")),
             "icons/queue.svg" => Some(include_bytes!("../assets/icons/queue.svg")),
+            "icons/restore.svg" => Some(include_bytes!("../assets/icons/restore.svg")),
             "icons/archive.svg" => Some(include_bytes!("../assets/icons/archive.svg")),
             "icons/filetypes/pdf.png" => Some(include_bytes!("../assets/icons/filetypes/pdf.png")),
             "icons/filetypes/docx.png" => {
@@ -111,6 +112,7 @@ mod tests {
             "icons/pin-outline.svg",
             "icons/pin-filled.svg",
             "icons/archive.svg",
+            "icons/restore.svg",
         ] {
             let bytes = AppAssets.load(path).unwrap().expect("custom pin SVG");
             assert!(std::str::from_utf8(&bytes).unwrap().contains("<svg"));

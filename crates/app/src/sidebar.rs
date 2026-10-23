@@ -143,6 +143,52 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         )
 }
 
+fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div {
+    let restore_state = state.clone();
+    let restore_id = id.clone();
+    let delete_state = state.clone();
+    let delete_id = id.clone();
+    h_flex()
+        .items_center()
+        .gap(zpx(4.0))
+        .child(
+            Button::new(SharedString::from(format!("restore-{}", id.0)))
+                .text()
+                .size(zpx(20.0))
+                .p_0()
+                .tooltip("Restore")
+                .accessibility_label("Restore")
+                .text_color(rgba(MUTED))
+                .child(
+                    Icon::default()
+                        .path("icons/restore.svg")
+                        .with_size(zpx(CONTROL_ICON_SIZE)),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    restore_state.update(cx, |s, cx| s.restore(restore_id.clone(), cx));
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("delete-{}", id.0)))
+                .ghost()
+                .with_size(zpx(20.0))
+                .tooltip("Permanently delete")
+                .accessibility_label("Permanently delete")
+                .child(
+                    Icon::new(ActionIcon::Trash)
+                        .with_size(zpx(CONTROL_ICON_SIZE))
+                        .text_color(rgb(0xff646b)),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    delete_state.update(cx, |s, cx| s.permanently_delete(delete_id.clone(), cx));
+                }),
+        )
+}
+
 fn session_menu_item(
     label: &'static str,
     icon: Icon,
@@ -323,7 +369,7 @@ fn row_item(
                     .h(zpx(20.0))
                     .items_center()
                     .gap(zpx(4.0))
-                    .when(!archived, |actions| actions.w(zpx(44.0)))
+                    .w(zpx(44.0))
                     .rounded_sm()
                     .opacity(0.0)
                     .group_hover(hover_group, |a| a.opacity(1.0))
@@ -349,14 +395,7 @@ fn row_item(
                             }),
                         )
                     })
-                    .when(archived, |a| {
-                        a.child(
-                            div()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(rgba(MUTED))
-                                .child("Restore"),
-                        )
-                    }),
+                    .when(archived, |a| a.child(archived_actions(&id, state))),
             );
 
         if !archived {
@@ -801,8 +840,14 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                             .children(archived_terminals.iter().map(|row| {
                                 let state = state.clone();
                                 let id = row.id.clone();
+                                let group =
+                                    SharedString::from(format!("archived-terminal-{}", id.0));
+                                let actions = archived_actions(&id, &state);
                                 h_flex()
-                                    .id(SharedString::from(format!("archived-terminal-{}", id.0)))
+                                    .id(group.clone())
+                                    .group(group.clone())
+                                    .relative()
+                                    .items_center()
                                     .h(zpx(ROW_HEIGHT))
                                     .min_h(zpx(ROW_HEIGHT))
                                     .flex_none()
@@ -812,11 +857,14 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                     .cursor_pointer()
                                     .hover(|row| row.bg(rgba(0xffffff0a)))
                                     .child(div().flex_1().truncate().child(s.current_title(&id)))
+                                    .child(div().flex_none().w(zpx(44.0)))
                                     .child(
-                                        div()
-                                            .text_size(zpx(TEXT_SM))
-                                            .text_color(rgba(MUTED))
-                                            .child("Restore"),
+                                        actions
+                                            .absolute()
+                                            .right(zpx(8.0))
+                                            .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+                                            .opacity(0.0)
+                                            .group_hover(group, |a| a.opacity(1.0)),
                                     )
                                     .on_click(move |_, _, cx| {
                                         state.update(cx, |s, cx| s.restore(id.clone(), cx))

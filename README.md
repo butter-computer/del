@@ -153,6 +153,8 @@ conversation. Unloading a running session also stops its current work.
   name is being generated. Titles persist across restarts, manual
   renames take precedence, and failed requests retain the first-message fallback.
   Empty drafts remain “New session.” Terminal titles follow provider metadata.
+  Archived chat and terminal rows show Restore and Permanently delete icons on hover.
+  The delete icon stays red, including when hovered.
 - A blue dot at the far right marks unread conversations, including background
   replies that finish before being opened. Hover actions make room for the dot.
 - Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
