@@ -628,10 +628,10 @@ async fn model_effort_and_fast_changes_reach_next_turn_in_same_thread() {
         ACCOUNT_OK[1],
         THREAD[0],
         THREAD[1],
-        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}],"model":"model-b","effort":"high","serviceTier":"priority","serviceTierForTurn":"priority"}}"#,
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"model-b","effort":"high","serviceTier":"priority","serviceTierForTurn":"priority"}}"#,
         r#"< {"id":4,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
         r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[]}}}"#,
-        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"again"}],"model":"model-c","effort":"low","serviceTier":null,"serviceTierForTurn":"default"}}"#,
+        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"again"}],"approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly"},"model":"model-c","effort":"low","serviceTier":null,"serviceTierForTurn":"default"}}"#,
         r#"< {"id":5,"result":{"turn":{"id":"u2","status":"inProgress","items":[]}}}"#,
         r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u2","status":"completed","items":[]}}}"#,
     ]);
@@ -641,6 +641,7 @@ async fn model_effort_and_fast_changes_reach_next_turn_in_same_thread() {
     let mut events = h.subscribe();
     let mut settings = config();
     settings.model = Some("model-b".into());
+    settings.permission_mode = PermissionMode::FullAuto;
     settings.reasoning_effort = Some("high".into());
     settings.service_tier = Some("priority".into());
     assert_eq!(
@@ -657,6 +658,7 @@ async fn model_effort_and_fast_changes_reach_next_turn_in_same_thread() {
         .unwrap();
     until_turn_end(&mut events).await;
     settings.model = Some("model-c".into());
+    settings.permission_mode = PermissionMode::Ask;
     settings.reasoning_effort = Some("low".into());
     settings.service_tier = None;
     backend.reconfigure(settings, &h.id).await.unwrap();

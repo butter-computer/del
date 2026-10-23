@@ -580,6 +580,8 @@ impl McpHost for AppHost {
             })?;
             self.reply(caller, rx).await?
         } else {
+            crate::providers::prepare_session_permissions(&self.manager, target)
+                .map_err(|e| failed(e.to_string()))?;
             self.manager
                 .resume(target)
                 .await

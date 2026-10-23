@@ -120,7 +120,7 @@ impl ClaudeBackend {
         .map(String::from)
         .to_vec();
         if config.permission_mode == PermissionMode::FullAuto {
-            a.push("--allow-dangerously-skip-permissions".into());
+            a.push("--dangerously-skip-permissions".into());
         }
         a.extend(session_flag.map(String::from));
         if let Some(m) = &config.model {
@@ -427,6 +427,34 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
 #[cfg(test)]
 mod model_config_tests {
     use super::*;
+    #[test]
+    fn full_access_bypasses_permissions_for_new_and_resumed_chats() {
+        let backend = ClaudeBackend::new(ClaudeOptions::default());
+        let mut config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Claude,
+            permission_mode: PermissionMode::FullAuto,
+        };
+        for flag in ["--session-id", "--resume"] {
+            let args = backend.args(&config, [flag, "test"]);
+            assert!(args.contains(&"--dangerously-skip-permissions".into()));
+            assert!(
+                args.windows(2)
+                    .any(|w| w == ["--permission-mode", "bypassPermissions"])
+            );
+            assert!(args.windows(2).any(|w| w == [flag, "test"]));
+        }
+        config.permission_mode = PermissionMode::Ask;
+        assert!(
+            !backend
+                .args(&config, ["--session-id", "test"])
+                .contains(&"--dangerously-skip-permissions".into())
+        );
+    }
+
     #[test]
     fn effort_is_forwarded_only_when_selected() {
         let backend = ClaudeBackend::new(ClaudeOptions::default());

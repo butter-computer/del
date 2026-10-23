@@ -7,6 +7,29 @@
 
 use del_agent::{LoginState, Provider, ProviderStatus};
 
+/// Del starts the built-in agents with full access; ACP keeps its own policy.
+pub fn permission_mode(provider: Provider) -> del_agent::PermissionMode {
+    match provider {
+        Provider::Codex | Provider::Claude => del_agent::PermissionMode::FullAuto,
+        Provider::Acp => del_agent::PermissionMode::Ask,
+    }
+}
+
+pub fn prepare_session_permissions(
+    manager: &del_agent::SessionManager,
+    id: &del_agent::SessionId,
+) -> del_agent::Result<()> {
+    if let Some(record) = manager
+        .list_sessions()
+        .into_iter()
+        .find(|record| &record.id == id)
+        && matches!(record.provider, Provider::Codex | Provider::Claude)
+    {
+        manager.set_permission_mode(id, permission_mode(record.provider))?;
+    }
+    Ok(())
+}
+
 pub fn ready(st: &ProviderStatus) -> bool {
     st.installed && (st.provider == Provider::Acp || st.login == LoginState::LoggedIn)
 }
@@ -91,6 +114,40 @@ pub fn launch_login(provider: Provider, path: &std::path::Path) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reopening_builtin_sessions_persists_full_access_and_leaves_acp_alone() {
+        use del_agent::{MockBackend, PermissionMode, SessionConfig, SessionManager};
+        let directory = tempfile::tempdir().unwrap();
+        let backends = Provider::ALL.iter().map(|&provider| {
+            std::sync::Arc::new(MockBackend::new(provider))
+                as std::sync::Arc<dyn del_agent::AgentBackend>
+        });
+        let manager =
+            SessionManager::new(directory.path().join("sessions.jsonl"), backends).unwrap();
+        for provider in Provider::ALL {
+            let config = SessionConfig {
+                provider,
+                cwd: directory.path().into(),
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: PermissionMode::Ask,
+            };
+            let session = manager.start_session(config).await.unwrap();
+            manager.close(&session.id).await.unwrap();
+            prepare_session_permissions(&manager, &session.id).unwrap();
+            prepare_session_permissions(&manager, &session.id).unwrap();
+            let record = manager
+                .list_sessions()
+                .into_iter()
+                .find(|record| record.id == session.id)
+                .unwrap();
+            assert_eq!(record.permission_mode, permission_mode(provider));
+            assert_eq!(manager.resume(&session.id).await.unwrap().id, session.id);
+        }
+        manager.shutdown().await;
+    }
 
     #[test]
     fn summary_covers_each_state() {

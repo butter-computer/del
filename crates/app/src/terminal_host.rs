@@ -205,13 +205,22 @@ impl TerminalLaunchSpec {
             ));
         }
         let mut args = self.args.clone();
+        let bypass = match self.kind {
+            TerminalLaunchKind::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
+            TerminalLaunchKind::Claude => Some("--dangerously-skip-permissions"),
+            _ => None,
+        };
+        if let Some(flag) = bypass
+            && !args.iter().any(|arg| arg == flag)
+        {
+            args.push(flag.into());
+        }
         let cwd = self.cwd.canonicalize()?;
         if self.kind == TerminalLaunchKind::Codex {
             // Login shell startup files may change directories. Pin the CLI's
             // workspace independently of that shell's final working directory.
             args.extend(["--cd".into(), cwd.to_string_lossy().into_owned()]);
-            // Scope trust to the folder explicitly opened in Del. Keep the
-            // provider's approval policy and sandbox settings unchanged.
+            // Scope startup folder trust to the workspace opened in Del.
             args.extend([
                 "-c".into(),
                 format!(
@@ -1049,13 +1058,50 @@ mod tests {
                 .to_string_lossy()
                 .into_owned();
             if kind == TerminalLaunchKind::Codex {
+                expected.push("--dangerously-bypass-approvals-and-sandbox");
                 expected.extend(["--cd", &canonical_cwd]);
                 expected.extend(["-c", &trust]);
                 expected.extend(["-c", r#"tui.terminal_title=["session-id","thread-name"]"#]);
+            } else {
+                expected.push("--dangerously-skip-permissions");
             }
             expected.extend(["--", prompt]);
             assert_eq!(prepared.args, expected);
             assert_eq!(prepared.cwd, Some(config.cwd.canonicalize().unwrap()));
+        }
+    }
+
+    #[test]
+    fn resumed_terminal_launches_receive_one_bypass_flag() {
+        for (kind, flag) in [
+            (
+                TerminalLaunchKind::Codex,
+                "--dangerously-bypass-approvals-and-sandbox",
+            ),
+            (TerminalLaunchKind::Claude, "--dangerously-skip-permissions"),
+        ] {
+            let mut spec = TerminalLaunchSpec {
+                kind,
+                cwd: std::env::temp_dir(),
+                program: Some("/bin/cat".into()),
+                args: vec![
+                    if kind == TerminalLaunchKind::Codex {
+                        "resume"
+                    } else {
+                        "--resume"
+                    }
+                    .into(),
+                    "saved-id".into(),
+                ],
+                title: "Test".into(),
+                login_env: false,
+            };
+            for _ in 0..2 {
+                let prepared = spec.prepare(vec![], vec![]).unwrap();
+                assert_eq!(prepared.args.iter().filter(|arg| *arg == flag).count(), 1);
+                assert!(prepared.args.contains(&"saved-id".into()));
+                spec.args.push(flag.into());
+            }
         }
     }
 
@@ -1092,6 +1138,7 @@ mod tests {
             prepared.args,
             [
                 "original",
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--cd",
                 &spec.cwd.canonicalize().unwrap().to_string_lossy(),
                 "-c",

@@ -255,7 +255,7 @@ impl AppState {
                     reasoning_effort: None,
                     service_tier: None,
                     provider: Provider::Claude,
-                    permission_mode: PermissionMode::default(),
+                    permission_mode: providers::permission_mode(Provider::Claude),
                 },
             )]),
             panel: Panel::Chat,
@@ -372,6 +372,7 @@ impl AppState {
                             .any(|s| s.provider == draft.provider && providers::ready(s));
                         if !draft_ready {
                             draft.provider = ready.provider;
+                            draft.permission_mode = providers::permission_mode(ready.provider);
                             draft.model = None;
                             draft.reasoning_effort = None;
                             draft.service_tier = None;
@@ -440,12 +441,7 @@ impl AppState {
                 cwd: r.cwd,
                 reasoning_effort: self.effort(),
                 service_tier: self.service_tier(),
-                permission_mode: self
-                    .records
-                    .iter()
-                    .find(|record| record.id == r.id)
-                    .map(|record| record.permission_mode)
-                    .unwrap_or_default(),
+                permission_mode: providers::permission_mode(r.provider),
             })
         });
         // Wait for provider discovery/sign-in; never open an authentication UI
@@ -912,7 +908,7 @@ impl AppState {
                 reasoning_effort: None,
                 service_tier: None,
                 provider,
-                permission_mode: PermissionMode::default(),
+                permission_mode: providers::permission_mode(provider),
             },
         );
         self.new_uid(Tab::Draft(key));
@@ -1341,6 +1337,7 @@ impl AppState {
         if let Some(d) = self.draft_mut() {
             if d.provider != provider {
                 d.provider = provider;
+                d.permission_mode = providers::permission_mode(provider);
                 d.model = None;
                 d.reasoning_effort = None;
                 d.service_tier = None;
@@ -1518,11 +1515,31 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, Arc, HashMap, Overrides, Panel, PermissionMode, Provider, Selection,
-        SessionConfig, SessionManager, Tab, unbounded_channel,
+        AppState, Arc, HashMap, Overrides, Panel, Provider, Selection, SessionConfig,
+        SessionManager, Tab, unbounded_channel,
     };
+    use crate::providers;
     use gpui::AppContext as _;
     use gpui::Entity;
+
+    #[gpui::test]
+    fn draft_permissions_follow_provider_on_new_tabs_and_switches(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |state, cx| {
+            for provider in [Provider::Codex, Provider::Claude, Provider::Acp] {
+                state.set_provider(provider, cx);
+                assert_eq!(
+                    state.draft().unwrap().permission_mode,
+                    providers::permission_mode(provider)
+                );
+                state.new_session(cx);
+                assert_eq!(
+                    state.draft().unwrap().permission_mode,
+                    providers::permission_mode(state.draft().unwrap().provider)
+                );
+            }
+        });
+    }
 
     #[gpui::test]
     fn closing_settings_preserves_selection_and_terminal_toggle_keeps_sessions(
@@ -1576,7 +1593,7 @@ mod tests {
                     reasoning_effort: None,
                     service_tier: None,
                     provider: Provider::Claude,
-                    permission_mode: PermissionMode::default(),
+                    permission_mode: providers::permission_mode(Provider::Claude),
                 },
             )]),
             next_draft: 1,

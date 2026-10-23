@@ -374,6 +374,13 @@ impl AgentBackend for CodexBackend {
         let conn = self.connection().await?;
         let mut params = json!({ "threadId": session.as_str(), "input": turn_input(&input) });
         if let Some(config) = &s.state.lock().unwrap().turn_config {
+            let (approval, sandbox) = policy_for(config.permission_mode);
+            params["approvalPolicy"] = json!(approval);
+            params["sandboxPolicy"] = json!({"type": match sandbox {
+                SandboxMode::ReadOnly => "readOnly",
+                SandboxMode::WorkspaceWrite => "workspaceWrite",
+                SandboxMode::DangerFullAccess => "dangerFullAccess",
+            }});
             params["model"] = json!(config.model);
             params["effort"] = json!(config.reasoning_effort);
             params["serviceTier"] = json!(config.service_tier);
@@ -593,6 +600,21 @@ mod model_config_tests {
         assert_eq!(items[3]["type"], "localImage");
     }
     use super::*;
+    #[test]
+    fn full_access_disables_approval_and_sandbox_for_chat_threads() {
+        let config = SessionConfig {
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            provider: Provider::Codex,
+            permission_mode: PermissionMode::FullAuto,
+        };
+        let params = thread_params(&config);
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandbox"], "danger-full-access");
+    }
+
     #[test]
     fn effort_is_forwarded_only_when_selected() {
         let mut config = SessionConfig {

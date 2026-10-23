@@ -25,6 +25,7 @@ pub struct Backend {
 
 impl Backend {
     pub async fn resume(&self, id: &SessionId) -> del_agent::Result<del_agent::SessionHandle> {
+        crate::providers::prepare_session_permissions(&self.manager, id)?;
         self.manager.resume(id).await
     }
 }

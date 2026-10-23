@@ -261,9 +261,17 @@ override and an explicit `--cd` so login shell startup cannot change its workspa
 Both providers' recognized startup trust dialogs are confirmed as soon as they
 appear (100 ms polling), with short retries only while the exact workspace prompt
 remains visible. Confirmation is limited to startup (two minutes) and stops once
-the prompt disappears. Tool approval and sandbox settings remain unchanged;
-unrecognized dialogs stay interactive.
+the prompt disappears. Unrecognized dialogs stay interactive.
 Shell/custom commands and arbitrary ACP agents keep their own trust setup.
+
+Del starts and reopens Codex and Claude sessions with full access by default.
+Codex chat uses `approvalPolicy: never` and `sandbox: danger-full-access`;
+Codex terminals use `--dangerously-bypass-approvals-and-sandbox` (YOLO mode).
+Claude chat uses `bypassPermissions` with `--dangerously-skip-permissions`,
+and Claude terminals use the same bypass flag. These modes allow file changes
+and command execution without tool-approval prompts. Existing saved chats adopt
+the setting when reopened; there is currently no in-chat permission toggle.
+ACP sessions and custom shell commands keep their existing permission behavior.
 
 Del's MCP bridge provides scoped session coordination, status, notifications,
 and user questions for supported terminal agents. Launch-specific credentials
@@ -392,7 +400,8 @@ steering without duplicate output, attachments, terminal resume identities,
 PTY lifecycle, updater ownership/failure handling, and persisted UI metadata.
 UI regression tests also cover preview tabs, unload/resume, hover clipping and
 collapse fading, first-chunk fading, reasoning-step boundaries, and zoom shortcuts
-with composer or terminal focus.
+with composer or terminal focus. Permission tests cover new and resumed sessions,
+terminal bypass flags, and Codex permission changes on subsequent turns.
 Tests requiring installed/authenticated provider CLIs are ignored by default;
 run those explicitly when validating live-provider behavior. Signing continuity
 and installation while running have separate macOS regression scripts.

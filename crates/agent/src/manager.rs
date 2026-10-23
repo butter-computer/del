@@ -443,6 +443,18 @@ impl SessionManager {
         })
     }
 
+    /// Persist permissions for the next launch or idle-turn reconfiguration.
+    pub fn set_permission_mode(&self, id: &SessionId, mode: PermissionMode) -> Result<()> {
+        let mut index = self.shared.index.lock().unwrap();
+        let record = index
+            .get(id)
+            .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        if record.permission_mode == mode {
+            return Ok(());
+        }
+        index.update(id, |record| record.permission_mode = mode)
+    }
+
     pub async fn steer(&self, id: &SessionId, text: String) -> Result<()> {
         self.backend(self.live_provider(id)?)?.steer(id, text).await
     }
@@ -746,6 +758,8 @@ mod tests {
         let (before, _) = m.subscribe_with_history(&h.id).unwrap();
         m.set_model_settings(&h.id, Some("new-model".into()), Some("high".into()), None)
             .unwrap();
+        m.set_permission_mode(&h.id, PermissionMode::FullAuto)
+            .unwrap();
         m.send_prompt(&h.id, UserInput::text("second"))
             .await
             .unwrap();
@@ -770,6 +784,14 @@ mod tests {
         assert_eq!(
             m.shared.live.lock().unwrap()[&h.id].config.model.as_deref(),
             Some("new-model")
+        );
+        assert_eq!(
+            m.shared.live.lock().unwrap()[&h.id].config.permission_mode,
+            PermissionMode::FullAuto
+        );
+        assert_eq!(
+            m.list_sessions()[0].permission_mode,
+            PermissionMode::FullAuto
         );
         assert_eq!(m.list_sessions().len(), 1);
     }
