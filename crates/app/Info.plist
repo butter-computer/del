@@ -9,4 +9,6 @@
   <key>CFBundleVersion</key><string>0.1.0</string>
   <key>CFBundleIconFile</key><string>Del.icns</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Del uses your microphone to dictate text into the message composer.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Del uses Apple speech recognition for dictation. Audio may be processed by Apple when on-device recognition is unavailable.</string>
 </dict></plist>

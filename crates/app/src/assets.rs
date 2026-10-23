@@ -19,6 +19,7 @@ impl AssetSource for AppAssets {
             return Ok(Some(bytes));
         }
         let bytes: Option<&'static [u8]> = match path {
+            "icons/microphone.svg" => Some(include_bytes!("../assets/icons/microphone.svg")),
             "icons/claude.svg" => Some(include_bytes!("../assets/icons/claude.svg")),
             "icons/codex.svg" => Some(include_bytes!("../assets/icons/codex.svg")),
             "icons/acp.svg" => Some(include_bytes!("../assets/icons/acp.svg")),

@@ -43,6 +43,8 @@ pub struct ComposerCard {
     running: bool,
     starting: bool,
     on_send: Handler,
+    on_voice: Handler,
+    dictation: crate::dictation::Phase,
     on_attach: Handler,
     on_paste: PasteHandler,
     has_attachments: bool,
@@ -77,6 +79,8 @@ impl ComposerCard {
             running,
             starting: false,
             on_send: noop.clone(),
+            on_voice: noop.clone(),
+            dictation: Default::default(),
             on_attach: noop.clone(),
             on_paste: Rc::new(|_, _, _| false),
             has_attachments: false,
@@ -120,6 +124,14 @@ impl ComposerCard {
         self.on_send = Rc::new(f);
         self
     }
+    pub fn dictation(mut self, phase: crate::dictation::Phase) -> Self {
+        self.dictation = phase;
+        self
+    }
+    pub fn on_voice(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_voice = Rc::new(handler);
+        self
+    }
     pub fn on_stop(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_stop = Rc::new(f);
         self
@@ -159,8 +171,9 @@ fn chip(id: &'static str) -> Button {
 
 impl RenderOnce for ComposerCard {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let can_send =
-            self.has_attachments || composer::submission(&self.input.read(cx).value()).is_some();
+        let can_send = self.dictation == crate::dictation::Phase::Idle
+            && (self.has_attachments
+                || composer::submission(&self.input.read(cx).value()).is_some());
         let muted = rgba(0xffffff8c);
         let ComposerCard {
             input,
@@ -174,6 +187,8 @@ impl RenderOnce for ComposerCard {
             running,
             starting,
             on_send,
+            on_voice,
+            dictation,
             on_attach,
             on_paste,
             has_attachments: _,
@@ -264,6 +279,37 @@ impl RenderOnce for ComposerCard {
                     ))
             };
 
+        let voice_label = match dictation {
+            crate::dictation::Phase::Idle => "Dictate with Apple speech recognition",
+            crate::dictation::Phase::Starting => "Cancel dictation setup",
+            crate::dictation::Phase::Listening => "Stop dictation",
+            crate::dictation::Phase::Finishing => "Finishing dictation…",
+        };
+        let voice = chip("dictate")
+            .size(zpx(28.))
+            .disabled(starting && dictation == crate::dictation::Phase::Idle)
+            .tooltip(voice_label)
+            .accessibility_label(voice_label)
+            .when(dictation == crate::dictation::Phase::Listening, |button| {
+                button.bg(rgba(0xff505024))
+            })
+            .child(match dictation {
+                crate::dictation::Phase::Idle => Icon::default()
+                    .path("icons/microphone.svg")
+                    .with_size(zpx(16.))
+                    .text_color(muted)
+                    .into_any_element(),
+                crate::dictation::Phase::Listening => div()
+                    .size(zpx(8.))
+                    .rounded_xs()
+                    .bg(rgb(0xff6666))
+                    .into_any_element(),
+                _ => gpui_kit::component::spinner::Spinner::new()
+                    .small()
+                    .into_any_element(),
+            })
+            .on_click(move |_, window, cx| on_voice(window, cx));
+
         // No border: the card is told apart from the page by its fill alone.
         v_flex()
             .w_full()
@@ -299,7 +345,7 @@ impl RenderOnce for ComposerCard {
                             .child(model_picker)
                             .when(show_folder, |row| row.child(folder_el)),
                     )
-                    .child(action),
+                    .child(h_flex().items_center().gap_1().child(voice).child(action)),
             )
     }
 }

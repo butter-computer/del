@@ -17,6 +17,7 @@ mod attachments;
 mod browser;
 mod chat;
 mod composer_ui;
+mod dictation;
 mod document_preview;
 mod followup_ui;
 mod followups;
@@ -37,6 +38,7 @@ mod terminal_conversation;
 #[allow(dead_code)]
 mod terminal_host;
 mod terminal_store;
+mod voice_ui;
 mod zoom;
 
 use crate::appearance::{page_surface, rgb, rgba, shell_surface};
@@ -253,6 +255,8 @@ struct AppShell {
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
+    dictation: Option<dictation::Dictation>,
+    dictation_generation: u64,
     model_picker: Entity<model_picker::ModelPicker>,
     rename: Entity<InputState>,
     /// The session whose title is loaded into the rename field.
@@ -447,7 +451,18 @@ impl AppShell {
                 InputEvent::PressEnter { secondary, shift } if !shift => {
                     this.submit_with_mode(*secondary || window.modifiers().platform, window, cx)
                 }
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => {
+                    if this.dictation.as_ref().is_some_and(|voice| {
+                        voice.draft.displayed != this.composer.read(cx).value().as_ref()
+                    }) {
+                        this.cancel_dictation(cx);
+                    }
+                    cx.notify();
+                }
+                InputEvent::Focus if this.dictation.is_some() => {
+                    this.settle_dictation(window, cx);
+                    this.cancel_dictation(cx);
+                }
                 _ => {}
             },
         )
@@ -539,6 +554,8 @@ impl AppShell {
             right_toggles: 0,
             right_animate: false,
             chats: HashMap::new(),
+            dictation: None,
+            dictation_generation: 0,
             composer_owner: 0,
             composer_drafts: HashMap::new(),
             composer_attachments: HashMap::new(),
@@ -569,6 +586,7 @@ impl AppShell {
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
         cx.on_app_quit(|this, cx| {
+            this.cancel_dictation(cx);
             this.remember_right(cx);
             this.persist_right(cx);
             if let Err(error) = this.sidebar_widths.save() {
@@ -853,6 +871,9 @@ impl AppShell {
     }
 
     fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dictation.is_some() {
+            return;
+        }
         let owner = self.composer_owner(cx);
         let text = self.composer.read(cx).value().trim().to_string();
         let attachments = self
@@ -923,6 +944,7 @@ impl AppShell {
         let shell_stop = shell.clone();
         let shell_attach = shell.clone();
         let shell_paste = shell.clone();
+        let shell_voice = shell.clone();
         let retry_state = self.state.clone();
         let owner = self.composer_owner(cx);
         let has_attachments = self
@@ -939,6 +961,14 @@ impl AppShell {
             locked,
             running,
         )
+        .dictation(
+            self.dictation
+                .as_ref()
+                .map_or(dictation::Phase::Idle, |voice| voice.phase),
+        )
+        .on_voice(move |window, cx| {
+            shell_voice.update(cx, |this, cx| this.toggle_dictation(window, cx))
+        })
         .show_folder(locked || self.state.read(cx).pending_prompt().is_some())
         .starting(
             self.state.read(cx).is_starting()
@@ -1624,6 +1654,11 @@ impl Render for AppShell {
                     );
                 });
             }
+        }
+        if self.dictation.as_ref().is_some_and(|voice| {
+            voice.owner != self.composer_owner(cx) || self.state.read(cx).panel != Panel::Chat
+        }) {
+            self.cancel_dictation(cx);
         }
         let settings_open = self.state.read(cx).panel == Panel::Providers;
         if settings_open && !self.settings_focused {

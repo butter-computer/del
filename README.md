@@ -2,7 +2,8 @@
 
 Del is a native Rust desktop workspace for coding agents, built with GPUI. It
 combines Codex, Claude Code, and installed ACP agents with conversation tabs,
-a follow-up queue, a file viewer, and integrated terminals.
+a follow-up queue, a file viewer, integrated terminals, a session browser, and
+native Apple voice dictation.
 
 The project is a local-development application (version `0.1.0`), with macOS as
 the current desktop target. Provider CLIs handle authentication and inference;
@@ -18,7 +19,7 @@ and the provider CLI you want to use. Sign in through that CLI or use Del's
 cargo run --locked -p del-app
 ```
 
-For the signed macOS application, Dock icon, and a stable launch path:
+For the signed macOS application, voice input, Dock icon, and a stable launch path:
 
 ```sh
 ./scripts/bundle-macos.sh
@@ -217,6 +218,35 @@ ACP steering is currently unsupported and leaves the message available to retry.
 Steering during streaming keeps the current assistant answer in one block.
 Sent steering messages use a small muted yellow queue icon beside the text,
 without a separate “steer” heading.
+
+### Voice input
+
+Click the microphone beside Send to dictate into the composer using Apple's
+[Speech framework](https://developer.apple.com/documentation/speech). Click the
+red stop button to finish, then review or edit the text and send it normally.
+Completed phrases stay in the draft across pauses; only the current phrase is
+revised. Incoming text reveals over 80 ms (instant with Reduce Motion). Send and
+keyboard submission are disabled during dictation, and the caret stays hidden.
+Stop dictation before sending; clicking into the composer stops capture and
+restores editing, including any words still appearing.
+
+There is no Del recording-duration limit: Apple's bounded recognition requests
+renew in the background while capture stays active. Editing, switching chats,
+opening Settings, or quitting stops capture. Del does not save audio. Apple
+service availability and quotas still apply.
+
+Native bridges target macOS 11 or later even when built with a newer SDK, retaining
+runtime availability checks. Microphone capture uses the long-supported audio tap
+API; optional punctuation is enabled only on macOS 13 and later.
+
+Use the signed `del.app` build for voice input. On first use, macOS asks for
+Microphone and Speech Recognition access. Denied access can be changed in
+**System Settings → Privacy & Security**. Raw `cargo run` builds show a helpful
+error instead of requesting permissions without bundle metadata.
+
+Recognition uses the current macOS locale and runs on-device when Apple supports
+it for that locale; otherwise Apple's speech service may require a connection.
+No Codex, Claude, or third-party transcription API is used.
 
 ## Files, terminals, and browser
 
@@ -459,4 +489,12 @@ across process restarts, profile deletion, and pointer routing during sidebar re
 
 ```sh
 python3 scripts/test-browser.py
+```
+
+Dictation lifecycle checks do not record audio or prompt for permissions:
+
+```sh
+clang -fobjc-arc -mmacosx-version-min=11.0 scripts/test-dictation.m -framework AppKit -framework Speech \
+  -framework AVFoundation -o /tmp/del-dictation-test
+/tmp/del-dictation-test
 ```
