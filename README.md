@@ -96,12 +96,13 @@ conversation history and composer drafts.
 **⌘K** opens conversation search. Search message text or titles across saved Codex
 and Claude chats, including terminal conversations and archived sessions. Use
 **↑/↓** to select a match, **Enter** (or click) to open it, and **Escape** to close.
-Add **/chat** or **/terminal** to limit results to that session type; use either
+Add **/c** for chats or **/t** for terminals to limit results; use either
 filter by itself to list its sessions. Tab shortcut badges stay hidden while
 the palette is open.
 
-Results show the matching passage; opening one keeps its tab, scrolls to the
-matched text, and briefly highlights it, including within Markdown replies.
+Assistant previews render Markdown and highlight the matching words. Opening a
+result keeps its tab, scrolls to the matched text, and briefly highlights it,
+including within Markdown replies.
 
 Search reads local provider transcripts on a background worker and caches their
 message text in memory, refreshing changed files when the palette opens. It does

@@ -4,17 +4,22 @@ use gpui_kit::{
     component::{
         dialog::DialogEntrance,
         input::{Input, InputEvent, InputState},
+        text::{TextView, TextViewState, TextViewStyle},
         *,
     },
     prelude::*,
     *,
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 pub struct Palette {
     input: Entity<InputState>,
     documents: Vec<Arc<search::Document>>,
     hits: Vec<search::Hit>,
+    previews: HashMap<usize, Preview>,
     selected: usize,
     scroll: ListState,
     loading: bool,
@@ -23,6 +28,11 @@ pub struct Palette {
     generation: u64,
     runtime: tokio::runtime::Handle,
 }
+struct Preview {
+    view: Entity<TextViewState>,
+    highlighted: bool,
+}
+
 pub enum PaletteEvent {
     Open(search::Hit),
     Close,
@@ -43,6 +53,7 @@ impl Palette {
             input,
             documents: vec![],
             hits: vec![],
+            previews: HashMap::new(),
             selected: 0,
             scroll: ListState::new(0, ListAlignment::Top, zpx(200.)),
             loading: true,
@@ -62,6 +73,7 @@ impl Palette {
         let documents = self.documents.clone();
         self.loading = true;
         self.hits.clear();
+        self.previews.clear();
         self.scroll.reset(0);
         let task = self
             .runtime
@@ -88,9 +100,70 @@ impl Palette {
             cx.emit(PaletteEvent::Open(hit.clone()));
         }
     }
-    fn result(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(hit) = self.hits.get(ix) else {
+    fn result(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(hit) = self.hits.get(ix).cloned() else {
             return div().into_any_element();
+        };
+        let preview = if hit
+            .message
+            .is_some_and(|i| hit.document.messages[i].role == "Assistant")
+        {
+            let preview = self.previews.entry(ix).or_insert_with(|| {
+                let view = cx.new(|cx| TextViewState::markdown(&hit.snippet, cx));
+                cx.observe(&view, |_, _, cx| cx.notify()).detach();
+                Preview {
+                    view,
+                    highlighted: false,
+                }
+            });
+            if !preview.highlighted {
+                preview.highlighted = preview.view.update(cx, |view, cx| {
+                    let Some(range) = view
+                        .rendered_text()
+                        .range_for_source(hit.snippet_range.clone())
+                    else {
+                        return false;
+                    };
+                    view.set_range_highlights(
+                        [gpui_kit::base::text::RangeHighlight::new(
+                            range,
+                            crate::appearance::rgba(0xe8b04a44),
+                        )],
+                        cx,
+                    )
+                    .is_ok()
+                });
+            }
+            let palette = cx.entity().downgrade();
+            TextView::new(&preview.view)
+                .style(
+                    TextViewStyle::default()
+                        .paragraph_gap(rems(0.))
+                        .heading_font_size(|_, _| zpx(12.)),
+                )
+                .max_lines(1)
+                .selectable(false)
+                .stream_fade(false)
+                .on_link_click(move |_, _, _, cx| {
+                    // A preview link opens its conversation, like the rest of the row.
+                    cx.stop_propagation();
+                    let _ = palette.update(cx, |this, cx| {
+                        this.selected = ix;
+                        this.open(cx);
+                    });
+                })
+                .into_any_element()
+        } else {
+            StyledText::new(hit.snippet.clone())
+                .with_highlights([(
+                    hit.snippet_range.clone(),
+                    HighlightStyle {
+                        background_color: Some(crate::appearance::rgba(0xe8b04a44).into()),
+                        color: Some(crate::appearance::rgb(0xffffff).into()),
+                        ..Default::default()
+                    },
+                )])
+                .into_any_element()
         };
         let source = &hit.document.source;
         let kind = if matches!(source.tab, Tab::Terminal(_)) {
@@ -153,14 +226,7 @@ impl Palette {
                     .text_size(zpx(12.))
                     .line_height(relative(1.4))
                     .text_color(crate::appearance::rgba(0xffffffaa))
-                    .child(StyledText::new(hit.snippet.clone()).with_highlights([(
-                        hit.snippet_range.clone(),
-                        HighlightStyle {
-                            background_color: Some(crate::appearance::rgba(0xe8b04a44).into()),
-                            color: Some(crate::appearance::rgb(0xffffff).into()),
-                            ..Default::default()
-                        },
-                    )])),
+                    .child(preview),
             )
             .into_any_element()
     }
@@ -210,6 +276,7 @@ impl Render for Palette {
             .child(
                 Input::new(&self.input)
                     .large()
+                    .px_0()
                     .text_size(zpx(15.))
                     .appearance(false)
                     .bordered(false)
@@ -268,7 +335,7 @@ impl Render for Palette {
                     .child(
                         h_flex()
                             .gap_3()
-                            .child("/chat · /terminal Filter")
+                            .child("/c · /t Filter")
                             .child("↑ ↓ Navigate")
                             .child(
                                 h_flex()
@@ -571,6 +638,59 @@ mod tests {
             "remaining transcript and prompt",
             now + Duration::from_secs(6)
         ));
+    }
+
+    struct PreviewFixture(Entity<Palette>);
+    impl Render for PreviewFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(600.))
+                .child(self.0.update(cx, |palette, cx| palette.result(0, cx)))
+        }
+    }
+    #[gpui::test]
+    fn markdown_preview_renders_formatting_and_maps_search_highlight(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let palette = cx.new(|cx| Palette::new(runtime.handle().clone(), window, cx));
+            palette.update(cx, |palette, _| {
+                let document = Arc::new(search::Document {
+                    source: search::Source {
+                        tab: Tab::Session(del_agent::SessionId::new("markdown")),
+                        title: "Preview".into(),
+                        provider: Some(del_agent::Provider::Claude),
+                        cwd: "/tmp".into(),
+                        conversation_id: None,
+                        archived: false,
+                        live: None,
+                    },
+                    messages: Arc::new(vec![search::Message {
+                        role: "Assistant",
+                        text: "**Cats** and *purrs*, `code`, [a link](https://example.com).".into(),
+                    }]),
+                });
+                palette.hits = search::search(&[document], "Cats");
+            });
+            PreviewFixture(palette)
+        });
+        for _ in 0..8 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let palette = root.read_with(cx, |root, _| root.0.clone());
+        palette.read_with(cx, |palette, cx| {
+            let preview = &palette.previews[&0];
+            assert!(preview.highlighted);
+            let rendered = preview.view.read(cx).rendered_text();
+            assert_eq!(rendered.as_str().trim(), "Cats and purrs, code, a link.");
+            let range = rendered
+                .range_for_source(palette.hits[0].snippet_range.clone())
+                .unwrap();
+            assert_eq!(&rendered.as_str()[range], "Cats");
+        });
     }
 
     struct Fixture(Entity<Palette>);

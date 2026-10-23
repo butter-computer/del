@@ -270,9 +270,9 @@ fn query_parts(query: &str) -> (Option<Scope>, String) {
     let mut scope = None;
     let mut words = Vec::new();
     for word in query.split_whitespace() {
-        if word.eq_ignore_ascii_case("/chat") {
+        if word.eq_ignore_ascii_case("/c") {
             scope = Some(Scope::Chat);
-        } else if word.eq_ignore_ascii_case("/terminal") {
+        } else if word.eq_ignore_ascii_case("/t") {
             scope = Some(Scope::Terminal);
         } else {
             words.push(word);
@@ -393,10 +393,10 @@ mod tests {
     #[test]
     fn slash_filters_scope_results_and_keep_match_offsets() {
         let docs = [
-            document(false, true, "hello café /terminal/path"),
+            document(false, true, "hello café /t/path"),
             document(true, false, "hello CAFÉ"),
         ];
-        for (query, terminal) in [("/terminal café", true), ("café /CHAT", false)] {
+        for (query, terminal) in [("/t café", true), ("café /C", false)] {
             let hits = search(&docs, query);
             assert_eq!(hits.len(), 1);
             assert_eq!(
@@ -406,12 +406,12 @@ mod tests {
             let text = &hits[0].document.messages[0].text;
             assert_eq!(text[hits[0].range.clone()].to_lowercase(), "café");
         }
-        let hits = search(&docs, "/terminal");
+        let hits = search(&docs, "/t");
         assert_eq!(hits.len(), 1);
         assert!(hits[0].message.is_none());
         assert!(matches!(hits[0].document.source.tab, Tab::Terminal(_)));
-        assert_eq!(search(&docs, "/chat saved").len(), 1);
-        assert_eq!(search(&docs, "/terminal/path").len(), 1);
+        assert_eq!(search(&docs, "/c saved").len(), 1);
+        assert_eq!(search(&docs, "/t/path").len(), 1);
         assert_eq!(search(&docs, "hello").len(), 2);
     }
 
