@@ -12,4 +12,4 @@ mod models;
 
 mod titles;
 
-mod history;
+pub mod history;

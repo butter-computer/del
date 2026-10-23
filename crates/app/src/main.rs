@@ -17,6 +17,7 @@ mod attachments;
 mod browser;
 mod chat;
 mod composer_ui;
+mod conversation_search;
 mod dictation;
 mod document_preview;
 mod followup_ui;
@@ -30,6 +31,7 @@ mod provider_updates;
 mod providers;
 mod readiness;
 mod right_panel;
+mod search_ui;
 mod sessions;
 mod sidebar;
 mod signin;
@@ -145,6 +147,7 @@ actions!(
         NextSession,
         PrevSession,
         FocusComposer,
+        SearchConversations,
         StopSession,
         ToggleProviders,
         ToggleSidebar,
@@ -286,6 +289,9 @@ struct AppShell {
     right_animate: bool,
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
+    search_index: Arc<std::sync::Mutex<conversation_search::Index>>,
+    search_open: bool,
+    terminal_search_generation: u64,
     composer_owner: u64,
     composer_drafts: HashMap<u64, String>,
     composer_attachments: HashMap<u64, Vec<del_agent::Attachment>>,
@@ -554,6 +560,9 @@ impl AppShell {
             right_toggles: 0,
             right_animate: false,
             chats: HashMap::new(),
+            search_index: search_ui::new_index(),
+            search_open: false,
+            terminal_search_generation: 0,
             dictation: None,
             dictation_generation: 0,
             composer_owner: 0,
@@ -847,6 +856,9 @@ impl AppShell {
     }
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_open {
+            return;
+        }
         if let Selection::Terminal(id) = &self.state.read(cx).selection
             && let Some(terminal) = self.terminals.get(id)
         {
@@ -1225,7 +1237,7 @@ impl AppShell {
                                             let animate_open = !matches!(tab_key, Some(Tab::Session(_)));
 
                                             let shortcut_number = tab_key.as_ref().and_then(|tab| self.state.read(cx).tabs.iter().position(|candidate| candidate == tab)).filter(|index| *index < 9).map(|index| index + 1);
-                                            let shortcut_hint = self.state.read(cx).shortcut_hints && shortcut_number.is_some();
+                                            let shortcut_hint = !self.search_open && self.state.read(cx).shortcut_hints && shortcut_number.is_some();
                                             let active = tab_key
                                                 .as_ref()
                                                 .is_some_and(|t| selection == t.selection())
@@ -1712,8 +1724,9 @@ impl Render for AppShell {
             self.tab_reveal = Some((selected_uid, std::time::Instant::now()));
         }
         self.sync_right(window, cx);
-        self.right
-            .update(cx, |panel, cx| panel.set_preview_visible(right_visible, cx));
+        self.right.update(cx, |panel, cx| {
+            panel.set_preview_visible(right_visible && !self.search_open, cx)
+        });
         for (panel, _) in self.right_cache.values() {
             if panel != &self.right {
                 panel.update(cx, |panel, cx| panel.set_preview_visible(false, cx));
@@ -1749,9 +1762,12 @@ impl Render for AppShell {
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 this.state.update(cx, |state, cx| {
-                    state.shortcut_hints = event.modifiers.platform;
+                    state.shortcut_hints = event.modifiers.platform && !this.search_open;
                     cx.notify();
                 });
+            }))
+            .on_action(cx.listener(|this, _: &SearchConversations, window, cx| {
+                this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 if !SIDEBAR_ENABLED {
@@ -1942,6 +1958,7 @@ fn main() {
             appearance::load(cx);
 
             cx.bind_keys([
+                KeyBinding::new("cmd-k", SearchConversations, None),
                 KeyBinding::new("cmd-\\", ToggleFiles, None),
                 KeyBinding::new("cmd-shift-b", ToggleFiles, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),

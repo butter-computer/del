@@ -34,6 +34,74 @@ impl ChatView {
         let Some(block) = self.model.blocks.get(ix).cloned() else {
             return div().into_any_element();
         };
+        if let Some(flash) = self.search_flash.as_mut().filter(|flash| flash.ix == ix) {
+            if !flash.applied {
+                flash.applied = flash.text_view.update(cx, |state, cx| {
+                    let Some(range) = state.rendered_text().range_for_source(flash.range.clone())
+                    else {
+                        return false;
+                    };
+                    let _ = state.set_range_highlights(
+                        [gpui_kit::base::text::RangeHighlight::new(
+                            range.clone(),
+                            rgba(0xe8b04a60),
+                        )],
+                        cx,
+                    );
+                    let _ = state.reveal_range(range, cx);
+                    true
+                });
+                if flash.applied {
+                    let view = flash.text_view.clone();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1400))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this
+                                .search_flash
+                                .as_ref()
+                                .is_some_and(|flash| flash.text_view == view)
+                            {
+                                this.search_flash = None;
+                                this.scroller.remeasure_items(ix..ix + 1);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            let style = TextViewStyle::default().heading_font_size(|level, _| {
+                if level <= 2 {
+                    zpx(TEXT_LG)
+                } else {
+                    zpx(TEXT_MD)
+                }
+            });
+            return h_flex()
+                .w_full()
+                .justify_center()
+                .px_3()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(zpx(COLUMN_MAX_WIDTH))
+                        .px_2()
+                        .rounded_lg()
+                        .when(matches!(block, Block::User { .. }), |row| {
+                            row.py_2().bg(rgba(CARD))
+                        })
+                        .text_size(zpx(TEXT_MD))
+                        .text_color(rgb(TEXT))
+                        .child(
+                            TextView::new(&flash.text_view)
+                                .style(style)
+                                .selectable(true),
+                        ),
+                )
+                .into_any_element();
+        }
         let content = match block {
             Block::User {
                 text,

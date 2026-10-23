@@ -3,6 +3,7 @@
 mod colors;
 pub mod keys;
 pub mod mouse;
+mod search;
 mod session;
 mod view;
 

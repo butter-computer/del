@@ -93,6 +93,29 @@ tab, send/queue a prompt, or move the tab to keep it open. Preview titles are
 muted and italic. New chats remain open, and replaced previews retain their
 conversation history and composer drafts.
 
+**⌘K** opens conversation search. Search message text or titles across saved Codex
+and Claude chats, including terminal conversations and archived sessions. Use
+**↑/↓** to select a match, **Enter** (or click) to open it, and **Escape** to close.
+Add **/chat** or **/terminal** to limit results to that session type; use either
+filter by itself to list its sessions. Tab shortcut badges stay hidden while
+the palette is open.
+
+Results show the matching passage; opening one keeps its tab, scrolls to the
+matched text, and briefly highlights it, including within Markdown replies.
+
+Search reads local provider transcripts on a background worker and caches their
+message text in memory, refreshing changed files when the palette opens. It does
+not start agents or terminals to index history. Sent messages and streamed
+replies are included from their loaded views. Results show the agent icon in a
+compact palette that grows with results up to a maximum height. Terminal matches
+open the actual terminal and resume its original conversation when needed. Del
+waits for restored output to settle, then scrolls to and highlights the passage
+when it is available in the terminal scrollback. Codex uses inline terminal mode
+to preserve that scrollback. If the CLI has not restored the passage to its
+buffer, Del reports that limitation while keeping the terminal open. Browser
+profiles and conversation history are retained. Plain shell terminals have
+searchable titles; provider-backed terminals also have searchable messages.
+
 Claude chats reload their saved local transcript when reopened, including messages,
 reasoning, and tool results. Use **Unload** in a session’s context menu to close
 its tab and release its live chat process or terminal. The session stays in the

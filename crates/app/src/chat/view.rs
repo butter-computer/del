@@ -44,6 +44,35 @@ fn active_prompt(prompts: &[usize], top: usize, at_end: bool) -> Option<usize> {
     }
 }
 
+pub(super) struct SearchFlash {
+    pub ix: usize,
+    pub text_view: Entity<gpui_kit::component::text::TextViewState>,
+    pub range: std::ops::Range<usize>,
+    pub applied: bool,
+}
+
+fn escaped_search_text(
+    text: &str,
+    range: std::ops::Range<usize>,
+) -> (String, std::ops::Range<usize>) {
+    let mut out = String::new();
+    let mut start = 0;
+    let mut end = 0;
+    for (ix, ch) in text.char_indices() {
+        if ix == range.start {
+            start = out.len();
+        }
+        if ch.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(ch);
+        if ix + ch.len_utf8() == range.end {
+            end = out.len();
+        }
+    }
+    (out, start..end)
+}
+
 pub struct PromptSubmitted;
 
 pub struct ChatView {
@@ -61,6 +90,8 @@ pub struct ChatView {
     completed_turns: u64,
     pub(super) first_chunks: std::collections::HashMap<String, std::time::Instant>,
     pub pending_errors: Vec<String>,
+    pub(super) search_pending: Option<crate::conversation_search::Hit>,
+    pub(super) search_flash: Option<SearchFlash>,
 }
 
 impl EventEmitter<PromptSubmitted> for ChatView {}
@@ -105,6 +136,8 @@ impl ChatView {
             completed_turns: 0,
             first_chunks: Default::default(),
             pending_errors: Vec::new(),
+            search_pending: None,
+            search_flash: None,
         };
         if let Some(input) = first_prompt {
             let change = view.model.push_input(&input, false);
@@ -114,6 +147,92 @@ impl ChatView {
             view.follow(id, cx);
         }
         view
+    }
+
+    pub fn search_messages(&self) -> Vec<crate::conversation_search::Message> {
+        crate::conversation_search::messages(&self.model)
+    }
+
+    #[cfg(test)]
+    pub fn saved_transcript(backend: Backend, model: ChatModel, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(backend, None, None, cx);
+        view.scroller.reset(model.blocks.len());
+        view.model = model;
+        view
+    }
+
+    pub fn reveal_search_hit(
+        &mut self,
+        hit: crate::conversation_search::Hit,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_pending = Some(hit);
+        self.search_flash = None;
+        self.jump = None;
+        self.apply_search_jump(cx);
+        cx.notify();
+    }
+
+    fn apply_search_jump(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let Some(hit) = self.search_pending.take() else {
+            return;
+        };
+        let Some(message_ix) = hit.message else {
+            return;
+        };
+        let message = &hit.document.messages[message_ix];
+        let occurrence = hit.document.messages[..message_ix]
+            .iter()
+            .filter(|m| *m == message)
+            .count();
+        let found = self
+            .model
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(ix, block)| {
+                let (role, text) = match block {
+                    Block::User { text, .. } => ("You", text),
+                    Block::Assistant { text, .. } => ("Assistant", text),
+                    _ => return Vec::new(),
+                };
+                if role != message.role {
+                    return Vec::new();
+                }
+                text.match_indices(&message.text)
+                    .map(move |(offset, _)| (ix, offset, text.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .nth(occurrence);
+        let Some((ix, offset, text)) = found else {
+            self.pending_errors.push(
+                "That message changed since the search. Search again to find its current location."
+                    .into(),
+            );
+            return;
+        };
+        let source_range = offset + hit.range.start..offset + hit.range.end;
+        let (source, range) = if message.role == "You" {
+            escaped_search_text(&text, source_range)
+        } else {
+            (text, source_range)
+        };
+        let text_view =
+            cx.new(|cx| gpui_kit::component::text::TextViewState::markdown(&source, cx));
+        cx.observe(&text_view, |_, _, cx| cx.notify()).detach();
+        self.search_flash = Some(SearchFlash {
+            ix,
+            text_view,
+            range,
+            applied: false,
+        });
+        self.scroller.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: zpx(0.),
+        });
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
@@ -460,6 +579,7 @@ impl Render for ChatView {
         if self.loading && self.model.blocks.is_empty() {
             return super::conversation_loading("Loading conversation…".into(), cx.reduce_motion());
         }
+        self.apply_search_jump(cx);
         let view = cx.entity();
         if let Some(jump) = &self.jump {
             let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
@@ -914,5 +1034,122 @@ mod tests {
             assert_eq!(users, ["follow-up"]);
         });
         runtime.block_on(manager.shutdown());
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use crate::conversation_search as search;
+    use ::gpui;
+    use core::prelude::v1::test;
+    use std::sync::Arc;
+
+    fn backend() -> (tempfile::TempDir, tokio::runtime::Runtime, Backend) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager,
+        };
+        (dir, runtime, backend)
+    }
+    fn hit(messages: Vec<search::Message>, query: &str, n: usize) -> search::Hit {
+        let doc = Arc::new(search::Document {
+            source: search::Source {
+                tab: crate::state::Tab::Session(SessionId::new("saved")),
+                title: "Task".into(),
+                provider: Some(del_agent::Provider::Codex),
+                cwd: "/tmp".into(),
+                conversation_id: None,
+                archived: false,
+                live: None,
+            },
+            messages: Arc::new(messages),
+        });
+        search::search(&[doc], query).remove(n)
+    }
+    struct Fixture(Entity<ChatView>);
+    impl Render for Fixture {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(14.));
+            div().w(px(650.)).h(px(350.)).child(self.0.clone())
+        }
+    }
+    #[gpui::test]
+    fn search_reveals_deep_markdown_match_and_clears_highlight(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_dir, _runtime, backend) = backend();
+        let text = (0..100)
+            .map(|i| format!("Paragraph {i}: some text.\n\n"))
+            .collect::<String>()
+            + "**uniqueneedle** at the end.";
+        let messages = vec![search::Message {
+            role: "Assistant",
+            text,
+        }];
+        let target = hit(messages.clone(), "uniqueneedle", 0);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            let chat =
+                cx.new(|cx| ChatView::saved_transcript(backend, search::model(&messages), cx));
+            chat.update(cx, |chat, cx| chat.reveal_search_hit(target, cx));
+            Fixture(chat)
+        });
+        for _ in 0..8 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let chat = root.read_with(cx, |root, _| root.0.clone());
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.search_flash.as_ref().unwrap().applied);
+            assert_eq!(chat.scroller.logical_scroll_top().item_ix, 0);
+            assert!(
+                chat.scroller.logical_scroll_top().offset_in_item > px(1000.),
+                "{:?}",
+                chat.scroller.logical_scroll_top()
+            );
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        chat.read_with(cx, |chat, _| assert!(chat.search_flash.is_none()));
+    }
+    #[gpui::test]
+    fn search_waits_for_hydration_and_resolves_repeated_messages(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_dir, _runtime, backend) = backend();
+        let messages = vec![
+            search::Message {
+                role: "You",
+                text: "same message".into(),
+            },
+            search::Message {
+                role: "Assistant",
+                text: "answer".into(),
+            },
+            search::Message {
+                role: "You",
+                text: "same message".into(),
+            },
+        ];
+        let target = hit(messages.clone(), "same", 1);
+        let chat = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        chat.update(cx, |chat, cx| {
+            chat.loading = true;
+            chat.reveal_search_hit(target, cx);
+            assert!(chat.search_pending.is_some());
+            assert!(chat.search_flash.is_none());
+            chat.model = search::model(&messages);
+            chat.scroller.reset(chat.model.blocks.len());
+            chat.loading = false;
+            chat.apply_search_jump(cx);
+            assert_eq!(chat.search_flash.as_ref().unwrap().ix, 2);
+            assert!(chat.search_pending.is_none());
+        });
     }
 }

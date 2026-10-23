@@ -2,7 +2,7 @@
 //! `AgentEvent` stream into a `ChatModel`, and renders the transcript plus the
 //! composer.
 
-mod attachments;
+pub(crate) mod attachments;
 mod blocks;
 mod loading;
 pub mod model;

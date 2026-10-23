@@ -9,17 +9,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) fn load(cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    let Some(path) = root.and_then(|root| crate::titles::transcript_path(&root, cwd, id)) else {
+pub fn load(cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
+    let Some(path) = path(cwd, id) else {
         return Ok(vec![]);
     };
     read(BufReader::new(std::fs::File::open(path)?), id)
 }
 
-fn read(reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> {
+/// Locate saved messages without resuming the CLI.
+pub fn path(cwd: &Path, id: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+    crate::titles::transcript_path(&root, cwd, id)
+}
+
+pub fn read(reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> {
     let mut records = Vec::<Value>::new();
     let mut positions = HashMap::new();
     for line in reader.lines() {

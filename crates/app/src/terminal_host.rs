@@ -217,6 +217,10 @@ impl TerminalLaunchSpec {
         }
         let cwd = self.cwd.canonicalize()?;
         if self.kind == TerminalLaunchKind::Codex {
+            // Keep conversation output in the emulator's searchable scrollback.
+            if !args.iter().any(|arg| arg == "--no-alt-screen") {
+                args.push("--no-alt-screen".into());
+            }
             // Login shell startup files may change directories. Pin the CLI's
             // workspace independently of that shell's final working directory.
             args.extend(["--cd".into(), cwd.to_string_lossy().into_owned()]);
@@ -1013,6 +1017,7 @@ mod tests {
                 .into_owned();
             if kind == TerminalLaunchKind::Codex {
                 expected.push("--dangerously-bypass-approvals-and-sandbox");
+                expected.push("--no-alt-screen");
                 expected.extend(["--cd", &canonical_cwd]);
                 expected.extend(["-c", &trust]);
                 expected.extend(["-c", r#"tui.terminal_title=["session-id","thread-name"]"#]);
@@ -1093,6 +1098,7 @@ mod tests {
             [
                 "original",
                 "--dangerously-bypass-approvals-and-sandbox",
+                "--no-alt-screen",
                 "--cd",
                 &spec.cwd.canonicalize().unwrap().to_string_lossy(),
                 "-c",

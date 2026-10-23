@@ -3,7 +3,7 @@
 
 use crate::{TerminalEvent, TerminalSession, TerminalSize, colors, keys, mouse};
 use alacritty_terminal::{
-    grid::Scroll,
+    grid::{Dimensions, Scroll},
     index::{Column, Line, Point as GridPoint, Side},
     selection::{Selection, SelectionType},
     term::TermMode,
@@ -39,6 +39,8 @@ pub struct TerminalView {
     composition_selection: Range<usize>,
     title: Option<String>,
     exit: Option<Option<i32>>,
+    search_flash: Option<std::ops::RangeInclusive<GridPoint>>,
+    search_generation: u64,
     /// Treat Option as an ESC prefix. Set false to use OS Option characters.
     pub option_as_meta: bool,
 }
@@ -75,7 +77,9 @@ impl TerminalView {
                 if this
                     .update_in(cx, |this, window, cx| {
                         match &event {
-                            TerminalEvent::Wakeup => this.session.ack_wakeup(),
+                            TerminalEvent::Wakeup => {
+                                this.session.ack_wakeup();
+                            }
                             TerminalEvent::TitleChanged(title) => this.title = title.clone(),
                             TerminalEvent::Bell => window.play_system_bell(),
                             TerminalEvent::Exited { code } => this.exit = Some(*code),
@@ -102,6 +106,8 @@ impl TerminalView {
             composition_selection: 0..0,
             title: None,
             exit: None,
+            search_flash: None,
+            search_generation: 0,
             option_as_meta: true,
         }
     }
@@ -119,6 +125,42 @@ impl TerminalView {
         self.session.close(Duration::from_millis(200));
     }
 
+    /// Reveal a saved transcript match if it is present in the live terminal buffer.
+    pub fn reveal_search_match(
+        &mut self,
+        source: &str,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found = self.session.with_term(|term| {
+            let found = crate::search::locate(term.grid(), source, range)?;
+            let offset = (term.screen_lines() as i32 / 3 - found.start().line.0).max(0);
+            term.scroll_display(Scroll::Bottom);
+            term.scroll_display(Scroll::Delta(offset));
+            Some(found)
+        });
+        let Some(found) = found else {
+            return false;
+        };
+        self.search_flash = Some(found);
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1400))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation == generation {
+                    this.search_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+        true
+    }
+
     fn report_focus(&self, focused: bool) {
         if self.session.mode().contains(TermMode::FOCUS_IN_OUT) {
             self.session.write(if focused {
@@ -133,6 +175,7 @@ impl TerminalView {
             term.selection = None;
             term.scroll_display(Scroll::Bottom);
         });
+        self.search_flash = None;
         self.session.write(bytes);
         cx.notify();
     }
@@ -404,7 +447,13 @@ impl TerminalView {
                     row: row as usize,
                     text,
                     fg: color(fg),
-                    bg: if selected {
+                    bg: if self
+                        .search_flash
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&indexed.point))
+                    {
+                        Some(rgba(0xe8b04a66).into())
+                    } else if selected {
                         Some(rgba(0x43556fff).into())
                     } else if transparent_background(cell.bg, cell.flags) {
                         None

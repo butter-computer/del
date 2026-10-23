@@ -57,7 +57,7 @@ pub fn codex_title(title: &str) -> Option<(String, Option<String>)> {
     Some((prefix.to_owned(), name))
 }
 
-fn rollouts(root: &Path) -> Vec<PathBuf> {
+pub fn rollouts(root: &Path) -> Vec<PathBuf> {
     // Only Codex's year/month/day hierarchy; never recursively traverse a workspace.
     let mut dirs = vec![root.join("sessions")];
     for _ in 0..3 {
