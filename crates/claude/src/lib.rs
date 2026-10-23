@@ -11,3 +11,5 @@ pub use protocol::Translator;
 mod models;
 
 mod titles;
+
+mod history;

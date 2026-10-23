@@ -2,8 +2,10 @@
 
 An embedded Unix terminal with portable-pty, alacritty_terminal, and a GPUI entity.
 The view uses Menlo at 13 logical pixels and leaves the default terminal background
-transparent so the host's chat surface shows through. Explicit cell backgrounds,
-inverse colors, and selection remain visible.
+transparent so the host's chat surface shows through. Font size, cell geometry,
+and input coordinates follow the host's interface zoom. The cursor is hidden when
+the terminal or its window is unfocused. Explicit cell backgrounds,
+inverse colors, and selection remain visible, including explicit black backgrounds.
 
 ```rust,ignore
 // In app initialization:
@@ -21,7 +23,9 @@ terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
 // Render terminal.clone() as a child. Drop all entity references on tab close.
 ```
 
-`TerminalSpec::command("claude", ["--help"])` runs a program through the user's interactive login shell so it receives the user's PATH. Set `login_env: false` for direct execution. `env`, `cwd`, initial grid size, and scrollback capacity are configurable. Inherited environment is retained with TERM, COLORTERM, and TERM_PROGRAM defaults. Extra environment overrides those defaults. Environment variables that a login startup file reassigns follow that shell's normal behavior.
+`TerminalSpec::shell()` starts `$SHELL` with `-l`, falling back to `/bin/zsh`.
+
+`TerminalSpec::command("claude", ["--help"])` runs a program through the user's interactive login shell so it receives the user's PATH. Set `login_env: false` for direct execution. `env`, `cwd`, initial grid size, and scrollback capacity are configurable. Inherited environment is retained with TERM, COLORTERM, and TERM_PROGRAM defaults. Parent colour overrides (`NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE`) are cleared so applications detect the real PTY and its truecolour support. Explicit `TerminalSpec.env` settings override those defaults. Environment variables that a login startup file reassigns follow that shell's normal behavior.
 
 `TerminalView` emits `TerminalEvent` for title changes, bell, exit status, and repaint wakeups. Subscribe with GPUI's `cx.subscribe` or `cx.subscribe_in`. Alternatively, drive a `TerminalSession` without a view using `take_events`, `write`, `resize`, and `with_term`. Call `ack_wakeup` when handling a repaint. The final exit event follows PTY output draining.
 

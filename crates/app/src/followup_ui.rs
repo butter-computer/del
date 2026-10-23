@@ -1,3 +1,4 @@
+use crate::zoom::px as zpx;
 use crate::{
     AppShell,
     appearance::{rgb, rgba},
@@ -22,12 +23,12 @@ struct QueueDrag {
 struct QueueDragPreview;
 impl Render for QueueDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size(px(1.))
+        div().size(zpx(1.))
     }
 }
 fn thumbnail(attachment: &Attachment) -> impl IntoElement {
     div()
-        .size(px(24.))
+        .size(zpx(24.))
         .flex_none()
         .rounded_sm()
         .overflow_hidden()
@@ -46,7 +47,7 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
         .when(!crate::attachments::is_image(attachment), |el| {
             el.child(
                 Icon::new(IconName::File)
-                    .with_size(px(15.))
+                    .with_size(zpx(15.))
                     .text_color(rgba(0xffffff99)),
             )
         })
@@ -72,7 +73,7 @@ impl AppShell {
     pub(super) fn sync_composer_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = self.composer_owner(cx);
         if owner != self.composer_owner {
-            self.attachment_scroll.set_offset(point(px(0.), px(0.)));
+            self.attachment_scroll.set_offset(point(zpx(0.), zpx(0.)));
             self.composer_drafts.insert(
                 self.composer_owner,
                 self.composer.read(cx).value().to_string(),
@@ -201,7 +202,7 @@ impl AppShell {
             .id("composer-attachments")
             .w_full()
             .min_w_0()
-            .h(px(64.))
+            .h(zpx(64.))
             .overflow_x_scroll()
             .overflow_y_hidden()
             .track_scroll(&self.attachment_scroll)
@@ -213,8 +214,8 @@ impl AppShell {
                     delta.y
                 };
                 let scroll = &this.attachment_scroll;
-                let x = (scroll.offset().x + dx).clamp(-scroll.max_offset().x, px(0.));
-                scroll.set_offset(point(x, px(0.)));
+                let x = (scroll.offset().x + dx).clamp(-scroll.max_offset().x, zpx(0.));
+                scroll.set_offset(point(x, zpx(0.)));
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -237,8 +238,8 @@ impl AppShell {
                             .group(group.clone())
                             .relative()
                             .flex_none()
-                            .h(px(56.))
-                            .w(px(if is_image { 56. } else { 148. }))
+                            .h(zpx(56.))
+                            .w(zpx(if is_image { 56. } else { 148. }))
                             .gap_1p5()
                             .items_center()
                             .rounded_lg()
@@ -256,7 +257,7 @@ impl AppShell {
                             }))
                             .when(is_image, |row| {
                                 row.child(
-                                    div().size(px(56.)).rounded_lg().overflow_hidden().child(
+                                    div().size(zpx(56.)).rounded_lg().overflow_hidden().child(
                                         img(file.path.clone())
                                             .size_full()
                                             .object_fit(ObjectFit::Cover),
@@ -266,7 +267,7 @@ impl AppShell {
                             .when(!is_image, |row| {
                                 row.child(
                                     div()
-                                        .size(px(40.))
+                                        .size(zpx(40.))
                                         .flex_none()
                                         .flex()
                                         .items_center()
@@ -275,12 +276,12 @@ impl AppShell {
                                             if let Some(asset) = crate::attachments::file_mark(file)
                                             {
                                                 img(asset)
-                                                    .size(px(28.))
+                                                    .size(zpx(28.))
                                                     .object_fit(ObjectFit::Contain)
                                                     .into_any_element()
                                             } else {
                                                 Icon::new(IconName::File)
-                                                    .with_size(px(28.))
+                                                    .with_size(zpx(28.))
                                                     .text_color(rgba(0xffffff70))
                                                     .into_any_element()
                                             },
@@ -294,14 +295,14 @@ impl AppShell {
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_size(px(12.))
+                                                .text_size(zpx(12.))
                                                 .text_color(rgba(0xffffffdd))
                                                 .child(crate::attachments::compact_filename(file)),
                                         )
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_size(px(11.))
+                                                .text_size(zpx(11.))
                                                 .text_color(rgba(0xffffff70))
                                                 .child(crate::attachments::file_type(file)),
                                         ),
@@ -327,15 +328,15 @@ impl AppShell {
                                 )
                                 .child(
                                     Icon::new(ActionIcon::Close)
-                                        .with_size(px(12.))
+                                        .with_size(zpx(12.))
                                         .text_color(rgb(0x202020)),
                                 )
                                 .accessibility_label("Remove attachment")
                                 .tooltip("Remove attachment")
                                 .absolute()
-                                .right(px(2.))
-                                .top(px(2.))
-                                .size(px(20.))
+                                .right(zpx(2.))
+                                .top(zpx(2.))
+                                .size(zpx(20.))
                                 .p_0()
                                 .rounded_full()
                                 .opacity(0.0)
@@ -360,7 +361,7 @@ impl AppShell {
             .relative()
             .w_full()
             .min_w_0()
-            .h(px(64.))
+            .h(zpx(64.))
             .flex_none()
             .overflow_hidden()
             .child(strip)
@@ -388,7 +389,7 @@ impl AppShell {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .w(px(40.))
+                .w(zpx(40.))
                 .when(left, |fade| fade.left_0())
                 .when(!left, |fade| fade.right_0())
             }))
@@ -397,7 +398,16 @@ impl AppShell {
         let Some(chat) = self.open_chat(cx) else {
             return div().into_any_element();
         };
-        let items = chat.read(cx).queue.items.clone();
+        // In-flight input is already visible in the transcript. Showing it here
+        // briefly grows the composer, then shrinks it again on acknowledgement.
+        let items: Vec<_> = chat
+            .read(cx)
+            .queue
+            .items
+            .iter()
+            .filter(|item| !item.sending)
+            .cloned()
+            .collect();
         if items.is_empty() {
             return div().into_any_element();
         }
@@ -412,9 +422,9 @@ impl AppShell {
             .child(
                 v_flex()
                     .id("followup-queue")
-                    .h(px(height))
+                    .h(zpx(height))
                     .overflow_y_scroll()
-                    .rounded_t(px(14.))
+                    .rounded_t(zpx(14.))
                     .bg(rgba(QUEUE_SURFACE_RGBA))
                     .py_1()
                     .children(items.into_iter().enumerate().map(|(index, item)| {
@@ -430,7 +440,7 @@ impl AppShell {
                         h_flex()
                             .id(group.clone())
                             .group(group.clone())
-                            .h(px(32.))
+                            .h(zpx(32.))
                             .flex_none()
                             .px_2()
                             .gap_2()
@@ -457,8 +467,8 @@ impl AppShell {
                                 div()
                                     .id(SharedString::from(format!("drag-{}", item.id)))
                                     .cursor_grab()
-                                    .w(px(12.))
-                                    .h(px(24.))
+                                    .w(zpx(12.))
+                                    .h(zpx(24.))
                                     .flex_none()
                                     .flex()
                                     .items_center()
@@ -475,15 +485,15 @@ impl AppShell {
                                     .child(
                                         svg()
                                             .path("icons/grip.svg")
-                                            .w(px(9.))
-                                            .h(px(15.))
+                                            .w(zpx(9.))
+                                            .h(zpx(15.))
                                             .text_color(rgba(0xffffff8c)),
                                     ),
                             )
                             .child(
                                 svg()
                                     .path("icons/queue.svg")
-                                    .size(px(14.))
+                                    .size(zpx(14.))
                                     .text_color(rgba(0xffffff70)),
                             )
                             .children(item.input.attachments.iter().take(3).map(thumbnail))
@@ -507,8 +517,7 @@ impl AppShell {
                                     .small()
                                     .compact()
                                     .icon(Icon::default().path("icons/steer.svg"))
-                                    .label(if item.sending { "Sending…" } else { "Steer" })
-                                    .disabled(item.sending)
+                                    .label("Steer")
                                     .on_click(move |_, _, cx| {
                                         send_chat.update(cx, |chat, cx| {
                                             chat.deliver_queued(send.clone(), chat.is_running(), cx)
@@ -521,7 +530,6 @@ impl AppShell {
                                     ActionIcon::Trash,
                                     "Delete queued message",
                                 )
-                                .disabled(item.sending)
                                 .on_click(move |_, _, cx| {
                                     delete_chat.update(cx, |chat, cx| {
                                         chat.take_queued(&delete, cx);
@@ -534,7 +542,6 @@ impl AppShell {
                                     ActionIcon::Pencil,
                                     "Edit queued message",
                                 )
-                                .disabled(item.sending)
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| this.edit_queued(&edit, window, cx),
                                 )),
@@ -545,10 +552,10 @@ impl AppShell {
                 queue.child(
                     div()
                         .absolute()
-                        .left(px(12.))
-                        .right(px(12.))
+                        .left(zpx(12.))
+                        .right(zpx(12.))
                         .bottom_0()
-                        .h(px(12.))
+                        .h(zpx(12.))
                         .bg(linear_gradient(
                             0.,
                             linear_color_stop(rgba(QUEUE_SURFACE_RGBA), 0.),

@@ -8,6 +8,7 @@ use crate::terminal_host::{
     TerminalLaunchSpec,
 };
 use crate::terminal_store::{TerminalRecord, TerminalStore};
+use crate::zoom::px as zpx;
 use crate::{AppShell, composer_ui};
 use del_agent::{Provider, SessionId};
 use del_mcp::{HostError, HostResult, SessionInfo, SessionMode, UserAnswer};
@@ -30,7 +31,7 @@ pub(super) struct PendingQuestion {
 pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
     match provider {
         Some(provider) => composer_ui::provider_logo(provider, 14.).into_any_element(),
-        None => div().text_size(px(12.)).child(">_").into_any_element(),
+        None => div().text_size(zpx(12.)).child(">_").into_any_element(),
     }
 }
 
@@ -99,6 +100,8 @@ impl AppShell {
             .state
             .update(cx, |s, _| std::mem::take(&mut s.closed_terminals));
         for id in closed {
+            self.terminal_update_restarts
+                .retain(|pending| pending != &id);
             self.terminal_opening.remove(&id);
             self.terminal_attempts.remove(&id);
             if let Some(host) = self.terminals.remove(&id) {
@@ -247,19 +250,16 @@ impl AppShell {
         let bridge = self.mcp.as_ref().map(McpBridge::handle);
         let prepare_info = info.clone();
         let runtime = self.state.read(cx).backend().runtime;
-        let report = self.state.read(cx).update_reporter(
-            draft
-                .map(|key| format!("draft-{key}"))
-                .unwrap_or_else(|| id.0.clone()),
-        );
-        let program = spec.program.clone();
-        let provider = spec.provider();
+        if let (Some(program), Some(provider)) = (spec.program.clone(), spec.provider()) {
+            runtime.spawn(async move {
+                if let Err(error) =
+                    crate::provider_updates::ensure_program(program.into(), provider, |_| {}).await
+                {
+                    eprintln!("[del update] terminal background check failed: {error}");
+                }
+            });
+        }
         let prepare = runtime.spawn(async move {
-            let managed_updates = if let (Some(program), Some(provider)) = (program, provider) {
-                let result = crate::provider_updates::ensure_program(program.into(), provider, |message| report(Some(message))).await;
-                report(None);
-                result?
-            } else { false };
             tokio::task::spawn_blocking(move || {
             let conversation_id = if resuming && prepare_info.provider == Some(Provider::Codex) && conversation_id.is_none() {
                 previous.as_ref().and_then(|record| crate::terminal_conversation::recover_legacy_codex(
@@ -277,9 +277,9 @@ impl AppShell {
             } else if prepare_info.provider.is_some() {
                 return Err("Agent tools are still starting. Try again in a moment.".into());
             } else { (Vec::new(), Vec::new()) };
-            if managed_updates && prepare_info.provider == Some(Provider::Codex) {
-                // Del has already updated this installation. Do not let the CLI
-                // interpose its own update prompt before the waiting first prompt.
+            if prepare_info.provider == Some(Provider::Codex) {
+                // Del checks updates in the background, so CLI update prompts
+                // must not block terminal startup.
                 args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
             }
             if let Some(conversation) = &conversation_id {
@@ -719,11 +719,11 @@ impl AppShell {
             .child(
                 Button::new("new-workspace")
                     .ghost()
-                    .h(px(24.0))
+                    .h(zpx(24.0))
                     .px_3()
-                    .text_size(px(14.0))
+                    .text_size(zpx(14.0))
                     .cursor_pointer()
-                    .icon(Icon::new(IconName::Folder).size(px(16.0)))
+                    .icon(Icon::new(IconName::Folder).size(zpx(16.0)))
                     .label(crate::sessions::folder_name(&cwd))
                     .text_color(rgba(0xffffff8c))
                     .on_click(move |_, _, cx| state.update(cx, |state, cx| state.pick_folder(cx))),
@@ -747,13 +747,13 @@ impl AppShell {
 
     pub(super) fn render_mode_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let position = self.mode_slide_position(cx);
-        let mut row = h_flex().relative().h(px(24.0)).gap_1().flex_none().child(
+        let mut row = h_flex().relative().h(zpx(24.0)).gap_1().flex_none().child(
             div()
                 .absolute()
                 .top_0()
-                .left(px(44.0 * position))
-                .h(px(24.0))
-                .w(px(40.0 + 20.0 * position))
+                .left(zpx(44.0 * position))
+                .h(zpx(24.0))
+                .w(zpx(40.0 + 20.0 * position))
                 .rounded_md()
                 .bg(rgba(0xffffff20)),
         );
@@ -767,13 +767,13 @@ impl AppShell {
                     .role(gpui::Role::Button)
                     .aria_label(label)
                     .relative()
-                    .w(px(width))
-                    .h(px(24.0))
+                    .w(zpx(width))
+                    .h(zpx(24.0))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
+                    .text_size(zpx(12.0))
                     .cursor_pointer()
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -878,7 +878,7 @@ impl AppShell {
             .w_full()
             .px_3()
             .gap_1()
-            .text_size(px(12.))
+            .text_size(zpx(12.))
             .when_some(summary, |area, summary| {
                 area.child(div().text_color(rgb(0x999999)).child(summary))
             });

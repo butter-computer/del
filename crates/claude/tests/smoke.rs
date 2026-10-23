@@ -114,6 +114,13 @@ async fn real_cli_prompt_approve_interrupt_resume() {
     be.shutdown().await.unwrap();
     let be2 = ClaudeBackend::new(opts);
     let h2 = be2.resume(cfg, &h.id).await.unwrap();
+    assert!(h2.history().iter().any(|event| matches!(event,
+        AgentEvent::UserMessage { text } if text.contains("hello.txt"))));
+    assert!(
+        h2.history()
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AssistantMessage { .. }))
+    );
     let mut rx2 = h2.subscribe();
     be2.send_prompt(
         &h2.id,

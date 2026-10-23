@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -40,12 +40,22 @@ struct Live {
     history: Vec<AgentEvent>,
 }
 
+const STANDBY_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+struct Standby {
+    config: SessionConfig,
+    handle: SessionHandle,
+    created: Instant,
+}
+
 struct Shared {
     backends: HashMap<Provider, Arc<dyn AgentBackend>>,
     index: Mutex<SessionIndex>,
     live: Mutex<HashMap<SessionId, Live>>,
     resume_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     all_tx: broadcast::Sender<ManagerEvent>,
+    standby: Mutex<Option<Standby>>,
+    preparation: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; all clones share state.
@@ -154,6 +164,8 @@ impl SessionManager {
                 live: Mutex::new(HashMap::new()),
                 resume_locks: Mutex::new(HashMap::new()),
                 all_tx,
+                standby: Mutex::new(None),
+                preparation: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -245,12 +257,80 @@ impl SessionManager {
         );
     }
 
-    pub async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
-        let applied_config = config.clone();
+    /// Keep one unused session ready, without publishing a chat or sending a prompt.
+    /// Preparation never holds the lock used by the send path.
+    pub async fn prepare_session(&self, config: SessionConfig) -> Result<()> {
+        let _preparing = self.shared.preparation.lock().await;
+        if self
+            .shared
+            .standby
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
+        {
+            return Ok(());
+        }
+        let started = Instant::now();
         let handle = self
             .backend(config.provider)?
             .start_session(config.clone())
             .await?;
+        let previous = self.shared.standby.lock().unwrap().replace(Standby {
+            config,
+            handle,
+            created: Instant::now(),
+        });
+        if let Some(previous) = previous {
+            let _ = self
+                .backend(previous.config.provider)?
+                .close(&previous.handle.id)
+                .await;
+        }
+        eprintln!(
+            "[del startup] standby prepared in {}ms",
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
+    pub async fn clear_prepared_session(&self) {
+        let _preparing = self.shared.preparation.lock().await;
+        let previous = self.shared.standby.lock().unwrap().take();
+        if let Some(previous) = previous
+            && let Ok(backend) = self.backend(previous.config.provider)
+        {
+            let _ = backend.close(&previous.handle.id).await;
+        }
+    }
+
+    pub async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        let applied_config = config.clone();
+        let prepared = {
+            let mut slot = self.shared.standby.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
+            {
+                slot.take().map(|s| s.handle)
+            } else {
+                None
+            }
+        };
+        let started = Instant::now();
+        let warm = prepared.is_some();
+        let handle = match prepared {
+            Some(handle) => handle,
+            None => {
+                self.backend(config.provider)?
+                    .start_session(config.clone())
+                    .await?
+            }
+        };
+        eprintln!(
+            "[del startup] session ready warm={warm} elapsed={}ms",
+            started.elapsed().as_millis()
+        );
         let now = now_ms();
         self.shared.index.lock().unwrap().upsert(SessionRecord {
             id: handle.id.clone(),
@@ -392,6 +472,18 @@ impl SessionManager {
 
     /// End the live session. Its index record stays so it can be resumed.
     pub async fn close(&self, id: &SessionId) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _closing = lock.lock().await;
+        if !self.is_live(id) {
+            return Ok(());
+        }
         let p = self.live_provider(id)?;
         let res = self.backend(p)?.close(id).await;
         if let Some(l) = self.shared.live.lock().unwrap().remove(id) {
@@ -457,6 +549,7 @@ impl SessionManager {
 
     /// Close every session and kill all backend child processes. Idempotent.
     pub async fn shutdown(&self) {
+        self.clear_prepared_session().await;
         let ids: Vec<SessionId> = self.shared.live.lock().unwrap().keys().cloned().collect();
         for id in ids {
             let _ = self.close(&id).await;
@@ -512,6 +605,130 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {want:?}"));
+    }
+
+    #[tokio::test]
+    async fn standby_is_hidden_consumed_once_and_replenished() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let config = cfg(Provider::Codex);
+        let mut events = m.subscribe_all();
+        m.prepare_session(config.clone()).await.unwrap();
+        let ready_id = m
+            .shared
+            .standby
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handle
+            .id
+            .clone();
+        assert!(m.list_sessions().is_empty());
+        assert!(events.try_recv().is_err());
+        assert!(!m.is_live(&ready_id));
+        m.prepare_session(config.clone()).await.unwrap();
+        assert_eq!(
+            m.shared.standby.lock().unwrap().as_ref().unwrap().handle.id,
+            ready_id
+        );
+        let (first, second) = tokio::join!(
+            m.start_session(config.clone()),
+            m.start_session(config.clone())
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_ne!(first.id, second.id);
+        assert!(first.id == ready_id || second.id == ready_id);
+        assert_eq!(m.list_sessions().len(), 2);
+        m.prepare_session(config).await.unwrap();
+        let replacement = m
+            .shared
+            .standby
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handle
+            .id
+            .clone();
+        assert_ne!(replacement, ready_id);
+        assert_eq!(m.list_sessions().len(), 2);
+        m.shutdown().await;
+        assert!(m.shared.standby.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn standby_never_crosses_configuration_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let config = cfg(Provider::Codex);
+        m.prepare_session(config.clone()).await.unwrap();
+        let ready_id = m
+            .shared
+            .standby
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handle
+            .id
+            .clone();
+        let mut variants = vec![config.clone(); 6];
+        variants[0].cwd = "/different".into();
+        variants[1].model = Some("different-model".into());
+        variants[2].reasoning_effort = Some("high".into());
+        variants[3].service_tier = Some("priority".into());
+        variants[4].provider = Provider::Claude;
+        variants[5].permission_mode = PermissionMode::FullAuto;
+        for different in variants {
+            let handle = m.start_session(different).await.unwrap();
+            assert_ne!(handle.id, ready_id);
+        }
+        assert_eq!(m.start_session(config).await.unwrap().id, ready_id);
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn expired_standby_is_replaced_without_touching_active_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let config = cfg(Provider::Codex);
+        let active = m.start_session(config.clone()).await.unwrap();
+        m.prepare_session(config.clone()).await.unwrap();
+        let expired = {
+            let mut slot = m.shared.standby.lock().unwrap();
+            let standby = slot.as_mut().unwrap();
+            standby.created = Instant::now() - STANDBY_LIFETIME;
+            standby.handle.id.clone()
+        };
+        let fresh = m.start_session(config.clone()).await.unwrap();
+        assert_ne!(fresh.id, expired);
+        m.prepare_session(config).await.unwrap();
+        assert!(m.is_live(&active.id));
+        assert!(m.is_live(&fresh.id));
+        assert!(
+            m.backend(Provider::Codex)
+                .unwrap()
+                .send_prompt(&expired, UserInput::text("unused"))
+                .await
+                .is_err()
+        );
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_does_not_wait_for_background_preparation_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let _preparing = m.shared.preparation.lock().await;
+        let started = tokio::time::timeout(
+            Duration::from_secs(1),
+            m.start_session(cfg(Provider::Codex)),
+        )
+        .await;
+        assert!(started.unwrap().is_ok());
+        drop(_preparing);
+        m.shutdown().await;
     }
 
     #[tokio::test]
@@ -644,6 +861,29 @@ mod tests {
             AgentEvent::TurnStarted { .. }
         ));
         assert_eq!(m.list_sessions().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unloading_releases_live_session_but_keeps_resumable_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Claude)).await.unwrap();
+        let mut rx = m.subscribe(&h.id).unwrap();
+        let before = m.list_sessions()[0].clone();
+        m.close(&h.id).await.unwrap();
+        m.close(&h.id).await.unwrap();
+        assert!(!m.is_live(&h.id));
+        assert!(matches!(
+            rx.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        let after = &m.list_sessions()[0];
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.config(), before.config());
+        assert_eq!(after.title, before.title);
+        assert_eq!(m.resume(&h.id).await.unwrap().id, h.id);
+        assert!(m.is_live(&h.id));
+        m.shutdown().await;
     }
 
     #[tokio::test]

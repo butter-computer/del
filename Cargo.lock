@@ -1537,6 +1537,7 @@ name = "del-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "del-core",
  "futures",
  "gpui-kit",
  "gpui-pre",

@@ -3,9 +3,11 @@
 //! composer.
 
 mod blocks;
+mod loading;
 pub mod model;
 mod view;
 
-pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView};
+pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView, PromptSubmitted};
 
 pub use blocks::pending_prompt;
+pub use loading::conversation_loading;

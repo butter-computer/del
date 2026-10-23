@@ -20,6 +20,27 @@ fn wait_for(mut predicate: impl FnMut() -> bool) {
 }
 
 #[test]
+fn pty_preserves_ansi_truecolour_and_explicit_backgrounds() {
+    use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+    let session = spawn(r"printf '\033[31mR\033[38;2;210;110;75mT\033[48;2;0;0;0mB\033[0mD'");
+    wait_for(|| session.exited());
+    session.with_term(|term| {
+        let cells: Vec<_> = term.grid().display_iter().take(4).collect();
+        assert_eq!(cells[0].fg, Color::Named(NamedColor::Red));
+        assert_eq!(
+            cells[1].fg,
+            Color::Spec(Rgb {
+                r: 210,
+                g: 110,
+                b: 75
+            })
+        );
+        assert_eq!(cells[2].bg, Color::Spec(Rgb { r: 0, g: 0, b: 0 }));
+        assert_eq!(cells[3].bg, Color::Named(NamedColor::Background));
+    });
+}
+
+#[test]
 fn pty_reports_environment_title_bell_and_exit_after_final_output() {
     let mut s = spawn(
         r#"printf '\033]2;demo\007\007%s/%s' "$TERM" "$COLORTERM"; printf '\033[?2026hFINAL'; exit 7"#,

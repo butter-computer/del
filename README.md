@@ -82,8 +82,21 @@ permissions or inspects the user's TCC database.
 The editable app icon is `crates/app/assets/del.svg`; PNG and ICNS exports are
 checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
 `sharp` Node package is available. Bundle builds use the checked-in exports.
+Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
+
+Opening a saved chat from the sidebar uses one temporary preview tab. Opening
+another replaces that preview in place. Double-click the sidebar session or its
+tab, send/queue a prompt, or move the tab to keep it open. Preview titles are
+muted and italic. New chats remain open, and replaced previews retain their
+conversation history and composer drafts.
+
+Claude chats reload their saved local transcript when reopened, including messages,
+reasoning, and tool results. Use **Unload** in a session’s context menu to close
+its tab and release its live chat process or terminal. The session stays in the
+sidebar with its history, title, and pin intact; selecting it resumes the same
+conversation. Unloading a running session also stops its current work.
 
 - Choose a provider, model, and project folder in a new-session composer.
 - Each New Session action opens an independent draft tab; existing drafts are
@@ -96,7 +109,15 @@ checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
 - A session's project folder is fixed after creation. Its folder label becomes
   informational rather than a clickable folder picker.
 - Chat renders streaming answers, reasoning, tool activity, diffs, usage, and
-  approval requests. The message rail provides jump-to-prompt navigation.
+  approval requests. The message rail appears after six user messages and provides
+  jump-to-prompt navigation. Its ticks lengthen only on hover.
+- Assistant text uses [FlowToken](https://github.com/Ephibbs/flowtoken)'s default
+  streaming fade, tuned to 400 ms with ease-in-out timing. The first live chunk
+  also fades in smoothly; saved messages appear immediately when reopened.
+  This is implemented with GPUI's native Markdown motion, preserving selection
+  and honoring Reduce Motion; the React package is not embedded in Del.
+- Opening a saved conversation shows a transcript shimmer while it loads,
+  with static placeholders when Reduce Motion is enabled.
 - Sessions have tabs and sidebar entries, with rename, pin, unread, archive,
   restore, and permanent-delete actions. Terminal entries share the session
   context menu. Provider-owned titles update from conversation metadata; manual
@@ -134,7 +155,8 @@ default is labeled **Default**.
 
 Selecting a model opens its reasoning controls. Slider stops correspond to
 advertised effort levels, and the accent follows the selected provider (including
-Codex blue and Claude orange). Fast mode is enabled only when the model
+Codex blue and Claude orange). Use **←/→** in the reasoning controls to move one
+level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
 Reset clears explicit effort/fast settings and refreshes the catalog.
 
@@ -216,8 +238,12 @@ mode are saved per chat. Switching panes, opening Settings, or closing the sideb
 hides native previews; closing the preview releases its document.
 
 Click **TERMINALS** in the left sidebar to collapse or expand the list, with a
-short transition and no disclosure-arrow icon. Reduce Motion makes the transition
-instant.
+short transition and no disclosure-arrow icon. Row highlights fade and clip with
+the list. Reduce Motion makes the transition instant.
+
+The workspace terminal starts the shell selected by `$SHELL` as a login shell,
+falling back to `/bin/zsh`. Its terminal engine is `alacritty_terminal`, rendered
+inside Del with GPUI. The cursor is hidden when the terminal or app loses focus.
 
 Terminals use a real PTY, support shell and agent sessions, and retain colored
 terminal cells while letting the normal chat surface show through their default
@@ -229,12 +255,12 @@ workspace. Unresolved identity is reported rather than choosing the latest chat.
 Built-in Codex and Claude terminal launches automatically trust the workspace
 opened in Del, including resumed sessions. Codex receives a launch-scoped
 [`projects.<path>.trust_level`](https://developers.openai.com/codex/config-reference/)
-override. Claude's recognized startup trust dialog is selected and confirmed
-as soon as it appears (100 ms polling), with short retries only while the exact
-workspace prompt remains visible. Claude persists its own decision. This does not
-change tool approval or sandbox settings. Claude confirmation is limited to
-startup (two minutes) and the exact workspace, and stops once the prompt
-disappears. Unrecognized dialogs stay interactive.
+override and an explicit `--cd` so login shell startup cannot change its workspace.
+Both providers' recognized startup trust dialogs are confirmed as soon as they
+appear (100 ms polling), with short retries only while the exact workspace prompt
+remains visible. Confirmation is limited to startup (two minutes) and stops once
+the prompt disappears. Tool approval and sandbox settings remain unchanged;
+unrecognized dialogs stay interactive.
 Shell/custom commands and arbitrary ACP agents keep their own trust setup.
 
 Del's MCP bridge provides scoped session coordination, status, notifications,
@@ -244,9 +270,10 @@ and MCP configuration are kept separate from saved launch history. See
 
 ## Harness updates
 
-Before launching or reopening an agent process, Del checks its installed harness
-and shows an updating screen while an update is applied. Successful checks are
-cached for 30 minutes; concurrent launches share an updater.
+Del checks the selected provider's installed harness in the background at startup
+and every 30 minutes. Terminal launches also request a background check. Sending,
+resuming, and model discovery never wait for updates. Successful checks are cached
+for 30 minutes; concurrent checks share an updater.
 
 - Global npm packages update through their owning prefix.
 - Homebrew packages update through their owning formula or cask.
@@ -254,16 +281,33 @@ cached for 30 minutes; concurrent launches share an updater.
 - Installed ACP agents use the same npm/Homebrew ownership detection.
 - Custom or unmanaged binaries are left alone; registry install hints are not run.
 
-The first prompt waits for the update and is submitted once. Recognized successful
-CLI self-update exits reopen the saved conversation automatically. Failed updates
-retain the waiting prompt for retry. Running conversations are not interrupted to
-install updates. This updates supported harness installations, not Del itself or
-arbitrary applications on the computer.
+Update failures are logged without blocking chat. Recognized successful CLI
+self-update exits reopen the saved conversation automatically. This updates
+supported harness installations, not Del itself or arbitrary applications.
+
+Del also keeps one unused chat session ready after provider discovery at startup.
+It matches the selected provider, model, folder, reasoning, service tier, and
+permission settings, replenishes after use, and refreshes after 30 minutes. No
+prompt is sent and no sidebar chat is created until the session is used. Changing
+chat settings replaces the standby; active conversations are never recycled.
+Preparation failures retry in the background and normal sends can still start a
+session immediately. Startup logs record standby preparation, reuse, and first
+prompt acceptance times; model-side first-token latency can still vary.
 
 ## Settings and shortcuts
 
+Del opens as a centered window at roughly 70% of the available display width and
+76% of its height, with a minimum size of **960 × 640 logical pixels**.
+
+Zoom scales the shell, chat, controls, file panels, and embedded terminal together
+in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to the
+session index and restored on launch. Keyboard shortcuts work while the composer
+or terminal has focus.
+
 Settings has **Preferences** (persisted Light/Dark appearance) and **Providers**
-(sign-in status, sign-in, and re-check). The sidebar entry includes a gear icon.
+(sign-in status, sign-in, and a refresh icon to re-check status). Light mode uses
+more opaque surfaces; dark mode keeps its translucent background. The sidebar
+entry includes a gear icon.
 The right sidebar is hidden in Settings; **Escape** closes Settings and returns
 to the selected conversation, terminal, or draft.
 Hold Command to see numeric hints on the top tabs. There are no numeric sidebar
@@ -274,6 +318,9 @@ session shortcuts.
 | Command-1–9 | Select a top tab by position |
 | Command-N / Command-T | New session |
 | Command-W | Close the active tab |
+| Command-+ (Command-Shift-=) | Zoom the entire interface in |
+| Command-- | Zoom the entire interface out |
+| Command-= | Reset zoom to 100% |
 | Control-Tab / Control-Shift-Tab | Next / previous tab |
 | Command-Shift-] / Command-Shift-[ | Next / previous tab |
 | Command-L | Focus composer |
@@ -304,6 +351,7 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | `right-panels.json` | Per-chat file/terminal pane state |
 | `sidebar-widths.json` | Sidebar sizes |
 | `appearance.json` | Light/Dark preference |
+| `zoom.json` | Interface zoom percentage |
 | `acp-agents.json` | ACP registry overrides |
 
 The macOS development-signing identity uses the fixed directory described above.
@@ -340,6 +388,9 @@ python3 scripts/test-macos-install.py
 Tests cover provider transcript replay, queue ordering and busy recovery,
 steering without duplicate output, attachments, terminal resume identities,
 PTY lifecycle, updater ownership/failure handling, and persisted UI metadata.
+UI regression tests also cover preview tabs, unload/resume, hover clipping and
+collapse fading, first-chunk fading, reasoning-step boundaries, and zoom shortcuts
+with composer or terminal focus.
 Tests requiring installed/authenticated provider CLIs are ignored by default;
 run those explicitly when validating live-provider behavior. Signing continuity
 and installation while running have separate macOS regression scripts.

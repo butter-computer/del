@@ -339,7 +339,14 @@ impl AgentBackend for ClaudeBackend {
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
-        self.spawn(&config, session.clone(), ["--resume", session.as_str()])
+        let cwd = config.cwd.clone();
+        let id = session.as_str().to_owned();
+        let history = tokio::task::spawn_blocking(move || crate::history::load(&cwd, &id))
+            .await
+            .map_err(|e| AgentError::Backend(e.to_string()))??;
+        Ok(self
+            .spawn(&config, session.clone(), ["--resume", session.as_str()])?
+            .with_history(history))
     }
 
     async fn respond_approval(

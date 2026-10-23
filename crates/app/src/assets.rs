@@ -6,7 +6,9 @@ use std::borrow::Cow;
 
 gpui_kit::assets::icon_assets!(
     SidebarIcons,
-    [Pencil, Archive, Pin, PinOff, Close, Coffee, Eye, Trash]
+    [
+        Pencil, Archive, Pin, PinOff, Close, Coffee, Eye, Trash, RefreshCw
+    ]
 );
 
 pub struct AppAssets;
@@ -56,6 +58,19 @@ impl AssetSource for AppAssets {
     }
 }
 
+/// Set the Dock icon for both bundled and direct development launches.
+pub fn set_app_icon() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn del_set_app_icon(bytes: *const u8, length: usize);
+        }
+        let icon = include_bytes!("../assets/Del.icns");
+        // Called by the application startup callback on the main thread.
+        unsafe { del_set_app_icon(icon.as_ptr(), icon.len()) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +86,7 @@ mod tests {
             gpui_kit::assets::IconName::Coffee,
             gpui_kit::assets::IconName::Eye,
             gpui_kit::assets::IconName::Trash,
+            gpui_kit::assets::IconName::RefreshCw,
         ] {
             let path = icon.path();
             let bytes = AppAssets.load(&path).unwrap().expect("sidebar action SVG");

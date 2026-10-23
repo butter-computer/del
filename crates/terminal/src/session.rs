@@ -175,6 +175,20 @@ fn base_env(spec: &TerminalSpec) -> HashMap<String, String> {
     env
 }
 
+// An embedding process (including an IDE or build runner) may disable colour
+// for its captured output. A real PTY should detect its own capabilities.
+fn configure_environment(command: &mut CommandBuilder, spec: &TerminalSpec) {
+    for key in ["NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+        command.env_remove(key);
+    }
+    for (key, value) in base_env(spec) {
+        command.env(key, value);
+    }
+    for key in &spec.env_remove {
+        command.env_remove(key);
+    }
+}
+
 // Job-control shells put foreground jobs in separate process groups. Sweep
 // groups belonging to the PTY's session, rather than only the shell's group.
 struct ProcessSession {
@@ -317,12 +331,7 @@ impl TerminalSession {
         if let Some(cwd) = &spec.cwd {
             command.cwd(cwd);
         }
-        for (key, value) in base_env(&spec) {
-            command.env(key, value);
-        }
-        for key in &spec.env_remove {
-            command.env_remove(key);
-        }
+        configure_environment(&mut command, &spec);
         let pair = native_pty_system()
             .openpty(spec.size.pty_size())
             .map_err(io::Error::other)?;
@@ -515,6 +524,29 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pty_colour_detection_ignores_parent_overrides_but_honours_explicit_settings() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("NO_COLOR", "1");
+        command.env("FORCE_COLOR", "0");
+        command.env("CLICOLOR", "0");
+        command.env("CLICOLOR_FORCE", "0");
+        configure_environment(&mut command, &TerminalSpec::shell());
+        for key in ["NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+            assert!(command.get_env(key).is_none());
+        }
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        configure_environment(&mut command, &TerminalSpec::shell().env("NO_COLOR", "1"));
+        assert_eq!(command.get_env("NO_COLOR"), Some(std::ffi::OsStr::new("1")));
+    }
+
     #[test]
     fn command_arguments_are_not_interpolated() {
         let s = TerminalSpec::command("claude", ["a b", "$(touch nope)"]);

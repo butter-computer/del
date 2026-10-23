@@ -3,6 +3,7 @@
 
 use super::model::{Block, Change, ChatModel, Phase, compact_count};
 use crate::appearance::rgba;
+use crate::zoom::px as zpx;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::typography::TEXT_SM;
 use gpui_kit::component::spinner::Spinner;
@@ -20,30 +21,10 @@ pub const COLUMN_MAX_WIDTH: f32 = 640.0;
 pub struct Backend {
     pub runtime: tokio::runtime::Handle,
     pub manager: SessionManager,
-    pub updates_enabled: bool,
-    pub update_progress: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync>,
 }
 
 impl Backend {
     pub async fn resume(&self, id: &SessionId) -> del_agent::Result<del_agent::SessionHandle> {
-        if self.updates_enabled
-            && !self.manager.is_live(id)
-            && let Some(record) = self
-                .manager
-                .list_sessions()
-                .into_iter()
-                .find(|r| &r.id == id)
-        {
-            let report = &self.update_progress;
-            let result = crate::provider_updates::ensure_provider(
-                record.provider,
-                record.model,
-                |message| report(id.0.clone(), Some(message)),
-            )
-            .await;
-            report(id.0.clone(), None);
-            result.map_err(AgentError::Backend)?;
-        }
         self.manager.resume(id).await
     }
 }
@@ -62,6 +43,8 @@ fn active_prompt(prompts: &[usize], top: usize, at_end: bool) -> Option<usize> {
     }
 }
 
+pub struct PromptSubmitted;
+
 pub struct ChatView {
     pub(super) model: ChatModel,
     pub(super) scroller: ListState,
@@ -75,8 +58,11 @@ pub struct ChatView {
     closed: bool,
     loading: bool,
     completed_turns: u64,
+    pub(super) first_chunks: std::collections::HashMap<String, std::time::Instant>,
     pub pending_errors: Vec<String>,
 }
+
+impl EventEmitter<PromptSubmitted> for ChatView {}
 
 impl ChatView {
     /// A chat for `session`, which the app has already started. The view
@@ -89,7 +75,7 @@ impl ChatView {
         first_prompt: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroller = ListState::new(0, ListAlignment::Top, px(400.0));
+        let scroller = ListState::new(0, ListAlignment::Top, zpx(400.0));
         scroller.set_follow_mode(FollowMode::Tail);
         let view = cx.weak_entity();
         scroller.set_scroll_handler(move |_, _, cx| {
@@ -116,6 +102,7 @@ impl ChatView {
             closed: false,
             loading: session.is_some(),
             completed_turns: 0,
+            first_chunks: Default::default(),
             pending_errors: Vec::new(),
         };
         if let Some(text) = first_prompt {
@@ -137,6 +124,16 @@ impl ChatView {
         {
             self.pending_errors.push(message.clone());
         }
+        if !self.loading
+            && let AgentEvent::AssistantTextDelta { turn_id, text }
+                | AgentEvent::AssistantMessage { turn_id, text } = event
+            && !text.is_empty()
+            && !self.first_chunks.contains_key(turn_id)
+            && !self.model.blocks.iter().any(|block| matches!(block,
+                Block::Assistant { turn_id: existing, text, .. } if existing == turn_id && !text.is_empty()))
+        {
+            self.first_chunks.insert(turn_id.clone(), std::time::Instant::now());
+        }
         let change = self.model.apply(event);
         self.sync(change, cx);
     }
@@ -155,6 +152,12 @@ impl ChatView {
         cx.notify();
     }
 
+    pub fn remeasure_for_zoom(&mut self, cx: &mut Context<Self>) {
+        self.jump = None;
+        self.scroller.remeasure_items(0..self.scroller.item_count());
+        cx.notify();
+    }
+
     /// Whether a turn is in flight.
     pub fn is_running(&self) -> bool {
         self.model.is_running()
@@ -169,6 +172,7 @@ impl ChatView {
     }
 
     pub fn enqueue(&mut self, input: UserInput, cx: &mut Context<Self>) -> String {
+        cx.emit(PromptSubmitted);
         let id = self.queue.push(input);
         self.save_queue();
         cx.notify();
@@ -210,6 +214,7 @@ impl ChatView {
         let Some(input) = self.queue.begin(&item_id) else {
             return;
         };
+        cx.emit(PromptSubmitted);
         self.save_queue();
         let backend = self.backend.clone();
         let text = if input.attachments.is_empty() {
@@ -432,12 +437,12 @@ impl ChatView {
         h_flex()
             .id("status")
             .w_full()
-            .max_w(px(COLUMN_MAX_WIDTH))
-            .h(px(20.0))
+            .max_w(zpx(COLUMN_MAX_WIDTH))
+            .h(zpx(20.0))
             .px_2()
             .items_center()
             .justify_between()
-            .text_size(px(TEXT_SM))
+            .text_size(zpx(TEXT_SM))
             .text_color(muted)
             .child(
                 h_flex()
@@ -467,12 +472,15 @@ fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.loading && self.model.blocks.is_empty() {
+            return super::conversation_loading("Loading conversation…".into(), cx.reduce_motion());
+        }
         let view = cx.entity();
         if let Some(jump) = &self.jump {
             let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
             self.scroller.scroll_to(ListOffset {
                 item_ix: jump.target,
-                offset_in_item: px(0.0),
+                offset_in_item: zpx(0.0),
             });
             if t < 1.0 {
                 let target = self
@@ -483,8 +491,8 @@ impl Render for ChatView {
                     .max(-self.scroller.max_offset_for_scrollbar().y.as_f32());
                 let eased = 1.0 - (1.0 - t).powi(3);
                 self.scroller.set_offset_from_scrollbar(point(
-                    px(0.0),
-                    px(jump.from + (target - jump.from) * eased),
+                    zpx(0.0),
+                    gpui::px(jump.from + (target - jump.from) * eased),
                 ));
                 window.request_animation_frame();
             } else {
@@ -507,7 +515,7 @@ impl Render for ChatView {
             .collect();
         let at_end = self.scroller.is_following_tail()
             || self.scroller.is_scrolled_to_end() == Some(true)
-            || self.scroller.max_offset_for_scrollbar().y <= px(0.0);
+            || self.scroller.max_offset_for_scrollbar().y <= zpx(0.0);
         let active = self.jump.as_ref().map(|jump| jump.target).or_else(|| {
             active_prompt(
                 &prompts.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(),
@@ -526,80 +534,103 @@ impl Render for ChatView {
                     .child(
                         v_flex()
                             .id("message-navigation")
-                            .w(px(24.0))
+                            .w(zpx(24.0))
                             .h_full()
                             .flex_none()
                             .justify_center()
                             .py_3()
-                            .child(
+                            .children((prompts.len() >= 6).then(|| {
                                 v_flex()
                                     .id("message-ticks")
                                     .max_h_full()
                                     .overflow_y_scroll()
-                                    .children(prompts.into_iter().enumerate().map(|(position, (ix, text))| {
-                                        let strength = |hover: Option<usize>| hover.map_or(0.0, |hover| {
-                                            (1.0 - position.abs_diff(hover) as f32 / 4.0).max(0.0)
-                                        });
-                                        let previous = strength(previous_hover);
-                                        let next = strength(hover);
-                                        let selected = active == Some(ix);
-                                        div()
-                                            .id(("message-jump", ix))
-                                            .role(gpui::Role::Button)
-                                            .aria_label(format!(
-                                                "Jump to message: {}",
-                                                text.chars().take(80).collect::<String>()
-                                            ))
-                                            .tooltip(move |window, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new(
-                                                    text.chars().take(180).collect::<String>(),
-                                                )
-                                                .build(window, cx)
-                                            })
-                                            .on_hover(cx.listener(move |this, hovered, _, cx| {
-                                                let next = if *hovered { Some(position) }
-                                                    else if this.rail_hover == Some(position) { None }
-                                                    else { this.rail_hover };
-                                                if next != this.rail_hover {
-                                                    this.rail_previous_hover = this.rail_hover;
-                                                    this.rail_hover = next;
+                                    .children(prompts.into_iter().enumerate().map(
+                                        |(position, (ix, text))| {
+                                            let strength = |hover: Option<usize>| {
+                                                hover.map_or(0.0, |hover| {
+                                                    (1.0 - position.abs_diff(hover) as f32 / 4.0)
+                                                        .max(0.0)
+                                                })
+                                            };
+                                            let previous = strength(previous_hover);
+                                            let next = strength(hover);
+                                            let selected = active == Some(ix);
+                                            div()
+                                                .id(("message-jump", ix))
+                                                .role(gpui::Role::Button)
+                                                .aria_label(format!(
+                                                    "Jump to message: {}",
+                                                    text.chars().take(80).collect::<String>()
+                                                ))
+                                                .tooltip(move |window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        text.chars().take(180).collect::<String>(),
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .on_hover(cx.listener(
+                                                    move |this, hovered, _, cx| {
+                                                        let next = if *hovered {
+                                                            Some(position)
+                                                        } else if this.rail_hover == Some(position)
+                                                        {
+                                                            None
+                                                        } else {
+                                                            this.rail_hover
+                                                        };
+                                                        if next != this.rail_hover {
+                                                            this.rail_previous_hover =
+                                                                this.rail_hover;
+                                                            this.rail_hover = next;
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
+                                                .group("message-tick")
+                                                .w_full()
+                                                .h(zpx(12.0))
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .justify_start()
+                                                .pl(zpx(2.0))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.jump = Some(MessageJump {
+                                                        target: ix,
+                                                        from: this
+                                                            .scroller
+                                                            .scroll_px_offset_for_scrollbar()
+                                                            .y
+                                                            .as_f32(),
+                                                        started: std::time::Instant::now(),
+                                                    });
                                                     cx.notify();
-                                                }
-                                            }))
-                                            .group("message-tick")
-                                            .w_full()
-                                            .h(px(12.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_start()
-                                            .pl(px(2.0))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.jump = Some(MessageJump {
-                                                    target: ix,
-                                                    from: this
-                                                        .scroller
-                                                        .scroll_px_offset_for_scrollbar()
-                                                        .y
-                                                        .as_f32(),
-                                                    started: std::time::Instant::now(),
-                                                });
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div().h(px(2.0))
-                                                    .with_animation(SharedString::from(format!("rail-{ix}-{previous_hover:?}-{hover:?}-{selected}")),
-                                                        Animation::new(std::time::Duration::from_millis(100)).with_easing(ease_out_quint()),
+                                                }))
+                                                .child(
+                                                    div().h(zpx(2.0)).with_animation(
+                                                        SharedString::from(format!(
+                                                            "rail-{ix}-{previous_hover:?}-{hover:?}"
+                                                        )),
+                                                        Animation::new(
+                                                            std::time::Duration::from_millis(100),
+                                                        )
+                                                        .with_easing(ease_out_quint()),
                                                         move |tick, t| {
-                                                            let weight = previous + (next - previous) * t;
-                                                            let width = (7.0 + 15.0 * weight).max(if selected { 14.0 } else { 7.0 });
-                                                            let alpha = (0.22 + 0.68 * weight).max(if selected { 0.8 } else { 0.22 });
-                                                            tick.w(px(width)).bg(rgba(0xffffffff).opacity(alpha))
-                                                        })
-                                            )
-                                    })),
-                            ),
+                                                            let weight =
+                                                                previous + (next - previous) * t;
+                                                            let width = 7.0 + 15.0 * weight;
+                                                            let alpha = (0.22 + 0.68 * weight).max(
+                                                                if selected { 0.8 } else { 0.22 },
+                                                            );
+                                                            tick.w(zpx(width))
+                                                                .bg(rgba(0xffffffff).opacity(alpha))
+                                                        },
+                                                    ),
+                                                )
+                                        },
+                                    ))
+                            })),
                     )
                     .child(
                         div().flex_1().min_w_0().h_full().child(
@@ -608,7 +639,7 @@ impl Render for ChatView {
                                     .w_full()
                                     .min_w_0()
                                     .px_3()
-                                    .pb(px(6.0))
+                                    .pb(zpx(6.0))
                                     .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
                                     .into_any_element()
                             })
@@ -625,6 +656,7 @@ impl Render for ChatView {
                     .px_3()
                     .child(self.render_status()),
             )
+            .into_any_element()
     }
 }
 
@@ -641,6 +673,80 @@ mod tests {
         assert_eq!(active_prompt(&[0, 3, 6, 9], 8, false), Some(6));
         assert_eq!(active_prompt(&[], 0, true), None);
     }
+    #[gpui::test]
+    fn initial_stream_fade_starts_once_and_skips_history(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            directory.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager,
+        };
+        let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.loading = true;
+            view.on_event(
+                &AgentEvent::AssistantMessage {
+                    turn_id: "saved".into(),
+                    text: "Old response".into(),
+                },
+                cx,
+            );
+            assert!(view.first_chunks.is_empty());
+            view.loading = false;
+            view.on_event(
+                &AgentEvent::AssistantTextDelta {
+                    turn_id: "saved".into(),
+                    text: " continues".into(),
+                },
+                cx,
+            );
+            assert!(
+                view.first_chunks.is_empty(),
+                "restored streaming text must not fade again"
+            );
+            view.on_event(
+                &AgentEvent::AssistantTextDelta {
+                    turn_id: "live".into(),
+                    text: "".into(),
+                },
+                cx,
+            );
+            assert!(view.first_chunks.is_empty());
+            view.on_event(
+                &AgentEvent::AssistantTextDelta {
+                    turn_id: "live".into(),
+                    text: "First".into(),
+                },
+                cx,
+            );
+            let started = view.first_chunks["live"];
+            view.on_event(
+                &AgentEvent::AssistantTextDelta {
+                    turn_id: "live".into(),
+                    text: " later".into(),
+                },
+                cx,
+            );
+            view.on_event(
+                &AgentEvent::AssistantMessage {
+                    turn_id: "live".into(),
+                    text: "First later".into(),
+                },
+                cx,
+            );
+            assert_eq!(view.first_chunks.len(), 1);
+            assert_eq!(view.first_chunks["live"], started);
+        });
+    }
+
     #[gpui::test]
     fn followups_wait_for_completion_then_send_in_order(cx: &mut gpui::TestAppContext) {
         use std::sync::Arc;
@@ -670,8 +776,6 @@ mod tests {
         let backend = Backend {
             runtime: runtime.handle().clone(),
             manager: manager.clone(),
-            updates_enabled: false,
-            update_progress: Arc::new(|_, _| {}),
         };
         let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
         view.update(cx, |view, cx| {
@@ -758,8 +862,6 @@ mod tests {
         let backend = Backend {
             runtime: runtime.handle().clone(),
             manager: manager.clone(),
-            updates_enabled: false,
-            update_progress: Arc::new(|_, _| {}),
         };
         let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
         view.update(cx, |view, cx| {

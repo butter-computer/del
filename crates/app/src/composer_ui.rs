@@ -9,6 +9,7 @@
 
 use crate::appearance::{rgb, rgba};
 use crate::providers;
+use crate::zoom::px as zpx;
 use del_agent::Provider;
 use del_core::composer;
 use del_core::typography::TEXT_MD;
@@ -146,7 +147,7 @@ pub fn provider_logo(provider: Provider, size: f32) -> Svg {
     let (path, color) = provider_brand(provider);
     svg()
         .path(path)
-        .size(px(size))
+        .size(zpx(size))
         .flex_none()
         .text_color(rgb(color))
 }
@@ -208,11 +209,11 @@ impl RenderOnce for ComposerCard {
         };
         let folder_el = if folder_locked {
             h_flex()
-                .h(px(20.0))
+                .h(zpx(20.0))
                 .px_1()
                 .gap_1()
                 .items_center()
-                .text_size(px(12.0))
+                .text_size(zpx(12.0))
                 .text_color(muted)
                 .child(Icon::new(IconName::Folder).small())
                 .child(folder)
@@ -230,47 +231,46 @@ impl RenderOnce for ComposerCard {
         // One round button: send, or stop while a turn is running.
         let action = div()
             .id("send")
-            .size(px(28.0))
+            .size(zpx(28.0))
             .flex()
             .items_center()
             .justify_center()
             .rounded_full();
-        let action = if starting {
-            action.child(gpui_kit::component::spinner::Spinner::new().small())
-        } else if running {
-            action
-                .bg(rgb(0xffffff))
-                .cursor_pointer()
-                .on_click(move |_, w, cx| on_stop(w, cx))
-                .child(div().size(px(9.0)).rounded_xs().bg(rgb(0x111113)))
-        } else {
-            action
-                .bg(if can_send {
-                    rgb(0xffffff)
-                } else {
-                    rgb(0x4a4a4e)
-                })
-                .when(can_send, |a| {
-                    a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
-                })
-                .child(
-                    Icon::new(IconName::ArrowUp)
-                        .small()
-                        .text_color(if can_send {
+        let action =
+            if starting {
+                action.child(gpui_kit::component::spinner::Spinner::new().small())
+            } else if running {
+                action
+                    .bg(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_click(move |_, w, cx| on_stop(w, cx))
+                    .child(div().size(zpx(9.0)).rounded_xs().bg(rgb(0x111113)))
+            } else {
+                action
+                    .bg(if can_send {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0x4a4a4e)
+                    })
+                    .when(can_send, |a| {
+                        a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
+                    })
+                    .child(Icon::new(IconName::ArrowUp).with_size(zpx(16.)).text_color(
+                        if can_send {
                             rgb(0x111113)
                         } else {
                             rgb(0x8a8a8e)
-                        }),
-                )
-        };
+                        },
+                    ))
+            };
 
         // No border: the card is told apart from the page by its fill alone.
         v_flex()
             .w_full()
-            .max_w(px(max_width))
+            .max_w(zpx(max_width))
             .p_2()
             .gap_1()
-            .rounded(px(14.0))
+            .rounded(zpx(14.0))
             .bg(rgba(COMPOSER_SURFACE_RGBA))
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
@@ -278,7 +278,7 @@ impl RenderOnce for ComposerCard {
                     .on_paste(move |item, window, cx| on_paste(item, window, cx))
                     .appearance(false)
                     .bordered(false)
-                    .text_size(px(TEXT_MD)),
+                    .text_size(zpx(TEXT_MD)),
             )
             .child(
                 h_flex()

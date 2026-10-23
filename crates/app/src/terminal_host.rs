@@ -7,6 +7,7 @@
 //! Use `TerminalHost::spawn_prepared` to create an entity without panicking on
 //! invalid launch settings or PTY spawn errors.
 
+use crate::zoom::px as zpx;
 use del_terminal::{TerminalEvent, TerminalSession, TerminalSpec, TerminalView};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -206,6 +207,9 @@ impl TerminalLaunchSpec {
         let mut args = self.args.clone();
         let cwd = self.cwd.canonicalize()?;
         if self.kind == TerminalLaunchKind::Codex {
+            // Login shell startup files may change directories. Pin the CLI's
+            // workspace independently of that shell's final working directory.
+            args.extend(["--cd".into(), cwd.to_string_lossy().into_owned()]);
             // Scope trust to the folder explicitly opened in Del. Keep the
             // provider's approval policy and sandbox settings unchanged.
             args.extend([
@@ -366,17 +370,17 @@ impl Render for TerminalLauncher {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(560.))
+                    .max_w(zpx(560.))
                     .gap_3()
                     .child(
                         div()
-                            .text_size(px(20.))
+                            .text_size(zpx(20.))
                             .text_color(rgb(0xf5f5f5))
                             .child("Open a terminal"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(zpx(12.))
                             .text_color(rgb(0x999999))
                             .child(self.cwd.to_string_lossy().into_owned()),
                     )
@@ -392,7 +396,7 @@ impl Render for TerminalLauncher {
                     .when_some(self.error.clone(), |d, error| {
                         d.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(zpx(12.))
                                 .text_color(rgb(0xe58b8b))
                                 .child(error),
                         )
@@ -572,10 +576,13 @@ impl TerminalHost {
             cx.notify();
         })
         .detach();
-        if spec.kind == TerminalLaunchKind::Claude {
-            // Claude has no interactive-launch trust flag. Confirm only its
-            // exact startup dialog, letting Claude persist trust itself. Never
-            // auto-answer later tool approvals or dialogs in custom terminals.
+        if matches!(
+            spec.kind,
+            TerminalLaunchKind::Claude | TerminalLaunchKind::Codex
+        ) {
+            // Confirm only the exact startup trust dialog for the selected
+            // workspace. Leave tool approvals and custom terminals alone.
+            let kind = spec.kind;
             let workspace = cwd.clone();
             cx.spawn(async move |this, cx| {
                 let started = std::time::Instant::now();
@@ -590,7 +597,13 @@ impl TerminalHost {
                             return false;
                         }
                         let screen = screen_tail(session);
-                        let Some(key) = claude_workspace_trust_key(&screen, &workspace) else {
+                        let key = match kind {
+                            TerminalLaunchKind::Codex => {
+                                codex_workspace_trust_key(&screen, &workspace)
+                            }
+                            _ => claude_workspace_trust_key(&screen, &workspace),
+                        };
+                        let Some(key) = key else {
                             // Once the recognized dialog disappears, stop.
                             return last_attempt.is_none();
                         };
@@ -707,7 +720,7 @@ impl Render for TerminalHost {
             .overflow_hidden()
             .child(
                 h_flex()
-                    .h(px(32.))
+                    .h(zpx(32.))
                     .px_2()
                     .gap_2()
                     .flex_none()
@@ -716,13 +729,13 @@ impl Render for TerminalHost {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(zpx(12.))
                             .text_color(rgb(0xaaaaaa))
                             .child(self.snapshot.title.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(zpx(11.))
                             .text_color(rgb(0x888888))
                             .child(status),
                     )
@@ -803,6 +816,35 @@ fn trust_confirmation_due(
         .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_millis(250))
 }
 
+fn codex_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'static [u8]> {
+    let lines: Vec<_> = screen
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let heading = lines.iter().position(|line| *line == "Folder access")?;
+    if lines.get(heading + 1).copied()? != cwd.to_string_lossy()
+        || !lines
+            .iter()
+            .any(|line| line.starts_with("Trust this folder?"))
+        || !lines.contains(&"2. Quit")
+        || !lines.last()?.starts_with("enter")
+        || !lines.last()?.contains("continue")
+        || !lines.last()?.contains("esc")
+        || !lines.last()?.contains("quit")
+    {
+        return None;
+    }
+    lines
+        .iter()
+        .any(|line| {
+            line.strip_prefix('>')
+                .or_else(|| line.strip_prefix('›'))
+                .is_some_and(|selected| selected.trim() == "1. Trust and continue")
+        })
+        .then_some(b"\r".as_slice())
+}
+
 fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'static [u8]> {
     let lines: Vec<_> = screen.lines().map(str::trim).collect();
     if !lines.contains(&"Accessing workspace:")
@@ -832,6 +874,25 @@ fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'s
 mod tests {
     use super::{TerminalLaunchKind, TerminalLaunchSpec};
     use std::path::PathBuf;
+
+    #[test]
+    fn codex_confirms_only_the_selected_workspace_startup_prompt() {
+        let cwd = std::path::Path::new("/work/project");
+        let screen = "Folder access\n/work/project\n\nTrust this folder? Codex can read, edit, and run files here.\nContinue only if you trust these files. Your trust decision will be saved.\n› 1. Trust and continue\n  2. Quit\n\n  enter continue · esc quit\n";
+        assert_eq!(
+            super::codex_workspace_trust_key(screen, cwd),
+            Some(b"\r".as_slice())
+        );
+        for unrelated in [
+            screen.replace("/work/project", "/"),
+            screen.replace("Folder access", "Run command"),
+            screen.replace("› 1. Trust and continue", "1. Trust and continue"),
+            screen.replace("› 1. Trust and continue", "› 1. Approve command"),
+            format!("{screen}A later prompt"),
+        ] {
+            assert_eq!(super::codex_workspace_trust_key(&unrelated, cwd), None);
+        }
+    }
 
     #[test]
     fn trust_confirmation_is_immediate_with_short_bounded_retries() {
@@ -981,7 +1042,14 @@ mod tests {
                 serde_json::to_string(&config.cwd.canonicalize().unwrap().to_string_lossy())
                     .unwrap()
             );
+            let canonical_cwd = config
+                .cwd
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             if kind == TerminalLaunchKind::Codex {
+                expected.extend(["--cd", &canonical_cwd]);
                 expected.extend(["-c", &trust]);
                 expected.extend(["-c", r#"tui.terminal_title=["session-id","thread-name"]"#]);
             }
@@ -1024,6 +1092,8 @@ mod tests {
             prepared.args,
             [
                 "original",
+                "--cd",
+                &spec.cwd.canonicalize().unwrap().to_string_lossy(),
                 "-c",
                 &format!(
                     "projects.{}.trust_level=\"trusted\"",

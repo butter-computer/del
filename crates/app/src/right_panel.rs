@@ -2,6 +2,7 @@
 
 use crate::appearance::{rgb, rgba};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
+use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
@@ -415,14 +416,14 @@ impl RightPanel {
         div()
             .id(id)
             .px_2()
-            .h(px(24.0))
+            .h(zpx(24.0))
             .flex()
             .flex_none()
             .whitespace_nowrap()
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(TEXT_MD))
+            .text_size(zpx(TEXT_MD))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
@@ -457,7 +458,7 @@ impl RightPanel {
         let tree = v_flex()
             .id("file-tree")
             .flex_none()
-            .h(px(self.file_tree_height))
+            .h(zpx(self.file_tree_height))
             .overflow_y_scroll()
             .children(rows.into_iter().map(|(path, depth, is_dir)| {
                 let name = path
@@ -469,21 +470,21 @@ impl RightPanel {
                 let click = path.clone();
                 h_flex()
                     .w_full()
-                    .h(px(22.0))
+                    .h(zpx(22.0))
                     .flex_none()
-                    .pl(px(4.0 + depth as f32 * 12.0))
+                    .pl(zpx(4.0 + depth as f32 * 12.0))
                     .pr_1()
                     .child(
                         h_flex()
                             .id(SharedString::from(path.display().to_string()))
-                            .h(px(22.0))
+                            .h(zpx(22.0))
                             .min_w_0()
                             .px_1()
                             .gap_1p5()
                             .items_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .text_size(px(TEXT_SM))
+                            .text_size(zpx(TEXT_SM))
                             .text_color(if is_dir {
                                 rgb(0xf0f0f0)
                             } else {
@@ -531,20 +532,20 @@ impl RightPanel {
             Viewer::None => div()
                 .p_3()
                 .whitespace_nowrap()
-                .text_size(px(TEXT_SM))
+                .text_size(zpx(TEXT_SM))
                 .text_color(muted)
                 .child("Select a file to view it")
                 .into_any_element(),
             Viewer::Loading { .. } => div()
                 .p_3()
-                .text_size(px(TEXT_SM))
+                .text_size(zpx(TEXT_SM))
                 .text_color(muted)
                 .child("Loading file…")
                 .into_any_element(),
             Viewer::Note { message, .. } => div()
                 .p_3()
                 .whitespace_nowrap()
-                .text_size(px(TEXT_SM))
+                .text_size(zpx(TEXT_SM))
                 .text_color(muted)
                 .child(message.clone())
                 .into_any_element(),
@@ -563,7 +564,7 @@ impl RightPanel {
                         .p_3()
                         .w_full()
                         .whitespace_normal()
-                        .text_size(px(TEXT_SM))
+                        .text_size(zpx(TEXT_SM))
                         .child(
                             TextView::markdown(
                                 ("file-markdown", self.file_request),
@@ -579,14 +580,14 @@ impl RightPanel {
                     range
                         .map(|i| {
                             h_flex()
-                                .h(px(20.0))
+                                .h(zpx(20.0))
                                 .gap_2()
                                 .px_2()
                                 .font_family(MONO)
-                                .text_size(px(TEXT_SM))
+                                .text_size(zpx(TEXT_SM))
                                 .child(
                                     div()
-                                        .w(px(32.0))
+                                        .w(zpx(32.0))
                                         .flex_none()
                                         .text_right()
                                         .text_color(rgba(0xffffff40))
@@ -619,7 +620,7 @@ impl RightPanel {
         let preview = v_flex()
             .size_full()
             .min_h_0()
-            .rounded(px(10.0))
+            .rounded(zpx(10.0))
             .overflow_hidden()
             .when_some(selected, |preview, path| {
                 let name = path
@@ -628,8 +629,8 @@ impl RightPanel {
                     .unwrap_or_default();
                 preview.child(
                     h_flex()
-                        .h(px(28.0))
-                        .rounded_t(px(10.0))
+                        .h(zpx(28.0))
+                        .rounded_t(zpx(10.0))
                         .flex_none()
                         .px_2()
                         .gap_2()
@@ -641,7 +642,7 @@ impl RightPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(TEXT_SM))
+                                .text_size(zpx(TEXT_SM))
                                 .child(name),
                         )
                         .when(is_markdown, |header| {
@@ -652,12 +653,12 @@ impl RightPanel {
                                             .id(label)
                                             .role(gpui::Role::Button)
                                             .aria_label(label)
-                                            .h(px(20.0))
+                                            .h(zpx(20.0))
                                             .px_1p5()
                                             .flex()
                                             .items_center()
                                             .rounded_md()
-                                            .text_size(px(11.0))
+                                            .text_size(zpx(11.0))
                                             .cursor_pointer()
                                             .when(self.markdown_preview == preview, |button| {
                                                 button.bg(rgba(0xffffff20))
@@ -676,7 +677,7 @@ impl RightPanel {
                                 .id("close-file-preview")
                                 .role(gpui::Role::Button)
                                 .aria_label("Close file preview")
-                                .size(px(22.0))
+                                .size(zpx(22.0))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -708,11 +709,13 @@ impl RightPanel {
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<FileSplitDrag>, _, cx| {
                     let drag = event.drag(cx);
-                    let delta = event.event.position.y.as_f32() - drag.start_y.get();
+                    let delta = del_core::zoom::unscaled(
+                        event.event.position.y.as_f32() - drag.start_y.get(),
+                    );
                     this.file_tree_height = resized_tree_height(
                         drag.start_height,
                         delta,
-                        event.bounds.size.height.as_f32(),
+                        del_core::zoom::unscaled(event.bounds.size.height.as_f32()),
                     );
                     cx.notify();
                 }),
@@ -721,7 +724,7 @@ impl RightPanel {
                 div()
                     .relative()
                     .flex_none()
-                    .h(px(self.file_tree_height))
+                    .h(zpx(self.file_tree_height))
                     .overflow_hidden()
                     .child(tree),
             )
@@ -729,7 +732,7 @@ impl RightPanel {
                 div()
                     .id("file-preview-resize")
                     .group("file-preview-resize")
-                    .h(px(8.0))
+                    .h(zpx(8.0))
                     .w_full()
                     .flex_none()
                     .px_2()
@@ -742,7 +745,7 @@ impl RightPanel {
                     .on_drag(split_drag, |_, _, _, cx| cx.new(|_| FileSplitPreview))
                     .child(
                         div()
-                            .h(px(1.0))
+                            .h(zpx(1.0))
                             .w_full()
                             .bg(rgba(0xffffff10))
                             .group_hover("file-preview-resize", |line| line.bg(rgba(0xffffff24))),
@@ -768,7 +771,7 @@ impl RightPanel {
         }
         div()
             .p_3()
-            .text_size(px(TEXT_SM))
+            .text_size(zpx(TEXT_SM))
             .text_color(rgba(0xffffff8c))
             .child(if self.terminal_error.is_some() {
                 "Terminal unavailable. Switch back to Terminal to retry."
@@ -802,7 +805,7 @@ impl Render for RightPanel {
             .flex_none()
             .child(
                 h_flex()
-                    .h(px(32.0))
+                    .h(zpx(32.0))
                     .flex_none()
                     .overflow_hidden()
                     .px_2()
@@ -814,12 +817,12 @@ impl Render for RightPanel {
                         row.child(div().flex_1()).child(
                             h_flex()
                                 .id("show-hidden-files")
-                                .gap(px(5.0))
+                                .gap(zpx(5.0))
                                 .items_center()
                                 .cursor_pointer()
                                 .opacity(0.55)
                                 .hover(|control| control.opacity(0.82))
-                                .text_size(px(11.0))
+                                .text_size(zpx(11.0))
                                 .text_color(rgba(0xffffff8c))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_hidden = !this.show_hidden;
@@ -831,8 +834,8 @@ impl Render for RightPanel {
                                 .child(
                                     div()
                                         .relative()
-                                        .w(px(22.0))
-                                        .h(px(12.0))
+                                        .w(zpx(22.0))
+                                        .h(zpx(12.0))
                                         .rounded_full()
                                         .bg(if show_hidden {
                                             rgba(0x448aff80)
@@ -842,8 +845,8 @@ impl Render for RightPanel {
                                         .child(
                                             div()
                                                 .absolute()
-                                                .top(px(2.0))
-                                                .size(px(8.0))
+                                                .top(zpx(2.0))
+                                                .size(zpx(8.0))
                                                 .rounded_full()
                                                 .bg(rgba(0xffffffe6))
                                                 .with_animation(
@@ -861,7 +864,7 @@ impl Render for RightPanel {
                                                         } else {
                                                             (12.0, 2.0)
                                                         };
-                                                        thumb.left(px(from + (to - from) * t))
+                                                        thumb.left(zpx(from + (to - from) * t))
                                                     },
                                                 ),
                                         ),

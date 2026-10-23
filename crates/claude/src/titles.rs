@@ -15,32 +15,9 @@ pub(crate) struct Titles(HashMap<PathBuf, TitleFile>);
 
 impl Titles {
     pub fn read(&mut self, root: &Path, cwd: &Path, id: &str) -> std::io::Result<Option<String>> {
-        // Session IDs are filenames, never paths from the provider.
-        if uuid::Uuid::parse_str(id).is_err() {
+        let Some(path) = transcript_path(root, cwd, id) else {
             return Ok(None);
-        }
-        let project: String = cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let projects = root.join("projects");
-        let filename = format!("{id}.jsonl");
-        let mut path = projects.join(project).join(&filename);
-        if !path.is_file() {
-            // Claude may canonicalize a symlinked workspace or encode a long path differently.
-            let Ok(entries) = std::fs::read_dir(projects) else {
-                return Ok(None);
-            };
-            let Some(found) = entries
-                .flatten()
-                .map(|e| e.path().join(&filename))
-                .find(|p| p.is_file())
-            else {
-                return Ok(None);
-            };
-            path = found;
-        }
+        };
         let mut file = std::fs::File::open(&path)?;
         let size = file.metadata()?.len();
         let state = self.0.entry(path).or_default();
@@ -81,6 +58,33 @@ impl Titles {
         }
         Ok(state.custom.clone().or_else(|| state.generated.clone()))
     }
+}
+
+pub(crate) fn transcript_path(root: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
+    // Session IDs are filenames, never paths from the provider.
+    if uuid::Uuid::parse_str(id).is_err() {
+        return None;
+    }
+    let project: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let projects = root.join("projects");
+    let filename = format!("{id}.jsonl");
+    let mut path = projects.join(project).join(&filename);
+    if !path.is_file() {
+        // Claude may canonicalize a symlinked workspace or encode a long path differently.
+        let Ok(entries) = std::fs::read_dir(projects) else {
+            return None;
+        };
+        let found = entries
+            .flatten()
+            .map(|e| e.path().join(&filename))
+            .find(|p| p.is_file())?;
+        path = found;
+    }
+    Some(path)
 }
 
 #[cfg(test)]

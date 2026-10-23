@@ -1,6 +1,7 @@
 //! Model and reasoning controls backed by the selected provider's catalog.
 use crate::appearance::{rgb, rgba};
 use crate::state::{AppState, Selection};
+use crate::zoom::px as zpx;
 use del_agent::{EffortOption, Provider};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
@@ -26,7 +27,7 @@ struct EffortDrag;
 
 impl Render for EffortDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size(px(1.)).opacity(0.0)
+        div().size(zpx(1.)).opacity(0.0)
     }
 }
 
@@ -87,14 +88,14 @@ impl Render for ModelPicker {
                     } else {
                         Anchor::TopLeft
                     })
-                    .offset(px(20.))
+                    .offset(zpx(20.))
                     .trigger(
                         Button::new("model-picker-trigger")
                             .ghost()
                             .small()
                             .compact()
                             .rounded_full()
-                            .text_size(px(15.))
+                            .text_size(zpx(15.))
                             .disabled(state.is_starting())
                             .accessibility_label(format!("Select model: {label}"))
                             .child(h_flex().gap_1().items_center().child(label).when_some(
@@ -114,7 +115,7 @@ impl Render for ModelPicker {
                                     search.set_value("", window, cx);
                                     search.focus(window, cx);
                                 });
-                                panel.model_scroll.set_offset(point(px(0.), px(0.)));
+                                panel.model_scroll.set_offset(point(zpx(0.), zpx(0.)));
                                 panel.state.update(cx, |s, cx| s.load_models(false, cx));
                                 cx.notify();
                             });
@@ -156,7 +157,7 @@ impl ModelPanel {
         cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.highlighted = None;
-                this.model_scroll.set_offset(point(px(0.), px(0.)));
+                this.model_scroll.set_offset(point(zpx(0.), zpx(0.)));
                 cx.notify();
             }
         })
@@ -181,7 +182,7 @@ impl Render for ModelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let available_height = if matches!(state.selection, Selection::Session(_)) {
-            self.trigger_bottom.get() - px(28.)
+            self.trigger_bottom.get() - zpx(28.)
         } else {
             window.viewport_size().height - self.trigger_bottom.get()
         };
@@ -200,19 +201,37 @@ impl Render for ModelPanel {
         let root = v_flex()
             .id("model-panel")
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = &event.keystroke;
+                if key.key == "escape" {
                     window.prevent_default();
                     cx.stop_propagation();
                     cx.emit(CloseModelPicker);
+                } else if !this.models
+                    && !key.modifiers.platform
+                    && !key.modifiers.control
+                    && !key.modifiers.alt
+                    && matches!(key.key.as_str(), "left" | "right")
+                    && !this.state.read(cx).is_starting()
+                    && let Some(index) =
+                        next_effort_index(this.effort_index, this.levels.len(), key.key == "right")
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.previous_effort_index = this.effort_index;
+                    this.effort_index = index;
+                    let effort = Some(this.levels[index].id.clone());
+                    this.state
+                        .update(cx, |state, cx| state.set_effort(effort, cx));
+                    cx.notify();
                 }
             }))
-            .w(px(278.))
+            .w(zpx(278.))
             .p_3()
             .gap_3()
             .rounded_xl()
             .bg(rgb(0x222222))
-            .text_size(px(13.));
+            .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
             let show_default = fuzzy_model_matches(&query, "Default recommended");
@@ -233,8 +252,8 @@ impl Render for ModelPanel {
                 .collect();
             let model_count = self.choices.len();
             self.highlighted = self.highlighted.filter(|index| *index < model_count);
-            let list_height = px(model_count.max(1) as f32 * 42.)
-                .min((available_height - px(84.)).clamp(px(60.), px(240.)));
+            let list_height = zpx(model_count.max(1) as f32 * 42.)
+                .min((available_height - zpx(84.)).clamp(zpx(60.), zpx(240.)));
             let scroll = self.model_scroll.clone();
             let mut list = v_flex().gap_0p5().when(show_default, |list| {
                 list.child(
@@ -248,7 +267,7 @@ impl Render for ModelPanel {
                         .h_auto()
                         .flex_none()
                         .py_1p5()
-                        .text_size(px(12.))
+                        .text_size(zpx(12.))
                         .justify_start()
                         .disabled(locked)
                         .when(
@@ -264,7 +283,7 @@ impl Render for ModelPanel {
                                 .child("Default")
                                 .child(
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(zpx(10.5))
                                         .text_color(muted)
                                         .child("Use the provider’s recommended model"),
                                 ),
@@ -294,7 +313,7 @@ impl Render for ModelPanel {
                         .h_auto()
                         .flex_none()
                         .py_1p5()
-                        .text_size(px(12.))
+                        .text_size(zpx(12.))
                         .justify_start()
                         .disabled(locked)
                         .when(selected.as_deref() == Some(&id), |b| {
@@ -310,8 +329,8 @@ impl Render for ModelPanel {
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
                                         div()
-                                            .text_size(px(10.5))
-                                            .max_w(px(250.))
+                                            .text_size(zpx(10.5))
+                                            .max_w(zpx(250.))
                                             .truncate()
                                             .text_color(muted)
                                             .child(model.description.clone()),
@@ -373,7 +392,7 @@ impl Render for ModelPanel {
                 }))
                 .p_2p5()
                 .gap_2()
-                .text_size(px(12.))
+                .text_size(zpx(12.))
                 .child(
                     h_flex()
                         .justify_between()
@@ -425,7 +444,7 @@ impl Render for ModelPanel {
                                 move |_, bounds, window, _| {
                                     // Read after layout so the fade is accurate on the
                                     // first frame, after refresh, and at the scroll end.
-                                    if scroll.max_offset().y + scroll.offset().y > px(1.) {
+                                    if scroll.max_offset().y + scroll.offset().y > zpx(1.) {
                                         window.paint_quad(fill(
                                             bounds,
                                             linear_gradient(
@@ -441,7 +460,7 @@ impl Render for ModelPanel {
                             .bottom_0()
                             .left_0()
                             .right_0()
-                            .h(px(18.)),
+                            .h(zpx(18.)),
                         ),
                 )
                 .into_any_element();
@@ -472,7 +491,7 @@ impl Render for ModelPanel {
                 .child(
                     Button::new("fast-mode")
                         .ghost()
-                        .size(px(30.))
+                        .size(zpx(30.))
                         .flex_none()
                         .p_0()
                         .disabled(locked || !supports_fast)
@@ -491,7 +510,7 @@ impl Render for ModelPanel {
                         .child(
                             Icon::default()
                                 .path("icons/zap.svg")
-                                .with_size(px(15.))
+                                .with_size(zpx(15.))
                                 .text_color(if fast { accent } else { rgba(0xffffff70) }),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -503,7 +522,7 @@ impl Render for ModelPanel {
                         .ghost()
                         .small()
                         .compact()
-                        .text_size(px(16.))
+                        .text_size(zpx(16.))
                         .child(
                             h_flex()
                                 .items_center()
@@ -528,7 +547,7 @@ impl Render for ModelPanel {
                 .child(
                     Button::new("reset-effort")
                         .ghost()
-                        .size(px(30.))
+                        .size(zpx(30.))
                         .flex_none()
                         .p_0()
                         .accessibility_label("Reset model settings and refresh")
@@ -537,7 +556,7 @@ impl Render for ModelPanel {
                         .disabled(locked || catalog.loading)
                         .child(
                             Icon::new(IconName::RefreshCw)
-                                .with_size(px(15.))
+                                .with_size(zpx(15.))
                                 .text_color(rgba(0xffffff70)),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -561,8 +580,8 @@ impl Render for ModelPanel {
                 div()
                     .id("effort-track")
                     .relative()
-                    .w(px(TRACK_WIDTH))
-                    .h(px(32.))
+                    .w(zpx(TRACK_WIDTH))
+                    .h(zpx(32.))
                     .cursor_grab()
                     .on_drag(EffortDrag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                     .on_drag_move(
@@ -571,9 +590,10 @@ impl Render for ModelPanel {
                             if stops == 0 {
                                 return;
                             }
-                            let x = (event.event.position.x - event.bounds.origin.x)
-                                .as_f32()
-                                .clamp(0.0, TRACK_WIDTH);
+                            let x = del_core::zoom::unscaled(
+                                (event.event.position.x - event.bounds.origin.x).as_f32(),
+                            )
+                            .clamp(0.0, TRACK_WIDTH);
                             let stop = (((x - TRACK_INSET) / (TRACK_WIDTH - THUMB_SIZE))
                                 * stops as f32)
                                 .round()
@@ -588,43 +608,45 @@ impl Render for ModelPanel {
                         div()
                             .absolute()
                             .left_0()
-                            .top(px(4.))
+                            .top(zpx(4.))
                             .w_full()
-                            .h(px(24.))
-                            .rounded(px(12.))
+                            .h(zpx(24.))
+                            .rounded(zpx(12.))
                             .overflow_hidden()
                             .bg(rgb(0x2a2a2d))
                             .child(
-                                div().h_full().rounded(px(12.)).bg(accent).with_animation(
+                                div().h_full().rounded(zpx(12.)).bg(accent).with_animation(
                                     SharedString::from(format!(
                                         "effort-fill-{old_fill}-{new_fill}"
                                     )),
                                     Animation::new(std::time::Duration::from_millis(180))
                                         .with_easing(ease_out_quint()),
-                                    move |fill, t| fill.w(px(old_fill + (new_fill - old_fill) * t)),
+                                    move |fill, t| {
+                                        fill.w(zpx(old_fill + (new_fill - old_fill) * t))
+                                    },
                                 ),
                             ),
                     )
                     .child(
                         h_flex()
                             .absolute()
-                            .left(px(TRACK_INSET))
-                            .right(px(TRACK_INSET))
+                            .left(zpx(TRACK_INSET))
+                            .right(zpx(TRACK_INSET))
                             .top_0()
                             .bottom_0()
                             .items_center()
                             .justify_between()
                             .children(
                                 (0..stops).map(|_| {
-                                    div().size(px(5.)).rounded_full().bg(rgba(0xffffff40))
+                                    div().size(zpx(5.)).rounded_full().bg(rgba(0xffffff40))
                                 }),
                             ),
                     )
                     .child(
                         div()
                             .absolute()
-                            .top(px(2.))
-                            .size(px(THUMB_SIZE))
+                            .top(zpx(2.))
+                            .size(zpx(THUMB_SIZE))
                             .rounded_full()
                             .bg(rgb(0xf4f4f4))
                             .shadow_md()
@@ -635,7 +657,8 @@ impl Render for ModelPanel {
                                 Animation::new(std::time::Duration::from_millis(180))
                                     .with_easing(ease_out_quint()),
                                 move |thumb, t| {
-                                    thumb.left(px(old_position + (new_position - old_position) * t))
+                                    thumb
+                                        .left(zpx(old_position + (new_position - old_position) * t))
                                 },
                             ),
                     )
@@ -668,6 +691,16 @@ impl Render for ModelPanel {
     }
 }
 
+fn next_effort_index(current: usize, count: usize, right: bool) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    let current = current.min(last);
+    Some(if right {
+        current.saturating_add(1).min(last)
+    } else {
+        current.saturating_sub(1)
+    })
+}
+
 fn next_model_index(current: Option<usize>, count: usize, down: bool) -> Option<usize> {
     if count == 0 {
         return None;
@@ -697,7 +730,17 @@ fn fuzzy_model_matches(query: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fuzzy_model_matches, next_model_index};
+    use super::{fuzzy_model_matches, next_effort_index, next_model_index};
+
+    #[test]
+    fn effort_arrows_step_once_and_stop_at_endpoints() {
+        assert_eq!(next_effort_index(2, 6, true), Some(3));
+        assert_eq!(next_effort_index(2, 6, false), Some(1));
+        assert_eq!(next_effort_index(0, 6, false), Some(0));
+        assert_eq!(next_effort_index(5, 6, true), Some(5));
+        assert_eq!(next_effort_index(0, 0, true), None);
+        assert_eq!(next_effort_index(9, 1, true), Some(0));
+    }
 
     #[test]
     fn model_navigation_wraps_and_handles_filtered_or_empty_results() {

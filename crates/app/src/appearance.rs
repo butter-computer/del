@@ -1,12 +1,30 @@
 //! Persisted appearance shared by the custom chrome and component theme.
+use crate::zoom::px as zpx;
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, Rgba, px};
+use gpui_kit::{App, Rgba};
 use std::sync::atomic::{AtomicBool, Ordering};
 static LIGHT: AtomicBool = AtomicBool::new(false);
 
 pub fn light() -> bool {
     LIGHT.load(Ordering::Relaxed)
 }
+
+pub fn shell_surface() -> Rgba {
+    gpui_kit::rgba(if light() {
+        0xeeeef0f5
+    } else {
+        del_core::SHELL_SURFACE_RGBA
+    })
+}
+
+pub fn page_surface() -> Rgba {
+    gpui_kit::rgba(if light() {
+        0xfafafaf5
+    } else {
+        del_core::PAGE_SURFACE_RGBA
+    })
+}
+
 fn path() -> std::path::PathBuf {
     del_agent::data_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -43,7 +61,7 @@ fn apply(light: bool, cx: &mut App) {
     );
     Theme::update(cx, |theme| {
         theme.colors.background = gpui_kit::transparent_black();
-        theme.font_size = px(del_core::typography::TEXT_MD);
+        theme.font_size = zpx(del_core::typography::TEXT_MD);
         theme.colors.popover = rgb(0x2b2b2e).into();
         theme.colors.popover_foreground = rgb(0xf0f0f0).into();
         theme.colors.border = rgba(0xffffff14).into();

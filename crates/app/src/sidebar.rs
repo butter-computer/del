@@ -5,6 +5,7 @@ use crate::appearance::{rgb, rgba};
 use crate::composer_ui::provider_logo;
 use crate::sessions::Row;
 use crate::state::{AppState, Panel, Selection};
+use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::assets::IconName as ActionIcon;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -34,17 +35,17 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
             move |dot, _| {
                 let t = (start.elapsed().as_secs_f32() / 0.18).min(1.0);
                 let value = from + (target - from) * (1.0 - (1.0 - t).powi(3));
-                dot.size(px(6.0 * value)).opacity(value)
+                dot.size(zpx(6.0 * value)).opacity(value)
             },
         )
         .into_any_element()
     } else {
-        dot.size(px(6.0 * target))
+        dot.size(zpx(6.0 * target))
             .opacity(target)
             .into_any_element()
     };
     div()
-        .size(px(6.0))
+        .size(zpx(6.0))
         .flex_none()
         .flex()
         .items_center()
@@ -58,25 +59,25 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
 fn coffee_icon(active: bool, cx: &App) -> Div {
     div()
         .relative()
-        .size(px(18.0))
+        .size(zpx(18.0))
         .child(
             Icon::default()
                 .path("icons/coffee-cup.svg")
-                .with_size(px(18.0)),
+                .with_size(zpx(18.0)),
         )
         .children((0..3).map(|i| {
             let steam = div()
                 .absolute()
-                .left(px(5.0 + i as f32 * 3.0))
-                .top(px(0.0))
-                .w(px(2.0))
-                .h(px(5.0))
+                .left(zpx(5.0 + i as f32 * 3.0))
+                .top(zpx(0.0))
+                .w(zpx(2.0))
+                .h(zpx(5.0))
                 .text_color(if active { rgb(0xf5a524) } else { rgba(MUTED) })
                 .child(
                     Icon::default()
                         .path("icons/coffee-steam.svg")
-                        .w(px(2.0))
-                        .h(px(5.0)),
+                        .w(zpx(2.0))
+                        .h(zpx(5.0)),
                 );
             if active && !cx.reduce_motion() {
                 steam
@@ -86,7 +87,7 @@ fn coffee_icon(active: bool, cx: &App) -> Div {
                         move |steam, t| {
                             let phase = (t + i as f32 / 3.0) % 1.0;
                             steam
-                                .top(px(2.0 - phase * 4.0))
+                                .top(zpx(2.0 - phase * 4.0))
                                 .opacity((std::f32::consts::PI * phase).sin())
                         },
                     )
@@ -101,7 +102,7 @@ fn coffee_icon(active: bool, cx: &App) -> Div {
 fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str) -> Button {
     Button::new(id)
         .ghost()
-        .with_size(px(20.0))
+        .with_size(zpx(20.0))
         .icon(icon)
         .tooltip(label)
         .accessibility_label(label)
@@ -111,7 +112,7 @@ fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
-        .size(px(20.0))
+        .size(zpx(20.0))
         .p_0()
         .tooltip(if pinned { "Unpin" } else { "Pin" })
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
@@ -123,14 +124,14 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
                 } else {
                     "icons/pin-outline.svg"
                 })
-                .with_size(px(CONTROL_ICON_SIZE)),
+                .with_size(zpx(CONTROL_ICON_SIZE)),
         )
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .text()
-        .size(px(20.0))
+        .size(zpx(20.0))
         .p_0()
         .tooltip("Archive")
         .accessibility_label("Archive")
@@ -138,7 +139,7 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .child(
             Icon::default()
                 .path("icons/archive.svg")
-                .with_size(px(CONTROL_ICON_SIZE)),
+                .with_size(zpx(CONTROL_ICON_SIZE)),
         )
 }
 
@@ -146,51 +147,45 @@ fn session_menu_item(
     label: &'static str,
     icon: Icon,
     motion: &crate::hover_motion::HoverMotion,
-) -> PopupMenuItem {
-    let motion = motion.clone();
-    PopupMenuItem::element(move |_, cx| {
-        let destructive = label == "Permanently delete";
-        let background = cx.theme().popover;
-        let hover = motion.clone();
-        h_flex()
-            .id(label)
-            .role(gpui::Role::MenuItem)
-            .aria_label(label)
-            .items_center()
-            .h(px(28.0))
-            .gap(px(10.0))
-            .relative()
-            .flex_1()
-            .mx_neg_2()
-            .px_2()
-            .rounded_md()
-            .text_size(px(TEXT_MD))
-            .when(destructive, |item| item.text_color(rgb(0xff646b)))
-            .on_hover(move |entered, window, cx| hover.hover(label, *entered, window, cx))
-            .child(motion.background(
-                label.into(),
-                background.into(),
-                if destructive {
-                    rgba(0xff45451f)
-                } else {
-                    rgba(0xffffff14)
-                },
-            ))
-            .child(
-                icon.clone()
-                    .with_size(px(16.0))
-                    .when(destructive, |icon| icon.text_color(rgb(0xff646b))),
-            )
-            .child(label)
-    })
+) -> impl IntoElement {
+    let destructive = label == "Permanently delete";
+    let hover = motion.clone();
+    h_flex()
+        .id(label)
+        .debug_selector(|| format!("session-menu-{label}"))
+        .role(gpui::Role::MenuItem)
+        .aria_label(label)
+        .items_center()
+        .h(zpx(28.))
+        .gap(zpx(10.))
+        .relative()
+        .px_2()
+        .text_size(zpx(TEXT_MD))
+        .cursor_pointer()
+        .when(destructive, |item| item.text_color(rgb(0xff646b)))
+        .on_hover(move |entered, window, cx| hover.hover(label, *entered, window, cx))
+        .child(motion.marker(
+            label.into(),
+            rgba(0xffffff00),
+            if destructive {
+                rgba(0xff45452e)
+            } else {
+                rgba(0xffffff24)
+            },
+        ))
+        .child(
+            icon.with_size(zpx(16.))
+                .when(destructive, |icon| icon.text_color(rgb(0xff646b))),
+        )
+        .child(label)
 }
 
 fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
     div()
         .absolute()
-        .right(px(right))
-        .top(px((ROW_HEIGHT - 20.0) / 2.0))
-        .size(px(20.0))
+        .right(zpx(right))
+        .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+        .size(zpx(20.0))
         .flex()
         .items_center()
         .justify_center()
@@ -200,7 +195,7 @@ fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
             mark.child(
                 Icon::default()
                     .path("icons/pin-filled.svg")
-                    .with_size(px(CONTROL_ICON_SIZE))
+                    .with_size(zpx(CONTROL_ICON_SIZE))
                     .text_color(rgba(MUTED)),
             )
         })
@@ -232,18 +227,18 @@ fn row_item(
         .id(key.clone())
         .relative()
         .group(group.clone())
-        .h(px(ROW_HEIGHT))
-        .min_h(px(ROW_HEIGHT))
+        .h(zpx(ROW_HEIGHT))
+        .min_h(zpx(ROW_HEIGHT))
         .flex_none()
         .px_2()
         .gap_1p5()
         .items_center()
         .rounded_md()
         .cursor_pointer()
-        .text_size(px(TEXT_MD))
+        .text_size(zpx(TEXT_MD))
         .text_color(rgb(TEXT))
         .on_hover(move |entered, window, cx| hover.hover(&hover_key, *entered, window, cx))
-        .child(motion.background(
+        .child(motion.marker(
             id.0.clone(),
             if selected {
                 rgba(0xffffff14)
@@ -260,19 +255,24 @@ fn row_item(
                 Input::new(rename)
                     .appearance(false)
                     .bordered(false)
-                    .text_size(px(TEXT_MD)),
+                    .text_size(zpx(TEXT_MD)),
             ),
         )
     } else {
         let state_click = state.clone();
         let click_id = id.clone();
-        item.on_click(move |_, _, cx| {
+        item.on_click(move |event, _, cx| {
             let id = click_id.clone();
-            if archived {
-                state_click.update(cx, |s, cx| s.restore(id, cx));
-            } else {
-                state_click.update(cx, |s, cx| s.select(id, cx));
-            }
+            state_click.update(cx, |s, cx| {
+                if archived {
+                    s.restore(id.clone(), cx);
+                } else {
+                    s.select(id.clone(), cx);
+                }
+                if event.click_count() == 2 {
+                    s.keep_tab(&crate::state::Tab::Session(id), cx);
+                }
+            });
         })
         .child(
             div()
@@ -297,7 +297,7 @@ fn row_item(
             .child(pinned_mark(row.pinned, group.clone(), action_right))
             .child(
                 // Reserve space so titles never overlap the hover actions.
-                div().flex_none().w(px(if motion.is_hovered(&row.id.0) {
+                div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
                     44.0
                 } else if row.pinned {
                     20.0
@@ -312,12 +312,12 @@ fn row_item(
                 // not prepainted, which aborted the app.
                 h_flex()
                     .absolute()
-                    .right(px(action_right))
-                    .top(px((ROW_HEIGHT - 20.0) / 2.0))
-                    .h(px(20.0))
+                    .right(zpx(action_right))
+                    .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+                    .h(zpx(20.0))
                     .items_center()
-                    .gap(px(4.0))
-                    .when(!archived, |actions| actions.w(px(44.0)))
+                    .gap(zpx(4.0))
+                    .when(!archived, |actions| actions.w(zpx(44.0)))
                     .rounded_sm()
                     .opacity(0.0)
                     .group_hover(hover_group, |a| a.opacity(1.0))
@@ -346,7 +346,7 @@ fn row_item(
                     .when(archived, |a| {
                         a.child(
                             div()
-                                .text_size(px(TEXT_SM))
+                                .text_size(zpx(TEXT_SM))
                                 .text_color(rgba(MUTED))
                                 .child("Restore"),
                         )
@@ -365,6 +365,57 @@ fn row_item(
     item.into_any_element()
 }
 
+fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool, cx: &App) -> Div {
+    let background: Rgba = cx.theme().popover.into();
+    // One native menu item wraps the custom group, so native row hover
+    // backgrounds cannot peek out around the moving highlight.
+    v_flex()
+        .relative()
+        .flex_1()
+        .min_w(zpx(176.))
+        // PopupMenu's wrapper uses 8 logical pixels of padding.
+        // A rem-based negative margin leaves strips at smaller font sizes.
+        .mx(gpui::px(-8.))
+        .gap_0p5()
+        .bg(background)
+        .child(motion.layer(Some(background), cx.theme().border.into()))
+        .child(session_menu_item(
+            "Rename",
+            Icon::new(ActionIcon::Pencil),
+            motion,
+        ))
+        .child(session_menu_item(
+            if pinned { "Unpin" } else { "Pin" },
+            Icon::default().path(if pinned {
+                "icons/pin-filled.svg"
+            } else {
+                "icons/pin-outline.svg"
+            }),
+            motion,
+        ))
+        .child(session_menu_item(
+            "Mark as unread",
+            Icon::new(ActionIcon::Eye),
+            motion,
+        ))
+        .child(session_menu_item(
+            "Unload",
+            Icon::new(ActionIcon::Close),
+            motion,
+        ))
+        .child(motion.divider())
+        .child(session_menu_item(
+            "Archive",
+            Icon::default().path("icons/archive.svg"),
+            motion,
+        ))
+        .child(session_menu_item(
+            "Permanently delete",
+            Icon::new(ActionIcon::Trash),
+            motion,
+        ))
+}
+
 fn session_menu(
     menu: PopupMenu,
     state: &Entity<AppState>,
@@ -373,65 +424,26 @@ fn session_menu(
     cx: &mut App,
 ) -> PopupMenu {
     let motion = crate::hover_motion::HoverMotion::menu(cx);
-    let rename_state = state.clone();
-    let pin_state = state.clone();
-    let unread_state = state.clone();
-    let archive_state = state.clone();
-    let delete_state = state.clone();
-    let rename_id = id.clone();
-    let pin_id = id.clone();
-    let unread_id = id.clone();
-    let archive_id = id.clone();
-    let delete_id = id.clone();
+    let click_motion = motion.clone();
+    let state = state.clone();
+    let id = id.clone();
     menu.item(
-        session_menu_item("Rename", Icon::new(ActionIcon::Pencil), &motion).on_click({
-            let state = rename_state.clone();
-            let id = rename_id.clone();
-            move |_, _, cx| state.update(cx, |s, cx| s.start_rename(id.clone(), cx))
-        }),
-    )
-    .item(
-        session_menu_item(
-            if pinned { "Unpin" } else { "Pin" },
-            Icon::default().path(if pinned {
-                "icons/pin-filled.svg"
-            } else {
-                "icons/pin-outline.svg"
-            }),
-            &motion,
-        )
-        .on_click({
-            let state = pin_state.clone();
-            let id = pin_id.clone();
-            move |_, _, cx| state.update(cx, |s, cx| s.toggle_session_pin(&id, cx))
-        }),
-    )
-    .item(
-        session_menu_item("Mark as unread", Icon::new(ActionIcon::Eye), &motion).on_click({
-            let state = unread_state.clone();
-            let id = unread_id.clone();
-            move |_, _, cx| state.update(cx, |s, cx| s.mark_session_unread(&id, cx))
-        }),
-    )
-    .separator()
-    .item(
-        session_menu_item(
-            "Archive",
-            Icon::default().path("icons/archive.svg"),
-            &motion,
-        )
-        .on_click({
-            let state = archive_state.clone();
-            let id = archive_id.clone();
-            move |_, _, cx| state.update(cx, |s, cx| s.archive(id.clone(), cx))
-        }),
-    )
-    .item(
-        session_menu_item("Permanently delete", Icon::new(ActionIcon::Trash), &motion).on_click({
-            let state = delete_state.clone();
-            let id = delete_id.clone();
-            move |_, _, cx| state.update(cx, |s, cx| s.permanently_delete(id.clone(), cx))
-        }),
+        PopupMenuItem::element(move |_, cx| session_menu_content(&motion, pinned, cx)).on_click(
+            move |event, _, cx| {
+                let Some(action) = click_motion.clicked(event) else {
+                    return;
+                };
+                state.update(cx, |s, cx| match action.as_str() {
+                    "Rename" => s.start_rename(id.clone(), cx),
+                    "Pin" | "Unpin" => s.toggle_session_pin(&id, cx),
+                    "Mark as unread" => s.mark_session_unread(&id, cx),
+                    "Unload" => s.unload(id.clone(), cx),
+                    "Archive" => s.archive(id.clone(), cx),
+                    "Permanently delete" => s.permanently_delete(id.clone(), cx),
+                    _ => {}
+                });
+            },
+        ),
     )
 }
 
@@ -457,6 +469,9 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
     let caffeine_state = state.clone();
     let arch_state = state.clone();
     let terminal_state = state.clone();
+    // Shared with the highlight markers: the group canvas lives outside this
+    // animated section, so it needs the exact opacity sampled for this frame.
+    let terminal_opacity = std::rc::Rc::new(std::cell::Cell::new(1.0_f32));
 
     v_flex()
         .w_full()
@@ -470,28 +485,28 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
         .child(
             h_flex()
                 .id("new-session")
-                .h(px(ROW_HEIGHT))
-                .min_h(px(ROW_HEIGHT))
+                .h(zpx(ROW_HEIGHT))
+                .min_h(zpx(ROW_HEIGHT))
                 .flex_none()
                 .px_2()
                 .gap_1p5()
                 .items_center()
                 .rounded_md()
                 .cursor_pointer()
-                .text_size(px(TEXT_MD))
+                .text_size(zpx(TEXT_MD))
                 .text_color(rgb(TEXT))
                 .when(draft_selected, |r| r.bg(rgba(0xffffff14)))
                 .when(!draft_selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
                 .on_click(move |_, _, cx| new_state.update(cx, |s, cx| s.new_session(cx)))
                 .child(
                     Icon::new(IconName::Plus)
-                        .with_size(px(CONTROL_ICON_SIZE))
+                        .with_size(zpx(CONTROL_ICON_SIZE))
                         .text_color(rgba(MUTED)),
                 )
                 .child(div().flex_1().min_w_0().truncate().child("New session"))
                 .child(
                     div()
-                        .text_size(px(TEXT_SM))
+                        .text_size(zpx(TEXT_SM))
                         .text_color(rgba(FAINT))
                         .child("⌘N"),
                 ),
@@ -499,6 +514,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
         .child(
             v_flex()
                 .id("session-list")
+                .relative()
+                .child(s.sidebar_hover.layer(None, rgba(0xffffff00)))
                 .flex_1()
                 .min_h_0()
                 .gap_0p5()
@@ -515,14 +532,14 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                             animation_id,
                             Animation::new(std::time::Duration::from_millis(140))
                                 .with_easing(ease_out_quint()),
-                            |row, t| row.h(px(ROW_HEIGHT * t)).opacity(t),
+                            |row, t| row.h(zpx(ROW_HEIGHT * t)).opacity(t),
                         )
                 }))
                 .child(
                     div()
                         .id("terminals-toggle")
                         .flex_none()
-                        .min_h(px(ROW_HEIGHT))
+                        .min_h(zpx(ROW_HEIGHT))
                         .flex()
                         .items_center()
                         .role(gpui::Role::Button)
@@ -537,7 +554,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         })
                         .mt_3()
                         .px_2()
-                        .text_size(px(TEXT_SM))
+                        .text_size(zpx(TEXT_SM))
                         .text_color(rgba(FAINT))
                         .child("TERMINALS"),
                 )
@@ -577,8 +594,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                         .id(SharedString::from(format!("terminal-row-{}", id.0)))
                                         .relative()
                                         .group(group.clone())
-                                        .h(px(ROW_HEIGHT))
-                                        .min_h(px(ROW_HEIGHT))
+                                        .h(zpx(ROW_HEIGHT))
+                                        .min_h(zpx(ROW_HEIGHT))
                                         .flex_none()
                                         .px_2()
                                         .gap_2()
@@ -587,7 +604,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                         .on_hover(move |entered, window, cx| {
                                             hover.hover(&hover_key, *entered, window, cx)
                                         })
-                                        .child(motion.background(
+                                        .child(motion.marker_with_opacity(
                                             row.id.0.clone(),
                                             if selected {
                                                 rgba(0xffffff14)
@@ -595,6 +612,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                 rgba(0xffffff00)
                                             },
                                             rgba(0xffffff0a),
+                                            Some(terminal_opacity.clone()),
                                         ))
                                         .on_click(move |_, _, cx| {
                                             if !renaming {
@@ -608,7 +626,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                 provider_logo(provider, 14.0).into_any_element()
                                             }
                                             None => div()
-                                                .text_size(px(TEXT_SM))
+                                                .text_size(zpx(TEXT_SM))
                                                 .text_color(rgba(MUTED))
                                                 .child(">_")
                                                 .into_any_element(),
@@ -621,7 +639,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                     Input::new(rename)
                                                         .appearance(false)
                                                         .bordered(false)
-                                                        .text_size(px(TEXT_MD)),
+                                                        .text_size(zpx(TEXT_MD)),
                                                 )
                                                 .into_any_element()
                                         } else {
@@ -629,7 +647,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                 .flex_1()
                                                 .min_w_0()
                                                 .truncate()
-                                                .text_size(px(TEXT_MD))
+                                                .text_size(zpx(TEXT_MD))
                                                 .font_weight(FontWeight::NORMAL)
                                                 .child(if title_loading {
                                                     gpui_kit::component::shimmer::ShimmerText::new(
@@ -645,7 +663,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                 })
                                                 .into_any_element()
                                         })
-                                        .child(div().flex_none().w(px(
+                                        .child(div().flex_none().w(zpx(
                                             if motion.is_hovered(&row.id.0) {
                                                 44.0
                                             } else if row.pinned {
@@ -659,12 +677,12 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                         .child(
                                             h_flex()
                                                 .absolute()
-                                                .right(px(action_right))
-                                                .top(px((ROW_HEIGHT - 20.0) / 2.0))
-                                                .h(px(20.0))
-                                                .w(px(44.0))
+                                                .right(zpx(action_right))
+                                                .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+                                                .h(zpx(20.0))
+                                                .w(zpx(44.0))
                                                 .items_center()
-                                                .gap(px(4.0))
+                                                .gap(zpx(4.0))
                                                 .rounded_sm()
                                                 .opacity(0.0)
                                                 .group_hover(group, |actions| actions.opacity(1.0))
@@ -715,6 +733,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                             ("terminal-section", s.terminals_toggle),
                             Animation::new(std::time::Duration::from_millis(240)),
                             {
+                                let opacity = terminal_opacity.clone();
                                 let motion = s.terminals_motion;
                                 let target = if s.terminals_collapsed { 0.0 } else { 1.0 };
                                 let reduced = cx.reduce_motion();
@@ -733,7 +752,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                             from + (target - from) * (1.0 - (1.0 - t).powi(4))
                                         })
                                     };
-                                    list.h(px(height * fraction)).opacity(fraction)
+                                    opacity.set(fraction);
+                                    list.h(zpx(height * fraction)).opacity(fraction)
                                 }
                             },
                         ),
@@ -744,15 +764,15 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         list.child(
                             h_flex()
                                 .id("archived-toggle")
-                                .h(px(ROW_HEIGHT))
-                                .min_h(px(ROW_HEIGHT))
+                                .h(zpx(ROW_HEIGHT))
+                                .min_h(zpx(ROW_HEIGHT))
                                 .flex_none()
                                 .px_2()
                                 .mt_1()
                                 .items_center()
                                 .rounded_md()
                                 .cursor_pointer()
-                                .text_size(px(TEXT_SM))
+                                .text_size(zpx(TEXT_SM))
                                 .text_color(rgba(FAINT))
                                 .hover(|r| r.bg(rgba(0xffffff0a)))
                                 .on_click(move |_, _, cx| {
@@ -777,8 +797,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                 let id = row.id.clone();
                                 h_flex()
                                     .id(SharedString::from(format!("archived-terminal-{}", id.0)))
-                                    .h(px(ROW_HEIGHT))
-                                    .min_h(px(ROW_HEIGHT))
+                                    .h(zpx(ROW_HEIGHT))
+                                    .min_h(zpx(ROW_HEIGHT))
                                     .flex_none()
                                     .px_2()
                                     .gap_2()
@@ -788,7 +808,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                     .child(div().flex_1().truncate().child(s.current_title(&id)))
                                     .child(
                                         div()
-                                            .text_size(px(TEXT_SM))
+                                            .text_size(zpx(TEXT_SM))
                                             .text_color(rgba(MUTED))
                                             .child("Restore"),
                                     )
@@ -803,7 +823,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                     div()
                         .id("sidebar-window-drag")
                         .flex_1()
-                        .min_h(px(12.0))
+                        .min_h(zpx(12.0))
                         .w_full()
                         .window_control_area(WindowControlArea::Drag)
                         .on_mouse_down(MouseButton::Left, |_, window, _| {
@@ -813,8 +833,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
         )
         .child(
             h_flex()
-                .h(px(ROW_HEIGHT))
-                .min_h(px(ROW_HEIGHT))
+                .h(zpx(ROW_HEIGHT))
+                .min_h(zpx(ROW_HEIGHT))
                 .flex_none()
                 .gap_1()
                 .items_center()
@@ -829,7 +849,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .items_center()
                         .rounded_md()
                         .cursor_pointer()
-                        .text_size(px(TEXT_MD))
+                        .text_size(zpx(TEXT_MD))
                         .text_color(if providers_open {
                             rgb(0xf5f5f5)
                         } else {
@@ -847,7 +867,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 .child(
                     Button::new("caffeine-toggle")
                         .ghost()
-                        .size(px(28.0))
+                        .size(zpx(28.0))
                         .p_0()
                         .child(coffee_icon(s.caffeine_enabled, cx))
                         .tooltip(if s.caffeine_enabled {
@@ -868,4 +888,68 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         }),
                 ),
         )
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::{PopupMenu, PopupMenuItem, session_menu_content};
+    use gpui::{
+        Context, Entity, Focusable, InteractiveElement, IntoElement, Modifiers, MouseButton,
+        ParentElement, Render, Styled, Window, div, point, px,
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    struct MenuFixture(Entity<PopupMenu>);
+    impl Render for MenuFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .w(px(220.))
+                .debug_selector(|| "menu-fixture".into())
+                .child(self.0.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn shared_menu_surface_preserves_mouse_and_keyboard_actions(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let clicked = Rc::new(RefCell::new(Vec::new()));
+        let recorded = clicked.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            window.set_rem_size(px(14.));
+            let motion = crate::hover_motion::HoverMotion::menu(cx);
+            let selection = motion.clone();
+            let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::element(move |_, cx| session_menu_content(&motion, false, cx))
+                        .on_click(move |event, _, _| {
+                            if let Some(action) = selection.clicked(event) {
+                                recorded.borrow_mut().push(action);
+                            }
+                        }),
+                )
+            });
+            menu.read(cx).focus_handle(cx).focus(window, cx);
+            MenuFixture(menu)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("session-menu-Pin").unwrap();
+        let surface = cx.debug_bounds("menu-fixture").unwrap();
+        // Only the popup's 0.25rem outer padding should remain on either side.
+        assert_eq!(row.left() - surface.left(), px(3.5));
+        assert_eq!(surface.right() - row.right(), px(3.5));
+        let position = row.center();
+        cx.simulate_mouse_move(position, None, Modifiers::default());
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(&*clicked.borrow(), &["Pin"]);
+        cx.simulate_mouse_move(point(px(900.), px(900.)), None, Modifiers::default());
+        let menu = root.read_with(cx, |root, _| root.0.clone());
+        cx.update(|window, cx| menu.read(cx).focus_handle(cx).focus(window, cx));
+        cx.simulate_keystrokes("down down down enter");
+        cx.run_until_parked();
+        assert_eq!(&*clicked.borrow(), &["Pin", "Mark as unread"]);
+    }
 }

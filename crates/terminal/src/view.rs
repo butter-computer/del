@@ -8,7 +8,7 @@ use alacritty_terminal::{
     selection::{Selection, SelectionType},
     term::TermMode,
     term::cell::Flags,
-    vte::ansi::{CursorShape, Rgb},
+    vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
 use futures::StreamExt;
 use gpui::{prelude::*, *};
@@ -95,7 +95,7 @@ impl TerminalView {
             session,
             focus,
             bounds: Bounds::default(),
-            cell_width: px(8.),
+            cell_width: zoom_px(8.),
             selecting: false,
             wheel_remainder: 0.,
             composition: String::new(),
@@ -173,7 +173,7 @@ impl TerminalView {
     }
     fn cell_at(&self, position: Point<Pixels>) -> (usize, usize, Side) {
         let x = ((position.x - self.bounds.left()) / self.cell_width).max(0.);
-        let y = ((position.y - self.bounds.top()) / px(LINE_HEIGHT)).max(0.);
+        let y = ((position.y - self.bounds.top()) / zoom_px(LINE_HEIGHT)).max(0.);
         let size = self.session.size();
         (
             (x as usize).min(size.cols.saturating_sub(1) as usize),
@@ -285,7 +285,7 @@ impl TerminalView {
     fn scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.wheel_remainder += match e.delta {
             ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / LINE_HEIGHT,
+            ScrollDelta::Pixels(p) => f32::from(p.y) / zoom_px(LINE_HEIGHT).as_f32(),
         };
         let lines = self.wheel_remainder.trunc() as i32;
         self.wheel_remainder -= lines as f32;
@@ -326,6 +326,11 @@ fn color(c: Rgb) -> Hsla {
     rgb((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).into()
 }
 
+fn transparent_background(background: Color, flags: Flags) -> bool {
+    // Explicit colours, even black matching the default palette, are content.
+    background == Color::Named(NamedColor::Background) && !flags.contains(Flags::INVERSE)
+}
+
 struct PaintCell {
     col: usize,
     row: usize,
@@ -346,25 +351,23 @@ impl TerminalView {
         let font = font("Menlo");
         self.cell_width = window
             .text_system()
-            .advance(window.text_system().resolve_font(&font), px(FONT_SIZE), 'M')
+            .advance(
+                window.text_system().resolve_font(&font),
+                zoom_px(FONT_SIZE),
+                'M',
+            )
             .map(|s| s.width)
-            .unwrap_or(px(8.));
+            .unwrap_or(zoom_px(8.));
         let cols = ((bounds.size.width / self.cell_width).floor() as u16).max(2);
-        let rows = ((bounds.size.height / px(LINE_HEIGHT)).floor() as u16).max(1);
+        let rows = ((bounds.size.height / zoom_px(LINE_HEIGHT)).floor() as u16).max(1);
         let _ = self.session.resize(TerminalSize {
             cols,
             rows,
             cell_width: f32::from(self.cell_width).ceil() as u16,
-            cell_height: LINE_HEIGHT as u16,
+            cell_height: zoom_px(LINE_HEIGHT).as_f32().ceil() as u16,
         });
         self.session.with_term(|term| {
             let content = term.renderable_content();
-            let background = colors::resolve(
-                alacritty_terminal::vte::ansi::Color::Named(
-                    alacritty_terminal::vte::ansi::NamedColor::Background,
-                ),
-                content.colors,
-            );
             let mut cells = Vec::new();
             for indexed in content.display_iter {
                 let row = indexed.point.line.0 + content.display_offset as i32;
@@ -403,7 +406,7 @@ impl TerminalView {
                     fg: color(fg),
                     bg: if selected {
                         Some(rgba(0x43556fff).into())
-                    } else if bg == background && !cell.flags.contains(Flags::INVERSE) {
+                    } else if transparent_background(cell.bg, cell.flags) {
                         None
                     } else {
                         Some(color(bg))
@@ -448,20 +451,27 @@ fn paint_text(
             .intersects(Flags::ALL_UNDERLINES)
             .then_some(UnderlineStyle {
                 color: Some(fg),
-                thickness: px(1.),
+                thickness: zoom_px(1.),
                 wavy: flags.contains(Flags::UNDERCURL),
             }),
         strikethrough: flags
             .contains(Flags::STRIKEOUT)
             .then_some(StrikethroughStyle {
                 color: Some(fg),
-                thickness: px(1.),
+                thickness: zoom_px(1.),
             }),
     };
     let line = window
         .text_system()
-        .shape_line(text.into(), px(FONT_SIZE), &[run], None);
-    let _ = line.paint(origin, px(LINE_HEIGHT), TextAlign::Left, None, window, cx);
+        .shape_line(text.into(), zoom_px(FONT_SIZE), &[run], None);
+    let _ = line.paint(
+        origin,
+        zoom_px(LINE_HEIGHT),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 impl Render for TerminalView {
@@ -500,13 +510,13 @@ impl Render for TerminalView {
                             let view = painted.read(cx);
                             let focus = view.focus.clone();
                             let composition = view.composition.clone();
-                            let focused = focus.is_focused(window);
+                            let focused = focus.is_focused(window) && window.is_window_active();
                             window.handle_input(
                                 &focus,
                                 ElementInputHandler::new(bounds, painted.clone()),
                                 cx,
                             );
-                            let cursor = frame.cursor;
+                            let cursor = frame.cursor.filter(|_| focused);
                             // Paint every background before glyphs: a wide glyph
                             // extends into its spacer cell.
                             for cell in &frame.cells {
@@ -516,10 +526,10 @@ impl Render for TerminalView {
                                 let origin = bounds.origin
                                     + point(
                                         frame.width * cell.col as f32,
-                                        px(LINE_HEIGHT * cell.row as f32),
+                                        zoom_px(LINE_HEIGHT * cell.row as f32),
                                     );
                                 window.paint_quad(fill(
-                                    Bounds::new(origin, size(frame.width, px(LINE_HEIGHT))),
+                                    Bounds::new(origin, size(frame.width, zoom_px(LINE_HEIGHT))),
                                     background,
                                 ));
                             }
@@ -527,17 +537,20 @@ impl Render for TerminalView {
                                 let origin = bounds.origin
                                     + point(
                                         frame.width * cell.col as f32,
-                                        px(LINE_HEIGHT * cell.row as f32),
+                                        zoom_px(LINE_HEIGHT * cell.row as f32),
                                     );
                                 let cell_bounds =
-                                    Bounds::new(origin, size(frame.width, px(LINE_HEIGHT)));
+                                    Bounds::new(origin, size(frame.width, zoom_px(LINE_HEIGHT)));
                                 let block = focused
                                     && cursor.is_some_and(|(c, r, s)| {
                                         c == cell.col && r == cell.row && s == CursorShape::Block
                                     });
                                 if block {
                                     let cursor_bounds = if cell.flags.contains(Flags::WIDE_CHAR) {
-                                        Bounds::new(origin, size(frame.width * 2., px(LINE_HEIGHT)))
+                                        Bounds::new(
+                                            origin,
+                                            size(frame.width * 2., zoom_px(LINE_HEIGHT)),
+                                        )
                                     } else {
                                         cell_bounds
                                     };
@@ -564,24 +577,25 @@ impl Render for TerminalView {
                             }
                             if let Some((col, row, shape)) = cursor {
                                 let origin = bounds.origin
-                                    + point(frame.width * col as f32, px(LINE_HEIGHT * row as f32));
+                                    + point(
+                                        frame.width * col as f32,
+                                        zoom_px(LINE_HEIGHT * row as f32),
+                                    );
                                 if focused
                                     && matches!(shape, CursorShape::Beam | CursorShape::Underline)
                                 {
                                     let b = if shape == CursorShape::Beam {
-                                        Bounds::new(origin, size(px(1.0), px(LINE_HEIGHT)))
+                                        Bounds::new(
+                                            origin,
+                                            size(zoom_px(1.0), zoom_px(LINE_HEIGHT)),
+                                        )
                                     } else {
                                         Bounds::new(
-                                            origin + point(px(0.), px(LINE_HEIGHT - 2.)),
-                                            size(frame.width, px(2.)),
+                                            origin + point(zoom_px(0.), zoom_px(LINE_HEIGHT - 2.)),
+                                            size(frame.width, zoom_px(2.)),
                                         )
                                     };
                                     window.paint_quad(fill(b, color(colors::CURSOR)));
-                                } else if !focused {
-                                    window.paint_quad(fill(
-                                        Bounds::new(origin, size(frame.width, px(1.))),
-                                        color(colors::CURSOR),
-                                    ));
                                 }
                                 if !composition.is_empty() {
                                     paint_text(
@@ -602,9 +616,9 @@ impl Render for TerminalView {
         if let Some(code) = self.exit {
             root = root.child(
                 div()
-                    .h(px(24.))
+                    .h(zoom_px(24.))
                     .px_2()
-                    .text_size(px(12.))
+                    .text_size(zoom_px(12.))
                     .text_color(rgb(0x999999))
                     .child(
                         code.map(|c| format!("Process exited with status {c}"))
@@ -708,8 +722,12 @@ impl EntityInputHandler for TerminalView {
             .session
             .with_term(|t| (t.grid().cursor.point.column.0, t.grid().cursor.point.line.0));
         Some(Bounds::new(
-            self.bounds.origin + point(self.cell_width * col as f32, px(LINE_HEIGHT * row as f32)),
-            size(self.cell_width, px(LINE_HEIGHT)),
+            self.bounds.origin
+                + point(
+                    self.cell_width * col as f32,
+                    zoom_px(LINE_HEIGHT * row as f32),
+                ),
+            size(self.cell_width, zoom_px(LINE_HEIGHT)),
         ))
     }
     fn character_index_for_point(
@@ -722,9 +740,37 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+fn zoom_px(value: f32) -> Pixels {
+    gpui::px(del_core::zoom::scaled(value))
+}
 #[cfg(test)]
 mod tests {
-    use super::byte_range;
+    use super::{Color, Flags, NamedColor, Rgb, byte_range, transparent_background};
+
+    #[test]
+    fn glass_only_replaces_default_background_not_explicit_colours_or_inverse() {
+        assert!(transparent_background(
+            Color::Named(NamedColor::Background),
+            Flags::empty()
+        ));
+        for background in [
+            Color::Named(NamedColor::Black),
+            Color::Indexed(0),
+            Color::Spec(Rgb { r: 0, g: 0, b: 0 }),
+            Color::Spec(Rgb {
+                r: 20,
+                g: 80,
+                b: 180,
+            }),
+        ] {
+            assert!(!transparent_background(background, Flags::empty()));
+        }
+        assert!(!transparent_background(
+            Color::Named(NamedColor::Background),
+            Flags::INVERSE
+        ));
+    }
+
     #[test]
     fn ime_ranges_never_split_surrogates_or_utf8() {
         assert_eq!(byte_range("a😀界", 1..3), 1..5);

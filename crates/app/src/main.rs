@@ -5,6 +5,7 @@
 //! Layout metrics and the shell colours live in `del_core`; this crate renders
 //! them.
 
+use crate::zoom::px as zpx;
 // The wallpaper background is switched off for now; the loader stays so it can
 // be wired back in without redoing the preload and decode work.
 #[allow(dead_code)]
@@ -25,6 +26,7 @@ mod mode_ui;
 mod model_picker;
 mod provider_updates;
 mod providers;
+mod readiness;
 mod right_panel;
 mod sessions;
 mod sidebar;
@@ -34,13 +36,14 @@ mod terminal_conversation;
 #[allow(dead_code)]
 mod terminal_host;
 mod terminal_store;
+mod zoom;
 
-use crate::appearance::{rgb, rgba};
+use crate::appearance::{page_surface, rgb, rgba, shell_surface};
 use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
+use del_core::ShellMetrics;
 use del_core::typography::{TEXT_LG, TEXT_MD};
-use del_core::{PAGE_SURFACE_RGBA, SHELL_SURFACE_RGBA, ShellMetrics};
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -57,8 +60,8 @@ use std::time::Duration;
 use terminal_host::TerminalHost;
 use terminal_store::TerminalStore;
 
-/// Initial window size in logical pixels.
-const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(960.0), px(640.0));
+/// Fallback when display geometry is unavailable.
+const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(1120.0), px(760.0));
 
 /// The sidebar is reserved for something else for now: its code stays, but it is
 /// neither shown nor toggleable (button and Cmd-B) until this is turned on.
@@ -85,26 +88,26 @@ struct DraggedTab {
 impl Render for DraggedTab {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.strip_bounds.get();
-        let width = px(TAB_WIDTH).min(bounds.size.width.max(px(0.)));
+        let width = zpx(TAB_WIDTH).min(bounds.size.width.max(zpx(0.)));
         let natural_left = window.mouse_position().x - self.cursor_offset_x;
         let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
         // GPUI places drag previews at the pointer. Cancel its vertical movement
         // inside a fixed-size wrapper, keeping the original grab offset intact.
-        div().w(px(TAB_WIDTH)).h(px(24.)).child(
+        div().w(zpx(TAB_WIDTH)).h(zpx(24.)).child(
             h_flex()
                 .relative()
                 .top(self.start_pointer_y - window.mouse_position().y)
                 .left(left - natural_left)
                 .w(width)
                 .overflow_hidden()
-                .h(px(24.))
+                .h(zpx(24.))
                 .px_2()
                 .gap_2()
                 .items_center()
                 .rounded_md()
                 .bg(rgb(0x303033))
                 .text_color(rgb(0xf5f5f5))
-                .text_size(px(TEXT_MD))
+                .text_size(zpx(TEXT_MD))
                 .shadow_md()
                 .child(mode_ui::tab_mark(self.provider))
                 .child(tab_title(self.title.clone())),
@@ -117,8 +120,8 @@ fn tab_title(title: String) -> Div {
     div()
         .flex_1()
         .min_w_0()
-        .h(px(16.0))
-        .line_height(px(16.0))
+        .h(zpx(16.0))
+        .line_height(zpx(16.0))
         .truncate()
         .child(title)
 }
@@ -247,6 +250,7 @@ fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 
 struct AppShell {
     shell_focus: FocusHandle,
     settings_focused: bool,
+    zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
     model_picker: Entity<model_picker::ModelPicker>,
@@ -323,7 +327,7 @@ impl AppShell {
             .absolute()
             .top_0()
             .bottom_0()
-            .w(px(5.0))
+            .w(zpx(5.0))
             .cursor_col_resize()
             .on_mouse_down(MouseButton::Left, move |event, _, _| {
                 start_x.set(event.position.x.as_f32())
@@ -508,6 +512,7 @@ impl AppShell {
         let mut shell = Self {
             shell_focus: cx.focus_handle(),
             settings_focused: false,
+            zoom_percent: del_core::zoom::percent(),
             state,
             composer,
             model_picker,
@@ -577,6 +582,12 @@ impl AppShell {
 
     /// Make sure the open session has a live chat view.
     fn ensure_chat(&mut self, cx: &mut Context<Self>) {
+        let unloaded = self
+            .state
+            .update(cx, |s, _| std::mem::take(&mut s.unloaded_chats));
+        for id in unloaded {
+            self.chats.remove(&id);
+        }
         let Selection::Session(id) = self.state.read(cx).selection.clone() else {
             return;
         };
@@ -597,6 +608,11 @@ impl AppShell {
         let chat = cx.new(|cx| ChatView::new(backend, Some(session), first, cx));
         // The shared composer reflects hydration/running state owned by ChatView.
         cx.observe(&chat, |_, _, cx| cx.notify()).detach();
+        let tab = Tab::Session(id.clone());
+        cx.subscribe(&chat, move |this, _, _: &chat::PromptSubmitted, cx| {
+            this.state.update(cx, |state, cx| state.keep_tab(&tab, cx));
+        })
+        .detach();
         self.chats.insert(id, chat);
     }
 
@@ -886,7 +902,7 @@ impl AppShell {
         });
         v_flex()
             .w_full()
-            .max_w(px(COMPOSER_MAX_WIDTH))
+            .max_w(zpx(COMPOSER_MAX_WIDTH))
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.attach_paths(owner, paths.0.to_vec(), cx)
             }))
@@ -949,16 +965,16 @@ impl AppShell {
             h_flex()
                 .id(id.clone())
                 .group(id)
-                .h(px(24.0))
-                .min_w(px(120.0))
-                .max_w(px(200.0))
+                .h(zpx(24.0))
+                .min_w(zpx(120.0))
+                .max_w(zpx(200.0))
                 .pl_2()
                 .pr_1()
                 .gap_2()
                 .items_center()
                 .rounded_md()
                 .cursor_pointer()
-                .text_size(px(TEXT_MD))
+                .text_size(zpx(TEXT_MD))
                 .text_color(if active { rgb(0xf5f5f5) } else { muted })
                 .when(active, |t| t.bg(rgba(0xffffff14)))
                 .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
@@ -966,25 +982,25 @@ impl AppShell {
         };
 
         TitleBar::new()
-            .h(px(self.metrics.topbar_height))
-            .min_h(px(self.metrics.topbar_height))
+            .h(zpx(self.metrics.topbar_height))
+            .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
             .border_b_0()
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
             // opaque than the bar.
-            .bg(rgba(SHELL_SURFACE_RGBA))
+            .bg(shell_surface())
             .child(
                 h_flex()
                     // TitleBar reserves 80px for macOS window controls. Its inner
                     // flex row cannot shrink, so bound our content explicitly.
                     .w((window.viewport_size().width
-                        - px(if cfg!(target_os = "macos") {
+                        - gpui::px(if cfg!(target_os = "macos") {
                             80.0
                         } else {
                             12.0
                         }))
-                    .max(px(0.0)))
+                    .max(zpx(0.0)))
                     .flex_none()
                     .h_full()
                     .min_w_0()
@@ -1025,8 +1041,8 @@ impl AppShell {
                                     // Measure movement from where this tab was grabbed, so
                                     // grabbing its right edge cannot immediately shift the row.
                                     let x = source as f32 * slot
-                                        + (event.event.position.x - drag.start_pointer_x.get())
-                                            .as_f32();
+                                        + del_core::zoom::unscaled((event.event.position.x - drag.start_pointer_x.get())
+                                            .as_f32());
                                     let mut target =
                                         (x / slot).round().clamp(0.0, (count - 1) as f32) as usize;
                                     // Keep a small dead zone around slot boundaries so a
@@ -1067,7 +1083,7 @@ impl AppShell {
                                         .role(gpui::Role::Button)
                                         .aria_label("Toggle left sidebar")
                                         .flex_none()
-                                        .size(px(24.0))
+                                        .size(zpx(24.0))
                                         .mr_1()
                                         .flex()
                                         .items_center()
@@ -1087,7 +1103,7 @@ impl AppShell {
                                             } else {
                                                 IconName::PanelLeftOpen
                                             })
-                                            .with_size(px(sidebar::CONTROL_ICON_SIZE))
+                                            .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
                                             .text_color(muted),
                                         ),
                                 )
@@ -1113,7 +1129,7 @@ impl AppShell {
                                                 delta.y
                                             };
                                             this.tab_scroll
-                                                .set_offset(point(offset.x + dx, px(0.0)));
+                                                .set_offset(point(offset.x + dx, zpx(0.0)));
                                             cx.stop_propagation();
                                             cx.notify();
                                         },
@@ -1121,6 +1137,9 @@ impl AppShell {
                                     .children(tabs.into_iter().enumerate().map(
                                         |(index, (tab_key, uid, title, provider))| {
                                             let live = tab_key.is_some();
+                                            let preview = tab_key.as_ref().is_some_and(|tab| self.state.read(cx).preview_tab.as_ref() == Some(tab));
+                                            let animate_open = !matches!(tab_key, Some(Tab::Session(_)));
+
                                             let shortcut_number = tab_key.as_ref().and_then(|tab| self.state.read(cx).tabs.iter().position(|candidate| candidate == tab)).filter(|index| *index < 9).map(|index| index + 1);
                                             let shortcut_hint = self.state.read(cx).shortcut_hints && shortcut_number.is_some();
                                             let active = tab_key
@@ -1180,10 +1199,11 @@ impl AppShell {
                                                             this.finish_tab_drag(drag.uid, cx)
                                                         })
                                                     })
-                                                    .on_click(move |_, _, cx| {
+                                                    .on_click(move |event, _, cx| {
                                                         let tab = select_tab.clone();
                                                         select.update(cx, |s, cx| {
-                                                            s.select_tab(&tab, cx)
+                                                            s.select_tab(&tab, cx);
+                                                            if event.click_count() == 2 { s.keep_tab(&tab, cx); }
                                                         });
                                                     })
                                                     .child(mode_ui::tab_mark(provider))
@@ -1191,15 +1211,15 @@ impl AppShell {
                                                         div().flex_1().min_w_0().truncate().child(
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)
                                                                 .id(SharedString::from(format!("title-shimmer-{name}"))))
-                                                    } else { tab_title(title) })
-                                                    .when(shortcut_hint, |tab| tab.child(div().absolute().right(px(6.)).top(px(5.)).px_1().rounded_sm().bg(rgb(0x303033)).text_size(px(10.)).child(format!("⌘{}", shortcut_number.unwrap_or(1)))))
+                                                    } else { tab_title(title).when(preview, |title| title.italic().opacity(0.65)) })
+                                                    .when(shortcut_hint, |tab| tab.child(div().absolute().right(zpx(6.)).top(zpx(5.)).px_1().rounded_sm().bg(rgb(0x303033)).text_size(zpx(10.)).child(format!("⌘{}", shortcut_number.unwrap_or(1)))))
                                                     .when_some(indicator_id.as_ref(), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
                                                     .child(
                                                         div()
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
-                                                            .size(px(16.0))
+                                                            .size(zpx(16.0))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
@@ -1225,7 +1245,7 @@ impl AppShell {
                                                             })
                                                             .child(
                                                                 Icon::new(IconName::Close)
-                                                                    .with_size(px(sidebar::CONTROL_ICON_SIZE))
+                                                                    .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
                                                                     .text_color(muted),
                                                             ),
                                                     );
@@ -1234,7 +1254,7 @@ impl AppShell {
                                                 el = el
                                                     .child(mode_ui::tab_mark(provider))
                                                     .child(tab_title(title))
-                                                    .child(div().size(px(16.0)).flex_none());
+                                                    .child(div().size(zpx(16.0)).flex_none());
                                             }
                                             // The tab keeps its full size inside a clip whose width
                                             // (tab plus the gap after it) animates from 0 on open and
@@ -1243,12 +1263,12 @@ impl AppShell {
                                             // when a closed tab is finally removed.
                                             let clip = div()
                                                 .flex_none()
-                                                .w(px(TAB_WIDTH + TAB_GAP))
+                                                .w(zpx(TAB_WIDTH + TAB_GAP))
                                                 .overflow_hidden()
                                                 .child(
-                                                    el.w(px(TAB_WIDTH))
-                                                        .min_w(px(0.0))
-                                                        .max_w(px(TAB_WIDTH))
+                                                    el.w(zpx(TAB_WIDTH))
+                                                        .min_w(zpx(0.0))
+                                                        .max_w(zpx(TAB_WIDTH))
                                                         .flex_none(),
                                                 );
 
@@ -1287,7 +1307,7 @@ impl AppShell {
                                                     Animation::new(Duration::from_millis(90))
                                                         .with_easing(ease_out_quint()),
                                                     move |tab, t| {
-                                                        tab.relative().left(px(old_offset
+                                                        tab.relative().left(zpx(old_offset
                                                             + (new_offset - old_offset) * t))
                                                     },
                                                 );
@@ -1307,8 +1327,8 @@ impl AppShell {
                                                     Animation::new(state::TAB_ANIM)
                                                         .with_easing(ease_out_quint()),
                                                     move |slot, t| {
-                                                        let t = if live { t } else { 1.0 - t };
-                                                        slot.w(px((TAB_WIDTH + TAB_GAP) * t))
+                                                        let t = if live { if animate_open { t } else { 1.0 } } else { 1.0 - t };
+                                                        slot.w(zpx((TAB_WIDTH + TAB_GAP) * t))
                                                     },
                                                 )
                                         },
@@ -1321,7 +1341,7 @@ impl AppShell {
                                     .aria_label("New tab")
                                     .flex_none()
                                     .when(dragging_tab.is_some(), |plus| plus.opacity(0.0))
-                                    .size(px(24.0))
+                                    .size(zpx(24.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1338,7 +1358,7 @@ impl AppShell {
                                         this.state.update(cx, |s, cx| s.new_session(cx));
                                         this.focus_composer(window, cx);
                                     }))
-                                    .child(Icon::new(IconName::Plus).with_size(px(sidebar::CONTROL_ICON_SIZE)).text_color(muted)),
+                                    .child(Icon::new(IconName::Plus).with_size(zpx(sidebar::CONTROL_ICON_SIZE)).text_color(muted)),
                             ),
                     )
                     .child(
@@ -1347,7 +1367,7 @@ impl AppShell {
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
                             .flex_none()
-                            .size(px(24.0))
+                            .size(zpx(24.0))
                             .mr_2()
                             .flex()
                             .items_center()
@@ -1367,7 +1387,7 @@ impl AppShell {
                                 } else {
                                     IconName::PanelRightOpen
                                 })
-                                .with_size(px(sidebar::CONTROL_ICON_SIZE))
+                                .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
                                 .text_color(muted),
                             ),
                     ),
@@ -1375,38 +1395,18 @@ impl AppShell {
     }
 
     fn render_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let radius = px(self.metrics.page_radius);
+        let radius = zpx(self.metrics.page_radius);
         let (panel, selection) = {
             let st = self.state.read(cx);
             (st.panel, st.selection.clone())
         };
         let chat = self.open_chat(cx);
-        if panel == Panel::Chat
-            && let Some(message) = self.state.read(cx).current_update()
-        {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .rounded(radius)
-                .bg(rgba(PAGE_SURFACE_RGBA))
-                .child(gpui_kit::component::spinner::Spinner::new())
-                .child(message.to_owned())
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgba(0xffffff8c))
-                        .child("Your conversation will open automatically."),
-                )
-                .into_any_element();
-        }
         if panel == Panel::Chat && matches!(selection, Selection::Terminal(_)) {
             return div()
                 .size_full()
                 .rounded(radius)
                 .overflow_hidden()
-                .bg(rgba(PAGE_SURFACE_RGBA))
+                .bg(page_surface())
                 .child(self.render_terminal_page(cx))
                 .into_any_element();
         }
@@ -1417,7 +1417,7 @@ impl AppShell {
             .size_full()
             .rounded(radius)
             .overflow_hidden()
-            .bg(rgba(PAGE_SURFACE_RGBA))
+            .bg(page_surface())
             .when(panel == Panel::Providers, |page| {
                 page.child(signin::render(&self.state, cx))
             })
@@ -1456,7 +1456,7 @@ impl AppShell {
                                     ))
                                     .with_animation(
                                         ("first-prompt", transition_key),
-                                        Animation::new(Duration::from_millis(180))
+                                        Animation::new(Duration::from_millis(120))
                                             .with_easing(ease_out_quint()),
                                         |transcript, t| transcript.opacity(t),
                                     ),
@@ -1467,18 +1467,7 @@ impl AppShell {
                                     .items_center()
                                     .px_3()
                                     .pb_3()
-                                    .child(self.render_composer(cx))
-                                    .with_animation(
-                                        ("composer-dock", transition_key),
-                                        Animation::new(Duration::from_millis(220))
-                                            .with_easing(ease_out_quint()),
-                                        |composer, t| {
-                                            composer
-                                                .relative()
-                                                .top(px(-220.0 * (1.0 - t)))
-                                                .opacity(0.72 + 0.28 * t)
-                                        },
-                                    ),
+                                    .child(self.render_composer(cx)),
                             ),
                     )
                 }
@@ -1493,7 +1482,7 @@ impl AppShell {
                         .child(
                             v_flex()
                                 .w_full()
-                                .max_w(px(COMPOSER_MAX_WIDTH))
+                                .max_w(zpx(COMPOSER_MAX_WIDTH))
                                 .items_start()
                                 .gap_2()
                                 .child(
@@ -1501,8 +1490,8 @@ impl AppShell {
                                         // The composer's padding plus the input's own
                                         // inset, so the heading and the input text
                                         // share a left edge.
-                                        .pl(px(17.5))
-                                        .text_size(px(TEXT_LG))
+                                        .pl(zpx(17.5))
+                                        .text_size(zpx(TEXT_LG))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(rgb(0xf5f5f5))
                                         .child(HEADING),
@@ -1511,15 +1500,15 @@ impl AppShell {
                                     div()
                                         .relative()
                                         .w_full()
-                                        .pb(px(40.0))
+                                        .pb(zpx(40.0))
                                         .child(
                                             div()
                                                 .absolute()
                                                 .bottom_0()
-                                                .left(px(16.0))
-                                                .right(px(16.0))
-                                                .h(px(40.0))
-                                                .rounded_b(px(14.0))
+                                                .left(zpx(16.0))
+                                                .right(zpx(16.0))
+                                                .h(zpx(40.0))
+                                                .rounded_b(zpx(14.0))
                                                 .bg(rgb(0x1b1b1b))
                                                 .child(self.render_new_session_options(cx)),
                                         )
@@ -1543,6 +1532,13 @@ impl Drop for AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let zoom = del_core::zoom::percent();
+        if self.zoom_percent != zoom {
+            self.zoom_percent = zoom;
+            for chat in self.chats.values() {
+                chat.update(cx, |chat, cx| chat.remeasure_for_zoom(cx));
+            }
+        }
         if self.dragging_tab.is_some() && !cx.has_active_drag() {
             self.dragging_tab = None;
             self.drag_target = None;
@@ -1583,8 +1579,8 @@ impl Render for AppShell {
         self.sync_caffeine(cx);
         self.sync_terminal_sidebar_actions(cx);
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
-        let inset = px(self.metrics.page_inset);
-        let viewport = window.viewport_size().width.as_f32();
+        let inset = zpx(self.metrics.page_inset);
+        let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
         let left_width = sidebar_width(
             self.sidebar_widths.left,
             false,
@@ -1725,15 +1721,17 @@ impl Render for AppShell {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .bg(rgba(SHELL_SURFACE_RGBA))
+                    .bg(shell_surface())
                     .on_drag_move(cx.listener(
                         |this, event: &DragMoveEvent<SidebarResize>, window, cx| {
                             let drag = event.drag(cx);
-                            let delta = window.mouse_position().x.as_f32() - drag.start_x.get();
+                            let delta = del_core::zoom::unscaled(
+                                window.mouse_position().x.as_f32() - drag.start_x.get(),
+                            );
                             let width = sidebar_width(
                                 drag.width + if drag.right { -delta } else { delta },
                                 drag.right,
-                                window.viewport_size().width.as_f32(),
+                                del_core::zoom::unscaled(window.viewport_size().width.as_f32()),
                                 drag.other,
                             );
                             if drag.right {
@@ -1752,7 +1750,7 @@ impl Render for AppShell {
                             .overflow_hidden()
                             .child(sidebar::render(&self.state, &self.rename, cx));
                         if self.sidebar_toggles == 0 {
-                            row.child(sidebar.w(px(left_width)))
+                            row.child(sidebar.w(zpx(left_width)))
                         } else {
                             let opening = self.sidebar_open;
                             row.child(sidebar.with_animation(
@@ -1760,7 +1758,7 @@ impl Render for AppShell {
                                 Animation::new(PANEL_ANIM).with_easing(ease_out_quint()),
                                 move |element, t| {
                                     let t = if opening { t } else { 1.0 - t };
-                                    element.w(px(left_width * t))
+                                    element.w(zpx(left_width * t))
                                 },
                             ))
                         }
@@ -1803,9 +1801,9 @@ impl Render for AppShell {
                                     div().size_full().pr(inset).pb(inset).child(
                                         div()
                                             .size_full()
-                                            .rounded(px(self.metrics.page_radius))
+                                            .rounded(zpx(self.metrics.page_radius))
                                             .overflow_hidden()
-                                            .bg(rgba(PAGE_SURFACE_RGBA))
+                                            .bg(page_surface())
                                             .child(self.right.clone()),
                                     ),
                                 )
@@ -1833,7 +1831,7 @@ impl Render for AppShell {
                                         } else {
                                             1.0 - t
                                         };
-                                        el.w(px(full * t))
+                                        el.w(zpx(full * t))
                                     },
                                 ),
                         )
@@ -1848,7 +1846,10 @@ fn main() {
         .run(|cx| {
             // Must run before any gpui-component feature is used.
             gpui_kit::init(cx);
+            assets::set_app_icon();
             del_terminal::init(cx);
+            zoom::load();
+            zoom::init(cx);
             appearance::load(cx);
 
             cx.bind_keys([
@@ -1891,6 +1892,13 @@ fn main() {
             let metrics = ShellMetrics::default();
             let (light_x, light_y) = metrics.traffic_light_origin();
 
+            let window_size = cx.primary_display().map_or(WINDOW_SIZE, |display| {
+                let available = display.visible_bounds().size;
+                size(
+                    (available.width * 0.70).max(px(960.)),
+                    (available.height * 0.76).max(px(640.)),
+                )
+            });
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("del".into()),
@@ -1901,10 +1909,10 @@ fn main() {
                 }),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    WINDOW_SIZE,
+                    window_size,
                     cx,
                 ))),
-                window_min_size: Some(size(px(480.0), px(320.0))),
+                window_min_size: Some(size(px(960.0), px(640.0))),
                 window_background: WindowBackgroundAppearance::Blurred,
                 ..TitleBar::window_options()
             };

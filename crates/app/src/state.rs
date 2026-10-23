@@ -65,8 +65,8 @@ impl Tab {
 /// Results coming back from the runtime.
 enum Msg {
     Refresh,
-    UpdateProgress(String, Option<String>),
     ReplyFinished(SessionId),
+    Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
     Checked(ProviderStatus),
     SigninFinished(Provider),
@@ -108,11 +108,12 @@ pub struct AppState {
     next_draft: u64,
     draft_modes: HashMap<u64, SessionMode>,
     pub terminal_rows: Vec<TerminalRow>,
-    pub update_progress: HashMap<String, String>,
-    updates_enabled: bool,
+    readiness: Option<crate::readiness::Readiness>,
     unread_motion: HashMap<SessionId, (f32, std::time::Instant)>,
     pub terminal_title_loading: std::collections::HashSet<SessionId>,
     pub closed_terminals: Vec<SessionId>,
+    pub unloaded_chats: Vec<SessionId>,
+    unloading: std::collections::HashSet<SessionId>,
     pub removed_terminals: Vec<SessionId>,
     pub terminal_pin_changes: Vec<(SessionId, bool)>,
     pub panel: Panel,
@@ -139,6 +140,8 @@ pub struct AppState {
     pending_prompts: HashMap<u64, PendingPrompt>,
     /// Tabs in the top bar, in order: new-session drafts and sessions opened this run.
     pub tabs: Vec<Tab>,
+    /// At most one history session occupies the replaceable preview slot.
+    pub preview_tab: Option<Tab>,
     /// A stable id per tab (kept when a draft becomes its session), so each
     /// tab animates in exactly once.
     uids: HashMap<Tab, u64>,
@@ -222,6 +225,10 @@ impl AppState {
             let _ = detect_tx.send(Msg::Statuses(providers::detect_all().await));
         });
 
+        let readiness = crate::readiness::Readiness::new(rt.handle(), manager.clone());
+        cx.observe_self(|state, _| state.refresh_readiness())
+            .detach();
+
         Self::pump(rx, cx);
 
         let records = manager.list_sessions();
@@ -278,6 +285,7 @@ impl AppState {
             pending_prompts: HashMap::new(),
             starting: Default::default(),
             tabs: vec![Tab::Draft(0)],
+            preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             next_uid: 1,
             ghosts: Vec::new(),
@@ -286,10 +294,10 @@ impl AppState {
             terminal_rows: Vec::new(),
             terminal_title_loading: Default::default(),
             unread_motion: HashMap::new(),
-            update_progress: HashMap::new(),
-            updates_enabled: !std::env::var("DEL_BACKEND")
-                .is_ok_and(|v| v.eq_ignore_ascii_case("mock")),
+            readiness: Some(readiness),
             closed_terminals: Vec::new(),
+            unloaded_chats: Vec::new(),
+            unloading: Default::default(),
             removed_terminals: Vec::new(),
             terminal_pin_changes: Vec::new(),
         }
@@ -327,12 +335,9 @@ impl AppState {
                 }
             }
             Msg::Refresh => self.records = self.manager.list_sessions(),
-            Msg::UpdateProgress(key, message) => {
-                if let Some(message) = message {
-                    self.update_progress.insert(key, message);
-                } else {
-                    self.update_progress.remove(&key);
-                }
+            Msg::Unloaded(id) => {
+                self.unloading.remove(&id);
+                self.records = self.manager.list_sessions();
             }
             Msg::ReplyFinished(id) => {
                 self.reply_finished(&id, cx);
@@ -416,31 +421,39 @@ impl AppState {
         cx.notify();
     }
 
-    /// What a chat view needs to talk to the agents.
-    pub fn update_reporter(&self, key: String) -> impl Fn(Option<String>) + Send + 'static {
-        let tx = self.tx.clone();
-        move |message| {
-            let _ = tx.send(Msg::UpdateProgress(key.clone(), message));
-        }
-    }
-
-    pub fn current_update(&self) -> Option<&str> {
-        let key = match &self.selection {
-            Selection::Draft(key) => format!("draft-{key}"),
-            Selection::Session(id) | Selection::Terminal(id) => id.0.clone(),
+    fn refresh_readiness(&self) {
+        let Some(readiness) = &self.readiness else {
+            return;
         };
-        self.update_progress.get(&key).map(String::as_str)
+        // Keep the last chat configuration ready while looking at a terminal.
+        if matches!(self.selection, Selection::Terminal(_)) || self.mode() != SessionMode::Chat {
+            return;
+        }
+        let config = self.draft().cloned().or_else(|| {
+            self.active_row().map(|r| SessionConfig {
+                provider: r.provider,
+                model: r.model,
+                cwd: r.cwd,
+                reasoning_effort: self.effort(),
+                service_tier: self.service_tier(),
+                permission_mode: self
+                    .records
+                    .iter()
+                    .find(|record| record.id == r.id)
+                    .map(|record| record.permission_mode)
+                    .unwrap_or_default(),
+            })
+        });
+        // Wait for provider discovery/sign-in; never open an authentication UI
+        // or prepare a chat for a terminal tab.
+        let config = config.filter(|c| self.status_of(c.provider).is_some_and(providers::ready));
+        readiness.set_config(config);
     }
 
     pub fn backend(&self) -> crate::chat::Backend {
-        let tx = self.tx.clone();
         crate::chat::Backend {
             runtime: self.rt.handle().clone(),
             manager: self.manager.clone(),
-            updates_enabled: self.updates_enabled,
-            update_progress: std::sync::Arc::new(move |key, message| {
-                let _ = tx.send(Msg::UpdateProgress(key, message));
-            }),
         }
     }
 
@@ -740,13 +753,8 @@ impl AppState {
         catalog.loading = true;
         catalog.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
-        let model = self.effective().1;
-        let updates_enabled = self.updates_enabled;
         self.rt.spawn(async move {
             let result = async {
-                if updates_enabled {
-                    crate::provider_updates::ensure_provider(provider, model, |_| {}).await?;
-                }
                 manager
                     .list_models(provider, &cwd)
                     .await
@@ -928,6 +936,34 @@ impl AppState {
         }
     }
 
+    fn open_preview(&mut self, tab: Tab) {
+        if self.tabs.contains(&tab) {
+            return; // Selecting an already-open tab never makes it temporary.
+        }
+        if !self.uids.contains_key(&tab) {
+            self.new_uid(tab.clone());
+        }
+        if let Some(at) = self
+            .preview_tab
+            .as_ref()
+            .and_then(|preview| self.tabs.iter().position(|open| open == preview))
+        {
+            // Keep each session's UID for its cached composer text/attachments.
+            // Replacing a preview does not close its backend or delete history.
+            self.tabs[at] = tab.clone();
+        } else {
+            self.tabs.push(tab.clone());
+        }
+        self.preview_tab = Some(tab);
+    }
+
+    pub fn keep_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
+        if self.preview_tab.as_ref() == Some(tab) {
+            self.preview_tab = None;
+            cx.notify();
+        }
+    }
+
     pub fn select_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
         match tab {
             Tab::Session(id) => self.select(id.clone(), cx),
@@ -949,6 +985,7 @@ impl AppState {
             && from != to
         {
             let tab = self.tabs.remove(from);
+            self.keep_tab(&tab, cx);
             self.tabs.insert(to, tab);
             cx.notify();
         }
@@ -959,6 +996,7 @@ impl AppState {
         let Some(at) = self.tabs.iter().position(|t| t == tab) else {
             return;
         };
+        self.keep_tab(tab, cx);
         let (title, provider) = self.tab_info(tab);
         let uid = self.uid_of(tab);
         self.uids.remove(tab);
@@ -1021,9 +1059,12 @@ impl AppState {
     }
 
     pub fn select(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if self.unloading.contains(&id) {
+            return;
+        }
         self.set_unread(&id, false);
         self.save_overrides();
-        self.add_tab(&id);
+        self.open_preview(Tab::Session(id.clone()));
         self.selection = Selection::Session(id.clone());
         self.panel = Panel::Chat;
         self.renaming = None;
@@ -1062,7 +1103,6 @@ impl AppState {
         let text = input.text.clone();
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
-        let updates_enabled = self.updates_enabled;
         match self.selection.clone() {
             Selection::Terminal(_) => return,
             Selection::Draft(key) => {
@@ -1080,26 +1120,15 @@ impl AppState {
                         error: None,
                     },
                 );
-                let report = self.update_reporter(format!("draft-{key}"));
                 self.rt.spawn(async move {
-                    let update = if updates_enabled {
-                        crate::provider_updates::ensure_provider(
-                            config.provider,
-                            config.model.clone(),
-                            |message| report(Some(message)),
-                        )
-                        .await
-                    } else {
-                        Ok(())
-                    };
-                    report(None);
-                    if let Err(error) = update {
-                        let _ = tx.send(Msg::StartFailed(key, error));
-                        return;
-                    }
                     let result = async {
                         let handle = manager.start_session(config).await?;
+                        let submitted = std::time::Instant::now();
                         manager.send_prompt(&handle.id, input.clone()).await?;
+                        eprintln!(
+                            "[del startup] first prompt accepted in {}ms",
+                            submitted.elapsed().as_millis()
+                        );
                         Ok::<_, AgentError>(handle.id)
                     }
                     .await;
@@ -1110,6 +1139,7 @@ impl AppState {
                 });
             }
             Selection::Session(id) => {
+                self.keep_tab(&Tab::Session(id.clone()), cx);
                 let backend = self.backend();
                 self.rt.spawn(async move {
                     let result = async {
@@ -1141,6 +1171,31 @@ impl AppState {
                 let _ = tx.send(Msg::Error(format!("Could not stop: {e}")));
             }
         });
+        cx.notify();
+    }
+
+    /// Release the live process and view, retaining history and sidebar metadata.
+    pub fn unload(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if self.terminal_rows.iter().any(|row| row.id == id) {
+            self.close_tab(&Tab::Terminal(id.clone()), cx);
+            // A preview or already closed tab may still own a terminal host.
+            if !self.closed_terminals.contains(&id) {
+                self.closed_terminals.push(id.clone());
+            }
+            if let Some(row) = self.terminal_rows.iter_mut().find(|row| row.id == id) {
+                row.active = false;
+            }
+        } else if self.unloading.insert(id.clone()) {
+            self.close_tab(&Tab::Session(id.clone()), cx);
+            self.unloaded_chats.push(id.clone());
+            let (manager, tx) = (self.manager.clone(), self.tx.clone());
+            self.rt.spawn(async move {
+                if let Err(error) = manager.close(&id).await {
+                    let _ = tx.send(Msg::Error(format!("Could not unload session: {error}")));
+                }
+                let _ = tx.send(Msg::Unloaded(id));
+            });
+        }
         cx.notify();
     }
 
@@ -1439,6 +1494,9 @@ impl AppState {
     /// Close every session and kill every backend child process. Blocks, with
     /// a deadline, because the app is quitting.
     pub fn shutdown(&self) {
+        if let Some(readiness) = &self.readiness {
+            readiness.stop();
+        }
         let manager = self.manager.clone();
         self.rt.block_on(async move {
             let _ = tokio::time::timeout(Duration::from_secs(3), manager.shutdown()).await;
@@ -1515,9 +1573,10 @@ mod tests {
             terminal_rows: vec![],
             terminal_title_loading: Default::default(),
             unread_motion: HashMap::new(),
-            update_progress: HashMap::new(),
-            updates_enabled: false,
+            readiness: None,
             closed_terminals: vec![],
+            unloaded_chats: vec![],
+            unloading: Default::default(),
             removed_terminals: vec![],
             terminal_pin_changes: vec![],
             panel: Panel::Chat,
@@ -1537,11 +1596,101 @@ mod tests {
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
             tabs: vec![Tab::Draft(0)],
+            preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             next_uid: 1,
             ghosts: vec![],
             starting: Default::default(),
         })
+    }
+
+    #[gpui::test]
+    fn history_previews_replace_in_place_and_keep_separate_composer_owners(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let a = del_agent::SessionId::new("preview-a");
+            let b = del_agent::SessionId::new("preview-b");
+            s.select(a.clone(), cx);
+            let owner_a = s.uid_of(&Tab::Session(a.clone()));
+            s.select(b.clone(), cx);
+            assert_eq!(s.tabs, vec![Tab::Draft(0), Tab::Session(b.clone())]);
+            assert_eq!(s.preview_tab, Some(Tab::Session(b.clone())));
+            assert!(s.ghosts.is_empty());
+            assert_ne!(owner_a, s.uid_of(&Tab::Session(b)));
+            s.select(a.clone(), cx);
+            assert_eq!(s.uid_of(&Tab::Session(a)), owner_a);
+        });
+    }
+
+    #[gpui::test]
+    fn keeping_a_preview_preserves_it_and_existing_tabs_never_become_previews(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let a = del_agent::SessionId::new("kept-a");
+            let b = del_agent::SessionId::new("preview-b");
+            let c = del_agent::SessionId::new("preview-c");
+            s.select(a.clone(), cx);
+            s.keep_tab(&Tab::Session(a.clone()), cx);
+            s.keep_tab(&Tab::Session(a.clone()), cx);
+            s.select(b.clone(), cx);
+            s.select(a.clone(), cx);
+            assert_eq!(s.preview_tab, Some(Tab::Session(b)));
+            s.select(c.clone(), cx);
+            assert_eq!(
+                s.tabs,
+                vec![Tab::Draft(0), Tab::Session(a), Tab::Session(c.clone())]
+            );
+            s.close_tab(&Tab::Session(c), cx);
+            assert!(s.preview_tab.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn chat_submission_event_keeps_the_preview_before_backend_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        let id = del_agent::SessionId::new("queued-preview");
+        let backend = state.update(cx, |s, cx| {
+            s.select(id.clone(), cx);
+            s.backend()
+        });
+        let chat = cx.new(|cx| crate::chat::ChatView::new(backend, None, None, cx));
+        state.update(cx, |_, cx| {
+            cx.subscribe(
+                &chat,
+                move |state, _, _: &crate::chat::PromptSubmitted, cx| {
+                    state.keep_tab(&Tab::Session(id.clone()), cx);
+                },
+            )
+            .detach();
+        });
+        chat.update(cx, |chat, cx| {
+            chat.submit_input(del_agent::UserInput::text("queued message"), false, cx);
+        });
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| assert!(state.preview_tab.is_none()));
+    }
+
+    #[gpui::test]
+    fn sending_promotes_a_preview_even_while_delivery_is_pending(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let a = del_agent::SessionId::new("sent-a");
+            let b = del_agent::SessionId::new("preview-b");
+            s.select(a.clone(), cx);
+            s.send("keep this conversation".into(), cx);
+            assert!(s.preview_tab.is_none());
+            s.select(b.clone(), cx);
+            assert_eq!(
+                s.tabs,
+                vec![Tab::Draft(0), Tab::Session(a), Tab::Session(b)]
+            );
+        });
     }
 
     #[gpui::test]
@@ -1860,6 +2009,36 @@ mod tests {
             assert!(super::providers::ready(
                 s.status_of(del_agent::Provider::Codex).unwrap()
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn unload_retains_terminal_history_and_metadata(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let id = del_agent::SessionId::new("unload-terminal");
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: id.clone(),
+                title: "Saved conversation".into(),
+                cwd: "/tmp".into(),
+                provider: Some(del_agent::Provider::Claude),
+                active: true,
+                summary: "Saved output".into(),
+                pinned: true,
+            });
+            s.overrides.rename(&id, "My name");
+            s.select_terminal(id.clone(), cx);
+            s.unload(id.clone(), cx);
+            assert!(!s.tabs.contains(&Tab::Terminal(id.clone())));
+            assert_eq!(s.closed_terminals, vec![id.clone()]);
+            assert!(s.removed_terminals.is_empty());
+            assert_eq!(s.terminal_rows[0].summary, "Saved output");
+            assert!(s.terminal_rows[0].pinned);
+            assert!(!s.terminal_rows[0].active);
+            assert_eq!(s.overrides.title(&id), Some("My name"));
+            assert!(!s.terminal_archived(&id));
+            s.select_terminal(id.clone(), cx);
+            assert_eq!(s.selection, Selection::Terminal(id));
         });
     }
 
