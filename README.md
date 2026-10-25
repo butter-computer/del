@@ -87,6 +87,11 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
+The sidebar starts with **Search**, **New session (+)**, and **Keep Mac awake**.
+Search takes the remaining row width up to 100 logical pixels; the other two
+buttons stay compact, leaving space on wider sidebars. Keep-awake uses a neutral
+hover-colored background and animated yellow steam while enabled.
+
 Opening a saved chat from the sidebar uses one temporary preview tab. Opening
 another replaces that preview in place. Double-click the sidebar session or its
 tab, send/queue a prompt, or move the tab to keep it open. Preview titles are
@@ -98,7 +103,11 @@ Claude, and OpenCode chats, including terminal conversations and archived sessio
 **↑/↓** to select a match, **Enter** (or click) to open it, and **Escape** to close.
 Add **/c** for chats or **/t** for terminals to limit results; use either
 filter by itself to list its sessions. Tab shortcut badges stay hidden while
-the palette is open.
+the palette is open. The palette is centered over the conversation pane and
+stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
+entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
+shows and dismisses it immediately. The footer places **/c /t Filter** on the left
+and navigation, open, and close hints on the right.
 
 Assistant previews render Markdown and highlight the matching words. Opening a
 result keeps its tab, scrolls to the matched text, and briefly highlights it,
@@ -156,6 +165,9 @@ conversation. Unloading a running session also stops its current work.
   change the conversation’s model. The tab and sidebar title shimmer while a
   name is being generated. Titles persist across restarts, manual
   renames take precedence, and failed requests retain the first-message fallback.
+  The shared title-generation prompt lives in
+  [`crates/agent/src/titles.rs`](crates/agent/src/titles.rs) as `INSTRUCTIONS`.
+  Title generation consumes provider usage, including OpenCode free-model quotas.
   Empty drafts remain “New session.” Terminal titles follow provider metadata.
   Archived chat and terminal rows show Restore and Permanently delete icons on hover.
   The delete icon stays red, including when hovered.
@@ -164,13 +176,18 @@ conversation. Unloading a running session also stops its current work.
 - Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
-- Session titles use the available sidebar width, reserving extra action space
-  on hover so terminal pin/close buttons do not overlap their titles. New-session,
-  new-tab, tab-close, sidebar, archive, and pin icons share the same 15 px size.
+- Session titles use the available sidebar width and fade at the edge instead
+  of ending in an ellipsis. Hovering reserves extra action space so terminal
+  pin/close buttons do not overlap their titles.
   Sidebar rows keep their minimum height and single-line titles in
   short or narrow windows; the list scrolls instead of compressing rows.
+- Agent questions appear inside the active conversation, above its input, with
+  answer choices and a free-text field. Each question keeps its own draft while
+  switching sessions; terminal questions stay with their terminal session.
 - General application, session-start, model-loading, and message-delivery failures
   appear in dismissible toasts. Failed messages remain available to retry or edit.
+  OpenCode quota errors show a readable message and the provider's retry hint
+  when available, rather than raw JSON. Provider usage limits still apply.
 
 ## Models and reasoning
 
@@ -375,6 +392,9 @@ background. Saved Codex/Claude/OpenCode terminal sessions reopen the exact provi
 conversation ID without replaying the initial prompt. Legacy Codex identity
 recovery proceeds only when one saved conversation matches its launch time and
 workspace. Unresolved identity is reported rather than choosing the latest chat.
+New OpenCode terminals create fresh native sessions. Del disables OpenCode's
+shared inner tabs for its launches, preventing previous sessions from appearing
+inside a new terminal; the user's on-disk OpenCode configuration is unchanged.
 
 Built-in Codex and Claude terminal launches automatically trust the workspace
 opened in Del, including resumed sessions. Codex receives a launch-scoped
@@ -481,6 +501,7 @@ session shortcuts.
 | --- | --- |
 | Command-1–9 | Select a top tab by position |
 | Command-N / Command-T | New session |
+| Command-K | Open or close conversation search |
 | Command-W | Close the active tab |
 | Command-+ (Command-Shift-=) | Zoom the entire interface in |
 | Command-- | Zoom the entire interface out |
