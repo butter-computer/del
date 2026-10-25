@@ -206,7 +206,7 @@ impl SessionManager {
             loading: true,
         });
         let result = async {
-            let title = backend.generate_title(&context).await?;
+            let title = backend.generate_session_title(id, &context).await?;
             let Some(title) = title.and_then(|s| crate::titles::clean(&s)) else {
                 return Ok(false);
             };

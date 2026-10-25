@@ -5,7 +5,7 @@ through the types below. Tokio-based; no UI dependencies.
 
 ## Contract
 
-- `Provider { Codex, Claude, Acp }`.
+- `Provider { Codex, Claude, OpenCode, Acp }`.
 - `SessionConfig { cwd, model: Option<String>, reasoning_effort: Option<String>,
   service_tier: Option<String>, provider, permission_mode }`,
   `UserInput { text, attachments, command, skills }`, `ApprovalResponse { Approve, Deny }`.
@@ -62,10 +62,10 @@ durable follow-up queue and retries known busy rejections after completion.
 `Attachment` contains a local path and optional MIME type. Adapters encode image
 inputs in the provider's format. `steer_input` supports attachments when the
 provider overrides it; the default rejects image steering explicitly. Codex
-supports active-turn steering; Claude queues input through its streaming CLI;
+and OpenCode support active-turn steering; Claude queues input through its streaming CLI;
 ACP has no standard steering operation.
 
-Real Codex, Claude, and ACP adapters implement `AgentBackend` and are registered
+Real Codex, Claude, OpenCode, and ACP adapters implement `AgentBackend` and are registered
 with the manager. The mock is for isolated tests and has no model catalog.
 
 ## Native goals

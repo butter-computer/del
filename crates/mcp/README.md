@@ -1,6 +1,6 @@
 # del-mcp
 
-Del's MCP server for terminal agents and Codex/Claude chat browser access.
+Del's MCP server for terminal agents and Codex/Claude/OpenCode chat browser access.
 No GPUI dependency: the server talks to the app through the `McpHost` trait.
 
 MCP is implemented directly (JSON-RPC 2.0: `initialize`, `ping`, `tools/list`,
@@ -45,7 +45,7 @@ rejected. Object results carry both `content[0].text` (JSON) and
 | `ask_user` | `question` (≤4000), `options?` (≤8 strings, ≤200 each) | `{answered: true, answer, option_index?}` or `{answered: false, dismissed: true}`; blocks until the user answers in del; error on timeout |
 | `list_sessions` | none | `{sessions: [{id, provider, cwd, title, status, reported_state, is_self}]}` |
 | `get_session_summary` | `session_id` | `{info, reported_summary, last_output}` |
-| `spawn_session` | `provider` (`codex\|claude`), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
+| `spawn_session` | `provider` (`codex\|claude\|opencode`), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
 | `send_to_session` | `session_id` (spawned child or parent), `text` (≤20000) | text `sent` |
 | `notify` | `title` (≤120), `body` (≤1000) | text `notified` |
 
@@ -54,7 +54,7 @@ rejected. Object results carry both `content[0].text` (JSON) and
 ### Browser actions
 
 Del is the default for browser requests unless the user explicitly names another
-browser or destination. This routing instruction is supplied to Codex/Claude chats
+browser or destination. This routing instruction is supplied to Codex/Claude/OpenCode chats
 and in MCP initialization/tool metadata.
 
 `list_tabs` without a session lists saved sessions, their browser tabs, and
@@ -135,3 +135,9 @@ mutations queue native commands behind the calling turn and return `queued: true
 The model must finish that turn before native confirmation updates the goal card.
 Ordinary browser-only credentials cannot control goals. Other session tools and
 sibling spawning are not exposed to these chat credentials.
+
+OpenCode 2.x receives launch-local MCP configuration through
+`OPENCODE_CONFIG_CONTENT` in standalone terminal mode. Its chat adapter connects
+a browser-only credential to its private native server and attaches Del browser
+routing through native session instruction entries. Live integration checks in
+`app_bridge.rs` exercise cold startup and browser requests through OpenCode.

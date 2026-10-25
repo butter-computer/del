@@ -1576,7 +1576,7 @@ mod tests {
     fn draft_permissions_follow_provider_on_new_tabs_and_switches(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |state, cx| {
-            for provider in [Provider::Codex, Provider::Claude, Provider::Acp] {
+            for provider in Provider::ALL {
                 state.set_provider(provider, cx);
                 assert_eq!(
                     state.draft().unwrap().permission_mode,

@@ -8,19 +8,27 @@ use std::path::PathBuf;
 pub enum Provider {
     Codex,
     Claude,
+    #[serde(rename = "opencode")]
+    OpenCode,
     /// Any agent speaking the Agent Client Protocol. `SessionConfig::model`
     /// names the registry entry (`"<agent>"` or `"<agent>/<model>"`).
     Acp,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Acp];
+    pub const ALL: [Provider; 4] = [
+        Provider::Codex,
+        Provider::Claude,
+        Provider::OpenCode,
+        Provider::Acp,
+    ];
 
     /// Executable name of the provider's CLI.
     pub fn binary(self) -> &'static str {
         match self {
             Provider::Codex => "codex",
             Provider::Claude => "claude",
+            Provider::OpenCode => "opencode",
             // ACP agents are launched from the registry, not a fixed binary.
             Provider::Acp => "",
         }

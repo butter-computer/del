@@ -185,6 +185,7 @@ pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
     vec![
         Arc::new(del_codex::CodexBackend::new(Default::default())),
         Arc::new(del_acp::AcpBackend::default()),
+        Arc::new(del_opencode::OpenCodeBackend::default()),
         // Keep permission selection explicit in each session's launch arguments.
         Arc::new(del_claude::ClaudeBackend::new(del_claude::ClaudeOptions {
             setting_sources: None,
@@ -273,6 +274,7 @@ struct AppShell {
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
     tab_drag_origin: std::rc::Rc<std::cell::Cell<Pixels>>,
     tab_strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
+    page_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     sidebar_open: bool,
     sidebar_visible: bool,
     sidebar_toggles: u64,
@@ -296,6 +298,7 @@ struct AppShell {
     chats: HashMap<SessionId, Entity<ChatView>>,
     search_index: Arc<std::sync::Mutex<conversation_search::Index>>,
     search_open: bool,
+    search_closing: Option<std::time::Instant>,
     terminal_search_generation: u64,
     composer_owner: u64,
     composer_drafts: HashMap<u64, gpui_kit::component::input::InputContent>,
@@ -315,7 +318,6 @@ struct AppShell {
     terminal_update_restarted: HashSet<(SessionId, u32)>,
     mcp: Option<McpBridge>,
     questions: VecDeque<PendingQuestion>,
-    mcp_answer: Entity<InputState>,
     notices: VecDeque<(SessionId, String, String)>,
     reported: HashMap<SessionId, String>,
     mode_focus: Option<(Selection, SessionMode)>,
@@ -536,7 +538,6 @@ impl AppShell {
                 s.error = Some(error.clone());
             }
         });
-        let mcp_answer = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
         let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), window, cx));
         let command_menu =
             cx.new(|cx| command_menu::CommandMenu::new(composer.clone(), state.clone(), cx));
@@ -563,6 +564,7 @@ impl AppShell {
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
             tab_strip_bounds: Default::default(),
+            page_bounds: Default::default(),
             sidebar_open: true,
             sidebar_visible: true,
             sidebar_toggles: 0,
@@ -582,6 +584,7 @@ impl AppShell {
             chats: HashMap::new(),
             search_index: search_ui::new_index(),
             search_open: false,
+            search_closing: None,
             terminal_search_generation: 0,
             dictation: None,
             dictation_generation: 0,
@@ -603,7 +606,6 @@ impl AppShell {
             terminal_update_restarted: HashSet::new(),
             mcp: None,
             questions: VecDeque::new(),
-            mcp_answer,
             notices: VecDeque::new(),
             reported: HashMap::new(),
             mode_focus: None,
@@ -1101,6 +1103,7 @@ impl AppShell {
             )
             .child(self.render_followups(cx))
             .child(self.render_goal_bar(cx))
+            .children(self.render_agent_messages(cx))
             .child(
                 div().relative().child(composer).child(
                     deferred(
@@ -1966,7 +1969,6 @@ impl Render for AppShell {
                 this.state.update(cx, |s, cx| s.toggle_providers(cx));
             }))
             .child(self.render_topbar(window, cx))
-            .children(self.render_agent_messages(cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -2021,6 +2023,16 @@ impl Render for AppShell {
                             .h_full()
                             .px(inset)
                             .pb(inset)
+                            .on_children_prepainted({
+                                let page_bounds = self.page_bounds.clone();
+                                move |bounds, window, _| {
+                                    if let Some(bounds) = bounds.first()
+                                        && page_bounds.replace(*bounds) != *bounds
+                                    {
+                                        window.request_animation_frame();
+                                    }
+                                }
+                            })
                             .child(self.render_page(cx))
                             .when(self.sidebar_visible, |page| {
                                 page.child(
@@ -2087,6 +2099,20 @@ impl Render for AppShell {
                         )
                     }),
             )
+            .when(self.search_open, |shell| {
+                let shade = div().absolute().inset_0().bg(gpui_kit::rgba(0x00000066));
+                if let Some(started) = self.search_closing {
+                    shell.child(shade.opacity(search_ui::exit_opacity(started)))
+                } else if cx.reduce_motion() {
+                    shell.child(shade)
+                } else {
+                    shell.child(shade.with_animation(
+                        "search-background-dim",
+                        Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                        |shade, progress| shade.opacity(progress),
+                    ))
+                }
+            })
     }
 }
 

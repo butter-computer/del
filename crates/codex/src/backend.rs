@@ -801,6 +801,7 @@ mod model_config_tests {
                 token: "fixture".into(),
                 claude_config: "/tmp/browser.json".into(),
                 claude_session_config: None,
+                question: None,
             },
         );
         assert_eq!(params["config"]["model_reasoning_effort"], "high");

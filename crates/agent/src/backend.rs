@@ -69,12 +69,30 @@ pub type SessionToolConfig =
 
 pub const GOAL_INSTRUCTIONS: &str = "Del's goal MCP tool controls your actual native goal. When the user asks to set, change, resume, restart, or clear a goal, call goal with the corresponding action; saying it in a reply does not change goal state. Use get to inspect it. A queued response means the native command will run after this turn: finish your reply promptly, and do not claim it is active yet. Goals complete through the native goal evaluator, not by reporting ordinary turn completion. Only set or resume goals when the user asks. Never use an external session to change this session's goal.";
 
+/// App-owned question UI for native provider forms. Dropping the future dismisses it.
+#[derive(Clone, Debug)]
+pub enum QuestionAnswer {
+    Option(usize),
+    Text(String),
+}
+pub type QuestionHandler = std::sync::Arc<
+    dyn Fn(
+            SessionId,
+            String,
+            Vec<String>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<QuestionAnswer>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct BrowserTools {
     pub url: String,
     pub token: String,
     pub claude_config: std::path::PathBuf,
     pub claude_session_config: Option<SessionToolConfig>,
+    pub question: Option<QuestionHandler>,
 }
 
 #[async_trait]
@@ -118,6 +136,16 @@ pub trait AgentBackend: Send + Sync {
     /// Isolated title-only request; must not modify the real conversation.
     async fn generate_title(&self, _context: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    /// Generate a title using a provider's transient session API when available.
+    /// Like `generate_title`, this must not modify the conversation history.
+    async fn generate_session_title(
+        &self,
+        _session: &SessionId,
+        context: &str,
+    ) -> Result<Option<String>> {
+        self.generate_title(context).await
     }
 
     /// Discover model choices without submitting a prompt or registering a chat.

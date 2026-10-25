@@ -164,3 +164,21 @@ pub fn codex(c: &Credentials, transport: &Transport) -> LaunchConfig {
         files: vec![],
     }
 }
+
+/// OpenCode merges launch-local JSON with the user's configuration. Secrets
+/// remain in the child environment and never enter argv or saved terminal history.
+pub fn opencode(c: &Credentials) -> LaunchConfig {
+    LaunchConfig {
+        args: vec![],
+        env: vec![(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            json!({"mcp":{"del":{
+                "type":"remote", "url":c.url, "oauth":false,
+                "headers":{"Authorization":format!("Bearer {}",c.token)},
+                "timeout":{"execution":TOOL_TIMEOUT_SECS * 1000}
+            }}})
+            .to_string(),
+        )],
+        files: vec![],
+    }
+}

@@ -323,19 +323,10 @@ impl Render for Palette {
                     .justify_between()
                     .text_size(zpx(11.))
                     .text_color(crate::appearance::rgba(0xffffff80))
-                    .child(format!(
-                        "{} {}",
-                        self.hits.len(),
-                        if self.hits.len() == 1 {
-                            "match"
-                        } else {
-                            "matches"
-                        }
-                    ))
+                    .child("/c /t Filter")
                     .child(
                         h_flex()
                             .gap_3()
-                            .child("/c /t")
                             .child("↑ ↓ Navigate")
                             .child(
                                 h_flex()
@@ -349,7 +340,49 @@ impl Render for Palette {
     }
 }
 
+const EXIT_DURATION: std::time::Duration = std::time::Duration::from_millis(140);
+
+pub(super) fn exit_opacity(started: std::time::Instant) -> f32 {
+    let t = (started.elapsed().as_secs_f32() / EXIT_DURATION.as_secs_f32()).min(1.);
+    1. - t * t * (3. - 2. * t)
+}
+
 impl AppShell {
+    fn close_search(
+        &mut self,
+        hit: Option<search::Hit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.search_open || self.search_closing.is_some() {
+            return;
+        }
+        if cx.reduce_motion() {
+            window.close_dialog(cx);
+            self.search_open = false;
+            if let Some(hit) = hit {
+                self.open_search_hit(hit, window, cx);
+            }
+            cx.notify();
+            return;
+        }
+        self.search_closing = Some(std::time::Instant::now());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(EXIT_DURATION).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                window.close_dialog(cx);
+                this.search_open = false;
+                this.search_closing = None;
+                if let Some(hit) = hit {
+                    this.open_search_hit(hit, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn search_sources(&self, cx: &App) -> Vec<search::Source> {
         let state = self.state.read(cx);
         let mut sources: Vec<_> = state
@@ -392,9 +425,7 @@ impl AppShell {
 
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_open {
-            window.close_dialog(cx);
-            self.search_open = false;
-            cx.notify();
+            self.close_search(None, window, cx);
             return;
         }
         self.state.update(cx, |state, cx| {
@@ -406,12 +437,11 @@ impl AppShell {
         let runtime = self.state.read(cx).backend().runtime;
         let palette = cx.new(|cx| Palette::new(runtime.clone(), window, cx));
         cx.subscribe_in(&palette, window, |this, _, event, window, cx| {
-            window.close_dialog(cx);
-            this.search_open = false;
-            if let PaletteEvent::Open(hit) = event {
-                this.open_search_hit(hit.clone(), window, cx);
-            }
-            cx.notify();
+            let hit = match event {
+                PaletteEvent::Open(hit) => Some(hit.clone()),
+                PaletteEvent::Close => None,
+            };
+            this.close_search(hit, window, cx);
         })
         .detach();
         let sources = self.search_sources(cx);
@@ -445,14 +475,39 @@ impl AppShell {
         self.search_open = true;
         let shell = cx.weak_entity();
         let content = palette.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        let page_bounds = self.page_bounds.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let closing = shell
+                .upgrade()
+                .and_then(|shell| shell.read(cx).search_closing);
+            if closing.is_some() {
+                window.request_animation_frame();
+            }
+            let cancel_shell = shell.clone();
             let shell = shell.clone();
+            // Align with the actual conversation surface, including resized sidebars.
+            let bounds = page_bounds.get();
+            let width = zpx(620.).min((bounds.size.width - zpx(32.)).max(zpx(0.)));
+            let offset = bounds.center().x - window.viewport_size().width / 2.;
             dialog
                 .bg(crate::appearance::rgb(0x262628))
-                .entrance(DialogEntrance::Fade)
-                .width(zpx(620.))
+                .entrance(if closing.is_some() {
+                    DialogEntrance::None
+                } else {
+                    DialogEntrance::FadeSlide
+                })
+                .when_some(closing, |dialog, started| {
+                    dialog.opacity(exit_opacity(started))
+                })
+                .width(width)
+                .relative()
+                .left(offset)
                 .keyboard(false)
                 .close_button(false)
+                .on_cancel(move |_, window, cx| {
+                    let _ = cancel_shell.update(cx, |this, cx| this.close_search(None, window, cx));
+                    false
+                })
                 .on_close(move |_, _, cx| {
                     let _ = shell.update(cx, |this, cx| {
                         this.search_open = false;

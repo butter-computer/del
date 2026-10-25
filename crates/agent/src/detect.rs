@@ -32,8 +32,12 @@ pub struct ProviderStatus {
 
 /// Probe every provider concurrently.
 pub async fn detect_all() -> Vec<ProviderStatus> {
-    let (a, b) = tokio::join!(detect(Provider::Codex), detect(Provider::Claude));
-    vec![a, b]
+    let (a, b, c) = tokio::join!(
+        detect(Provider::Codex),
+        detect(Provider::Claude),
+        detect(Provider::OpenCode)
+    );
+    vec![a, b, c]
 }
 
 /// `Provider::Acp` has no single CLI; it always reports not installed here and
@@ -102,6 +106,7 @@ fn common_dirs() -> Vec<PathBuf> {
     if let Some(h) = dirs::home_dir() {
         for rel in [
             ".local/bin",
+            ".opencode/bin",
             ".claude/local",
             ".cargo/bin",
             ".bun/bin",
@@ -176,7 +181,7 @@ async fn probe_login(provider: Provider, bin: &Path) -> LoginState {
     let args: &[&str] = match provider {
         Provider::Codex => &["login", "status"],
         Provider::Claude => &["auth", "status"],
-        Provider::Acp => return LoginState::Unknown,
+        Provider::Acp | Provider::OpenCode => return LoginState::Unknown,
     };
     match run(bin, args).await {
         Some(o) => parse_login(provider, o.ok, &o.text),

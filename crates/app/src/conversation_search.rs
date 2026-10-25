@@ -61,6 +61,7 @@ pub struct Hit {
 #[derive(Default)]
 pub struct Index {
     files: HashMap<PathBuf, CachedFile>,
+    opencode: del_opencode::history::Cache,
 }
 struct CachedFile {
     modified: Option<std::time::SystemTime>,
@@ -101,6 +102,20 @@ impl Index {
                 used.insert(path.clone());
                 match self.read(&path, source.provider, id.unwrap_or_default()) {
                     Ok(messages) => saved = messages,
+                    Err(error) => snapshot.errors.push(format!("{}: {error}", source.title)),
+                }
+            }
+            if source.provider == Some(Provider::OpenCode)
+                && let Some(id) = id
+            {
+                match self.opencode.read(&source.cwd, id) {
+                    Ok(events) => {
+                        let mut model = ChatModel::default();
+                        for event in events.iter() {
+                            model.apply(event);
+                        }
+                        saved = Arc::new(messages(&model));
+                    }
                     Err(error) => snapshot.errors.push(format!("{}: {error}", source.title)),
                 }
             }

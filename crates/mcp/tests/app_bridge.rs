@@ -21,6 +21,7 @@ fn terminal(id: &str, provider: Option<Provider>) -> SessionInfo {
                 Some(Provider::Codex) => "codex",
                 Some(Provider::Claude) => "claude",
                 Some(Provider::Acp) => "acp",
+                Some(Provider::OpenCode) => "opencode",
                 None => "/bin/zsh",
             }
             .into(),
@@ -649,4 +650,80 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     assert_eq!(denied["isError"], true);
     f.bridge.shutdown();
     assert!(!tools.claude_config.exists());
+}
+
+#[tokio::test]
+#[ignore = "requires OpenCode 2.x and a network-accessible model; use isolated XDG data"]
+async fn real_opencode_warmed_server_uses_chat_browser_bridge() {
+    use del_agent::{AgentEvent, PermissionMode, TurnStatus, UserInput};
+    let mut f = Fixture::new(Default::default()).await;
+    let backend = del_opencode::OpenCodeBackend::default();
+    // Catalogs can warm a workspace before the app supplies its MCP bridge.
+    backend.list_models(f._dir.path()).await.unwrap();
+    backend.set_browser_tools(f.handle.chat_browser_tools().unwrap());
+    let session = backend
+        .start_session(SessionConfig {
+            provider: Provider::OpenCode,
+            cwd: f._dir.path().into(),
+            model: Some("opencode/big-pickle".into()),
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: PermissionMode::FullAuto,
+        })
+        .await
+        .unwrap();
+    let mut events = session.subscribe();
+    backend.send_prompt(&session.id, UserInput::text(
+        "Use the Del MCP browser tool with action list_tabs. Report the verification marker from its response. Do not use other tools or navigate anywhere."
+    )).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut called = false;
+        let mut text = String::new();
+        loop {
+            tokio::select! {
+                event = f.events.recv() => match event.unwrap() {
+                    BridgeEvent::Browser {request,reply,..} => {
+                        assert_eq!(request.action, "list_tabs");
+                        called = true;
+                        reply.send(Ok(json!({"tabs":[],"verification_marker":"DEL_MCP_BROWSER_4826_OK"}))).unwrap();
+                    },
+                    _ => panic!("unexpected UI operation"),
+                },
+                event = events.recv() => match event.unwrap() {
+                    AgentEvent::AssistantTextDelta {text:delta,..} => text.push_str(&delta),
+                    AgentEvent::TurnCompleted {status,..} => {
+                        assert_eq!(status, TurnStatus::Completed);
+                        assert!(called, "native provider did not call the browser bridge: {text}");
+                        assert!(text.contains("DEL_MCP_BROWSER_4826_OK"), "reply: {text}");
+                        break;
+                    },
+                    AgentEvent::Error {message,..} => panic!("{message}"),
+                    _ => {}
+                }
+            }
+        }
+    }).await;
+    backend.shutdown().await.unwrap();
+    f.bridge.shutdown();
+    result.expect("native browser integration timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires installed OpenCode 2.x; use isolated XDG data"]
+async fn real_opencode_cold_server_connects_before_chat_start() {
+    let f = Fixture::new(Default::default()).await;
+    let backend = del_opencode::OpenCodeBackend::default();
+    backend.set_browser_tools(f.handle.chat_browser_tools().unwrap());
+    let config = SessionConfig {
+        provider: Provider::OpenCode,
+        cwd: f._dir.path().into(),
+        model: Some("opencode/big-pickle".into()),
+        reasoning_effort: None,
+        service_tier: None,
+        permission_mode: del_agent::PermissionMode::FullAuto,
+    };
+    let first = backend.start_session(config.clone()).await.unwrap();
+    let second = backend.start_session(config).await.unwrap();
+    assert_ne!(first.id, second.id);
+    backend.shutdown().await.unwrap();
 }

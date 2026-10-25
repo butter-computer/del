@@ -95,7 +95,7 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "provider": {"type": "string", "enum": ["codex", "claude"]},
+                    "provider": {"type": "string", "enum": ["codex", "claude", "opencode"]},
                     "cwd": {"type": "string", "description": "Absolute path of an existing directory to work in."},
                     "prompt": {"type": "string", "maxLength": MAX_PROMPT, "description": "First instruction for the new agent."}
                 },

@@ -13,7 +13,7 @@ use crate::{AppShell, composer_ui};
 use del_agent::{Provider, SessionId};
 use del_mcp::{HostError, HostResult, SessionInfo, SessionMode, UserAnswer};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,6 +25,7 @@ pub(super) struct PendingQuestion {
     caller: SessionId,
     question: String,
     options: Vec<String>,
+    input: Entity<InputState>,
     reply: oneshot::Sender<UserAnswer>,
 }
 
@@ -113,7 +114,6 @@ impl AppShell {
     }
 
     pub(super) fn ensure_modes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let previous_question = self.questions.front().map(|q| q.id);
         let closed = self
             .state
             .update(cx, |s, _| std::mem::take(&mut s.closed_terminals));
@@ -155,10 +155,6 @@ impl AppShell {
                 .cloned()
         {
             self.begin_terminal(record.launch, None, Some(id), None, None, window, cx);
-        }
-        if previous_question != self.questions.front().map(|q| q.id) {
-            self.mcp_answer
-                .update(cx, |i, cx| i.set_value("", window, cx));
         }
     }
 
@@ -277,7 +273,12 @@ impl AppShell {
                 }
             });
         }
+        let opencode_model = spec.model.clone();
+        let opencode_variant = spec.variant.clone();
         let prepare = runtime.spawn(async move {
+            let conversation_id = if prepare_info.provider == Some(Provider::OpenCode) && !resuming {
+                Some(del_opencode::create_terminal_session(&prepare_info.cwd, opencode_model.as_deref(), opencode_variant.as_deref()).await.map_err(|e| e.to_string())?)
+            } else { conversation_id };
             tokio::task::spawn_blocking(move || {
             let conversation_id = if resuming && prepare_info.provider == Some(Provider::Codex) && conversation_id.is_none() {
                 previous.as_ref().and_then(|record| crate::terminal_conversation::recover_legacy_codex(
@@ -319,7 +320,14 @@ impl AppShell {
                 }
                 let result = prepared.and_then(|(mut args, env, conversation_id)| {
                     if let Some(prompt) = prompt {
-                        args.push("--".into());
+                        args.push(
+                            if spec.kind == TerminalLaunchKind::OpenCode {
+                                "--prompt"
+                            } else {
+                                "--"
+                            }
+                            .into(),
+                        );
                         args.push(prompt);
                     }
                     let mut launch = spec.clone();
@@ -593,6 +601,7 @@ impl AppShell {
             let provider = match snapshot.kind {
                 TerminalLaunchKind::Codex => Some(Provider::Codex),
                 TerminalLaunchKind::Claude => Some(Provider::Claude),
+                TerminalLaunchKind::OpenCode => Some(Provider::OpenCode),
                 _ => None,
             };
             bridge.handle().upsert_terminal(
@@ -623,7 +632,6 @@ impl AppShell {
     }
 
     fn handle_bridge(&mut self, event: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let previous_question = self.questions.front().map(|q| q.id);
         match event {
             BridgeEvent::Browser {
                 caller,
@@ -725,6 +733,7 @@ impl AppShell {
                         caller,
                         question,
                         options,
+                        input: cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…")),
                         reply,
                     });
                 }
@@ -764,6 +773,7 @@ impl AppShell {
                 let kind = match request.provider {
                     Provider::Codex => TerminalLaunchKind::Codex,
                     Provider::Claude => TerminalLaunchKind::Claude,
+                    Provider::OpenCode => TerminalLaunchKind::OpenCode,
                     Provider::Acp => {
                         let _ = reply.send(Err(HostError::Failed(
                             "ACP is a chat provider; spawn a Codex or Claude terminal".into(),
@@ -804,10 +814,6 @@ impl AppShell {
                     let _ = reply.send(result);
                 }
             }
-        }
-        if previous_question != self.questions.front().map(|q| q.id) {
-            self.mcp_answer
-                .update(cx, |i, cx| i.set_value("", window, cx));
         }
         cx.notify();
     }
@@ -924,7 +930,14 @@ impl AppShell {
             Selection::Draft(_) | Selection::Session(_) => {}
         }
 
-        page.into_any_element()
+        page.children(self.render_agent_messages(cx).map(|messages| {
+            div()
+                .w_full()
+                .max_w(zpx(crate::COMPOSER_MAX_WIDTH))
+                .p_3()
+                .child(messages)
+        }))
+        .into_any_element()
     }
 
     fn restart_button(&self, id: SessionId, cx: &mut Context<Self>) -> impl IntoElement {
@@ -957,7 +970,7 @@ impl AppShell {
         &mut self,
         id: u64,
         answer: UserAnswer,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(at) = self.questions.iter().position(|q| q.id == id)
@@ -965,53 +978,57 @@ impl AppShell {
         {
             let _ = question.reply.send(answer);
         }
-        self.mcp_answer
-            .update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
     }
 
     pub(super) fn render_agent_messages(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let active = match &self.state.read(cx).selection {
-            Selection::Session(id) | Selection::Terminal(id) => Some(id),
-            _ => None,
+            Selection::Session(id) | Selection::Terminal(id) => id.clone(),
+            _ => return None,
         };
-        let summary = active.and_then(|id| self.reported.get(id)).cloned();
-        if summary.is_none() && self.notices.is_empty() && self.questions.is_empty() {
+        let summary = self.reported.get(&active).cloned();
+        let notice = self
+            .notices
+            .iter()
+            .position(|(caller, _, _)| caller == &active);
+        let question = self
+            .questions
+            .iter()
+            .find(|q| q.caller == active && !q.reply.is_closed());
+        if summary.is_none() && notice.is_none() && question.is_none() {
             return None;
         }
         let mut area = v_flex()
             .w_full()
-            .px_3()
-            .gap_1()
+            .min_w_0()
+            .mb_2()
+            .gap_2()
             .text_size(zpx(12.))
             .when_some(summary, |area, summary| {
                 area.child(div().text_color(rgb(0x999999)).child(summary))
             });
-        if let Some((caller, title, body)) = self.notices.front() {
+        if let Some(notice) = notice {
+            let (_, title, body) = &self.notices[notice];
             area = area.child(
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(div().flex_1().child(format!(
-                        "{} · {}: {}",
-                        self.caller_name(caller, cx),
-                        title,
-                        body
-                    )))
+                    .child(div().flex_1().child(format!("{}: {}", title, body)))
                     .child(
                         Button::new("dismiss-notice")
                             .ghost()
                             .small()
                             .label("Dismiss")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notices.pop_front();
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.notices.remove(notice);
                                 cx.notify();
                             })),
                     ),
             );
         }
-        if let Some(question) = self.questions.front() {
+        if let Some(question) = question {
             let id = question.id;
+            let answer_input = question.input.clone();
             let mut options = h_flex().gap_2().flex_wrap();
             for (index, text) in question.options.iter().enumerate() {
                 let text = text.clone();
@@ -1019,7 +1036,13 @@ impl AppShell {
                     Button::new(("mcp-answer-option", index))
                         .ghost()
                         .small()
-                        .label(text.clone())
+                        .h_auto()
+                        .max_w_full()
+                        .py_2()
+                        .border_1()
+                        .border_color(rgba(0xffffff18))
+                        .accessibility_label(text.clone())
+                        .child(div().min_w_0().whitespace_normal().child(text.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.answer_question(
                                 id,
@@ -1035,28 +1058,34 @@ impl AppShell {
             }
             area = area.child(
                 v_flex()
+                    .id(("agent-question", id))
+                    .w_full()
+                    .min_w_0()
+                    .max_h(zpx(280.))
+                    .overflow_y_scroll()
                     .p_3()
-                    .gap_2()
-                    .rounded_md()
+                    .gap_3()
+                    .rounded(zpx(12.))
                     .bg(rgb(0x262629))
-                    .child(format!(
-                        "{} asks: {}",
-                        self.caller_name(&question.caller, cx),
-                        question.question
-                    ))
+                    .child(
+                        div()
+                            .text_size(zpx(14.))
+                            .whitespace_normal()
+                            .child(question.question.clone()),
+                    )
                     .child(options)
+                    .child(Input::new(&question.input))
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.mcp_answer)))
+                            .justify_end()
                             .child(
                                 Button::new("mcp-answer-send")
                                     .ghost()
                                     .small()
                                     .label("Send answer")
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        let text =
-                                            this.mcp_answer.read(cx).value().trim().to_string();
+                                        let text = answer_input.read(cx).value().trim().to_string();
                                         if !text.is_empty() {
                                             this.answer_question(
                                                 id,
@@ -1081,23 +1110,6 @@ impl AppShell {
         }
         Some(area)
     }
-
-    fn caller_name(&self, id: &SessionId, cx: &App) -> String {
-        self.state
-            .read(cx)
-            .terminal_rows
-            .iter()
-            .find(|r| &r.id == id)
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| {
-                let title = self.state.read(cx).current_title(id);
-                if title.is_empty() {
-                    id.to_string()
-                } else {
-                    title
-                }
-            })
-    }
 }
 
 /// Resume by exact identity; never replay the opening prompt or use --last.
@@ -1106,6 +1118,16 @@ fn resume_args(
     conversation: &str,
     resuming: bool,
 ) -> Result<Vec<String>, String> {
+    if provider == Some(Provider::OpenCode) {
+        if !conversation.starts_with("ses_")
+            || !conversation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("Invalid OpenCode conversation ID".into());
+        }
+        return Ok(vec!["--session".into(), conversation.into()]);
+    }
     uuid::Uuid::parse_str(conversation).map_err(|_| "Invalid saved conversation ID".to_owned())?;
     Ok(match provider {
         Some(Provider::Codex) if resuming => vec!["resume".into(), conversation.into()],

@@ -258,6 +258,46 @@ impl BridgeHandle {
             url: credentials.url,
             token: credentials.token,
             claude_config: file,
+            question: Some({
+                let service = Arc::downgrade(&self.service);
+                Arc::new(move |caller, question, options| {
+                    let service = service.clone();
+                    Box::pin(async move {
+                        let service = service.upgrade().ok_or_else(|| {
+                            del_agent::AgentError::Backend("Question UI closed".into())
+                        })?;
+                        let host = &service.host;
+                        let request_id = host.next_question.fetch_add(1, Ordering::Relaxed);
+                        let (reply, rx) = oneshot::channel();
+                        host.events
+                            .send(BridgeEvent::AskUser {
+                                request_id,
+                                caller,
+                                question,
+                                options,
+                                reply,
+                            })
+                            .map_err(|_| {
+                                del_agent::AgentError::Backend("Question UI closed".into())
+                            })?;
+                        let _guard = QuestionGuard {
+                            events: host.events.clone(),
+                            id: request_id,
+                        };
+                        let mut stopped = host.stopped.clone();
+                        let answer = tokio::select! { result = rx => result.ok(), _ = stopped.changed() => None };
+                        Ok(match answer {
+                            Some(UserAnswer::Option { index, .. }) => {
+                                Some(del_agent::backend::QuestionAnswer::Option(index))
+                            }
+                            Some(UserAnswer::Text { text }) => {
+                                Some(del_agent::backend::QuestionAnswer::Text(text))
+                            }
+                            _ => None,
+                        })
+                    })
+                })
+            }),
             claude_session_config: Some({
                 let service = Arc::downgrade(&self.service);
                 Arc::new(move |id| {
@@ -386,6 +426,7 @@ impl BridgeHandle {
                 launch::claude(&credentials, &Transport::Http, &self.service.config_dir)
             }
             Provider::Codex => Ok(launch::codex(&credentials, &Transport::Http)),
+            Provider::OpenCode => Ok(launch::opencode(&credentials)),
             Provider::Acp => Err(io::Error::other(
                 "ACP does not use terminal MCP launch config",
             )),

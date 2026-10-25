@@ -1,7 +1,7 @@
 # Del
 
 Del is a native Rust desktop workspace for coding agents, built with GPUI. It
-combines Codex, Claude Code, and installed ACP agents with conversation tabs,
+combines Codex, Claude Code, OpenCode 2.x, and installed ACP agents with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
@@ -93,8 +93,8 @@ tab, send/queue a prompt, or move the tab to keep it open. Preview titles are
 muted and italic. New chats remain open, and replaced previews retain their
 conversation history and composer drafts.
 
-**⌘K** opens conversation search. Search message text or titles across saved Codex
-and Claude chats, including terminal conversations and archived sessions. Use
+**⌘K** opens conversation search. Search message text or titles across saved Codex,
+Claude, and OpenCode chats, including terminal conversations and archived sessions. Use
 **↑/↓** to select a match, **Enter** (or click) to open it, and **Escape** to close.
 Add **/c** for chats or **/t** for terminals to limit results; use either
 filter by itself to list its sessions. Tab shortcut badges stay hidden while
@@ -106,7 +106,8 @@ including within Markdown replies.
 
 Search reads local provider transcripts on a background worker and caches their
 message text in memory, refreshing changed files when the palette opens. It does
-not start agents or terminals to index history. Sent messages and streamed
+not submit agent prompts or open terminals to index history. OpenCode exports
+use a private standalone server rather than the shared background service. Sent messages and streamed
 replies are included from their loaded views. Results show the agent icon in a
 compact palette that grows with results up to a maximum height. Terminal matches
 open the actual terminal and resume its original conversation when needed. Del
@@ -150,7 +151,8 @@ conversation. Unloading a running session also stops its current work.
   then refreshed every six user turns. The title prompt requests 1–3 words, ideally
   under 24 characters, without conversational filler. Codex uses
   GPT-5.6 Luna with reasoning disabled; Claude uses Haiku 5.5 with thinking
-  disabled. These small requests use the existing provider login and do not
+  disabled. OpenCode uses its native transient generation API with the session's
+  selected model, preserving conversation history. These requests use the existing provider login and do not
   change the conversation’s model. The tab and sidebar title shimmer while a
   name is being generated. Titles persist across restarts, manual
   renames take precedence, and failed requests retain the first-message fallback.
@@ -186,11 +188,12 @@ default is labeled **Default**.
 | --- | --- |
 | Codex | Paginated app-server `model/list`; advertised reasoning levels and priority/fast tier |
 | Claude | CLI initialization metadata; advertised effort levels and Fast support, applied with `--effort` and session-scoped `--settings` |
+| OpenCode 2.x | Native model catalog and per-model effort variants; white provider accent |
 | ACP | Installed registry agents and their advertised model/config options; `thought_level` is exposed for the agent's default entry when available |
 
 Selecting a model opens its reasoning controls. Slider stops correspond to
 advertised effort levels, and the accent follows the selected provider (including
-Codex blue and Claude orange). Use **←/→** in the reasoning controls to move one
+Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning controls to move one
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
 Reset clears explicit effort/fast settings and refreshes the catalog.
@@ -223,6 +226,11 @@ The bounded menu shows descriptions and argument hints, with skills first.
 - **Claude Code:** uses the CLI's initialization command catalog and native
   stream-json slash-command execution. User, project, and local settings load
   normally, so personal and installed plugin skills are available too.
+- **OpenCode 2.x:** uses native skill IDs and the native command catalog. Selected skills
+  travel as structured prompt items alongside text and file attachments. OpenCode
+  owns execution and persistence. Its inspected 2.1.4 API exposes no native goals
+  or Fast tier, so Del does not advertise those capabilities for OpenCode. See the
+  [adapter notes](crates/opencode/README.md) for installation and verification.
 - **Fast:** `/fast`, `/fast on`, and `/fast off` use the same saved session
   setting as the model picker. Codex uses its advertised service tier; Claude
   uses `fastMode` in session-scoped settings. Only supported models can enable
@@ -294,7 +302,7 @@ uncertain deliveries interrupted before acknowledgement require review rather
 than automatic replay. Other delivery failures keep the item and its error.
 A stopped or failed turn does not automatically advance the queue.
 
-Steering differs by harness: Codex supports active-turn steering; Claude's
+Steering differs by harness: Codex and OpenCode support active-turn steering; Claude's
 stream-json interface handles in-flight user input as a native queued follow-up.
 ACP steering is currently unsupported and leaves the message available to retry.
 Steering during streaming keeps the current assistant answer in one block.
@@ -363,7 +371,7 @@ inside Del with GPUI. The cursor is hidden when the terminal or app loses focus.
 
 Terminals use a real PTY, support shell and agent sessions, and retain colored
 terminal cells while letting the normal chat surface show through their default
-background. Saved Codex/Claude terminal sessions reopen the exact provider
+background. Saved Codex/Claude/OpenCode terminal sessions reopen the exact provider
 conversation ID without replaying the initial prompt. Legacy Codex identity
 recovery proceeds only when one saved conversation matches its launch time and
 workspace. Unresolved identity is reported rather than choosing the latest chat.
@@ -378,18 +386,19 @@ remains visible. Confirmation is limited to startup (two minutes) and stops once
 the prompt disappears. Unrecognized dialogs stay interactive.
 Shell/custom commands and arbitrary ACP agents keep their own trust setup.
 
-Del starts and reopens Codex and Claude sessions with full access by default.
+Del starts and reopens Codex, Claude, and OpenCode sessions with full access by default.
 Codex chat uses `approvalPolicy: never` and `sandbox: danger-full-access`;
 Codex terminals use `--dangerously-bypass-approvals-and-sandbox` (YOLO mode).
 Claude chat uses `bypassPermissions` with `--dangerously-skip-permissions`,
-and Claude terminals use the same bypass flag. These modes allow file changes
+and Claude terminals use the same bypass flag. OpenCode chat uses native allow
+rules and its terminal uses `--auto`. These modes allow file changes
 and command execution without tool-approval prompts. Existing saved chats adopt
 the setting when reopened; there is currently no in-chat permission toggle.
 ACP sessions and custom shell commands keep their existing permission behavior.
 
 Del's MCP bridge provides scoped session coordination, status, notifications,
 and user questions for supported terminal agents. Browser tools are also available
-to Codex and Claude chat sessions. Launch-specific credentials
+to Codex, Claude, and OpenCode chat sessions. Launch-specific credentials
 and MCP configuration are kept separate from saved launch history. See
 [the MCP documentation](crates/mcp/README.md) for tools, transport, and scope.
 
@@ -410,7 +419,7 @@ profile, its website data is cleared and remaining cleanup retries at next launc
 Startup cleanup initializes WebKit first, so pending deletions cannot crash the app
 before its first browser view opens.
 
-Codex and Claude agents can use Del's authenticated `browser` MCP tool to discover,
+Codex, Claude, and OpenCode agents can use Del's authenticated `browser` MCP tool to discover,
 create, select, close, and navigate tabs, inspect page text/elements, click, fill,
 send keys, evaluate page JavaScript, and take screenshots. These actions target the
 same visible browser and saved profiles. Del is the default browser for agent
@@ -526,6 +535,7 @@ See [ACP configuration](crates/acp/README.md) for custom installed agents.
 | `codex` | Codex app-server adapter |
 | `claude` | Claude streaming CLI adapter |
 | `acp` | ACP registry and protocol adapter |
+| `opencode` | OpenCode 2.x native server adapter |
 | `terminal` | PTY lifecycle, input, emulator state, and rendering |
 | `mcp` | Session bridge, MCP server, and stdio proxy |
 | `core` | Shared UI-independent helpers and shell metrics |

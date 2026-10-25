@@ -10,7 +10,9 @@ use del_agent::{LoginState, Provider, ProviderStatus};
 /// Del starts the built-in agents with full access; ACP keeps its own policy.
 pub fn permission_mode(provider: Provider) -> del_agent::PermissionMode {
     match provider {
-        Provider::Codex | Provider::Claude => del_agent::PermissionMode::FullAuto,
+        Provider::Codex | Provider::Claude | Provider::OpenCode => {
+            del_agent::PermissionMode::FullAuto
+        }
         Provider::Acp => del_agent::PermissionMode::Ask,
     }
 }
@@ -23,7 +25,10 @@ pub fn prepare_session_permissions(
         .list_sessions()
         .into_iter()
         .find(|record| &record.id == id)
-        && matches!(record.provider, Provider::Codex | Provider::Claude)
+        && matches!(
+            record.provider,
+            Provider::Codex | Provider::Claude | Provider::OpenCode
+        )
     {
         manager.set_permission_mode(id, permission_mode(record.provider))?;
     }
@@ -31,11 +36,13 @@ pub fn prepare_session_permissions(
 }
 
 pub fn ready(st: &ProviderStatus) -> bool {
-    st.installed && (st.provider == Provider::Acp || st.login == LoginState::LoggedIn)
+    st.installed
+        && (matches!(st.provider, Provider::Acp | Provider::OpenCode)
+            || st.login == LoginState::LoggedIn)
 }
 
 pub fn summary(st: &ProviderStatus) -> &'static str {
-    if st.provider == Provider::Acp && st.installed {
+    if matches!(st.provider, Provider::Acp | Provider::OpenCode) && st.installed {
         return "Available";
     }
     match (st.installed, st.login) {
@@ -50,6 +57,7 @@ pub fn display_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "Codex",
         Provider::Claude => "Claude",
+        Provider::OpenCode => "OpenCode",
         Provider::Acp => "ACP",
     }
 }
@@ -59,6 +67,7 @@ pub fn login_command(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "codex login",
         Provider::Claude => "claude auth login",
+        Provider::OpenCode => "opencode auth login",
         Provider::Acp => "Sign in with the selected agent’s CLI",
     }
 }

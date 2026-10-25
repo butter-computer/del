@@ -190,6 +190,7 @@ impl Render for ModelPanel {
         let (provider, selected, _) = state.effective();
         let accent = rgb(match provider {
             Provider::Codex => 0x007aff,
+            Provider::OpenCode => 0xd0d0ce,
             _ => crate::composer_ui::provider_brand(provider).1,
         });
         let info = state.model_info();
@@ -569,7 +570,14 @@ impl Render for ModelPanel {
             const THUMB_SIZE: f32 = 28.0;
             const TRACK_INSET: f32 = THUMB_SIZE / 2.0;
             let travel = TRACK_WIDTH - THUMB_SIZE;
-            let position = |value: usize| travel * value as f32 / max;
+            let position = |value: usize| {
+                if value == 0 {
+                    // Cover the rounded fill cap at the minimum stop.
+                    -2.0
+                } else {
+                    travel * value as f32 / max
+                }
+            };
             let old_position = position(self.previous_effort_index.min(self.levels.len() - 1));
             let new_position = position(self.effort_index);
             let old_fill = old_position + TRACK_INSET;

@@ -21,4 +21,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "
 ureq = { version = "3", default-features = false }
 
 [dev-dependencies]
+del-opencode = { path = "../opencode" }
 tempfile = "3"

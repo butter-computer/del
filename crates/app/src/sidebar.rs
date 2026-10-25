@@ -23,6 +23,89 @@ const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
 const FAINT: u32 = 0xffffff52;
 
+fn fading_title(text: String) -> impl IntoElement {
+    let label = text.clone();
+    let text: SharedString = text.replace(['\n', '\r'], " ").into();
+    div()
+        .id("fading-title")
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .aria_label(label)
+        .child(
+            canvas(
+                move |_, window, _| {
+                    let style = window.text_style();
+                    let line = window.text_system().shape_line(
+                        text.clone(),
+                        style.font_size.to_pixels(window.rem_size()),
+                        &[style.to_run(text.len())],
+                        None,
+                    );
+                    (line, style)
+                },
+                |bounds, (line, style), window, cx| {
+                    let fade = zpx(18.).min(bounds.size.width);
+                    let overflow = line.width() > bounds.size.width;
+                    let solid = if overflow {
+                        bounds.size.width - fade
+                    } else {
+                        bounds.size.width
+                    };
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: Bounds::new(bounds.origin, size(solid, bounds.size.height)),
+                        }),
+                        |window| {
+                            let _ = line.paint(
+                                bounds.origin,
+                                bounds.size.height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        },
+                    );
+                    if overflow {
+                        for step in 0..18 {
+                            let start = solid + fade * (step as f32 / 18.);
+                            let end = solid + fade * ((step + 1) as f32 / 18.);
+                            let clip = Bounds::new(
+                                point(bounds.left() + start, bounds.top()),
+                                size(end - start, bounds.size.height),
+                            );
+                            let decoration = DecorationRun {
+                                len: line.len() as u32,
+                                color: style.color.opacity(1. - (step as f32 + 0.5) / 18.),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            window.with_content_mask(
+                                Some(ContentMask { bounds: clip }),
+                                |window| {
+                                    let _ = LineLayout::paint(
+                                        &line,
+                                        bounds.origin,
+                                        bounds.size.height,
+                                        TextAlign::Left,
+                                        None,
+                                        &[decoration],
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            );
+                        }
+                    }
+                },
+            )
+            .w_full()
+            .h(zpx(20.)),
+        )
+}
+
 pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyElement {
     let (from, target, start) = state.unread_motion(id);
     let dot = div().rounded_full().bg(rgb(0x4a9eff));
@@ -59,16 +142,16 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
 fn coffee_icon(active: bool, cx: &App) -> Div {
     div()
         .relative()
-        .size(zpx(18.0))
+        .size(zpx(16.0))
         .child(
             Icon::default()
                 .path("icons/coffee-cup.svg")
-                .with_size(zpx(18.0)),
+                .with_size(zpx(16.0)),
         )
         .children((0..3).map(|i| {
             let steam = div()
                 .absolute()
-                .left(zpx(5.0 + i as f32 * 3.0))
+                .left(zpx(4.0 + i as f32 * 2.7))
                 .top(zpx(0.0))
                 .w(zpx(2.0))
                 .h(zpx(5.0))
@@ -324,7 +407,7 @@ fn row_item(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
                 .text_color(if selected {
                     rgb(0xf5f5f5)
                 } else {
@@ -336,7 +419,7 @@ fn row_item(
                         .id(SharedString::from(format!("sidebar-title-{}", id.0)))
                         .into_any_element()
                 } else {
-                    div().truncate().child(row.title.clone()).into_any_element()
+                    fading_title(row.title.clone()).into_any_element()
                 }),
         )
     };
@@ -529,31 +612,72 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
         .pb_2()
         .child(
             h_flex()
-                .id("new-session")
-                .h(zpx(ROW_HEIGHT))
-                .min_h(zpx(ROW_HEIGHT))
-                .flex_none()
-                .px_2()
+                .w_full()
                 .gap_1p5()
-                .items_center()
-                .rounded_md()
-                .cursor_pointer()
-                .text_size(zpx(TEXT_MD))
-                .text_color(rgb(TEXT))
-                .when(draft_selected, |r| r.bg(rgba(0xffffff14)))
-                .when(!draft_selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
-                .on_click(move |_, _, cx| new_state.update(cx, |s, cx| s.new_session(cx)))
+                .py_1()
+                .flex_none()
                 .child(
-                    Icon::new(IconName::Plus)
-                        .with_size(zpx(CONTROL_ICON_SIZE))
-                        .text_color(rgba(MUTED)),
+                    Button::new("search-conversations")
+                        .ghost()
+                        .flex_1()
+                        .min_w(zpx(34.))
+                        .max_w(zpx(100.))
+                        .h(zpx(34.))
+                        .rounded(zpx(9.))
+                        .p_0()
+                        .bg(rgb(0x303033))
+                        .tooltip("Search conversations (⌘K)")
+                        .accessibility_label("Search conversations")
+                        .child(Icon::new(IconName::Search).with_size(zpx(15.)))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::SearchConversations), cx)
+                        }),
                 )
-                .child(div().flex_1().min_w_0().truncate().child("New session"))
                 .child(
-                    div()
-                        .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(FAINT))
-                        .child("⌘N"),
+                    Button::new("new-session")
+                        .ghost()
+                        .flex_none()
+                        .size(zpx(34.))
+                        .rounded(zpx(9.))
+                        .p_0()
+                        .bg(rgb(if draft_selected { 0x3b3b3e } else { 0x303033 }))
+                        .tooltip("New session (⌘N)")
+                        .accessibility_label("New session")
+                        .child(Icon::new(IconName::Plus).with_size(zpx(16.)))
+                        .on_click(move |_, _, cx| new_state.update(cx, |s, cx| s.new_session(cx))),
+                )
+                .child(
+                    Button::new("caffeine-toggle")
+                        .ghost()
+                        .flex_none()
+                        .size(zpx(34.))
+                        .rounded(zpx(9.))
+                        .p_0()
+                        .bg(if s.caffeine_enabled {
+                            let hover: Background = cx.theme().tokens.accent.into();
+                            if cx.theme().mode.is_dark() {
+                                hover.opacity(0.5)
+                            } else {
+                                hover
+                            }
+                        } else {
+                            rgb(0x303033).into()
+                        })
+                        .child(coffee_icon(s.caffeine_enabled, cx))
+                        .tooltip(if s.caffeine_enabled {
+                            "Allow Mac to sleep"
+                        } else {
+                            "Keep Mac awake"
+                        })
+                        .accessibility_label(if s.caffeine_enabled {
+                            "Keep Mac awake: on"
+                        } else {
+                            "Keep Mac awake: off"
+                        })
+                        .text_color(rgba(MUTED))
+                        .on_click(move |_, _, cx| {
+                            caffeine_state.update(cx, |s, cx| s.toggle_caffeine(cx))
+                        }),
                 ),
         )
         .child(
@@ -691,7 +815,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .truncate()
+                                                .overflow_hidden()
                                                 .text_size(zpx(TEXT_MD))
                                                 .font_weight(FontWeight::NORMAL)
                                                 .child(if title_loading {
@@ -704,7 +828,7 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                                     )))
                                                     .into_any_element()
                                                 } else {
-                                                    div().truncate().child(title).into_any_element()
+                                                    fading_title(title).into_any_element()
                                                 })
                                                 .into_any_element()
                                         })
@@ -856,7 +980,12 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                                     .rounded_md()
                                     .cursor_pointer()
                                     .hover(|row| row.bg(rgba(0xffffff0a)))
-                                    .child(div().flex_1().truncate().child(s.current_title(&id)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(fading_title(s.current_title(&id))),
+                                    )
                                     .child(div().flex_none().w(zpx(44.0)))
                                     .child(
                                         actions
@@ -917,29 +1046,6 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .gap_1p5()
                         .child(Icon::new(IconName::Settings).small())
                         .child("Settings"),
-                )
-                .child(
-                    Button::new("caffeine-toggle")
-                        .ghost()
-                        .size(zpx(28.0))
-                        .p_0()
-                        .child(coffee_icon(s.caffeine_enabled, cx))
-                        .tooltip(if s.caffeine_enabled {
-                            "Allow Mac to sleep"
-                        } else {
-                            "Keep Mac awake"
-                        })
-                        .accessibility_label(if s.caffeine_enabled {
-                            "Keep Mac awake: on"
-                        } else {
-                            "Keep Mac awake: off"
-                        })
-                        .text_color(rgba(MUTED))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            caffeine_state.update(cx, |s, cx| s.toggle_caffeine(cx));
-                        }),
                 ),
         )
 }

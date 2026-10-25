@@ -162,6 +162,7 @@ pub(crate) fn provider_brand(provider: Provider) -> (&'static str, u32) {
     match provider {
         Provider::Claude => ("icons/claude.svg", 0xd97757),
         Provider::Codex => ("icons/codex.svg", 0xf5f5f5),
+        Provider::OpenCode => ("icons/opencode.svg", 0xf5f5f5),
         Provider::Acp => ("icons/acp.svg", 0xb1b7c4),
     }
 }

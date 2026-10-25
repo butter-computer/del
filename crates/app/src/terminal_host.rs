@@ -24,16 +24,25 @@ pub enum TerminalLaunchKind {
     Shell,
     Codex,
     Claude,
+    #[serde(rename = "opencode")]
+    OpenCode,
     Custom,
 }
 
 impl TerminalLaunchKind {
-    pub const ALL: [Self; 4] = [Self::Shell, Self::Codex, Self::Claude, Self::Custom];
+    pub const ALL: [Self; 5] = [
+        Self::Shell,
+        Self::Codex,
+        Self::Claude,
+        Self::OpenCode,
+        Self::Custom,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::Shell => "Shell",
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::OpenCode => "OpenCode",
             Self::Custom => "Custom",
         }
     }
@@ -49,6 +58,10 @@ pub struct TerminalLaunchSpec {
     pub args: Vec<String>,
     pub title: String,
     pub login_env: bool,
+    #[serde(default)]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl TerminalLaunchSpec {
@@ -56,6 +69,7 @@ impl TerminalLaunchSpec {
         match self.kind {
             TerminalLaunchKind::Codex => Some(del_agent::Provider::Codex),
             TerminalLaunchKind::Claude => Some(del_agent::Provider::Claude),
+            TerminalLaunchKind::OpenCode => Some(del_agent::Provider::OpenCode),
             _ => None,
         }
     }
@@ -71,16 +85,19 @@ impl TerminalLaunchSpec {
             args: Vec::new(),
             title: "Shell".into(),
             login_env: true,
+            variant: None,
+            model: None,
         }
     }
     pub fn agent(kind: TerminalLaunchKind, cwd: impl Into<PathBuf>) -> io::Result<Self> {
         let name = match kind {
             TerminalLaunchKind::Codex => "codex",
             TerminalLaunchKind::Claude => "claude",
+            TerminalLaunchKind::OpenCode => "opencode",
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "choose Codex or Claude",
+                    "choose Codex, Claude, or OpenCode",
                 ));
             }
         };
@@ -97,21 +114,28 @@ impl TerminalLaunchSpec {
             args: Vec::new(),
             title: kind.label().into(),
             login_env: true,
+            variant: None,
+            model: None,
         })
     }
     pub fn from_config(config: &del_agent::SessionConfig) -> io::Result<Self> {
         let kind = match config.provider {
             del_agent::Provider::Codex => TerminalLaunchKind::Codex,
             del_agent::Provider::Claude => TerminalLaunchKind::Claude,
+            del_agent::Provider::OpenCode => TerminalLaunchKind::OpenCode,
             del_agent::Provider::Acp => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Choose Codex or Claude to start a terminal session",
+                    "Choose Codex, Claude, or OpenCode to start a terminal session",
                 ));
             }
         };
         let mut spec = Self::agent(kind, config.cwd.clone())?;
         spec.apply_model_settings(config);
+        if kind == TerminalLaunchKind::OpenCode {
+            spec.variant = config.reasoning_effort.clone();
+            spec.model = config.model.clone();
+        }
         Ok(spec)
     }
 
@@ -123,7 +147,9 @@ impl TerminalLaunchSpec {
                     .to_string(),
             ]);
         }
-        if let Some(model) = &config.model {
+        if let Some(model) = &config.model
+            && self.kind != TerminalLaunchKind::OpenCode
+        {
             self.args.extend(["--model".into(), model.clone()]);
         }
         if let Some(effort) = &config.reasoning_effort {
@@ -170,13 +196,15 @@ impl TerminalLaunchSpec {
             args: vec!["-lc".into(), command],
             title: "Custom terminal".into(),
             login_env: false,
+            variant: None,
+            model: None,
         })
     }
 
     fn prepare(
         &self,
         extra_args: Vec<String>,
-        env: Vec<(String, String)>,
+        mut env: Vec<(String, String)>,
     ) -> io::Result<TerminalSpec> {
         if self.kind != TerminalLaunchKind::Shell && self.program.is_none() {
             return Err(io::Error::new(
@@ -215,6 +243,7 @@ impl TerminalLaunchSpec {
         let bypass = match self.kind {
             TerminalLaunchKind::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
             TerminalLaunchKind::Claude => Some("--dangerously-skip-permissions"),
+            TerminalLaunchKind::OpenCode => Some("--auto"),
             _ => None,
         };
         if let Some(flag) = bypass
@@ -245,6 +274,36 @@ impl TerminalLaunchSpec {
                 "-c".into(),
                 r#"tui.terminal_title=["session-id","thread-name"]"#.into(),
             ]);
+        }
+        if self.kind == TerminalLaunchKind::OpenCode {
+            // Del owns conversation tabs. OpenCode's shared tab strip otherwise
+            // restores unrelated sessions even with an explicit --session ID.
+            const CLI_CONFIG: &str = "OPENCODE_CLI_CONFIG_CONTENT";
+            let existing = env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == CLI_CONFIG)
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var(CLI_CONFIG).ok());
+            let mut config: serde_json::Value = existing
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !config.is_object() || config.get("tabs").is_some_and(|tabs| !tabs.is_object()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid OpenCode CLI config",
+                ));
+            }
+            config["tabs"]["mode"] = "off".into();
+            env.retain(|(key, _)| key != CLI_CONFIG);
+            env.push((CLI_CONFIG.into(), config.to_string()));
+            // Private server consumes this launch's MCP config; the shared
+            // background service cannot inherit per-terminal credentials.
+            args.push("--standalone".into());
+            args.push(cwd.to_string_lossy().into_owned());
         }
         args.extend(extra_args);
         Ok(TerminalSpec {
@@ -329,7 +388,9 @@ impl TerminalLauncher {
         }
         let spec = match self.kind {
             TerminalLaunchKind::Shell => Ok(TerminalLaunchSpec::shell(self.cwd.clone())),
-            TerminalLaunchKind::Codex | TerminalLaunchKind::Claude => {
+            TerminalLaunchKind::Codex
+            | TerminalLaunchKind::Claude
+            | TerminalLaunchKind::OpenCode => {
                 TerminalLaunchSpec::agent(self.kind, self.cwd.clone())
             }
             TerminalLaunchKind::Custom => TerminalLaunchSpec::custom(
@@ -916,6 +977,8 @@ mod tests {
             args: vec![],
             title: "Codex".into(),
             login_env: false,
+            variant: None,
+            model: None,
         };
         let prepared = spec
             .prepare(vec!["--".into(), "hello".into()], vec![])
@@ -1003,6 +1066,8 @@ mod tests {
                 args: vec![],
                 title: "Test".into(),
                 login_env: false,
+                variant: None,
+                model: None,
             };
             spec.apply_model_settings(&config);
             let prompt = "build this; keep it one argument";
@@ -1066,6 +1131,8 @@ mod tests {
                 ],
                 title: "Test".into(),
                 login_env: false,
+                variant: None,
+                model: None,
             };
             for _ in 0..2 {
                 let prepared = spec.prepare(vec![], vec![]).unwrap();
@@ -1097,6 +1164,8 @@ mod tests {
             args: vec!["original".into()],
             title: "Codex".into(),
             login_env: false,
+            variant: None,
+            model: None,
         };
         let before = serde_json::to_string(&spec).unwrap();
         let prepared = spec
@@ -1166,6 +1235,8 @@ mod tests {
             ],
             title: "Test terminal".into(),
             login_env: false,
+            variant: None,
+            model: None,
         };
         let (session, actual_cwd) = super::spawn_session(
             &spec,
@@ -1204,7 +1275,191 @@ mod tests {
             args: Vec::new(),
             title: "Missing program".into(),
             login_env: false,
+            variant: None,
+            model: None,
         };
         assert!(super::spawn_session(&spec, Vec::new(), Vec::new()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn native_terminal_flags_and_model_metadata_are_kept_separate() {
+        let spec = TerminalLaunchSpec {
+            kind: TerminalLaunchKind::OpenCode,
+            cwd: std::env::temp_dir(),
+            program: Some("opencode".into()),
+            args: vec![],
+            title: "OpenCode".into(),
+            login_env: false,
+            variant: Some("high".into()),
+            model: Some("provider/model".into()),
+        };
+        let prepared = spec
+            .prepare(
+                vec![
+                    "--session".into(),
+                    "ses_fixture".into(),
+                    "--prompt".into(),
+                    "hello".into(),
+                ],
+                vec![(
+                    "OPENCODE_CLI_CONFIG_CONTENT".into(),
+                    r#"{"theme":"test-theme","tabs":{"mode":"on","scope":"global"}}"#.into(),
+                )],
+            )
+            .unwrap();
+        let cli_config: serde_json::Value = serde_json::from_str(
+            &prepared
+                .env
+                .iter()
+                .find(|(key, _)| key == "OPENCODE_CLI_CONFIG_CONTENT")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(cli_config["tabs"]["mode"], "off");
+        assert_eq!(cli_config["tabs"]["scope"], "global");
+        assert_eq!(cli_config["theme"], "test-theme");
+        assert!(prepared.args.contains(&"--standalone".into()));
+        assert!(prepared.args.contains(&"--auto".into()));
+        assert!(!prepared.args.contains(&"--model".into()));
+        assert!(!prepared.args.contains(&"--variant".into()));
+        assert_eq!(spec.provider(), Some(del_agent::Provider::OpenCode));
+        let restored: TerminalLaunchSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(restored, spec);
+    }
+    #[tokio::test]
+    #[ignore = "requires OpenCode v2 and a network-accessible free model; use isolated XDG data"]
+    async fn real_opencode_terminal_mcp_status_and_question() {
+        let cwd = tempfile::tempdir().unwrap();
+        let id =
+            del_opencode::create_terminal_session(cwd.path(), Some("opencode/big-pickle"), None)
+                .await
+                .unwrap();
+        let sid = del_agent::SessionId::new(id.clone());
+        let host = std::sync::Arc::new(del_mcp::MockHost::new());
+        host.add_session(&id, del_agent::Provider::OpenCode);
+        let server = del_mcp::McpServer::start(host.clone(), Default::default())
+            .await
+            .unwrap();
+        let launch = del_mcp::launch::opencode(&server.register_session(&sid));
+        let mut spec = TerminalLaunchSpec::agent(TerminalLaunchKind::OpenCode, cwd.path()).unwrap();
+        spec.login_env = false;
+        let args=vec!["--session".into(),id,"--prompt".into(),
+            "Use the Del MCP server: call report_status with state working and summary DEL_TERM_7930_OK, then call ask_user with question Integration test answer? and no options. Report the answer it returns. Use the MCP ask_user tool, not the built-in question tool.".into()];
+        let terminal = TerminalSession::spawn(spec.prepare(args, launch.env).unwrap()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let question = host.take_question().await;
+            assert_eq!(question.caller, sid);
+            assert!(
+                host.reports()
+                    .iter()
+                    .any(|(caller, _, summary)| caller == &sid && summary == "DEL_TERM_7930_OK")
+            );
+            question.answer(del_mcp::UserAnswer::Text {
+                text: "DEL_TERM_ANSWER_6382_OK".into(),
+            });
+            loop {
+                let screen: String =
+                    terminal.with_term(|t| t.grid().display_iter().map(|c| c.c).collect());
+                if screen.contains("DEL_TERM_ANSWER_6382_OK") {
+                    break;
+                }
+                assert!(!terminal.exited(), "terminal exited: {screen}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        terminal.close(std::time::Duration::from_millis(300));
+        server.shutdown();
+        result.expect("OpenCode terminal MCP did not complete status/question round-trip");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2; use isolated XDG data"]
+    async fn real_opencode_new_terminal_has_only_its_own_tab() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut spec = TerminalLaunchSpec::agent(TerminalLaunchKind::OpenCode, cwd.path()).unwrap();
+        spec.login_env = false;
+        for launch in 0..2 {
+            let id = del_opencode::create_terminal_session(
+                cwd.path(),
+                Some("opencode/big-pickle"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut prepared = spec.prepare(vec!["--session".into(), id], vec![]).unwrap();
+            if launch == 0 {
+                // Seed the saved tab strip left by an ordinary OpenCode launch.
+                prepared
+                    .env
+                    .retain(|(key, _)| key != "OPENCODE_CLI_CONFIG_CONTENT");
+                prepared.env.push((
+                    "OPENCODE_CLI_CONFIG_CONTENT".into(),
+                    r#"{"tabs":{"mode":"on"}}"#.into(),
+                ));
+            }
+            let terminal = TerminalSession::spawn(prepared).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut ready = None;
+            let screen = loop {
+                let screen: String =
+                    terminal.with_term(|t| t.grid().display_iter().map(|c| c.c).collect());
+                if screen.contains("Big Pickle") {
+                    let since = ready.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > std::time::Duration::from_secs(2) {
+                        break screen;
+                    }
+                }
+                if terminal.exited() || std::time::Instant::now() > deadline {
+                    terminal.close(std::time::Duration::from_millis(300));
+                    panic!("terminal did not become ready: {screen}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            terminal.close(std::time::Duration::from_millis(300));
+            assert!(
+                screen.matches("New session").count() <= 1,
+                "launch {launch} restored another session tab: {screen}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OpenCode v2 and a network-accessible free model; use isolated XDG data"]
+    async fn real_opencode_terminal_launch_and_exact_resume() {
+        let cwd = tempfile::tempdir().unwrap();
+        let id =
+            del_opencode::create_terminal_session(cwd.path(), Some("opencode/big-pickle"), None)
+                .await
+                .unwrap();
+        let mut spec = TerminalLaunchSpec::agent(TerminalLaunchKind::OpenCode, cwd.path()).unwrap();
+        spec.login_env = false;
+        for resume in [false, true] {
+            let mut args = vec!["--session".into(), id.clone()];
+            if !resume {
+                args.extend(["--prompt".into(),"Reply with the concatenation of DEL_ and TUI_OK and nothing else. Do not use tools.".into()]);
+            }
+            let terminal = TerminalSession::spawn(spec.prepare(args, vec![]).unwrap()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+            let result = loop {
+                let screen: String =
+                    terminal.with_term(|t| t.grid().display_iter().map(|c| c.c).collect());
+                if screen.contains("DEL_TUI_OK") {
+                    break Ok(());
+                }
+                if terminal.exited() || std::time::Instant::now() > deadline {
+                    break Err(screen);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            terminal.close(std::time::Duration::from_millis(300));
+            result.unwrap_or_else(|screen| panic!("OpenCode terminal resume={resume}: {screen}"));
+        }
     }
 }

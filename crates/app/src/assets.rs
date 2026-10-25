@@ -36,6 +36,7 @@ impl AssetSource for AppAssets {
             "icons/microphone.svg" => Some(include_bytes!("../assets/icons/microphone.svg")),
             "icons/claude.svg" => Some(include_bytes!("../assets/icons/claude.svg")),
             "icons/codex.svg" => Some(include_bytes!("../assets/icons/codex.svg")),
+            "icons/opencode.svg" => Some(include_bytes!("../assets/icons/opencode.svg")),
             "icons/acp.svg" => Some(include_bytes!("../assets/icons/acp.svg")),
             "icons/zap.svg" => Some(include_bytes!("../assets/icons/zap.svg")),
             "icons/pin-outline.svg" => Some(include_bytes!("../assets/icons/pin-outline.svg")),

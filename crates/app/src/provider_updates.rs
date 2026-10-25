@@ -314,11 +314,13 @@ pub async fn ensure_provider(
         return Ok(());
     }
     let programs = match provider {
-        Provider::Codex => del_agent::detect::find_working_binary("codex")
-            .await
-            .map(|(path, _)| path)
-            .into_iter()
-            .collect::<Vec<_>>(),
+        Provider::Codex | Provider::OpenCode => {
+            del_agent::detect::find_working_binary(provider.binary())
+                .await
+                .map(|(path, _)| path)
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
         Provider::Claude => {
             tokio::task::spawn_blocking(|| del_agent::detect::find_binary("claude"))
                 .await
@@ -358,7 +360,7 @@ pub fn completed_cli_update(provider: Provider, output: &str, exit: Option<i32>)
             Provider::Claude => {
                 output.contains("Update installed") && output.contains("Restart to apply")
             }
-            Provider::Acp => false,
+            Provider::Acp | Provider::OpenCode => false,
         }
 }
 

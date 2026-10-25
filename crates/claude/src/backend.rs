@@ -660,6 +660,7 @@ mod model_config_tests {
             token: "fixture".into(),
             claude_config: "/tmp/browser.json".into(),
             claude_session_config: None,
+            question: None,
         });
         let config = SessionConfig {
             cwd: "/tmp".into(),
