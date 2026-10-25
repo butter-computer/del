@@ -23,7 +23,7 @@ const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
 const FAINT: u32 = 0xffffff52;
 
-fn fading_title(text: String) -> impl IntoElement {
+pub(crate) fn fading_title(text: String) -> impl IntoElement {
     let label = text.clone();
     let text: SharedString = text.replace(['\n', '\r'], " ").into();
     div()
@@ -575,7 +575,12 @@ fn session_menu(
     )
 }
 
-pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -> impl IntoElement {
+pub fn render(
+    state: &Entity<AppState>,
+    rename: &Entity<InputState>,
+    usage: &Entity<crate::usage::Usage>,
+    cx: &App,
+) -> impl IntoElement {
     let s = state.read(cx);
     let rows = s.rows();
     let archived = s.archived_rows();
@@ -619,10 +624,8 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                 .child(
                     Button::new("search-conversations")
                         .ghost()
-                        .flex_1()
-                        .min_w(zpx(34.))
-                        .max_w(zpx(100.))
-                        .h(zpx(34.))
+                        .flex_none()
+                        .size(zpx(34.))
                         .rounded(zpx(9.))
                         .p_0()
                         .bg(rgb(0x303033))
@@ -677,6 +680,34 @@ pub fn render(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -
                         .text_color(rgba(MUTED))
                         .on_click(move |_, _, cx| {
                             caffeine_state.update(cx, |s, cx| s.toggle_caffeine(cx))
+                        }),
+                )
+                .child(
+                    gpui_kit::component::popover::Popover::new("session-usage")
+                        .open(usage.read(cx).open)
+                        .arrow(true)
+                        .anchor(Anchor::LeftCenter)
+                        .on_open_change({
+                            let usage = usage.clone();
+                            move |open, _, cx| {
+                                usage.update(cx, |usage, cx| usage.set_open(*open, cx))
+                            }
+                        })
+                        .trigger(
+                            Button::new("session-usage-trigger")
+                                .ghost()
+                                .flex_none()
+                                .size(zpx(34.))
+                                .rounded(zpx(9.))
+                                .p_0()
+                                .bg(rgb(0x303033))
+                                .tooltip("Session memory")
+                                .accessibility_label("Session memory")
+                                .child(Icon::new(ActionIcon::Activity).with_size(zpx(16.))),
+                        )
+                        .content({
+                            let usage = usage.clone();
+                            move |_, _, _| usage.clone()
                         }),
                 ),
         )

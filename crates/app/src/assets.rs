@@ -7,6 +7,7 @@ use std::borrow::Cow;
 gpui_kit::assets::icon_assets!(
     SidebarIcons,
     [
+        Activity,
         Pencil,
         Archive,
         Pin,
@@ -95,6 +96,7 @@ mod tests {
     #[test]
     fn sidebar_action_icons_are_available() {
         for icon in [
+            gpui_kit::assets::IconName::Activity,
             gpui_kit::assets::IconName::Pencil,
             gpui_kit::assets::IconName::Archive,
             gpui_kit::assets::IconName::Pin,

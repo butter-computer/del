@@ -44,6 +44,7 @@ mod terminal_conversation;
 #[allow(dead_code)]
 mod terminal_host;
 mod terminal_store;
+mod usage;
 mod voice_ui;
 mod zoom;
 
@@ -252,7 +253,7 @@ impl Render for ResizePreview {
 }
 
 fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 {
-    let min = if right { 220.0 } else { 150.0 };
+    let min = if right { 220.0 } else { 162.0 };
     let max = if right { 800.0_f32 } else { 360.0_f32 };
     requested.clamp(min, max.min(viewport - other - 260.0 - 20.0).max(min))
 }
@@ -297,6 +298,7 @@ struct AppShell {
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     search_index: Arc<std::sync::Mutex<conversation_search::Index>>,
+    usage: Entity<usage::Usage>,
     search_open: bool,
     search_closing: Option<std::time::Instant>,
     terminal_search_generation: u64,
@@ -550,6 +552,8 @@ impl AppShell {
             },
         )
         .detach();
+        let usage = cx.new(|_| usage::Usage::new(state.clone()));
+        cx.observe(&usage, |_, _, cx| cx.notify()).detach();
         let mut shell = Self {
             shell_focus: cx.focus_handle(),
             settings_focused: false,
@@ -583,6 +587,7 @@ impl AppShell {
             right_animate: false,
             chats: HashMap::new(),
             search_index: search_ui::new_index(),
+            usage,
             search_open: false,
             search_closing: None,
             terminal_search_generation: 0,
@@ -1777,6 +1782,13 @@ impl Render for AppShell {
         }
         self.settings_focused = settings_open;
         self.sync_caffeine(cx);
+        let terminal_processes = self
+            .terminals
+            .iter()
+            .map(|(id, host)| (id.clone(), host.read(cx).snapshot().pid))
+            .collect();
+        self.usage
+            .update(cx, |usage, _| usage.terminals = terminal_processes);
         self.sync_terminal_sidebar_actions(cx);
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
         let inset = zpx(self.metrics.page_inset);
@@ -2000,7 +2012,7 @@ impl Render for AppShell {
                             .h_full()
                             .flex_none()
                             .overflow_hidden()
-                            .child(sidebar::render(&self.state, &self.rename, cx));
+                            .child(sidebar::render(&self.state, &self.rename, &self.usage, cx));
                         if self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {

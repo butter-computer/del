@@ -166,6 +166,10 @@ pub struct CodexClient {
 }
 
 impl CodexClient {
+    pub async fn process_id(&self) -> Option<u32> {
+        self.inner.child.lock().await.as_ref()?.id()
+    }
+
     /// Spawn `codex app-server` (stdio transport) and connect to it.
     pub fn spawn(
         opts: &SpawnOptions,

@@ -306,6 +306,11 @@ impl CodexBackend {
 
 #[async_trait]
 impl AgentBackend for CodexBackend {
+    async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
+        let _ = id;
+        let conn = self.conn.lock().await.as_ref()?.clone();
+        conn.client.process_id().await.map(|pid| (pid, true))
+    }
     fn set_browser_tools(&self, tools: del_agent::backend::BrowserTools) {
         *self.browser_tools.lock().unwrap() = Some(tools);
     }

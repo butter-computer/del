@@ -353,6 +353,15 @@ impl AcpBackend {
 
 #[async_trait]
 impl AgentBackend for AcpBackend {
+    async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)?
+            .rpc
+            .process_id()
+            .map(|pid| (pid, false))
+    }
     fn provider(&self) -> Provider {
         Provider::Acp
     }

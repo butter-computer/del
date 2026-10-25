@@ -349,6 +349,9 @@ async fn input_line(input: &UserInput) -> Result<String> {
 
 #[async_trait]
 impl AgentBackend for ClaudeBackend {
+    async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
+        self.live(id).ok()?.pid.map(|pid| (pid, false))
+    }
     fn set_browser_tools(&self, tools: del_agent::backend::BrowserTools) {
         *self.browser_tools.lock().unwrap() = Some(tools);
     }

@@ -85,6 +85,10 @@ pub fn closed_error() -> RpcError {
 }
 
 impl Rpc {
+    pub fn process_id(&self) -> Option<u32> {
+        self.pid
+    }
+
     pub fn spawn(
         program: &Path,
         args: &[String],

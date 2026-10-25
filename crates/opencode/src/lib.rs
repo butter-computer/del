@@ -480,6 +480,9 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
 
 #[async_trait]
 impl AgentBackend for OpenCodeBackend {
+    async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
+        Some((self.live(id).ok()?.server.pid, true))
+    }
     fn provider(&self) -> Provider {
         Provider::OpenCode
     }

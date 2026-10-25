@@ -9,7 +9,7 @@ use tokio::{
 
 pub struct Server {
     child: Child,
-    pid: u32,
+    pub(crate) pid: u32,
     client: reqwest::Client,
     url: String,
     password: String,

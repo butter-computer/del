@@ -728,6 +728,11 @@ impl SessionManager {
         self.shared.index.lock().unwrap().remove(id)
     }
 
+    pub async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
+        let provider = self.live_provider(id).ok()?;
+        self.backend(provider).ok()?.session_process(id).await
+    }
+
     pub fn is_live(&self, id: &SessionId) -> bool {
         self.shared.live.lock().unwrap().contains_key(id)
     }

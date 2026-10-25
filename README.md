@@ -87,10 +87,22 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
-The sidebar starts with **Search**, **New session (+)**, and **Keep Mac awake**.
-Search takes the remaining row width up to 100 logical pixels; the other two
-buttons stay compact, leaving space on wider sidebars. Keep-awake uses a neutral
-hover-colored background and animated yellow steam while enabled.
+The sidebar starts with four equal-sized buttons: **Search**, **New session (+)**,
+**Keep Mac awake**, and **Session memory**. Keep-awake uses a neutral hover-colored
+background and animated yellow steam while enabled.
+
+Session memory opens a compact popover to the right of its button, with a pointer
+on the left. It lists loaded chats and terminals by process-tree RAM usage,
+refreshing every three seconds while open. Each row shows a fading session title
+and its RAM usage; click the title to open the session. Delete and unload icons
+appear on hover with evenly padded click targets. Unload releases the live session
+while retaining its history; delete uses the existing permanent-delete action.
+Up to four rows are visible, with a bottom fade and scrolling without a scrollbar.
+
+Memory figures measure process RSS, not per-chat allocations inside Del. Providers
+that share a server can show the same process usage for several chats, and
+unloading one chat may not release that server's RAM. Unavailable measurements
+appear as a dash rather than zero.
 
 Opening a saved chat from the sidebar uses one temporary preview tab. Opening
 another replaces that preview in place. Double-click the sidebar session or its

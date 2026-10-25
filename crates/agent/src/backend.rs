@@ -99,6 +99,10 @@ pub struct BrowserTools {
 pub trait AgentBackend: Send + Sync {
     fn set_browser_tools(&self, _tools: BrowserTools) {}
     fn provider(&self) -> Provider;
+    /// Live process root and whether its memory is shared across sessions.
+    async fn session_process(&self, _id: &SessionId) -> Option<(u32, bool)> {
+        None
+    }
 
     async fn list_commands(&self, _cwd: &std::path::Path) -> Result<Vec<crate::ComposerCommand>> {
         Ok(Vec::new())
