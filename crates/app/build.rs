@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/browser.m");
     println!("cargo:rerun-if-changed=src/dictation.m");
     println!("cargo:rerun-if-changed=src/fluid.m");
+    println!("cargo:rerun-if-changed=src/backdrop.m");
     println!("cargo:rerun-if-changed=src/fluid.metal");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
@@ -25,6 +26,7 @@ fn main() {
             .file("src/browser.m")
             .file("src/dictation.m")
             .file("src/fluid.m")
+            .file("src/backdrop.m")
             .flag("-fobjc-arc")
             // Match Rust's macOS baseline so newer SDKs retain @available guards.
             .flag("-mmacosx-version-min=11.0")

@@ -153,3 +153,33 @@ fragment float4 cell_composite(Vertex in [[stage_in]],texture2d<float> scene [[t
     float4 result=mix(float4(sharp.rgb*sharp.a,sharp.a),soft,mask);
     return float4(result.rgb/max(result.a,0.00001f),result.a);
 }
+
+// Full GPUI scene backdrop, already premultiplied by the renderer. Blur only
+// primitives submitted before the marker; modal text is submitted afterward.
+kernel void backdrop_horizontal(texture2d<float,access::sample> source [[texture(0)]],
+ texture2d<float,access::write> output [[texture(1)]],constant float4 &params [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+    if(id.x>=output.get_width()||id.y>=output.get_height())return;
+    float2 uv=(float2(id)+0.5f)/float2(output.get_width(),output.get_height());
+    float2 offset=float2(4.0f*params.x/float(source.get_width()),0);
+    float4 sum=0;float total=0;
+    for(int i=-6;i<=6;i++){
+        float weight=exp(-float(i*i)/12.5f);
+        sum+=source.sample(sceneSampler,uv+offset*float(i))*weight;total+=weight;
+    }
+    output.write(sum/total,id);
+}
+kernel void backdrop_vertical(texture2d<float,access::sample> source [[texture(0)]],
+ texture2d<float,access::write> output [[texture(1)]],constant float4 &params [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+    if(id.x>=output.get_width()||id.y>=output.get_height())return;
+    float2 uv=(float2(id)+0.5f)/float2(output.get_width(),output.get_height());
+    float2 offset=float2(0,params.x/float(source.get_height()));
+    float4 sum=0;float total=0;
+    for(int i=-6;i<=6;i++){
+        float weight=exp(-float(i*i)/12.5f);
+        sum+=source.sample(sceneSampler,uv+offset*float(i))*weight;total+=weight;
+    }
+    output.write(sum/total,id);
+}
+fragment float4 backdrop_composite(Vertex in [[stage_in]],texture2d<float> blurred [[texture(0)]]) {
+    return blurred.sample(sceneSampler,in.uv);
+}

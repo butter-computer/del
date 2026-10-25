@@ -12,6 +12,7 @@ use crate::zoom::px as zpx;
 mod wallpaper;
 
 mod ambient;
+mod backdrop;
 mod appearance;
 mod assets;
 mod attachments;
@@ -2228,7 +2229,9 @@ impl Render for AppShell {
                     }),
             )
             .when(self.search_open, |shell| {
-                let shade = div().absolute().inset_0().bg(gpui_kit::rgba(0x00000066));
+                let shade = div().absolute().inset_0()
+                    .child(backdrop::blur_layer())
+                    .bg(gpui_kit::rgba(0x00000020));
                 if let Some(started) = self.search_closing {
                     shell.child(shade.opacity(search_ui::exit_opacity(started)))
                 } else if cx.reduce_motion() {

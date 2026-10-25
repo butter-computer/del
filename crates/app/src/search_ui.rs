@@ -192,17 +192,28 @@ impl Palette {
         }
     }
 
+    fn layout_height(&self,window:&Window,cx:&App)->(Pixels,Pixels) {
+        let actions=self.actions(cx).len();
+        let groups=usize::from(actions>0)+usize::from(!self.hits.is_empty());
+        let content=zpx(30. * actions as f32+36. * self.hits.len() as f32+22. * groups as f32);
+        let extra=zpx(if self.hits.is_empty(){24.}else{0.}+if self.errors.is_empty(){0.}else{20.});
+        let chrome=zpx(42.+30.+4.)+extra;
+        let available=(window.viewport_size().height-zpx(40.)-chrome).max(px(0.));
+        let results=content.min(zpx(300.)).min(available);
+        (results,chrome+results)
+    }
+
     fn action_row(&self, action: PaletteAction, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .id(("palette-action", ix))
             .role(Role::Button)
             .aria_label(action.label())
             .w_full()
-            .h(zpx(42.))
-            .px(zpx(12.))
-            .gap(zpx(12.))
+            .h(zpx(30.))
+            .px(zpx(8.))
+            .gap(zpx(8.))
             .items_center()
-            .rounded(zpx(8.))
+            .rounded(zpx(5.))
             .cursor_pointer()
             .bg(if ix == self.selected { rgba(0xffffff0c) } else { rgba(0xffffff00) })
             .hover(|row| row.bg(rgba(0xffffff09)))
@@ -215,7 +226,7 @@ impl Palette {
                 this.open(cx);
             }))
             .child(div().flex_none().text_color(rgba(0xffffff80)).child(crate::icons::path(action.icon())))
-            .child(div().flex_1().min_w_0().truncate().text_size(zpx(14.)).child(action.label()))
+            .child(div().flex_1().min_w_0().truncate().text_size(zpx(12.)).child(action.label()))
             .child(key_badge(action.shortcut()))
             .into_any_element()
     }
@@ -329,12 +340,12 @@ impl Palette {
             .id(("search-result", ix))
             .role(Role::Button)
             .aria_label(format!("{}: {}", source.title, hit.snippet))
-            .px(zpx(12.))
-            .h(zpx(if recent { 50. } else { 64. }))
-            .gap(zpx(12.))
+            .px(zpx(8.))
+            .h(zpx(36.))
+            .gap(zpx(8.))
             .items_center()
             .overflow_hidden()
-            .rounded(zpx(8.))
+            .rounded(zpx(5.))
             .cursor_pointer()
             .bg(if action_count + ix == self.selected {
                 rgba(0xffffff0c)
@@ -354,17 +365,20 @@ impl Palette {
                 div()
                     .flex_none()
                     .text_color(rgba(0xffffff80))
-                    .child(crate::icons::path(if matches!(source.tab, Tab::Terminal(_)) {
-                        "icons/square-terminal.svg"
-                    } else {
-                        "icons/messages-square.svg"
-                    })),
+                    .child(match source.provider {
+                        Some(provider) => crate::composer_ui::provider_logo(provider).into_any_element(),
+                        None => crate::icons::path(if matches!(source.tab, Tab::Terminal(_)) {
+                            "icons/square-terminal.svg"
+                        } else {
+                            "icons/file-text.svg"
+                        }).into_any_element(),
+                    }),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(zpx(3.))
+                    .gap(zpx(0.))
                     .child(
                         h_flex()
                             .items_center()
@@ -374,14 +388,14 @@ impl Palette {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(zpx(14.))
+                                    .text_size(zpx(12.))
                                     .text_color(rgb(0xeeeeef))
                                     .child(source.title.clone()),
                             )
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(zpx(11.))
+                                    .text_size(zpx(10.))
                                     .text_color(rgba(0xffffff70))
                                     .child(detail),
                             ),
@@ -390,7 +404,7 @@ impl Palette {
                         div()
                             .truncate()
                             .text_size(zpx(12.))
-                            .line_height(relative(1.4))
+                            .line_height(relative(1.15))
                             .text_color(rgba(0xffffff88))
                             .child(preview),
                     ),
@@ -410,16 +424,12 @@ impl Render for Palette {
         let entity = cx.entity();
         let empty = self.input.read(cx).value().trim().is_empty();
         let actions = self.actions(cx).len();
-        let row_height = if empty { 50. } else { 64. };
-        let groups = usize::from(actions > 0) + usize::from(!self.hits.is_empty());
-        let content_height = 42. * actions as f32 + row_height * self.hits.len() as f32 + 32. * groups as f32;
-        let max_height = (window.viewport_size().height - zpx(260.))
-            .max(zpx(84.))
-            .min(zpx(440.));
-        let results_height = zpx(content_height).min(max_height);
+        let (results_height,panel_height)=self.layout_height(window,cx);
+        let content_height=30. * actions as f32+36. * self.hits.len() as f32
+            +22. * (usize::from(actions>0)+usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
-            .w_full()
+            .w_full().h(panel_height).min_h_0().overflow_hidden()
             .text_color(rgb(0xeeeeef))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke;
@@ -449,10 +459,10 @@ impl Render for Palette {
             }))
             .child(
                 h_flex()
-                    .h(zpx(72.))
+                    .h(zpx(42.))
                     .flex_none()
-                    .px(zpx(20.))
-                    .gap(zpx(12.))
+                    .px(zpx(12.))
+                    .gap(zpx(8.))
                     .items_center()
                     .child(
                         div()
@@ -462,11 +472,11 @@ impl Render for Palette {
                     )
                     .child(
                         Input::new(&self.input)
-                            .large()
+                            .small()
                             .flex_1()
                             .min_w_0()
                             .px_0()
-                            .text_size(zpx(16.))
+                            .text_size(zpx(13.))
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false),
@@ -474,8 +484,9 @@ impl Render for Palette {
             )
             .child(
                 v_flex()
-                    .px(zpx(8.))
-                    .pb(zpx(8.))
+                    .flex_1().min_h_0().overflow_hidden()
+                    .px(zpx(4.))
+                    .pb(zpx(4.))
                     .when(content_height > 0., |body| {
                         body.child(
                             list(self.scroll.clone(), move |ix, _, cx| {
@@ -488,8 +499,8 @@ impl Render for Palette {
                     .when(self.hits.is_empty(), |body| {
                         body.child(
                             div()
-                                .px(zpx(12.))
-                                .py(zpx(14.))
+                                .px(zpx(8.))
+                                .h(zpx(24.)).flex().items_center()
                                 .text_size(zpx(12.))
                                 .text_color(rgba(0xffffff70))
                                 .child(if self.loading {
@@ -507,9 +518,9 @@ impl Render for Palette {
             .when(!self.errors.is_empty(), |panel| {
                 panel.child(
                     div()
-                        .px(zpx(20.))
-                        .pb(zpx(12.))
-                        .text_size(zpx(11.))
+                        .px(zpx(12.))
+                        .h(zpx(20.))
+                        .text_size(zpx(10.))
                         .text_color(rgba(0xe8b04aff))
                         .child(format!(
                             "{} transcript(s) could not be read. Other results are available.",
@@ -519,10 +530,10 @@ impl Render for Palette {
             })
             .child(
                 h_flex()
-                    .h(zpx(46.))
+                    .h(zpx(30.))
                     .flex_none()
-                    .px(zpx(16.))
-                    .gap(zpx(18.))
+                    .px(zpx(10.))
+                    .gap(zpx(12.))
                     .items_center()
                     .border_t_1()
                     .border_color(rgba(0xffffff0a))
@@ -545,8 +556,8 @@ impl Render for Palette {
 
 fn section_label(label: &'static str) -> impl IntoElement {
     div()
-        .h(zpx(32.))
-        .px(zpx(12.))
+        .h(zpx(22.))
+        .px(zpx(8.))
         .flex()
         .items_center()
         .text_size(zpx(12.))
@@ -558,14 +569,14 @@ fn key_badge(label: &'static str) -> impl IntoElement {
     div()
         .flex_none()
         .px(zpx(5.))
-        .min_w(zpx(22.))
-        .h(zpx(22.))
+        .min_w(zpx(18.))
+        .h(zpx(18.))
         .flex()
         .items_center()
         .justify_center()
         .rounded(zpx(4.))
         .bg(rgba(0xffffff0d))
-        .text_size(zpx(11.))
+        .text_size(zpx(10.))
         .text_color(rgb(0xd4d4d6))
         .child(label)
 }
@@ -767,7 +778,6 @@ impl AppShell {
         self.search_open = true;
         let shell = cx.weak_entity();
         let content = palette.clone();
-        let page_bounds = self.page_bounds.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let closing = shell
                 .upgrade()
@@ -777,14 +787,13 @@ impl AppShell {
             }
             let cancel_shell = shell.clone();
             let shell = shell.clone();
-            // Align with the actual conversation surface, including resized sidebars.
-            let bounds = page_bounds.get();
-            let width = zpx(620.).min((bounds.size.width - zpx(32.)).max(zpx(0.)));
-            let offset = bounds.center().x - window.viewport_size().width / 2.;
+            let viewport=window.viewport_size();
+            let width=zpx(500.).min((viewport.width-zpx(32.)).max(px(0.)));
+            let height=content.read(cx).layout_height(window,cx).1+px(2.);
             dialog
                 .bg(rgb(0x18181a))
                 .p_0()
-                .rounded(zpx(18.))
+                .rounded(zpx(12.))
                 .border_1()
                 .border_color(rgba(0xffffff14))
                 .overflow_hidden()
@@ -797,8 +806,8 @@ impl AppShell {
                     dialog.opacity(exit_opacity(started))
                 })
                 .width(width)
-                .relative()
-                .left(offset)
+                .margin_top(((viewport.height-height)/2.).max(zpx(12.)))
+                .overlay(false)
                 .keyboard(false)
                 .close_button(false)
                 .on_cancel(move |_, window, cx| {

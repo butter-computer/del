@@ -16,6 +16,8 @@ are confined to `src/metal_renderer.rs` and `src/shaders.metal`:
 
 - Accept BGRA CoreVideo surfaces with straight alpha, alongside the unchanged
   YUV surface path.
+- Expose a modal backdrop marker callback between scene render encoders, so
+  the accumulated scene can be blurred before modal foreground is drawn.
 - Expose an optional GPU producer callback before scene rendering. The callback
   encodes into GPUI's own uncommitted Metal command buffer; the producer must
   not commit it, wait for it, or mutate the GPUI scene.

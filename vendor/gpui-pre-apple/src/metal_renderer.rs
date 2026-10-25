@@ -37,6 +37,15 @@ pub fn set_surface_prepare_callback(callback: Option<SurfacePrepareCallback>) {
         std::sync::atomic::Ordering::Release);
 }
 
+/// Modal backdrop hook. A null command/texture queries whether a surface is a
+/// backdrop marker. Actual encoding runs between scene render encoders, so the
+/// producer may sample the accumulated scene but never the later modal text.
+pub type SurfaceBackdropCallback=unsafe extern "C" fn(*const c_void,*mut c_void,*mut c_void)->bool;
+static SURFACE_BACKDROP:std::sync::atomic::AtomicPtr<c_void>=std::sync::atomic::AtomicPtr::new(ptr::null_mut());
+pub fn set_surface_backdrop_callback(callback:Option<SurfaceBackdropCallback>){
+    SURFACE_BACKDROP.store(callback.map_or(ptr::null_mut(),|callback|callback as *mut c_void),std::sync::atomic::Ordering::Release);
+}
+
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
 
@@ -804,13 +813,22 @@ impl MetalRenderer {
                         viewport_size,
                         command_encoder,
                     ),
-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
-                    &scene.surfaces[range.clone()],
-                    range.start,
-                    instance_bindings,
-                    viewport_size,
-                    command_encoder,
-                ),
+                PrimitiveBatch::Surfaces(range) => {
+                    let hook=SURFACE_BACKDROP.load(std::sync::atomic::Ordering::Acquire);
+                    for index in range {
+                        let surface=&scene.surfaces[index];
+                        let buffer=CFRetained::as_ptr(&surface.image_buffer).as_ptr().cast();
+                        let callback=if hook.is_null(){None}else{Some(unsafe{mem::transmute::<*mut c_void,SurfaceBackdropCallback>(hook)})};
+                        let backdrop=callback.is_some_and(|callback|unsafe{callback(buffer,ptr::null_mut(),ptr::null_mut())});
+                        if backdrop {
+                            command_encoder.end_encoding();
+                            if let Some(callback)=callback {unsafe{callback(buffer,command_buffer.as_ptr().cast(),texture.as_ptr().cast());}}
+                            command_encoder=new_command_encoder_for_texture(command_buffer,texture,viewport_size,None);
+                        } else {
+                            self.draw_surfaces(std::slice::from_ref(surface),index,instance_bindings,viewport_size,command_encoder);
+                        }
+                    }
+                },
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
