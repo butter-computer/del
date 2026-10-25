@@ -259,6 +259,8 @@ impl Render for ModelPanel {
             let mut list = v_flex().gap_0p5().when(show_default, |list| {
                 list.child(
                     Button::new("model-default")
+                        .size(crate::icons::button_size())
+                        .p_0()
                         .accessibility_label("Default model")
                         .when(self.highlighted == Some(0), |button| {
                             button.bg(rgba(0xffffff14))
@@ -273,7 +275,7 @@ impl Render for ModelPanel {
                         .disabled(locked)
                         .when(
                             selected.is_none() || selected.as_deref() == Some("default"),
-                            |b| b.icon(IconName::Check),
+                            |b| b.child(crate::icons::icon(IconName::Check)),
                         )
                         .child(
                             v_flex()
@@ -305,6 +307,8 @@ impl Render for ModelPanel {
                 let id = model.id.clone();
                 list = list.child(
                     Button::new(("model-choice", i))
+                        .size(crate::icons::button_size())
+                        .p_0()
                         .accessibility_label(model.name.clone())
                         .when(self.highlighted == Some(choice_index), |button| {
                             button.bg(rgba(0xffffff14))
@@ -318,7 +322,7 @@ impl Render for ModelPanel {
                         .justify_start()
                         .disabled(locked)
                         .when(selected.as_deref() == Some(&id), |b| {
-                            b.icon(IconName::Check)
+                            b.child(crate::icons::icon(IconName::Check))
                         })
                         .child(
                             v_flex()
@@ -406,7 +410,7 @@ impl Render for ModelPanel {
                                     .appearance(false)
                                     .bordered(false)
                                     .cleanable(true)
-                                    .prefix(Icon::new(IconName::Search).xsmall().text_color(muted)),
+                                    .prefix(crate::icons::icon(IconName::Search).text_color(muted)),
                             ),
                         )
                         .child(
@@ -492,7 +496,7 @@ impl Render for ModelPanel {
                 .child(
                     Button::new("fast-mode")
                         .ghost()
-                        .size(zpx(30.))
+                        .size(crate::icons::button_size())
                         .flex_none()
                         .p_0()
                         .disabled(locked || !supports_fast)
@@ -508,12 +512,11 @@ impl Render for ModelPanel {
                         } else {
                             "Fast mode · increased usage"
                         })
-                        .child(
-                            Icon::default()
-                                .path("icons/zap.svg")
-                                .with_size(zpx(15.))
-                                .text_color(if fast { accent } else { rgba(0xffffff70) }),
-                        )
+                        .child(crate::icons::path("icons/zap.svg").text_color(if fast {
+                            accent
+                        } else {
+                            rgba(0xffffff70)
+                        }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.set_fast_mode(!fast, cx));
                         })),
@@ -533,8 +536,7 @@ impl Render for ModelPanel {
                                     row.child(div().text_color(rgba(0xffffff72)).child(effort))
                                 })
                                 .child(
-                                    Icon::new(IconName::ChevronRight)
-                                        .xsmall()
+                                    crate::icons::icon(IconName::ChevronRight)
                                         .text_color(rgba(0xffffff62)),
                                 ),
                         )
@@ -548,18 +550,14 @@ impl Render for ModelPanel {
                 .child(
                     Button::new("reset-effort")
                         .ghost()
-                        .size(zpx(30.))
+                        .size(crate::icons::button_size())
                         .flex_none()
                         .p_0()
                         .accessibility_label("Reset model settings and refresh")
                         .tooltip("Reset model settings and refresh")
                         .text_color(rgba(0xffffff70))
                         .disabled(locked || catalog.loading)
-                        .child(
-                            Icon::new(IconName::RefreshCw)
-                                .with_size(zpx(15.))
-                                .text_color(rgba(0xffffff70)),
-                        )
+                        .child(crate::icons::icon(IconName::RefreshCw).text_color(rgba(0xffffff70)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.reset_model_settings(cx))
                         })),

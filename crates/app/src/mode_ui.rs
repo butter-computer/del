@@ -31,8 +31,8 @@ pub(super) struct PendingQuestion {
 
 pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
     match provider {
-        Some(provider) => composer_ui::provider_logo(provider, 14.).into_any_element(),
-        None => div().text_size(zpx(12.)).child(">_").into_any_element(),
+        Some(provider) => composer_ui::provider_logo(provider).into_any_element(),
+        None => crate::icons::path("icons/terminal.svg").into_any_element(),
     }
 }
 
@@ -834,8 +834,13 @@ impl AppShell {
                     .px_3()
                     .text_size(zpx(14.0))
                     .cursor_pointer()
-                    .icon(Icon::new(IconName::Folder).size(zpx(16.0)))
-                    .label(crate::sessions::folder_name(&cwd))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(crate::icons::icon(IconName::Folder))
+                            .child(crate::sessions::folder_name(&cwd)),
+                    )
                     .text_color(rgba(0xffffff8c))
                     .on_click(move |_, _, cx| state.update(cx, |state, cx| state.pick_folder(cx))),
             )

@@ -96,11 +96,7 @@ impl AppShell {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        Icon::new(GoalIcon::Target)
-                            .with_size(zpx(14.))
-                            .text_color(rgba(0xffffff88)),
-                    )
+                    .child(crate::icons::icon(GoalIcon::Target).text_color(rgba(0xffffff88)))
                     .child(
                         div()
                             .text_size(zpx(12.))
@@ -126,11 +122,11 @@ impl AppShell {
                     })
                     .child(
                         Button::new("clear-goal")
+                            .size(crate::icons::button_size())
+                            .p_0()
                             .ghost()
-                            .small()
-                            .compact()
                             .disabled(pending)
-                            .icon(GoalIcon::Trash)
+                            .child(crate::icons::icon(GoalIcon::Trash))
                             .tooltip("Clear goal")
                             .accessibility_label("Clear goal")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -142,15 +138,15 @@ impl AppShell {
                         |row| {
                             row.child(
                                 Button::new("pause-goal")
+                                    .size(crate::icons::button_size())
+                                    .p_0()
                                     .ghost()
-                                    .small()
-                                    .compact()
                                     .disabled(pending)
-                                    .icon(if paused {
+                                    .child(crate::icons::icon(if paused {
                                         GoalIcon::Play
                                     } else {
                                         GoalIcon::Pause
-                                    })
+                                    }))
                                     .tooltip(if paused { "Resume goal" } else { "Pause goal" })
                                     .accessibility_label(if paused {
                                         "Resume goal"
@@ -172,14 +168,14 @@ impl AppShell {
                     )
                     .child(
                         Button::new("expand-goal")
+                            .size(crate::icons::button_size())
+                            .p_0()
                             .ghost()
-                            .small()
-                            .compact()
-                            .icon(if expanded {
+                            .child(crate::icons::icon(if expanded {
                                 GoalIcon::ChevronUp
                             } else {
                                 GoalIcon::ChevronDown
-                            })
+                            }))
                             .tooltip("Goal details")
                             .accessibility_label("Goal details")
                             .on_click(cx.listener(move |this, _, _, cx| {

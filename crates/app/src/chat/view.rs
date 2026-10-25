@@ -6,7 +6,6 @@ use crate::appearance::rgba;
 use crate::zoom::px as zpx;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::typography::TEXT_SM;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -575,7 +574,7 @@ impl ChatView {
                     .gap_1p5()
                     .items_center()
                     .when(self.model.is_running() && !waiting, |row| {
-                        row.child(Spinner::new().xsmall().color(muted.into()))
+                        row.child(crate::icons::spinner().color(muted.into()))
                     })
                     .child(label)
                     .when(!hint.is_empty(), |row| {

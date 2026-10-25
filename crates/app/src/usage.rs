@@ -249,18 +249,17 @@ impl Render for Usage {
                                                     delete_id.0
                                                 )))
                                                 .ghost()
-                                                .size(zpx(28.))
+                                                .size(crate::icons::button_size())
                                                 .flex_none()
                                                 .p_0()
                                                 .rounded(zpx(6.))
                                                 .tooltip("Permanently delete")
                                                 .accessibility_label("Permanently delete session")
                                                 .child(
-                                                    Icon::new(gpui_kit::assets::IconName::Trash)
-                                                        .with_size(zpx(14.))
-                                                        .text_color(crate::appearance::rgb(
-                                                            0xff646b,
-                                                        )),
+                                                    crate::icons::icon(
+                                                        gpui_kit::assets::IconName::Trash,
+                                                    )
+                                                    .text_color(crate::appearance::rgb(0xff646b)),
                                                 )
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.state.update(cx, |s, cx| {
@@ -278,16 +277,15 @@ impl Render for Usage {
                                                     unload_id.0
                                                 )))
                                                 .ghost()
-                                                .size(zpx(28.))
+                                                .size(crate::icons::button_size())
                                                 .flex_none()
                                                 .p_0()
                                                 .rounded(zpx(6.))
                                                 .tooltip("Unload session; keep history")
                                                 .accessibility_label("Unload session")
-                                                .child(
-                                                    Icon::new(gpui_kit::assets::IconName::Close)
-                                                        .with_size(zpx(14.)),
-                                                )
+                                                .child(crate::icons::icon(
+                                                    gpui_kit::assets::IconName::Close,
+                                                ))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.state.update(cx, |s, cx| {
                                                         s.unload(unload_id.clone(), cx)

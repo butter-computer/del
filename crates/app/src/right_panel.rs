@@ -531,7 +531,7 @@ impl RightPanel {
                                 };
                                 h_flex()
                                     .id(("browser-tab", index))
-                                    .h(zpx(24.))
+                                    .h(crate::icons::button_size())
                                     .max_w(zpx(150.))
                                     .px_2()
                                     .gap_1()
@@ -546,21 +546,33 @@ impl RightPanel {
                                     }))
                                     .child(div().truncate().child(label.to_owned()))
                                     .child(
-                                        div().id(("close-browser-tab", index)).child("×").on_click(
-                                            cx.listener(move |this, _, _, cx| {
+                                        div()
+                                            .id(("close-browser-tab", index))
+                                            .size(crate::icons::button_size())
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .role(gpui::Role::Button)
+                                            .aria_label("Close browser tab")
+                                            .child(crate::icons::icon(IconName::Close))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 this.close_browser_tab(index, cx);
-                                            }),
-                                        ),
+                                            })),
                                     )
                             })),
                     )
                     .child(
                         div()
                             .id("new-browser-tab")
-                            .px_2()
+                            .size(crate::icons::button_size())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .role(gpui::Role::Button)
+                            .aria_label("New browser tab")
                             .cursor_pointer()
-                            .child("+")
+                            .child(crate::icons::icon(IconName::Plus))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.new_browser_tab(None, cx);
                             })),
@@ -778,7 +790,7 @@ impl RightPanel {
                                 }
                             }))
                             .child(
-                                Icon::new(if is_dir {
+                                crate::icons::icon(if is_dir {
                                     if open {
                                         IconName::FolderOpen
                                     } else {
@@ -787,7 +799,6 @@ impl RightPanel {
                                 } else {
                                     IconName::File
                                 })
-                                .xsmall()
                                 .text_color(muted),
                             )
                             .child(div().min_w_0().truncate().child(name)),
@@ -908,7 +919,7 @@ impl RightPanel {
                         .gap_2()
                         .bg(rgba(0xffffff08))
                         .items_center()
-                        .child(Icon::new(IconName::File).xsmall().text_color(muted))
+                        .child(crate::icons::icon(IconName::File).text_color(muted))
                         .child(
                             div()
                                 .flex_1()
@@ -949,7 +960,7 @@ impl RightPanel {
                                 .id("close-file-preview")
                                 .role(gpui::Role::Button)
                                 .aria_label("Close file preview")
-                                .size(zpx(22.0))
+                                .size(crate::icons::button_size())
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -964,7 +975,7 @@ impl RightPanel {
                                     this.file_scroll = UniformListScrollHandle::new();
                                     cx.notify();
                                 }))
-                                .child(Icon::new(IconName::Close).xsmall().text_color(muted)),
+                                .child(crate::icons::icon(IconName::Close).text_color(muted)),
                         ),
                 )
             })

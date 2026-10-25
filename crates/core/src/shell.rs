@@ -8,16 +8,16 @@
 
 /// The one colour of the shell surface: the top bar and the gutter around the
 /// page are painted with exactly this value so they read as a single
-/// continuous surface. A dark charcoal; packed `0xRRGGBBAA`. The window is
+/// continuous surface. Near-pure black; packed `0xRRGGBBAA`. The window is
 /// blurred behind it, so the alpha lets the blur show through.
-pub const SHELL_SURFACE_RGBA: u32 = 0x26262a8c;
+pub const SHELL_SURFACE_RGBA: u32 = 0x000000d9;
 
 /// Tint of the rounded page: a faint black shade over the shell colour beneath
 /// it, so the page reads as slightly darker than its surround. It is
 /// deliberately light. The page sits on top of the shell colour, so a strong
 /// page colour would stack two translucent layers and look far more opaque
 /// than the top bar. Packed `0xRRGGBBAA`.
-pub const PAGE_SURFACE_RGBA: u32 = 0x00000033;
+pub const PAGE_SURFACE_RGBA: u32 = 0x00000008;
 
 /// Diameter of a macOS traffic light button, in logical pixels.
 pub const TRAFFIC_LIGHT_SIZE: f32 = 12.0;
@@ -37,7 +37,7 @@ pub struct ShellMetrics {
 impl Default for ShellMetrics {
     fn default() -> Self {
         Self {
-            topbar_height: 32.0,
+            topbar_height: 42.0,
             page_inset: 6.0,
             page_radius: 10.0,
         }

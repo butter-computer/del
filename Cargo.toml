@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/gpui-pre-apple"]
 members = ["crates/core", "crates/agent", "crates/codex", "crates/claude", "crates/acp", "crates/app", "crates/terminal", "crates/mcp", "crates/opencode"]
 
 [workspace.package]
@@ -25,3 +26,7 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[patch.crates-io]
+# Local alpha GPU-surface support; registry sources remain untouched.
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

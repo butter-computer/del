@@ -1,8 +1,8 @@
 use crate::zoom::px as zpx;
 use crate::{
     AppShell,
-    appearance::{rgb, rgba},
     composer_ui::QUEUE_SURFACE_RGBA,
+    appearance::{rgb, rgba},
     state::{Selection, Tab},
 };
 use del_agent::{Attachment, UserInput};
@@ -45,19 +45,15 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
             )
         })
         .when(!crate::attachments::is_image(attachment), |el| {
-            el.child(
-                Icon::new(IconName::File)
-                    .with_size(zpx(15.))
-                    .text_color(rgba(0xffffff99)),
-            )
+            el.child(crate::icons::icon(IconName::File).text_color(rgba(0xffffff99)))
         })
 }
 fn action(id: SharedString, icon: ActionIcon, label: &'static str) -> Button {
     Button::new(id)
+        .size(crate::icons::button_size())
+        .p_0()
         .ghost()
-        .small()
-        .compact()
-        .icon(icon)
+        .child(crate::icons::icon(icon))
         .tooltip(label)
         .accessibility_label(label)
 }
@@ -283,13 +279,11 @@ impl AppShell {
                                         .child(
                                             if let Some(asset) = crate::attachments::file_mark(file)
                                             {
-                                                img(asset)
-                                                    .size(zpx(28.))
-                                                    .object_fit(ObjectFit::Contain)
+                                                crate::icons::path(asset)
+                                                    .text_color(rgba(0xffffff99))
                                                     .into_any_element()
                                             } else {
-                                                Icon::new(IconName::File)
-                                                    .with_size(zpx(28.))
+                                                crate::icons::icon(IconName::File)
                                                     .text_color(rgba(0xffffff70))
                                                     .into_any_element()
                                             },
@@ -335,16 +329,14 @@ impl AppShell {
                                         .active(rgb(0xe5e5e5).into()),
                                 )
                                 .child(
-                                    Icon::new(ActionIcon::Close)
-                                        .with_size(zpx(12.))
-                                        .text_color(rgb(0x202020)),
+                                    crate::icons::icon(ActionIcon::Close).text_color(rgb(0x202020)),
                                 )
                                 .accessibility_label("Remove attachment")
                                 .tooltip("Remove attachment")
                                 .absolute()
                                 .right(zpx(2.))
                                 .top(zpx(2.))
-                                .size(zpx(20.))
+                                .size(crate::icons::button_size())
                                 .p_0()
                                 .rounded_full()
                                 .opacity(0.0)
@@ -475,8 +467,7 @@ impl AppShell {
                                 div()
                                     .id(SharedString::from(format!("drag-{}", item.id)))
                                     .cursor_grab()
-                                    .w(zpx(12.))
-                                    .h(zpx(24.))
+                                    .size(crate::icons::button_size())
                                     .flex_none()
                                     .flex()
                                     .items_center()
@@ -491,18 +482,12 @@ impl AppShell {
                                         |_, _, _, cx| cx.new(|_| QueueDragPreview),
                                     )
                                     .child(
-                                        svg()
-                                            .path("icons/grip.svg")
-                                            .w(zpx(9.))
-                                            .h(zpx(15.))
+                                        crate::icons::path("icons/grip.svg")
                                             .text_color(rgba(0xffffff8c)),
                                     ),
                             )
                             .child(
-                                svg()
-                                    .path("icons/queue.svg")
-                                    .size(zpx(14.))
-                                    .text_color(rgba(0xffffff70)),
+                                crate::icons::path("icons/queue.svg").text_color(rgba(0xffffff70)),
                             )
                             .children(item.input.attachments.iter().take(3).map(thumbnail))
                             .child(v_flex().flex_1().min_w_0().child(
@@ -524,8 +509,13 @@ impl AppShell {
                                     .ghost()
                                     .small()
                                     .compact()
-                                    .icon(Icon::default().path("icons/steer.svg"))
-                                    .label("Steer")
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(crate::icons::path("icons/steer.svg"))
+                                            .child("Steer"),
+                                    )
                                     .on_click(move |_, _, cx| {
                                         send_chat.update(cx, |chat, cx| {
                                             chat.deliver_queued(send.clone(), chat.is_running(), cx)

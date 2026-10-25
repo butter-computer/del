@@ -8,16 +8,53 @@ use crate::state::{AppState, Panel, Selection};
 use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::assets::IconName as ActionIcon;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-pub const SIDEBAR_WIDTH: f32 = 216.0;
+pub const SIDEBAR_WIDTH: f32 = 180.0;
 const ROW_HEIGHT: f32 = 28.0;
-pub const CONTROL_ICON_SIZE: f32 = 15.0;
+const TOOLBAR_HEIGHT: f32 = 34.0;
+const TOOLBAR_BACKGROUND: u8 = 0x0e;
+const TOOLBAR_HOVER: u8 = 0x1a;
+const TOOLBAR_PRESSED: u8 = 0x24;
+
+fn toolbar_tint(alpha: u8) -> Rgba {
+    let tint = if crate::appearance::light() { 0x00000000 } else { 0xffffff00 };
+    gpui_kit::rgba(tint | u32::from(alpha))
+}
+
+fn toolbar_row() -> Div {
+    h_flex().w_full().min_w_0().gap(zpx(6.)).py(zpx(8.)).flex_none()
+}
+
+fn toolbar_button(id: &'static str, cx: &App) -> Button {
+    let background = toolbar_tint(TOOLBAR_BACKGROUND);
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(background.into())
+                .hover(toolbar_tint(TOOLBAR_HOVER).into())
+                .active(toolbar_tint(TOOLBAR_PRESSED).into())
+                .shadow(false),
+        )
+        // One translucent fill per state; no extra border tint or base layer.
+        // Retain the component's keyboard focus ring.
+        .border_0()
+        .w_0()
+        .min_w_0()
+        .flex_1()
+        .h(zpx(TOOLBAR_HEIGHT))
+        .p_0()
+        .rounded(zpx(9.))
+}
+
+fn toolbar_trigger_style() -> StyleRefinement {
+    StyleRefinement::default().w_0().min_w_0().flex_1()
+}
 
 const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
@@ -137,56 +174,32 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
         .into_any_element()
 }
 
-/// The cup stays neutral. Only the three steam wisps rise and fade, staggered
-/// across a seamless loop. Reduced motion retains the yellow active indicator.
-fn coffee_icon(active: bool, cx: &App) -> Div {
-    div()
-        .relative()
-        .size(zpx(16.0))
-        .child(
-            Icon::default()
-                .path("icons/coffee-cup.svg")
-                .with_size(zpx(16.0)),
+/// Genuine system cup symbol, with a fixed-size active-state pulse.
+fn coffee_icon(active: bool, cx: &App) -> AnyElement {
+    let icon = crate::icons::path("icons/coffee-cup.svg").text_color(if active {
+        rgb(0xf5a524)
+    } else {
+        rgba(MUTED)
+    });
+    if active && !cx.reduce_motion() {
+        icon.with_animation(
+            "keep-awake-symbol",
+            Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+            |icon, t| icon.opacity(0.75 + 0.25 * (std::f32::consts::PI * t).sin()),
         )
-        .children((0..3).map(|i| {
-            let steam = div()
-                .absolute()
-                .left(zpx(4.0 + i as f32 * 2.7))
-                .top(zpx(0.0))
-                .w(zpx(2.0))
-                .h(zpx(5.0))
-                .text_color(if active { rgb(0xf5a524) } else { rgba(MUTED) })
-                .child(
-                    Icon::default()
-                        .path("icons/coffee-steam.svg")
-                        .w(zpx(2.0))
-                        .h(zpx(5.0)),
-                );
-            if active && !cx.reduce_motion() {
-                steam
-                    .with_animation(
-                        SharedString::from(format!("coffee-steam-{i}")),
-                        Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-                        move |steam, t| {
-                            let phase = (t + i as f32 / 3.0) % 1.0;
-                            steam
-                                .top(zpx(2.0 - phase * 4.0))
-                                .opacity((std::f32::consts::PI * phase).sin())
-                        },
-                    )
-                    .into_any_element()
-            } else {
-                steam.into_any_element()
-            }
-        }))
+        .into_any_element()
+    } else {
+        icon.into_any_element()
+    }
 }
 
 /// Compact hover actions retain spoken names without visible text labels.
 fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str) -> Button {
     Button::new(id)
+        .size(crate::icons::button_size())
+        .p_0()
         .ghost()
-        .with_size(zpx(20.0))
-        .icon(icon)
+        .child(crate::icons::icon(icon))
         .tooltip(label)
         .accessibility_label(label)
         .text_color(rgba(MUTED))
@@ -195,35 +208,27 @@ fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
-        .size(zpx(20.0))
+        .size(crate::icons::button_size())
         .p_0()
         .tooltip(if pinned { "Unpin" } else { "Pin" })
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
         .text_color(if pinned { rgb(0xf5f5f5) } else { rgba(MUTED) })
-        .child(
-            Icon::default()
-                .path(if pinned {
-                    "icons/pin-filled.svg"
-                } else {
-                    "icons/pin-outline.svg"
-                })
-                .with_size(zpx(CONTROL_ICON_SIZE)),
-        )
+        .child(crate::icons::path(if pinned {
+            "icons/pin-filled.svg"
+        } else {
+            "icons/pin-outline.svg"
+        }))
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .text()
-        .size(zpx(20.0))
+        .size(crate::icons::button_size())
         .p_0()
         .tooltip("Archive")
         .accessibility_label("Archive")
         .text_color(rgba(MUTED))
-        .child(
-            Icon::default()
-                .path("icons/archive.svg")
-                .with_size(zpx(CONTROL_ICON_SIZE)),
-        )
+        .child(crate::icons::path("icons/archive.svg"))
 }
 
 fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div {
@@ -237,16 +242,12 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
         .child(
             Button::new(SharedString::from(format!("restore-{}", id.0)))
                 .text()
-                .size(zpx(20.0))
+                .size(crate::icons::button_size())
                 .p_0()
                 .tooltip("Restore")
                 .accessibility_label("Restore")
                 .text_color(rgba(MUTED))
-                .child(
-                    Icon::default()
-                        .path("icons/restore.svg")
-                        .with_size(zpx(CONTROL_ICON_SIZE)),
-                )
+                .child(crate::icons::path("icons/restore.svg"))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -256,14 +257,11 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
         .child(
             Button::new(SharedString::from(format!("delete-{}", id.0)))
                 .ghost()
-                .with_size(zpx(20.0))
+                .size(crate::icons::button_size())
+                .p_0()
                 .tooltip("Permanently delete")
                 .accessibility_label("Permanently delete")
-                .child(
-                    Icon::new(ActionIcon::Trash)
-                        .with_size(zpx(CONTROL_ICON_SIZE))
-                        .text_color(rgb(0xff646b)),
-                )
+                .child(crate::icons::icon(ActionIcon::Trash).text_color(rgb(0xff646b)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -303,7 +301,7 @@ fn session_menu_item(
             },
         ))
         .child(
-            icon.with_size(zpx(16.))
+            icon.with_size(crate::icons::size())
                 .when(destructive, |icon| icon.text_color(rgb(0xff646b))),
         )
         .child(label)
@@ -313,20 +311,15 @@ fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
     div()
         .absolute()
         .right(zpx(right))
-        .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
-        .size(zpx(20.0))
+        .top(zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0))
+        .size(crate::icons::button_size())
         .flex()
         .items_center()
         .justify_center()
         .flex_none()
         .group_hover(group, |mark| mark.opacity(0.0))
         .when(pinned, |mark| {
-            mark.child(
-                Icon::default()
-                    .path("icons/pin-filled.svg")
-                    .with_size(zpx(CONTROL_ICON_SIZE))
-                    .text_color(rgba(MUTED)),
-            )
+            mark.child(crate::icons::path("icons/pin-filled.svg").text_color(rgba(MUTED)))
         })
         .into_any_element()
 }
@@ -376,7 +369,7 @@ fn row_item(
             },
             rgba(0xffffff0a),
         ))
-        .child(provider_logo(row.provider, 14.0));
+        .child(provider_logo(row.provider));
 
     item = if renaming {
         item.child(
@@ -433,9 +426,9 @@ fn row_item(
             .child(
                 // Reserve space so titles never overlap the hover actions.
                 div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
-                    44.0
+                    crate::icons::BUTTON_SIZE * 2.0 + 4.0
                 } else if row.pinned {
-                    20.0
+                    crate::icons::BUTTON_SIZE
                 } else {
                     0.0
                 })),
@@ -448,11 +441,11 @@ fn row_item(
                 h_flex()
                     .absolute()
                     .right(zpx(action_right))
-                    .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
-                    .h(zpx(20.0))
+                    .top(zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0))
+                    .h(crate::icons::button_size())
                     .items_center()
                     .gap(zpx(4.0))
-                    .w(zpx(44.0))
+                    .w(zpx(crate::icons::BUTTON_SIZE * 2.0 + 4.0))
                     .rounded_sm()
                     .opacity(0.0)
                     .group_hover(hover_group, |a| a.opacity(1.0))
@@ -509,12 +502,12 @@ fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool,
         .child(motion.layer(Some(background), cx.theme().border.into()))
         .child(session_menu_item(
             "Rename",
-            Icon::new(ActionIcon::Pencil),
+            crate::icons::icon(ActionIcon::Pencil),
             motion,
         ))
         .child(session_menu_item(
             if pinned { "Unpin" } else { "Pin" },
-            Icon::default().path(if pinned {
+            crate::icons::path(if pinned {
                 "icons/pin-filled.svg"
             } else {
                 "icons/pin-outline.svg"
@@ -523,23 +516,23 @@ fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool,
         ))
         .child(session_menu_item(
             "Mark as unread",
-            Icon::new(ActionIcon::Eye),
+            crate::icons::icon(ActionIcon::Eye),
             motion,
         ))
         .child(session_menu_item(
             "Unload",
-            Icon::new(ActionIcon::Close),
+            crate::icons::icon(ActionIcon::Close),
             motion,
         ))
         .child(motion.divider())
         .child(session_menu_item(
             "Archive",
-            Icon::default().path("icons/archive.svg"),
+            crate::icons::path("icons/archive.svg"),
             motion,
         ))
         .child(session_menu_item(
             "Permanently delete",
-            Icon::new(ActionIcon::Trash),
+            crate::icons::icon(ActionIcon::Trash),
             motion,
         ))
 }
@@ -580,8 +573,11 @@ pub fn render(
     rename: &Entity<InputState>,
     usage: &Entity<crate::usage::Usage>,
     cx: &App,
-) -> impl IntoElement {
+) -> AnyElement {
     let s = state.read(cx);
+    if s.panel == Panel::Providers {
+        return crate::signin::navigation(state, cx).into_any_element();
+    }
     let rows = s.rows();
     let archived = s.archived_rows();
     let archived_terminals: Vec<_> = s
@@ -593,7 +589,6 @@ pub fn render(
         Selection::Session(id) => Some(id.clone()),
         Selection::Draft(_) | Selection::Terminal(_) => None,
     };
-    let draft_selected = matches!(s.selection, Selection::Draft(_)) && s.panel == Panel::Chat;
     let providers_open = s.panel == Panel::Providers;
     let show_archived = s.show_archived;
 
@@ -616,56 +611,25 @@ pub fn render(
         .pl_2()
         .pb_2()
         .child(
-            h_flex()
-                .w_full()
-                .gap_1p5()
-                .py_1()
-                .flex_none()
+            toolbar_row()
                 .child(
-                    Button::new("search-conversations")
-                        .ghost()
-                        .flex_none()
-                        .size(zpx(34.))
-                        .rounded(zpx(9.))
-                        .p_0()
-                        .bg(rgb(0x303033))
+                    toolbar_button("search-conversations", cx)
                         .tooltip("Search conversations (⌘K)")
                         .accessibility_label("Search conversations")
-                        .child(Icon::new(IconName::Search).with_size(zpx(15.)))
+                        .child(crate::icons::icon(IconName::Search))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::SearchConversations), cx)
                         }),
                 )
                 .child(
-                    Button::new("new-session")
-                        .ghost()
-                        .flex_none()
-                        .size(zpx(34.))
-                        .rounded(zpx(9.))
-                        .p_0()
-                        .bg(rgb(if draft_selected { 0x3b3b3e } else { 0x303033 }))
+                    toolbar_button("new-session", cx)
                         .tooltip("New session (⌘N)")
                         .accessibility_label("New session")
-                        .child(Icon::new(IconName::Plus).with_size(zpx(16.)))
+                        .child(crate::icons::icon(IconName::Plus))
                         .on_click(move |_, _, cx| new_state.update(cx, |s, cx| s.new_session(cx))),
                 )
                 .child(
-                    Button::new("caffeine-toggle")
-                        .ghost()
-                        .flex_none()
-                        .size(zpx(34.))
-                        .rounded(zpx(9.))
-                        .p_0()
-                        .bg(if s.caffeine_enabled {
-                            let hover: Background = cx.theme().tokens.accent.into();
-                            if cx.theme().mode.is_dark() {
-                                hover.opacity(0.5)
-                            } else {
-                                hover
-                            }
-                        } else {
-                            rgb(0x303033).into()
-                        })
+                    toolbar_button("caffeine-toggle", cx)
                         .child(coffee_icon(s.caffeine_enabled, cx))
                         .tooltip(if s.caffeine_enabled {
                             "Allow Mac to sleep"
@@ -684,6 +648,7 @@ pub fn render(
                 )
                 .child(
                     gpui_kit::component::popover::Popover::new("session-usage")
+                        .trigger_style(toolbar_trigger_style())
                         .open(usage.read(cx).open)
                         .arrow(true)
                         .anchor(Anchor::LeftCenter)
@@ -694,16 +659,12 @@ pub fn render(
                             }
                         })
                         .trigger(
-                            Button::new("session-usage-trigger")
-                                .ghost()
+                            toolbar_button("session-usage-trigger", cx)
+                                .w_full()
                                 .flex_none()
-                                .size(zpx(34.))
-                                .rounded(zpx(9.))
-                                .p_0()
-                                .bg(rgb(0x303033))
                                 .tooltip("Session memory")
                                 .accessibility_label("Session memory")
-                                .child(Icon::new(ActionIcon::Activity).with_size(zpx(16.))),
+                                .child(crate::icons::icon(ActionIcon::Activity)),
                         )
                         .content({
                             let usage = usage.clone();
@@ -823,12 +784,10 @@ pub fn render(
                                         })
                                         .child(match row.provider {
                                             Some(provider) => {
-                                                provider_logo(provider, 14.0).into_any_element()
+                                                provider_logo(provider).into_any_element()
                                             }
-                                            None => div()
-                                                .text_size(zpx(TEXT_SM))
+                                            None => crate::icons::path("icons/terminal.svg")
                                                 .text_color(rgba(MUTED))
-                                                .child(">_")
                                                 .into_any_element(),
                                         })
                                         .child(if renaming {
@@ -865,9 +824,9 @@ pub fn render(
                                         })
                                         .child(div().flex_none().w(zpx(
                                             if motion.is_hovered(&row.id.0) {
-                                                44.0
+                                                crate::icons::BUTTON_SIZE * 2.0 + 4.0
                                             } else if row.pinned {
-                                                20.0
+                                                crate::icons::BUTTON_SIZE
                                             } else {
                                                 0.0
                                             },
@@ -878,9 +837,11 @@ pub fn render(
                                             h_flex()
                                                 .absolute()
                                                 .right(zpx(action_right))
-                                                .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+                                                .top(zpx(
+                                                    (ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0
+                                                ))
                                                 .h(zpx(20.0))
-                                                .w(zpx(44.0))
+                                                .w(zpx(crate::icons::BUTTON_SIZE * 2.0 + 4.0))
                                                 .items_center()
                                                 .gap(zpx(4.0))
                                                 .rounded_sm()
@@ -1017,12 +978,18 @@ pub fn render(
                                             .min_w_0()
                                             .child(fading_title(s.current_title(&id))),
                                     )
-                                    .child(div().flex_none().w(zpx(44.0)))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .w(zpx(crate::icons::BUTTON_SIZE * 2.0 + 4.0)),
+                                    )
                                     .child(
                                         actions
                                             .absolute()
                                             .right(zpx(8.0))
-                                            .top(zpx((ROW_HEIGHT - 20.0) / 2.0))
+                                            .top(
+                                                zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0),
+                                            )
                                             .opacity(0.0)
                                             .group_hover(group, |a| a.opacity(1.0)),
                                     )
@@ -1075,10 +1042,137 @@ pub fn render(
                             prov_state.update(cx, |s, cx| s.toggle_providers(cx))
                         })
                         .gap_1p5()
-                        .child(Icon::new(IconName::Settings).small())
+                        .child(crate::icons::icon(IconName::Settings))
                         .child("Settings"),
                 ),
         )
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod toolbar_tests {
+    use super::{toolbar_button, toolbar_row, toolbar_trigger_style};
+    use crate::zoom::px as zpx;
+    use gpui::{
+        Context, InteractiveElement, IntoElement, Modifiers, MouseButton, ParentElement, Render,
+        Styled, Window, div, px, size,
+    };
+    use gpui_kit::component::{IconName, popover};
+    use std::{cell::Cell, rc::Rc};
+
+    struct ToolbarFixture {
+        width: f32,
+        open: Rc<Cell<bool>>,
+    }
+
+    impl Render for ToolbarFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let open = self.open.clone();
+            let glyph = |name: &'static str, icon| {
+                div()
+                    .debug_selector(move || name.into())
+                    .flex_none()
+                    .child(crate::icons::icon(icon))
+            };
+            div().w(zpx(self.width)).pl_2().child(
+                toolbar_row()
+                    .debug_selector(|| "toolbar-row".into())
+                    .child(
+                        toolbar_button("toolbar-search", cx)
+                            .debug_selector(|| "toolbar-search".into())
+                            .child(glyph("search-glyph", IconName::Search)),
+                    )
+                    .child(
+                        toolbar_button("toolbar-new", cx)
+                            .debug_selector(|| "toolbar-new".into())
+                            .child(glyph("new-glyph", IconName::Plus)),
+                    )
+                    .child(
+                        toolbar_button("toolbar-coffee", cx)
+                            .debug_selector(|| "toolbar-coffee".into())
+                            .child(glyph("coffee-glyph", IconName::Settings)),
+                    )
+                    .child(
+                        popover::Popover::new("toolbar-memory")
+                            .trigger_style(toolbar_trigger_style())
+                            .open(self.open.get())
+                            .on_open_change(move |value, _, _| open.set(*value))
+                            .trigger(
+                                toolbar_button("toolbar-activity", cx)
+                                    .w_full()
+                                    .flex_none()
+                                    .debug_selector(|| "toolbar-activity".into())
+                                    .child(glyph("activity-glyph", IconName::Info)),
+                            )
+                            .content(|_, _, _| div().child("Memory")),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn toolbar_fills_row_with_equal_padded_targets_across_widths_and_zoom(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let open = Rc::new(Cell::new(false));
+        let fixture_open = open.clone();
+        let (root, cx) = cx.add_window_view(|_, _| ToolbarFixture {
+            width: 216.,
+            open: fixture_open,
+        });
+        for zoom in [100, 150] {
+            for width in [160., 216., 360.] {
+                cx.update(|window, cx| {
+                    del_core::zoom::set(zoom);
+                    window.set_rem_size(px(14. * zoom as f32 / 100.));
+                    root.update(cx, |fixture, cx| {
+                        fixture.width = width;
+                        cx.notify();
+                    });
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+                let row = cx.debug_bounds("toolbar-row").unwrap();
+                let targets = [
+                    "toolbar-search",
+                    "toolbar-new",
+                    "toolbar-coffee",
+                    "toolbar-activity",
+                ]
+                .map(|name| cx.debug_bounds(name).unwrap());
+                let glyphs = [
+                    "search-glyph",
+                    "new-glyph",
+                    "coffee-glyph",
+                    "activity-glyph",
+                ]
+                .map(|name| cx.debug_bounds(name).unwrap());
+                let expected_width = (row.size.width - zpx(18.)) / 4.;
+                for (target, glyph) in targets.iter().zip(glyphs) {
+                    assert!(
+                        (target.size.width - expected_width).abs() <= px(0.5),
+                        "unequal quarter at width={width},zoom={zoom}: {target:?}, row={row:?}"
+                    );
+                    assert_eq!(target.size.height, zpx(34.));
+                    assert_eq!(glyph.size, size(zpx(16.), zpx(16.)));
+                    assert!((target.center().x - glyph.center().x).abs() <= px(0.5));
+                    assert!((target.center().y - glyph.center().y).abs() <= px(0.5));
+                }
+                assert_eq!(targets[0].left(), row.left());
+                assert!((targets[3].right() - row.right()).abs() <= px(0.5));
+                for pair in targets.windows(2) {
+                    assert!((pair[1].left() - pair[0].right() - zpx(6.)).abs() <= px(0.5));
+                }
+            }
+        }
+        let activity = cx.debug_bounds("toolbar-activity").unwrap().center();
+        cx.simulate_mouse_move(activity, None, Modifiers::default());
+        cx.simulate_mouse_down(activity, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(activity, MouseButton::Left, Modifiers::default());
+        assert!(open.get(), "stretched popover target did not open");
+        cx.update(|_, _| del_core::zoom::set(100));
+    }
 }
 
 #[cfg(test)]

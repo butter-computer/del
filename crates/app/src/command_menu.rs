@@ -1,9 +1,5 @@
 //! Composer autocomplete driven by the selected harness's command catalog.
-use crate::{
-    appearance::{rgb, rgba},
-    state::AppState,
-    zoom::px as zpx,
-};
+use crate::{appearance::{rgb, rgba}, state::AppState, zoom::px as zpx};
 use del_agent::{CommandKind, ComposerCommand, Provider};
 use gpui_kit::{
     component::{

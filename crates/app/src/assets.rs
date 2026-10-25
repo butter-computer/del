@@ -20,6 +20,8 @@ gpui_kit::assets::icon_assets!(
         Target,
         Pause,
         Play,
+        MessagesSquare,
+        Terminal,
         ChevronDown,
         ChevronUp
     ]
@@ -29,6 +31,9 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = crate::icons::system_asset(path) {
+            return Ok(Some(Cow::Owned(bytes)));
+        }
         if let Some(bytes) = SidebarIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -63,7 +68,7 @@ impl AssetSource for AppAssets {
         };
         match bytes {
             Some(b) => Ok(Some(Cow::Borrowed(b))),
-            None => gpui_kit::assets::Assets.load(path),
+            None => gpui_kit::assets::Assets.load(crate::icons::fallback_path(path)),
         }
     }
 

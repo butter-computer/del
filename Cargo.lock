@@ -1481,6 +1481,9 @@ dependencies = [
  "dirs 6.0.0",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-apple",
+ "objc2-core-foundation",
+ "objc2-core-video",
  "image",
  "raw-window-handle",
  "serde",
@@ -2645,8 +2648,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52f58893fe1a0836464428dfad2b5eaf42c9c303a9638f4c2aced5a69072a15"
 dependencies = [
  "anyhow",
  "async-task",

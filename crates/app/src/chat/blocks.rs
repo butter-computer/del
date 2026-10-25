@@ -10,7 +10,6 @@ use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
 use gpui_kit::base::Easing;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -162,7 +161,7 @@ impl ChatView {
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                     .when(open, |row| {
-                        row.child(Spinner::new().xsmall().color(rgba(MUTED).into()))
+                        row.child(crate::icons::spinner().color(rgba(MUTED).into()))
                     })
                     .child(if open { "Thinking" } else { "Thought" })
                     .child(div().text_color(rgba(FAINT)).child(if expanded {
@@ -405,7 +404,10 @@ fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
         .cursor_pointer()
         .text_size(zpx(TEXT_MD))
         .font_weight(FontWeight::MEDIUM)
-        .when(primary, |p| p.bg(rgb(0xffffff)).text_color(rgb(0x111113)))
+        .when(primary, |p| {
+            p.bg(rgb(0xffffff))
+            .text_color(rgb(0x111113))
+        })
         .when(!primary, |p| {
             p.bg(rgba(0xffffff14))
                 .text_color(rgb(STRONG))
@@ -416,23 +418,19 @@ fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
 
 fn status_dot(state: ToolState) -> AnyElement {
     match state {
-        ToolState::Running => Spinner::new()
-            .xsmall()
+        ToolState::Running => crate::icons::spinner()
             .color(rgba(AMBER).into())
             .into_any_element(),
-        ToolState::Ok => dot(GREEN),
-        ToolState::Error => dot(RED),
-        ToolState::Declined => dot(0xffffff59),
+        ToolState::Ok => crate::icons::path("icons/circle-check.svg")
+            .text_color(rgba(GREEN))
+            .into_any_element(),
+        ToolState::Error => crate::icons::path("icons/circle-alert.svg")
+            .text_color(rgba(RED))
+            .into_any_element(),
+        ToolState::Declined => crate::icons::path("icons/circle-x.svg")
+            .text_color(rgba(0xffffff59))
+            .into_any_element(),
     }
-}
-
-fn dot(rgba_color: u32) -> AnyElement {
-    div()
-        .size(zpx(8.0))
-        .flex_none()
-        .rounded_full()
-        .bg(rgba(rgba_color))
-        .into_any_element()
 }
 
 fn user_message(
@@ -458,9 +456,7 @@ fn user_message(
         .bg(rgba(0xffffff12))
         .when(steer, |row| {
             row.child(
-                svg()
-                    .path("icons/queue.svg")
-                    .size(zpx(14.0))
+                crate::icons::path("icons/queue.svg")
                     .mt(zpx(3.5))
                     .flex_none()
                     .text_color(rgba(0xe8b04ab3)),
@@ -607,7 +603,7 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                     .text_size(zpx(TEXT_SM))
                     .text_color(rgba(MUTED))
                     .when(!failed, |row| {
-                        row.child(Spinner::new().xsmall()).child("Starting agent…")
+                        row.child(crate::icons::spinner()).child("Starting agent…")
                     }),
             ),
         )

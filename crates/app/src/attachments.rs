@@ -177,10 +177,10 @@ pub fn compact_filename(attachment: &Attachment) -> String {
 
 pub fn file_mark(attachment: &Attachment) -> Option<&'static str> {
     match file_type(attachment).as_str() {
-        "PDF" => Some("icons/filetypes/pdf.png"),
-        "DOC" | "DOCX" => Some("icons/filetypes/docx.png"),
-        "XLS" | "XLSX" => Some("icons/filetypes/xlsx.png"),
-        "PPT" | "PPTX" => Some("icons/filetypes/pptx.png"),
+        "PDF" => Some("icons/file-pdf.svg"),
+        "DOC" | "DOCX" => Some("icons/file-doc.svg"),
+        "XLS" | "XLSX" => Some("icons/file-xls.svg"),
+        "PPT" | "PPTX" => Some("icons/file-ppt.svg"),
         _ => None,
     }
 }
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(compact_filename(&attachment(".env")), ".env");
         assert_eq!(
             file_mark(&attachment("REPORT.PDF")),
-            Some("icons/filetypes/pdf.png")
+            Some("icons/file-pdf.svg")
         );
         assert_eq!(file_mark(&attachment("movie.mp4")), None);
     }

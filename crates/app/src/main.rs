@@ -11,6 +11,7 @@ use crate::zoom::px as zpx;
 #[allow(dead_code)]
 mod wallpaper;
 
+mod ambient;
 mod appearance;
 mod assets;
 mod attachments;
@@ -27,6 +28,7 @@ mod followups;
 mod goal_integration;
 mod goal_ui;
 mod hover_motion;
+mod icons;
 #[allow(dead_code)]
 mod mcp_bridge;
 mod mode_ui;
@@ -103,14 +105,14 @@ impl Render for DraggedTab {
         let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
         // GPUI places drag previews at the pointer. Cancel its vertical movement
         // inside a fixed-size wrapper, keeping the original grab offset intact.
-        div().w(zpx(TAB_WIDTH)).h(zpx(24.)).child(
+        div().w(zpx(TAB_WIDTH)).h(crate::icons::button_size()).child(
             h_flex()
                 .relative()
                 .top(self.start_pointer_y - window.mouse_position().y)
                 .left(left - natural_left)
                 .w(width)
                 .overflow_hidden()
-                .h(zpx(24.))
+                .h(crate::icons::button_size())
                 .px_2()
                 .gap_2()
                 .items_center()
@@ -134,6 +136,44 @@ fn tab_title(title: String) -> Div {
         .line_height(zpx(16.0))
         .truncate()
         .child(title)
+}
+
+/// The keyboard hint and hover close glyph share the reserved trailing slot.
+/// Keeping both inside it prevents the hint from covering the close button.
+fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla) -> Div {
+    div()
+        .relative()
+        .size(crate::icons::button_size())
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .opacity(0.0)
+                .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
+                .child(crate::icons::icon(IconName::Close).text_color(color)),
+        )
+        .when_some(shortcut, |slot, number| {
+            slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .group_hover(group, |hint| hint.opacity(0.0))
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(rgb(0x303033))
+                            .text_size(zpx(10.))
+                            .child(format!("⌘{number}")),
+                    ),
+            )
+        })
 }
 
 /// Shared timing for the left and right sidebar width transitions.
@@ -202,10 +242,13 @@ struct SidebarWidths {
     right: f32,
 }
 
+const LEFT_SIDEBAR_MIN: f32 = 162.0;
+const LEFT_SIDEBAR_MAX: f32 = 234.0;
+
 impl Default for SidebarWidths {
     fn default() -> Self {
         Self {
-            left: sidebar::SIDEBAR_WIDTH,
+            left: sidebar::SIDEBAR_WIDTH.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX),
             right: right_panel::PANEL_WIDTH,
         }
     }
@@ -219,14 +262,23 @@ impl SidebarWidths {
     }
 
     fn load() -> Self {
-        std::fs::read(Self::path())
+        Self::read(&Self::path())
+    }
+
+    fn read(path: &std::path::Path) -> Self {
+        std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
             .filter(|sizes| sizes.left.is_finite() && sizes.right.is_finite())
+            .map(|sizes| Self {
+                left: sizes.left.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX),
+                ..sizes
+            })
             .unwrap_or_default()
     }
 
-    fn save(self) -> std::io::Result<()> {
+    fn save(mut self) -> std::io::Result<()> {
+        self.left = self.left.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX);
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -253,14 +305,47 @@ impl Render for ResizePreview {
 }
 
 fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 {
-    let min = if right { 220.0 } else { 162.0 };
-    let max = if right { 800.0_f32 } else { 360.0_f32 };
+    let min = if right { 220.0 } else { LEFT_SIDEBAR_MIN };
+    let max = if right { 800.0_f32 } else { LEFT_SIDEBAR_MAX };
     requested.clamp(min, max.min(viewport - other - 260.0 - 20.0).max(min))
+}
+
+#[cfg(test)]
+mod sidebar_width_tests {
+    use super::{SidebarWidths, sidebar_width};
+
+    #[test]
+    fn left_cap_preserves_default_minimum_and_right_widths() {
+        assert_eq!(SidebarWidths::default().left, 180.);
+        assert_eq!(sidebar_width(360., false, 1600., 0.), 234.);
+        assert_eq!(sidebar_width(170., false, 1600., 0.), 170.);
+        assert_eq!(sidebar_width(-100., false, 1600., 0.), 162.);
+        assert_eq!(sidebar_width(400., false, 450., 100.), 162.);
+        assert_eq!(sidebar_width(180., false, 550., 100.), 170.);
+        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 234.);
+        assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
+        assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
+    }
+
+    #[test]
+    fn persisted_left_width_is_clamped_and_right_width_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-widths.json");
+        for (saved, expected) in [(360., 234.), (216., 216.), (170., 170.), (20., 162.)] {
+            std::fs::write(&path, format!("{{\"left\":{saved},\"right\":725}}")).unwrap();
+            let loaded = SidebarWidths::read(&path);
+            assert_eq!(loaded.left, expected);
+            assert_eq!(loaded.right, 725.);
+        }
+        std::fs::write(&path, b"invalid").unwrap();
+        assert_eq!(SidebarWidths::read(&path).left, 180.);
+    }
 }
 
 struct AppShell {
     shell_focus: FocusHandle,
     settings_focused: bool,
+    opacity_slider: Entity<gpui_kit::component::slider::SliderState>,
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
@@ -311,6 +396,7 @@ struct AppShell {
     attachment_scroll: ScrollHandle,
     queue_hovered: Option<String>,
     metrics: ShellMetrics,
+    ambient: Entity<ambient::LifeBackground>,
     terminals: HashMap<SessionId, Entity<TerminalHost>>,
     terminal_store: TerminalStore,
     terminal_attempts: HashSet<SessionId>,
@@ -554,9 +640,24 @@ impl AppShell {
         .detach();
         let usage = cx.new(|_| usage::Usage::new(state.clone()));
         cx.observe(&usage, |_, _, cx| cx.notify()).detach();
+        let opacity_slider = cx.new(|_| {
+            gpui_kit::component::slider::SliderState::new()
+                .min(f32::from(appearance::MIN_OPACITY))
+                .max(f32::from(appearance::MAX_OPACITY))
+                .step(1.)
+                .default_value(f32::from(appearance::opacity()))
+        });
+        cx.subscribe(&opacity_slider, |_, _, event, cx| {
+            use gpui_kit::component::slider::SliderEvent;
+            if let SliderEvent::Change(value) = event {
+                appearance::set_opacity(value.end().round() as u8, cx);
+                cx.notify();
+            }
+        }).detach();
         let mut shell = Self {
             shell_focus: cx.focus_handle(),
             settings_focused: false,
+            opacity_slider,
             zoom_percent: del_core::zoom::percent(),
             state,
             composer,
@@ -602,6 +703,7 @@ impl AppShell {
             attachment_scroll: ScrollHandle::new(),
             queue_hovered: None,
             metrics: ShellMetrics::default(),
+            ambient: cx.new(|cx| ambient::LifeBackground::new(window, cx)),
             terminals: HashMap::new(),
             terminal_store,
             terminal_attempts: HashSet::new(),
@@ -1110,7 +1212,9 @@ impl AppShell {
             .child(self.render_goal_bar(cx))
             .children(self.render_agent_messages(cx))
             .child(
-                div().relative().child(composer).child(
+                div().relative().child(composer)
+                    .child(self.ambient.read(cx).region_probe(0, zpx(14.0)))
+                    .child(
                     deferred(
                         div()
                             .absolute()
@@ -1165,7 +1269,8 @@ impl AppShell {
             h_flex()
                 .id(id.clone())
                 .group(id)
-                .h(zpx(24.0))
+                // The close target must fit inside the tab's animated clip.
+                .h(crate::icons::button_size())
                 .min_w(zpx(120.0))
                 .max_w(zpx(200.0))
                 .pl_2()
@@ -1185,7 +1290,8 @@ impl AppShell {
             .h(zpx(self.metrics.topbar_height))
             .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
-            .border_b_0()
+            .border_b_1()
+            .border_color(appearance::separator())
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
             // opaque than the bar.
@@ -1280,10 +1386,11 @@ impl AppShell {
                                 row.child(
                                     div()
                                         .id("toggle-sidebar")
+                                        .when(panel == Panel::Providers, |button| button.invisible())
                                         .role(gpui::Role::Button)
                                         .aria_label("Toggle left sidebar")
                                         .flex_none()
-                                        .size(zpx(24.0))
+                                        .size(crate::icons::button_size())
                                         .mr_1()
                                         .flex()
                                         .items_center()
@@ -1298,12 +1405,11 @@ impl AppShell {
                                             this.set_sidebar(!this.sidebar_open, cx);
                                         }))
                                         .child(
-                                            Icon::new(if self.sidebar_open {
+                                            crate::icons::icon(if self.sidebar_open {
                                                 IconName::PanelLeftClose
                                             } else {
                                                 IconName::PanelLeftOpen
                                             })
-                                            .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
                                             .text_color(muted),
                                         ),
                                 )
@@ -1412,26 +1518,17 @@ impl AppShell {
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)
                                                                 .id(SharedString::from(format!("title-shimmer-{name}"))))
                                                     } else { tab_title(title).when(preview, |title| title.italic().opacity(0.65)) })
-                                                    .when(shortcut_hint, |tab| tab.child(div().absolute().right(zpx(6.)).top(zpx(5.)).px_1().rounded_sm().bg(rgb(0x303033)).text_size(zpx(10.)).child(format!("⌘{}", shortcut_number.unwrap_or(1)))))
                                                     .when_some(indicator_id.as_ref(), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
                                                     .child(
                                                         div()
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
-                                                            .size(zpx(16.0))
+                                                            .size(crate::icons::button_size())
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
                                                             .flex_none()
-                                                            .rounded_sm()
-                                                            // Shown on hover only; faded rather than hidden
-                                                            // so layout and painting stay stable.
-                                                            .opacity(0.0)
-                                                            .group_hover(group.clone(), |c| {
-                                                                c.opacity(1.0)
-                                                            })
-                                                            .hover(|c| c.bg(rgba(0xffffff1a)))
                                                             .on_mouse_down(
                                                                 MouseButton::Left,
                                                                 |_, _, cx| cx.stop_propagation(),
@@ -1444,9 +1541,11 @@ impl AppShell {
                                                                 });
                                                             })
                                                             .child(
-                                                                Icon::new(IconName::Close)
-                                                                    .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
-                                                                    .text_color(muted),
+                                                                tab_action_content(
+                                                                    group.clone(),
+                                                                    shortcut_number.filter(|_| shortcut_hint),
+                                                                    muted.into(),
+                                                                ),
                                                             ),
                                                     );
                                             } else {
@@ -1454,7 +1553,7 @@ impl AppShell {
                                                 el = el
                                                     .child(mode_ui::tab_mark(provider))
                                                     .child(tab_title(title))
-                                                    .child(div().size(zpx(16.0)).flex_none());
+                                                    .child(div().size(crate::icons::button_size()).flex_none());
                                             }
                                             // The tab keeps its full size inside a clip whose width
                                             // (tab plus the gap after it) animates from 0 on open and
@@ -1541,7 +1640,7 @@ impl AppShell {
                                     .aria_label("New tab")
                                     .flex_none()
                                     .when(dragging_tab.is_some(), |plus| plus.opacity(0.0))
-                                    .size(zpx(24.0))
+                                    .size(crate::icons::button_size())
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1558,7 +1657,7 @@ impl AppShell {
                                         this.state.update(cx, |s, cx| s.new_session(cx));
                                         this.focus_composer(window, cx);
                                     }))
-                                    .child(Icon::new(IconName::Plus).with_size(zpx(sidebar::CONTROL_ICON_SIZE)).text_color(muted)),
+                                    .child(crate::icons::icon(IconName::Plus).text_color(muted)),
                             ),
                     )
                     .child(
@@ -1567,7 +1666,7 @@ impl AppShell {
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
                             .flex_none()
-                            .size(zpx(24.0))
+                            .size(crate::icons::button_size())
                             .mr_2()
                             .flex()
                             .items_center()
@@ -1582,25 +1681,31 @@ impl AppShell {
                                 if this.state.read(cx).panel == Panel::Chat { this.set_right(!this.right_open, cx); }
                             }))
                             .child(
-                                Icon::new(if self.right_open {
+                                crate::icons::icon(if self.right_open {
                                     IconName::PanelRightClose
                                 } else {
                                     IconName::PanelRightOpen
                                 })
-                                .with_size(zpx(sidebar::CONTROL_ICON_SIZE))
                                 .text_color(muted),
                             ),
                     ),
             )
     }
 
-    fn render_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let radius = zpx(self.metrics.page_radius);
         let (panel, selection) = {
             let st = self.state.read(cx);
             (st.panel, st.selection.clone())
         };
         let chat = self.open_chat(cx);
+        let landing = panel == Panel::Chat
+            && !matches!(selection, Selection::Terminal(_))
+            && chat.is_none()
+            && self.state.read(cx).pending_prompt().is_none();
+        self.ambient.update(cx, |ambient, cx| {
+            ambient.set_visible(landing && !self.search_open, window, cx)
+        });
         if panel == Panel::Chat && matches!(selection, Selection::Terminal(_)) {
             return div()
                 .size_full()
@@ -1619,7 +1724,7 @@ impl AppShell {
             .overflow_hidden()
             .bg(page_surface())
             .when(panel == Panel::Providers, |page| {
-                page.child(signin::render(&self.state, cx))
+                page.child(signin::render(&self.state, &self.opacity_slider, cx))
             })
             .when(panel == Panel::Chat, |page| match chat {
                 // Chat page: transcript above, the shared composer below.
@@ -1672,7 +1777,7 @@ impl AppShell {
                     )
                 }
                 // New-chat page: heading and the same composer, centred.
-                None => page.child(
+                None => page.child(self.ambient.clone()).child(
                     v_flex()
                         .absolute()
                         .inset_0()
@@ -1709,8 +1814,9 @@ impl AppShell {
                                                 .right(zpx(16.0))
                                                 .h(zpx(40.0))
                                                 .rounded_b(zpx(14.0))
-                                                .bg(rgb(0x1b1b1b))
-                                                .child(self.render_new_session_options(cx)),
+                                                .bg(crate::appearance::composer_surface())
+                                                .child(self.render_new_session_options(cx))
+                                                .child(self.ambient.read(cx).region_probe(1, zpx(14.0))),
                                         )
                                         .child(div().relative().child(self.render_composer(cx))),
                                 ),
@@ -1780,6 +1886,9 @@ impl Render for AppShell {
         if settings_open && !self.settings_focused {
             self.shell_focus.focus(window, cx);
         }
+        if !settings_open && self.settings_focused {
+            self.focus_composer(window, cx);
+        }
         self.settings_focused = settings_open;
         self.sync_caffeine(cx);
         let terminal_processes = self
@@ -1790,6 +1899,8 @@ impl Render for AppShell {
         self.usage
             .update(cx, |usage, _| usage.terminals = terminal_processes);
         self.sync_terminal_sidebar_actions(cx);
+        // Settings navigation stays available without changing chat's collapse preference.
+        let sidebar_visible = self.sidebar_visible || settings_open;
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
         let inset = zpx(self.metrics.page_inset);
         let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
@@ -1807,7 +1918,7 @@ impl Render for AppShell {
             self.sidebar_widths.right,
             true,
             viewport,
-            if self.sidebar_visible {
+            if sidebar_visible {
                 left_width
             } else {
                 0.0
@@ -1930,7 +2041,7 @@ impl Render for AppShell {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                if !SIDEBAR_ENABLED {
+                if !SIDEBAR_ENABLED || this.state.read(cx).panel == Panel::Providers {
                     return;
                 }
                 this.set_sidebar(!this.sidebar_open, cx);
@@ -1947,7 +2058,10 @@ impl Render for AppShell {
                 this.right.update(cx, |r, cx| r.show_terminal(window, cx));
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                this.state.update(cx, |s, cx| s.close_active_tab(cx));
+                this.state.update(cx, |state, cx| {
+                    if state.panel == Panel::Providers { state.toggle_providers(cx); }
+                    else { state.close_active_tab(cx); }
+                });
                 this.focus_composer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Tab1, w, cx| this.go_tab(0, w, cx)))
@@ -2006,14 +2120,16 @@ impl Render for AppShell {
                             cx.notify();
                         },
                     ))
-                    .when(SIDEBAR_ENABLED && self.sidebar_visible, |row| {
+                    .when(SIDEBAR_ENABLED && sidebar_visible, |row| {
                         let sidebar = div()
                             .relative()
                             .h_full()
                             .flex_none()
+                            .border_r_1()
+                            .border_color(appearance::separator())
                             .overflow_hidden()
                             .child(sidebar::render(&self.state, &self.rename, &self.usage, cx));
-                        if self.sidebar_toggles == 0 {
+                        if settings_open || self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {
                             let opening = self.sidebar_open;
@@ -2045,8 +2161,8 @@ impl Render for AppShell {
                                     }
                                 }
                             })
-                            .child(self.render_page(cx))
-                            .when(self.sidebar_visible, |page| {
+                            .child(self.render_page(window, cx))
+                            .when(sidebar_visible, |page| {
                                 page.child(
                                     self.resize_handle(
                                         false,
@@ -2085,7 +2201,7 @@ impl Render for AppShell {
                                     self.resize_handle(
                                         true,
                                         right_width,
-                                        if self.sidebar_visible {
+                                        if sidebar_visible {
                                             left_width
                                         } else {
                                             0.0

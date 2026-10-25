@@ -21,8 +21,6 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::rc::Rc;
 
-/// Fill of the composer card: a faint white lift, like the page it sits on.
-pub const COMPOSER_SURFACE_RGBA: u32 = 0xffffff12;
 pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -168,11 +166,11 @@ pub(crate) fn provider_brand(provider: Provider) -> (&'static str, u32) {
 }
 
 /// The agent's logo in its own colour, no background.
-pub fn provider_logo(provider: Provider, size: f32) -> Svg {
+pub fn provider_logo(provider: Provider) -> Svg {
     let (path, color) = provider_brand(provider);
     svg()
         .path(path)
-        .size(zpx(size))
+        .size(crate::icons::size())
         .flex_none()
         .text_color(rgb(color))
 }
@@ -217,7 +215,7 @@ impl RenderOnce for ComposerCard {
             h_flex()
                 .gap_1p5()
                 .items_center()
-                .child(provider_logo(provider, 14.0).when(!provider_ready, |l| l.opacity(0.5)))
+                .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
                 .child(providers::display_name(provider)),
         );
         let agent_el = {
@@ -227,12 +225,20 @@ impl RenderOnce for ComposerCard {
                     .iter()
                     .fold(menu.check_side(Side::Right), |menu, &p| {
                         let on_provider = on_provider.clone();
-                        let (path, color) = provider_brand(p);
                         menu.item(
-                            PopupMenuItem::new(providers::display_name(p))
-                                .icon(Icon::default().path(path).text_color(rgb(color)))
-                                .checked(p == current)
-                                .on_click(move |_, w, cx| on_provider(p, w, cx)),
+                            PopupMenuItem::element(move |_, _| {
+                                h_flex()
+                                    .h(crate::icons::button_size())
+                                    .gap_2()
+                                    .items_center()
+                                    .child(provider_logo(p))
+                                    .child(providers::display_name(p))
+                                    .child(div().flex_1())
+                                    .when(p == current, |row| {
+                                        row.child(crate::icons::icon(IconName::Check))
+                                    })
+                            })
+                            .on_click(move |_, w, cx| on_provider(p, w, cx)),
                         )
                     })
             })
@@ -245,14 +251,19 @@ impl RenderOnce for ComposerCard {
                 .items_center()
                 .text_size(zpx(12.0))
                 .text_color(muted)
-                .child(Icon::new(IconName::Folder).small())
+                .child(crate::icons::icon(IconName::Folder))
                 .child(folder)
                 .into_any_element()
         } else {
             chip("folder")
                 .disabled(starting)
-                .icon(IconName::Folder)
-                .label(folder)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(crate::icons::icon(IconName::Folder))
+                        .child(folder),
+                )
                 .text_color(muted)
                 .on_click(move |_, w, cx| on_folder(w, cx))
                 .into_any_element()
@@ -261,38 +272,37 @@ impl RenderOnce for ComposerCard {
         // One round button: send, or stop while a turn is running.
         let action = div()
             .id("send")
-            .size(zpx(28.0))
+            .size(crate::icons::button_size())
             .flex()
             .items_center()
             .justify_center()
             .rounded_full();
-        let action =
-            if starting {
-                action.child(gpui_kit::component::spinner::Spinner::new().small())
-            } else if running {
-                action
-                    .bg(rgb(0xffffff))
-                    .cursor_pointer()
-                    .on_click(move |_, w, cx| on_stop(w, cx))
-                    .child(div().size(zpx(9.0)).rounded_xs().bg(rgb(0x111113)))
-            } else {
-                action
-                    .bg(if can_send {
-                        rgb(0xffffff)
+        let action = if starting {
+            action.child(crate::icons::spinner())
+        } else if running {
+            action
+                .bg(rgb(0xffffff))
+                .cursor_pointer()
+                .on_click(move |_, w, cx| on_stop(w, cx))
+                .child(crate::icons::icon(IconName::Square).text_color(rgb(0x111113)))
+        } else {
+            action
+                .bg(if can_send {
+                    rgb(0xffffff)
+                } else {
+                    rgb(0x4a4a4e)
+                })
+                .when(can_send, |a| {
+                    a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
+                })
+                .child(
+                    crate::icons::icon(IconName::ArrowUp).text_color(if can_send {
+                        rgb(0x111113)
                     } else {
-                        rgb(0x4a4a4e)
-                    })
-                    .when(can_send, |a| {
-                        a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
-                    })
-                    .child(Icon::new(IconName::ArrowUp).with_size(zpx(16.)).text_color(
-                        if can_send {
-                            rgb(0x111113)
-                        } else {
-                            rgb(0x8a8a8e)
-                        },
-                    ))
-            };
+                        rgb(0x8a8a8e)
+                    }),
+                )
+        };
 
         let voice_label = match dictation {
             crate::dictation::Phase::Idle => "Dictate with Apple speech recognition",
@@ -301,7 +311,7 @@ impl RenderOnce for ComposerCard {
             crate::dictation::Phase::Finishing => "Finishing dictation…",
         };
         let voice = chip("dictate")
-            .size(zpx(28.))
+            .size(crate::icons::button_size())
             .disabled(starting && dictation == crate::dictation::Phase::Idle)
             .tooltip(voice_label)
             .accessibility_label(voice_label)
@@ -309,30 +319,24 @@ impl RenderOnce for ComposerCard {
                 button.bg(rgba(0xff505024))
             })
             .child(match dictation {
-                crate::dictation::Phase::Idle => Icon::default()
-                    .path("icons/microphone.svg")
-                    .with_size(zpx(16.))
+                crate::dictation::Phase::Idle => crate::icons::path("icons/microphone.svg")
                     .text_color(muted)
                     .into_any_element(),
-                crate::dictation::Phase::Listening => div()
-                    .size(zpx(8.))
-                    .rounded_xs()
-                    .bg(rgb(0xff6666))
+                crate::dictation::Phase::Listening => crate::icons::icon(IconName::Square)
+                    .text_color(rgb(0xff6666))
                     .into_any_element(),
-                _ => gpui_kit::component::spinner::Spinner::new()
-                    .small()
-                    .into_any_element(),
+                _ => crate::icons::spinner().into_any_element(),
             })
             .on_click(move |_, window, cx| on_voice(window, cx));
 
-        // No border: the card is told apart from the page by its fill alone.
+        // The wrapper owns the tint; the textarea adds no second background.
         v_flex()
             .w_full()
             .max_w(zpx(max_width))
             .p_2()
             .gap_1()
             .rounded(zpx(14.0))
-            .bg(rgba(COMPOSER_SURFACE_RGBA))
+            .bg(crate::appearance::composer_surface())
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 Textarea::new(&input)
@@ -341,13 +345,11 @@ impl RenderOnce for ComposerCard {
                             .items_center()
                             .gap_1()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(rgb(0x579fff))
+                            .text_color(rgb(0xf5f5f5))
                             .child(
-                                svg()
-                                    .path("icons/skill.svg")
-                                    .size(zpx(13.))
+                                crate::icons::path("icons/skill.svg")
                                     .flex_none()
-                                    .text_color(rgb(0x579fff)),
+                                    .text_color(rgb(0xf5f5f5)),
                             )
                             .child(token.token().label().clone())
                     })
@@ -366,7 +368,9 @@ impl RenderOnce for ComposerCard {
                             .gap_0p5()
                             .child(
                                 chip("attach-files")
-                                    .icon(IconName::Plus)
+                                    .size(crate::icons::button_size())
+                                    .p_0()
+                                    .child(crate::icons::icon(IconName::Plus))
                                     .tooltip("Attach files")
                                     .accessibility_label("Attach files")
                                     .on_click(move |_, window, cx| on_attach(window, cx)),
@@ -376,8 +380,15 @@ impl RenderOnce for ComposerCard {
                             .when(goal_mode, |row| {
                                 row.child(
                                     chip("goal-mode")
-                                        .icon(gpui_kit::assets::IconName::Target)
-                                        .label("Goal")
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(crate::icons::icon(
+                                                    gpui_kit::assets::IconName::Target,
+                                                ))
+                                                .child("Goal"),
+                                        )
                                         .tooltip("Cancel goal mode")
                                         .accessibility_label("Cancel goal mode")
                                         .on_click(move |_, window, cx| on_cancel_goal(window, cx)),
