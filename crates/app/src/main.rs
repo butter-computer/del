@@ -52,6 +52,7 @@ mod terminal_host;
 mod terminal_store;
 mod usage;
 mod voice_ui;
+mod workspace_files;
 mod zoom;
 
 use crate::appearance::{page_surface, rgb, rgba, shell_surface};
@@ -745,7 +746,7 @@ impl AppShell {
         .detach();
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
-        shell.watch_right(cx);
+        shell.watch_right(window, cx);
         shell.state.update(cx, |state, cx| state.window_activation_changed(window.is_window_active(), cx));
         cx.observe_window_activation(window, |this, window, cx| {
             this.state.update(cx, |state, cx| {
@@ -865,7 +866,24 @@ impl AppShell {
         cx.notify();
     }
 
-    fn watch_right(&mut self, cx: &mut Context<Self>) {
+    fn watch_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.subscribe_in(
+            &self.right,
+            window,
+            |this, panel, event: &right_panel::ContextRequest, window, cx| {
+                if this.right != *panel {
+                    return;
+                }
+                this.composer.update(cx, |input, cx| {
+                    let end = input.text().len();
+                    input.set_selected_range(end..end, cx);
+                    input.insert(format!("\n\n{}\n\n", event.0), window, cx);
+                    input.focus(window, cx);
+                });
+                cx.notify();
+            },
+        )
+        .detach();
         cx.observe(&self.right, |this, panel, cx| {
             if this.right == panel {
                 this.remember_right(cx);
@@ -1004,7 +1022,7 @@ impl AppShell {
             self.right_animate = false;
             self.right_toggles += 1;
             if newly_created {
-                self.watch_right(cx);
+                self.watch_right(window, cx);
             }
         }
         // A draft keeps its panel when it becomes a saved conversation.

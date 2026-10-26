@@ -3,7 +3,8 @@
 use crate::appearance::{rgb, rgba};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
-use del_core::typography::{TEXT_MD, TEXT_SM};
+use del_core::typography::TEXT_SM;
+use gpui_kit::component::input::{Editor, EditorState, InputEvent};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -16,9 +17,8 @@ use std::rc::Rc;
 
 pub const PANEL_WIDTH: f32 = 340.0;
 const MONO: &str = "Menlo";
-/// Largest file shown, and most lines rendered.
+/// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
-const MAX_FILE_LINES: usize = 3000;
 /// Generated dependency/build trees stay out of the lightweight file viewer.
 const NEVER_LIST: &[&str] = &["target", "node_modules"];
 const DEFAULT_TREE_HEIGHT: f32 = 220.0;
@@ -53,6 +53,7 @@ enum Pane {
     Files,
     Terminal,
     Browser,
+    Changes,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +69,9 @@ pub struct SavedPanel {
     browser_profile: String,
     browser_tabs: Vec<crate::browser::SavedTab>,
     browser_active: usize,
+    terminal_tabs: Vec<String>,
+    terminal_active: usize,
+    file_drafts: HashMap<PathBuf, crate::workspace_files::FileDraft>,
 }
 
 impl SavedPanel {
@@ -88,6 +92,9 @@ impl Default for SavedPanel {
             browser_profile: uuid::Uuid::new_v4().to_string(),
             browser_tabs: vec![Default::default()],
             browser_active: 0,
+            terminal_tabs: vec![uuid::Uuid::new_v4().to_string()],
+            terminal_active: 0,
+            file_drafts: HashMap::new(),
         }
     }
 }
@@ -189,8 +196,7 @@ enum Viewer {
     },
     Text {
         path: PathBuf,
-        lines: std::sync::Arc<Vec<String>>,
-        widest: usize,
+        source: String,
         markdown: Option<SharedString>,
     },
     Loading {
@@ -202,6 +208,9 @@ enum Viewer {
     },
 }
 
+pub struct ContextRequest(pub String);
+impl EventEmitter<ContextRequest> for RightPanel {}
+
 pub struct RightPanel {
     pane: Pane,
     root: PathBuf,
@@ -209,7 +218,23 @@ pub struct RightPanel {
     viewer: Viewer,
     document_preview: Option<crate::document_preview::DocumentPreview>,
     preview_visible: bool,
-    terminal: Option<Entity<TerminalHost>>,
+    terminals: HashMap<String, Entity<TerminalHost>>,
+    terminal_tabs: Vec<String>,
+    terminal_active: usize,
+    file_drafts: HashMap<PathBuf, crate::workspace_files::FileDraft>,
+    editors: HashMap<PathBuf, Entity<EditorState>>,
+    saving: HashSet<PathBuf>,
+    file_error: Option<String>,
+    change_files: Vec<crate::workspace_files::ChangedFile>,
+    change_root: PathBuf,
+    change_selected: Option<PathBuf>,
+    change_text: Option<String>,
+    change_editor: Option<Entity<EditorState>>,
+    change_error: Option<String>,
+    change_request: u64,
+    diff_request: u64,
+    changes_loading: bool,
+
     browser: Option<crate::browser::Browser>,
     browser_profile: String,
     browser_tabs: Vec<crate::browser::SavedTab>,
@@ -224,7 +249,6 @@ pub struct RightPanel {
     directory_entries: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
     split_origin: Rc<Cell<f32>>,
     rows: Vec<(PathBuf, usize, bool)>,
-    file_scroll: UniformListScrollHandle,
     markdown_preview: bool,
     markdown_scroll: ScrollHandle,
 }
@@ -248,6 +272,8 @@ impl RightPanel {
             self.ensure_terminal(window, cx);
         } else if self.pane == Pane::Browser {
             self.ensure_browser(cx);
+        } else if self.pane == Pane::Changes && self.change_request == 0 {
+            self.refresh_changes(cx);
         }
     }
     pub fn snapshot(&self, open: bool) -> SavedPanel {
@@ -268,11 +294,27 @@ impl RightPanel {
             browser_profile: self.browser_profile.clone(),
             browser_tabs: self.browser_snapshot(),
             browser_active: self.browser_active,
+            terminal_tabs: self.terminal_tabs.clone(),
+            terminal_active: self.terminal_active,
+            file_drafts: self
+                .file_drafts
+                .iter()
+                .filter(|(_, draft)| draft.text != draft.original)
+                .map(|(path, draft)| (path.clone(), draft.clone()))
+                .collect(),
         }
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.pane = saved.pane;
+        self.terminal_tabs = if saved.terminal_tabs.is_empty() {
+            vec![uuid::Uuid::new_v4().to_string()]
+        } else {
+            saved.terminal_tabs
+        };
+        self.terminal_active = saved.terminal_active.min(self.terminal_tabs.len() - 1);
+        self.file_drafts = saved.file_drafts;
+        self.editors.clear();
         self.browser_profile = if uuid::Uuid::parse_str(&saved.browser_profile).is_ok() {
             saved.browser_profile
         } else {
@@ -312,7 +354,22 @@ impl RightPanel {
             viewer: Viewer::None,
             document_preview: None,
             preview_visible: true,
-            terminal: None,
+            terminals: HashMap::new(),
+            terminal_tabs: vec![uuid::Uuid::new_v4().to_string()],
+            terminal_active: 0,
+            file_drafts: HashMap::new(),
+            editors: HashMap::new(),
+            saving: HashSet::new(),
+            file_error: None,
+            change_files: Vec::new(),
+            change_root: PathBuf::new(),
+            change_selected: None,
+            change_text: None,
+            change_editor: None,
+            change_error: None,
+            change_request: 0,
+            diff_request: 0,
+            changes_loading: false,
             browser: None,
             browser_profile: uuid::Uuid::new_v4().to_string(),
             browser_tabs: vec![Default::default()],
@@ -327,7 +384,6 @@ impl RightPanel {
             directory_entries: HashMap::new(),
             split_origin: Default::default(),
             rows: Vec::new(),
-            file_scroll: UniformListScrollHandle::new(),
             markdown_preview: false,
             markdown_scroll: ScrollHandle::new(),
         };
@@ -338,9 +394,18 @@ impl RightPanel {
     /// Point the panel at another project folder.
     pub fn set_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.root != root {
-            if let Some(terminal) = self.terminal.take() {
+            for (_, terminal) in self.terminals.drain() {
                 terminal.update(cx, |terminal, cx| terminal.close(cx));
             }
+            self.terminal_tabs = vec![uuid::Uuid::new_v4().to_string()];
+            self.terminal_active = 0;
+            self.change_request += 1;
+            self.diff_request += 1;
+            self.change_files.clear();
+            self.change_selected = None;
+            self.change_text = None;
+            self.change_editor = None;
+            self.changes_loading = false;
             self.root = root;
             self.directory_entries.clear();
             self.rows.clear();
@@ -352,6 +417,8 @@ impl RightPanel {
             self.terminal_error = None;
             if self.pane == Pane::Terminal {
                 self.ensure_terminal(window, cx);
+            } else if self.pane == Pane::Changes {
+                self.refresh_changes(cx);
             }
             cx.notify();
         }
@@ -554,7 +621,10 @@ impl RightPanel {
                                             .justify_center()
                                             .role(gpui::Role::Button)
                                             .aria_label("Close browser tab")
-                                            .child(crate::icons::icon(IconName::Close).with_size(zpx(14.)))
+                                            .child(
+                                                crate::icons::icon(IconName::Close)
+                                                    .with_size(zpx(14.)),
+                                            )
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 this.close_browser_tab(index, cx);
@@ -591,12 +661,14 @@ impl RightPanel {
     }
 
     fn ensure_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal.is_some() {
+        let id = self.terminal_tabs[self.terminal_active].clone();
+        if self.terminals.contains_key(&id) {
             return;
         }
         match TerminalHost::spawn(TerminalLaunchSpec::shell(self.root.clone()), window, cx) {
             Ok(terminal) => {
-                self.terminal = Some(terminal);
+                cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+                self.terminals.insert(id, terminal);
                 self.terminal_error = None;
             }
             Err(error) => {
@@ -613,7 +685,10 @@ impl RightPanel {
     }
 
     fn focus_terminal(&self, window: &mut Window, cx: &mut App) {
-        if let Some(terminal) = &self.terminal {
+        if let Some(terminal) = self
+            .terminals
+            .get(&self.terminal_tabs[self.terminal_active])
+        {
             terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         }
     }
@@ -624,18 +699,37 @@ impl RightPanel {
     }
 
     fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self
+            .file_drafts
+            .get(&path)
+            .is_some_and(|draft| draft.text == draft.original)
+            && !self.saving.contains(&path)
+        {
+            self.file_drafts.remove(&path);
+            self.editors.remove(&path);
+        }
+        self.file_error = None;
         self.file_request += 1;
         let request = self.file_request;
         self.viewer = Viewer::Loading { path: path.clone() };
-        self.file_scroll = UniformListScrollHandle::new();
         self.markdown_scroll = ScrollHandle::new();
         let load = cx
             .background_executor()
             .spawn(async move { read_viewer(path) });
         cx.spawn(async move |this, cx| {
-            let viewer = load.await;
+            let mut viewer = load.await;
             let _ = this.update(cx, |this, cx| {
                 if this.file_request == request {
+                    if let Viewer::Text {
+                        path,
+                        markdown: Some(markdown),
+                        ..
+                    } = &mut viewer
+                    {
+                        if let Some(draft) = this.file_drafts.get(path) {
+                            *markdown = draft.text.clone().into();
+                        }
+                    }
                     this.document_preview = match &viewer {
                         Viewer::Document { path } => {
                             Some(crate::document_preview::DocumentPreview::new(path))
@@ -697,7 +791,9 @@ impl RightPanel {
         let active = self.pane == pane;
         div()
             .id(id)
-            .px_2()
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .px_1p5()
             .h(zpx(24.0))
             .flex()
             .flex_none()
@@ -705,7 +801,7 @@ impl RightPanel {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(zpx(TEXT_MD))
+            .text_size(zpx(TEXT_SM))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
@@ -720,6 +816,8 @@ impl RightPanel {
                     this.focus_terminal(window, cx);
                 } else if pane == Pane::Browser {
                     this.ensure_browser(cx);
+                } else if pane == Pane::Changes {
+                    this.refresh_changes(cx);
                 } else {
                     this.refresh_tree(cx);
                 }
@@ -728,7 +826,8 @@ impl RightPanel {
             .child(label)
     }
 
-    fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_editor(window, cx);
         let rows = self.rows.clone();
         let selected = match &self.viewer {
             Viewer::Document { path }
@@ -857,40 +956,31 @@ impl RightPanel {
                         ),
                 )
                 .into_any_element(),
-            Viewer::Text { lines, widest, .. } => {
-                let lines = lines.clone();
-                uniform_list("file-text", lines.len(), move |range, _, _| {
-                    range
-                        .map(|i| {
-                            h_flex()
-                                .h(zpx(20.0))
-                                .gap_2()
-                                .px_2()
+            Viewer::Text { path, .. } => self
+                .editors
+                .get(path)
+                .map(|editor| {
+                    div()
+                        .size_full()
+                        .key_context("FileEditor")
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            if event.keystroke.modifiers.platform && event.keystroke.key == "s" {
+                                cx.stop_propagation();
+                                this.save_selected(cx);
+                            }
+                        }))
+                        .child(
+                            Editor::new(editor)
+                                .h(relative(1.))
+                                .appearance(false)
+                                .bordered(false)
                                 .font_family(MONO)
                                 .text_size(zpx(TEXT_SM))
-                                .child(
-                                    div()
-                                        .w(zpx(32.0))
-                                        .flex_none()
-                                        .text_right()
-                                        .text_color(rgba(0xffffff40))
-                                        .child((i + 1).to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .child(lines[i].clone()),
-                                )
-                        })
-                        .collect()
+                                .aria_label("File editor"),
+                        )
+                        .into_any_element()
                 })
-                .size_full()
-                .with_width_from_item(Some(*widest))
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .track_scroll(&self.file_scroll)
-                .into_any_element()
-            }
+                .unwrap_or_else(|| div().into_any_element()),
         };
 
         let is_markdown = matches!(
@@ -926,7 +1016,11 @@ impl RightPanel {
                                 .min_w_0()
                                 .truncate()
                                 .text_size(zpx(TEXT_SM))
-                                .child(name),
+                                .child(if self.selected_dirty() {
+                                    format!("{name} •")
+                                } else {
+                                    name
+                                }),
                         )
                         .when(is_markdown, |header| {
                             header.child(h_flex().gap_0p5().flex_none().children(
@@ -972,11 +1066,51 @@ impl RightPanel {
                                     this.file_request += 1;
                                     this.document_preview = None;
                                     this.viewer = Viewer::None;
-                                    this.file_scroll = UniformListScrollHandle::new();
                                     cx.notify();
                                 }))
                                 .child(crate::icons::icon(IconName::Close).text_color(muted)),
                         ),
+                )
+            })
+            .when(matches!(self.viewer, Viewer::Text { .. }), |preview| {
+                preview.child(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            action(
+                                "save-file",
+                                if self.selected_dirty() {
+                                    "Save •"
+                                } else {
+                                    "Save"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
+                        )
+                        .child(action("revert-file", "Revert").on_click(
+                            cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
+                        ))
+                        .child(
+                            action("reload-file", "Reload")
+                                .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
+                        )
+                        .child(
+                            action("ask-file", "Ask about this")
+                                .on_click(cx.listener(|this, _, _, cx| this.ask_file(cx))),
+                        ),
+                )
+            })
+            .when_some(self.file_error.clone(), |preview, error| {
+                preview.child(
+                    div()
+                        .p_2()
+                        .text_size(zpx(11.))
+                        .whitespace_normal()
+                        .text_color(rgb(0xf08080))
+                        .child(error),
                 )
             })
             .child(v_flex().flex_1().min_h_0().overflow_hidden().child(viewer));
@@ -1044,8 +1178,558 @@ impl RightPanel {
             )
     }
 
-    fn render_terminal(&self, cx: &App) -> AnyElement {
-        if let Some(terminal) = &self.terminal {
+    fn ensure_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Viewer::Text { path, source, .. } = &self.viewer else {
+            return;
+        };
+        if self.editors.contains_key(path) {
+            return;
+        }
+        let path = path.clone();
+        let draft = self.file_drafts.entry(path.clone()).or_insert_with(|| {
+            crate::workspace_files::FileDraft {
+                original: source.clone(),
+                text: source.clone(),
+            }
+        });
+        if let Viewer::Text {
+            markdown: Some(markdown),
+            ..
+        } = &mut self.viewer
+        {
+            *markdown = draft.text.clone().into();
+        }
+        let language = match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            "rs" => "rust",
+            "js" | "jsx" => "javascript",
+            "ts" | "tsx" => "typescript",
+            "json" => "json",
+            "py" => "python",
+            "md" => "markdown",
+            "sh" => "bash",
+            "css" => "css",
+            "html" => "html",
+            "toml" => "toml",
+            _ => "plaintext",
+        };
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language(language)
+                .soft_wrap(false)
+                .default_value(draft.text.clone())
+        });
+        let edited = path.clone();
+        cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = editor.read(cx).text().to_string();
+                if let Some(draft) = this.file_drafts.get_mut(&edited) {
+                    draft.text = text.clone();
+                }
+                if let Viewer::Text {
+                    path,
+                    markdown: Some(markdown),
+                    ..
+                } = &mut this.viewer
+                {
+                    if path == &edited {
+                        *markdown = text.into();
+                    }
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        self.editors.insert(path, editor);
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        match &self.viewer {
+            Viewer::Text { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    }
+    fn selected_dirty(&self) -> bool {
+        self.selected_path()
+            .and_then(|path| self.file_drafts.get(&path))
+            .is_some_and(|draft| draft.text != draft.original)
+    }
+    fn save_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        let Some(draft) = self.file_drafts.get(&path).cloned() else {
+            return;
+        };
+        if draft.text == draft.original || !self.saving.insert(path.clone()) {
+            return;
+        }
+        self.file_error = None;
+        let target = path.clone();
+        let text = draft.text.clone();
+        let save = cx.background_executor().spawn(async move {
+            crate::workspace_files::save_file(&target, &draft.original, &draft.text)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = save.await;
+            let _ = this.update(cx, |this, cx| {
+                this.saving.remove(&path);
+                match result {
+                    Ok(()) => {
+                        if let Some(draft) = this.file_drafts.get_mut(&path) {
+                            draft.original = text;
+                        }
+                        this.file_error = None;
+                        this.refresh_changes(cx);
+                    }
+                    Err(error) => this.file_error = Some(format!("{}: {error}", path.display())),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn revert_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        if self.saving.contains(&path) {
+            return;
+        }
+        if let Some(draft) = self.file_drafts.get_mut(&path) {
+            draft.text = draft.original.clone();
+            if let Some(editor) = self.editors.get(&path) {
+                editor.update(cx, |editor, cx| {
+                    editor.set_value(draft.text.clone(), window, cx)
+                });
+            }
+            if let Viewer::Text {
+                markdown: Some(markdown),
+                ..
+            } = &mut self.viewer
+            {
+                *markdown = draft.text.clone().into();
+            }
+        }
+        self.file_error = None;
+        cx.notify();
+    }
+    fn reload_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        if self.selected_dirty() {
+            self.file_error =
+                Some("Unsaved edits are kept. Save or Revert them before reloading.".into());
+            cx.notify();
+            return;
+        }
+        self.editors.remove(&path);
+        self.file_drafts.remove(&path);
+        self.open_file(path, cx);
+    }
+    fn ask_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        let Some(editor) = self.editors.get(&path) else {
+            return;
+        };
+        let editor = editor.read(cx);
+        let text = editor.text().to_string();
+        let range = editor.selected_range();
+        let label = format!(
+            "File {}{}",
+            path.display(),
+            if self.selected_dirty() {
+                " (unsaved edits)"
+            } else {
+                ""
+            }
+        );
+        let context = crate::workspace_files::selected_context(&label, &text, range);
+        self.send_context(context, cx);
+    }
+    fn send_context(&mut self, context: String, cx: &mut Context<Self>) {
+        if context.len() > 64 * 1024 {
+            self.file_error =
+                Some("Select a smaller excerpt to add to chat (up to 64 KiB).".into());
+        } else {
+            cx.emit(ContextRequest(context));
+            self.file_error = None;
+        }
+        cx.notify();
+    }
+    fn new_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
+        self.terminal_active = self.terminal_tabs.len() - 1;
+        self.ensure_terminal(window, cx);
+        self.focus_terminal(window, cx);
+        cx.notify();
+    }
+    fn close_terminal_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.terminal_tabs.remove(index);
+        if let Some(terminal) = self.terminals.remove(&id) {
+            terminal.update(cx, |terminal, cx| terminal.close(cx));
+        }
+        if self.terminal_tabs.is_empty() {
+            self.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
+        }
+        self.terminal_active = if index < self.terminal_active {
+            self.terminal_active - 1
+        } else {
+            self.terminal_active
+        }
+        .min(self.terminal_tabs.len() - 1);
+        self.ensure_terminal(window, cx);
+        self.focus_terminal(window, cx);
+        cx.notify();
+    }
+    fn ask_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal) = self
+            .terminals
+            .get(&self.terminal_tabs[self.terminal_active])
+        else {
+            return;
+        };
+        let view = terminal.read(cx).terminal_view();
+        let text = view
+            .read(cx)
+            .session()
+            .with_term(|term| term.selection_to_string());
+        if let Some(text) = text.filter(|s| !s.is_empty()) {
+            self.send_context(
+                crate::workspace_files::selected_context(
+                    &format!("Terminal selection in {}", self.root.display()),
+                    &text,
+                    0..text.len(),
+                ),
+                cx,
+            );
+        } else {
+            self.file_error =
+                Some("Select terminal output first, then choose Ask about this.".into());
+            cx.notify();
+        }
+    }
+    fn render_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .h(zpx(28.))
+                    .flex_none()
+                    .px_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .id("terminal-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .children(self.terminal_tabs.iter().enumerate().map(|(index, id)| {
+                                let title = self
+                                    .terminals
+                                    .get(id)
+                                    .map(|terminal| terminal.read(cx).snapshot().title)
+                                    .filter(|title| !title.is_empty())
+                                    .unwrap_or_else(|| format!("Terminal {}", index + 1));
+                                h_flex()
+                                    .id(("terminal-tab", index))
+                                    .h(crate::icons::button_size())
+                                    .max_w(zpx(150.))
+                                    .px_2()
+                                    .gap_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(zpx(11.))
+                                    .when(index == self.terminal_active, |row| {
+                                        row.bg(rgba(0xffffff14))
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.terminal_active = index;
+                                        this.ensure_terminal(window, cx);
+                                        this.focus_terminal(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(div().truncate().child(title))
+                                    .child(
+                                        div()
+                                            .id(("close-terminal-tab", index))
+                                            .size(crate::icons::button_size())
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .role(gpui::Role::Button)
+                                            .aria_label("Close terminal tab")
+                                            .child(
+                                                crate::icons::icon(IconName::Close)
+                                                    .with_size(zpx(14.)),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.close_terminal_tab(index, window, cx);
+                                            })),
+                                    )
+                            })),
+                    )
+                    .child(
+                        action("new-terminal-tab", "+")
+                            .aria_label("New terminal tab")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.new_terminal_tab(window, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex().px_2().py_1().flex_none().child(
+                    action("ask-terminal", "Ask about this")
+                        .on_click(cx.listener(|this, _, _, cx| this.ask_terminal(cx))),
+                ),
+            )
+            .when_some(self.file_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .p_2()
+                        .text_size(zpx(11.))
+                        .whitespace_normal()
+                        .child(error),
+                )
+            })
+            .child(div().flex_1().min_h_0().child(self.terminal_body(cx)))
+            .into_any_element()
+    }
+
+    fn refresh_changes(&mut self, cx: &mut Context<Self>) {
+        if self.changes_loading {
+            return;
+        }
+        self.changes_loading = true;
+        self.change_request += 1;
+        let request = self.change_request;
+        let root = self.root.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { crate::workspace_files::changes(&root) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                if request != this.change_request {
+                    return;
+                }
+                this.changes_loading = false;
+                match result {
+                    Ok((root, files)) => {
+                        this.change_root = root;
+                        this.change_error = None;
+                        this.change_files = files;
+                        let selected = this
+                            .change_selected
+                            .clone()
+                            .filter(|path| this.change_files.iter().any(|file| &file.path == path))
+                            .or_else(|| this.change_files.first().map(|file| file.path.clone()));
+                        this.change_selected = selected.clone();
+                        if let Some(path) = selected {
+                            this.load_diff(path, cx);
+                        } else {
+                            this.diff_request += 1;
+                            this.change_text = None;
+                            this.change_editor = None;
+                        }
+                    }
+                    Err(error) => {
+                        this.change_error = Some(error);
+                        this.change_files.clear();
+                        this.change_selected = None;
+                        this.diff_request += 1;
+                        this.change_text = None;
+                        this.change_editor = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn load_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(file) = self
+            .change_files
+            .iter()
+            .find(|file| file.path == path)
+            .cloned()
+        else {
+            return;
+        };
+        self.diff_request += 1;
+        let request = self.diff_request;
+        self.change_selected = Some(path);
+        self.change_text = None;
+        self.change_editor = None;
+        let root = self.change_root.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { crate::workspace_files::diff(&root, &file) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.diff_request != request {
+                    return;
+                }
+                match result {
+                    Ok(text) => this.change_text = Some(text),
+                    Err(error) => this.change_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn render_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.change_editor.is_none()
+            && let Some(text) = &self.change_text
+        {
+            self.change_editor = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language("diff")
+                    .default_value(text.clone())
+            }));
+        }
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .flex_none()
+                    .child(
+                        action(
+                            "refresh-changes",
+                            if self.changes_loading {
+                                "Refreshing…"
+                            } else {
+                                "Refresh"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_changes(cx))),
+                    )
+                    .child(action("ask-diff", "Ask about this").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            if let (Some(editor), Some(path)) =
+                                (&this.change_editor, &this.change_selected)
+                            {
+                                let editor = editor.read(cx);
+                                let text = editor.text().to_string();
+                                let context = crate::workspace_files::selected_context(
+                                    &format!(
+                                        "Git diff for {}",
+                                        this.change_root.join(path).display()
+                                    ),
+                                    &text,
+                                    editor.selected_range(),
+                                );
+                                this.send_context(context, cx);
+                            }
+                        },
+                    )))
+                    .child(
+                        action("edit-changed-file", "Edit file").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(path) = &this.change_selected {
+                                    this.preview_file(this.change_root.join(path), cx);
+                                }
+                            },
+                        )),
+                    ),
+            )
+            .when_some(self.file_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .p_2()
+                        .whitespace_normal()
+                        .text_size(zpx(TEXT_SM))
+                        .child(error),
+                )
+            })
+            .when_some(self.change_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .p_3()
+                        .whitespace_normal()
+                        .text_size(zpx(TEXT_SM))
+                        .child(error),
+                )
+            })
+            .when(
+                self.change_files.is_empty() && self.change_error.is_none(),
+                |view| {
+                    view.child(
+                        div()
+                            .p_3()
+                            .text_size(zpx(TEXT_SM))
+                            .child(if self.changes_loading {
+                                "Loading changes…"
+                            } else {
+                                "Working tree clean"
+                            }),
+                    )
+                },
+            )
+            .child(
+                v_flex()
+                    .id("changed-files")
+                    .max_h(zpx(160.))
+                    .flex_none()
+                    .overflow_y_scroll()
+                    .children(self.change_files.iter().enumerate().map(|(index, file)| {
+                        let path = file.path.clone();
+                        h_flex()
+                            .id(("changed-file", index))
+                            .px_2()
+                            .py_1()
+                            .gap_2()
+                            .cursor_pointer()
+                            .text_size(zpx(TEXT_SM))
+                            .when(self.change_selected.as_ref() == Some(&path), |row| {
+                                row.bg(rgba(0xffffff14))
+                            })
+                            .child(div().text_color(rgb(0x90cba0)).child(file.status.clone()))
+                            .child(div().min_w_0().truncate().child(path.display().to_string()))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.load_diff(path.clone(), cx)),
+                            )
+                    })),
+            )
+            .when_some(self.change_editor.clone(), |view, editor| {
+                view.child(
+                    div().flex_1().min_h_0().child(
+                        Editor::new(&editor)
+                            .readonly(true)
+                            .h(relative(1.))
+                            .appearance(false)
+                            .bordered(false)
+                            .font_family(MONO)
+                            .text_size(zpx(TEXT_SM))
+                            .aria_label("Git diff"),
+                    ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn terminal_body(&self, cx: &App) -> AnyElement {
+        if let Some(terminal) = self
+            .terminals
+            .get(&self.terminal_tabs[self.terminal_active])
+        {
             return div()
                 .size_full()
                 .min_h_0()
@@ -1066,7 +1750,7 @@ impl RightPanel {
 }
 
 impl Render for RightPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if (!self.preview_visible
             || self.pane != Pane::Files
             || !matches!(self.viewer, Viewer::Document { .. }))
@@ -1081,9 +1765,10 @@ impl Render for RightPanel {
         }
         let show_hidden = self.show_hidden;
         let body = match self.pane {
-            Pane::Files => self.render_files(cx).into_any_element(),
+            Pane::Files => self.render_files(window, cx).into_any_element(),
             Pane::Terminal => self.render_terminal(cx),
             Pane::Browser => self.render_browser(cx),
+            Pane::Changes => self.render_changes(window, cx),
         };
         v_flex()
             .size_full()
@@ -1101,6 +1786,7 @@ impl Render for RightPanel {
                     .gap_0p5()
                     .items_center()
                     .child(self.tab("tab-files", "Files", Pane::Files, cx))
+                    .child(self.tab("tab-changes", "Changes", Pane::Changes, cx))
                     .child(self.tab("tab-terminal", "Terminal", Pane::Terminal, cx))
                     .child(self.tab("tab-browser", "Browser", Pane::Browser, cx))
                     .when(self.pane == Pane::Files, |row| {
@@ -1166,6 +1852,23 @@ impl Render for RightPanel {
     }
 }
 
+fn action(id: &'static str, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .px_1p5()
+        .h(zpx(24.))
+        .flex()
+        .items_center()
+        .flex_none()
+        .rounded_md()
+        .text_size(zpx(11.))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgba(0xffffff14)))
+        .child(label)
+}
+
 fn read_viewer(path: PathBuf) -> Viewer {
     if crate::document_preview::supports(&path) && path.is_file() {
         return Viewer::Document { path };
@@ -1178,29 +1881,17 @@ fn read_viewer(path: PathBuf) -> Viewer {
         Ok(_) => match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
-                    let lines: Vec<_> = text
-                        .lines()
-                        .take(MAX_FILE_LINES)
-                        .map(|line| line.replace('\t', "    "))
-                        .collect();
-                    let widest = lines
-                        .iter()
-                        .enumerate()
-                        .max_by_key(|(_, line)| line.chars().count())
-                        .map(|(ix, _)| ix)
-                        .unwrap_or(0);
                     let markdown = path
                         .extension()
                         .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| {
                             ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
                         })
-                        .then(|| SharedString::from(text));
+                        .then(|| SharedString::from(text.clone()));
                     Viewer::Text {
+                        source: text,
                         markdown,
                         path,
-                        lines: std::sync::Arc::new(lines),
-                        widest,
                     }
                 }
                 Err(_) => Viewer::Note {
@@ -1326,10 +2017,134 @@ mod tests {
         });
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
-            assert!(panel.file_scroll.0.borrow().base_handle.max_offset().y > px(1000.0));
+            assert!(panel.editors.contains_key(&path));
             assert_eq!(panel.snapshot(true).selected, Some(path.clone()));
         });
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[::gpui::test]
+    fn preparing_visible_changes_does_not_restart_completed_loads(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.pane = Pane::Changes;
+            panel.prepare_to_show(window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| panel.update(cx, |panel, cx| {
+            assert!(!panel.changes_loading);
+            let request = panel.change_request;
+            panel.prepare_to_show(window, cx);
+            panel.prepare_to_show(window, cx);
+            assert_eq!(panel.change_request, request);
+            assert!(!panel.changes_loading);
+        }));
+    }
+
+    #[::gpui::test]
+    fn terminal_tabs_keep_independent_shells_and_close_only_the_target(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (_panel, _cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.ensure_terminal(window, cx);
+            let first_id = panel.terminal_tabs[0].clone();
+            let first = panel.terminals[&first_id].clone();
+            panel.new_terminal_tab(window, cx);
+            let second_id = panel.terminal_tabs[1].clone();
+            let second = panel.terminals[&second_id].clone();
+            let first_view = first.read(cx).terminal_view();
+            let second_view = second.read(cx).terminal_view();
+            assert_ne!(
+                first_view.read(cx).session().pid(),
+                second_view.read(cx).session().pid()
+            );
+            let saved = panel.snapshot(true);
+            let restored: SavedPanel =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(
+                restored.terminal_tabs,
+                vec![first_id.clone(), second_id.clone()]
+            );
+            assert_eq!(restored.terminal_active, 1);
+            panel.close_terminal_tab(0, window, cx);
+            assert_eq!(
+                first.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Closed
+            );
+            assert_eq!(
+                second.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Running
+            );
+            assert_eq!(panel.terminal_tabs, vec![second_id]);
+            second.update(cx, |terminal, cx| terminal.close(cx));
+            panel
+        });
+    }
+
+    #[::gpui::test]
+    fn editing_persists_drafts_and_emits_selected_context(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, "original\n").unwrap();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.viewer = read_viewer(path.clone());
+            panel
+        });
+        cx.run_until_parked();
+        let context = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        cx.update(|window, cx| {
+            let captured = context.clone();
+            cx.subscribe(&panel, move |_, event: &ContextRequest, _| {
+                *captured.borrow_mut() = event.0.clone()
+            })
+            .detach();
+            let editor = panel.read(cx).editors[&path].clone();
+            editor.update(cx, |editor, cx| {
+                editor.replace_all("changed\nsecond\n", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            assert!(panel.selected_dirty());
+            assert_eq!(
+                panel.snapshot(true).file_drafts[&path].text,
+                "changed\nsecond\n"
+            );
+            panel.editors[&path].update(cx, |editor, cx| editor.set_selected_range(8..14, cx));
+            panel.ask_file(cx);
+        });
+        cx.run_until_parked();
+        assert!(context.borrow().contains("lines 2–2"));
+        assert!(context.borrow().contains("second"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                let saved: SavedPanel =
+                    serde_json::from_str(&serde_json::to_string(&panel.snapshot(true)).unwrap())
+                        .unwrap();
+                panel.restore(saved, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.editors[&path].read(cx).text().to_string(),
+                "changed\nsecond\n"
+            );
+            assert!(panel.selected_dirty());
+        });
+        panel.update(cx, |panel, cx| panel.save_selected(cx));
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed\nsecond\n");
+        panel.read_with(cx, |panel, _| assert!(!panel.selected_dirty()));
     }
 
     #[::gpui::test]
@@ -1369,44 +2184,25 @@ mod tests {
     fn long_file_has_bounded_scrollable_preview_on_both_axes(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.txt");
+        let source = ("long line ".repeat(40) + "\n").repeat(1000);
+        std::fs::write(&path, &source).unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
             let mut panel = RightPanel::new(dir.path().into(), window, cx);
-            panel.viewer = Viewer::Text {
-                path: dir.path().join("long.txt"),
-                lines: std::sync::Arc::new(vec!["long line ".repeat(100); 1000]),
-                widest: 0,
-                markdown: None,
-            };
+            panel.viewer = read_viewer(path.clone());
             panel
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _| {
-            let state = panel.file_scroll.0.borrow();
-            let max = state.base_handle.max_offset();
-            assert!(
-                max.x > px(100.0),
-                "long lines must scroll horizontally: {max:?}"
-            );
-            assert!(
-                max.y > px(1000.0),
-                "long files must scroll vertically: {max:?}"
-            );
-        });
         panel.update(cx, |panel, cx| {
-            panel
-                .file_scroll
-                .0
-                .borrow()
-                .base_handle
-                .set_offset(point(px(-120.0), px(-400.0)));
-            cx.notify();
+            panel.editors[&path].update(cx, |editor, cx| {
+                editor.set_scroll_offset(point(px(-120.), px(-400.)), cx)
+            });
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _| {
-            assert_eq!(
-                panel.file_scroll.0.borrow().base_handle.offset(),
-                point(px(-120.0), px(-400.0))
-            );
+        panel.read_with(cx, |panel, cx| {
+            let editor = panel.editors[&path].read(cx);
+            assert_eq!(editor.text().to_string(), source);
+            assert!(editor.scroll_offset().y < px(0.));
         });
     }
 

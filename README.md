@@ -558,14 +558,24 @@ No Codex, Claude, or third-party transcription API is used.
 
 ## Files, terminals, and browser
 
-The right sidebar has **Files**, **Terminal**, and **Browser** panes. The file tree loads
+The right sidebar has **Files**, **Changes**, **Terminal**, and **Browser** panes. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
 `target`/`node_modules` trees. Selection highlights fit the file label. The tree
 and preview have a draggable split. The file tree has no opaque edge overlays
 over its translucent background.
 
-The viewer is read-only. Text files show line numbers; Markdown supports
-**Markdown / Preview** modes. Text previews are capped at 512 KiB and 3,000 lines.
+Text files are editable with line numbers and syntax highlighting. Use **Save** or
+**Cmd-S** to save, **Revert** to discard edits, and **Reload** to read from disk.
+Unsaved drafts survive file switches and app restarts. Saving detects external
+changes and keeps your draft instead of overwriting them. Markdown supports
+**Markdown / Preview** modes. Text files are capped at 512 KiB.
+
+**Changes** lists staged, unstaged, and untracked Git changes, with selectable
+diffs, Refresh, and an Edit file shortcut. **Ask about this** adds selected file
+text, diff text, or terminal output to the composer without sending it. File
+and diff references include their paths and selection line ranges; with no
+selection, the file or diff is included up to 64 KiB.
+
 On macOS, PDFs render with PDFKit in a continuous vertical scroll without floating
 page-arrow controls. Word documents (`.doc`/`.docx`) render inside the sidebar using
 [Quick Look](https://developer.apple.com/documentation/quicklookui/qlpreviewview),
@@ -577,7 +587,9 @@ Expanded folders, selected file, dotfile preference, split height, and Markdown
 mode are saved per chat. Switching panes, opening Settings, or closing the sidebar
 hides native previews; closing the preview releases its document.
 
-Terminal content fills its pane without a title/status/Copy output header.
+Workspace terminals have independent tabs with plus and close controls, like the
+browser. Switching tabs keeps their shells running; closing a tab stops only its
+shell. Tab layout is saved per chat, with fresh shells created after restarting.
 
 The workspace terminal starts the shell selected by `$SHELL` as a login shell,
 falling back to `/bin/zsh`. Its terminal engine is `alacritty_terminal`, rendered

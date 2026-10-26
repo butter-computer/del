@@ -405,3 +405,11 @@ This records the final decisions, including corrections to earlier experiments.
   means the turn already ended, not a user-facing failure. Preserve all other
   interrupt errors. Live provider queue checks cover Claude, Codex, and OpenCode;
   verify ordered delivery, steering followed by queued work, and Stop/resume.
+
+- Sidebar file edits remain drafts until Save/Cmd-S. Preserve drafts across file
+  switches and restarts, detect external changes before saving, and preserve
+  symlinks and file permissions. Ask about this appends context without submitting
+  or replacing existing composer text. Changes is a read-only Git review pane.
+- Workspace terminal tabs own independent PTYs. Switching tabs keeps shells alive;
+  closing one tab must not terminate another. Restore tab layout with fresh shells,
+  never by replaying old commands.
