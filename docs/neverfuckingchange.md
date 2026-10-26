@@ -24,6 +24,7 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Four equally sized buttons, in order: Search, New session, Keep Mac awake,
   Memory usage. Search must not expand wider than the others.
+  Leave a small gap between the toolbar’s final button and the sidebar divider.
 - Cap control growth; empty space is fine. Do not stretch buttons to fill a wide sidebar.
 - Keep-awake uses a neutral hover-style background, never a yellow filled background.
 - While enabled, use the gold cup with subtle rising steam above it. Respect Reduce Motion.
@@ -34,7 +35,7 @@ This records the final decisions, including corrections to earlier experiments.
 ## Memory usage
 
 - The visible heading, tooltip, and accessibility label are **Memory usage**.
-- Open the popup to the right of the toolbar icon with a pointer on its left.
+- Anchor the memory popup below its toolbar button so it never overlaps the top tabs.
 - Keep it compact: about 240 logical pixels wide, at most four visible rows.
 - Sort loaded chat and terminal sessions by highest process RAM usage first.
 - Each single-line row contains the correct provider logo, a short fading title,
@@ -51,12 +52,18 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Sidebar ordering
 
+- Top-tab titles fade at their trailing edge instead of using ellipses. Use all
+  space up to the action slot; an absent unread dot must not reserve a gap.
+  Reclaim the close-button space when idle and not hovered. Preserve descenders
+  with enough line height, and use a smooth trailing fade.
+
 - Keep a visible theme-aware vertical divider between the workspace and each sidebar,
   including the right Files/Terminal panel. Preserve its resize target.
 
 - Pinned chats keep their pin order, oldest first. A new pin goes after existing
   pins; activity must not reorder them. Unpinning and pinning again appends it.
 - Sidebar rows support drag-reordering like top tabs, with live row movement.
+  Lock the preview horizontally inside the sidebar; use vertical movement for reordering.
   Hide the source row and its highlight while dragging; show only the floating preview.
   Neighbor rows use the top tabs’ 90 ms easing, with a dead zone to prevent jitter.
 - Top-tab and sidebar chat/terminal drags emit one native haptic tick when the
@@ -127,10 +134,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows with semantic SF icons.
 - Assistant replies show only an overlapping-rounded-squares Copy icon and measured
-  response duration beside it in a hover footer, with a 160 ms eased fade in and out.
+  local reply time in 24-hour **HH:MM** format beside it in a hover footer, with a 160 ms eased fade in and out.
   Do not add audio, feedback, or overflow icons to this footer.
-  Keep space reserved so hovering does not shift the transcript. Never invent timings
-  for historical messages without duration data; show a dash when unavailable.
+  Keep space reserved so hovering does not shift the transcript. Never show response duration here or invent timestamps
+  for historical messages without a recorded reply time; show a dash when unavailable.
 - Tool rows use muted text and inline disclosure arrows; omit shell launch wrappers from summaries.
   Merge matching successful edit/file events into one row, keep output/diffs in disclosure, and omit zero-count diff badges.
 - Keep tool input/output available through disclosure. Group consecutive tools immediately, including while running.

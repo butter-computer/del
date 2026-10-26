@@ -515,7 +515,7 @@ fn user_message(
         )
 }
 
-fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, elapsed: Option<u64>, hovered: Option<bool>, reduced: bool) -> impl IntoElement {
+fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, replied_at: Option<chrono::DateTime<chrono::Local>>, hovered: Option<bool>, reduced: bool) -> impl IntoElement {
     let style = TextViewStyle::default().heading_font_size(|level, _| {
         if level <= 2 {
             zpx(TEXT_LG)
@@ -566,11 +566,7 @@ fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextVi
                             }
                         }),
                 )
-                .child(match elapsed {
-                    Some(seconds) if seconds >= 60 => format!("{}m {}s", seconds / 60, seconds % 60),
-                    Some(seconds) => format!("{seconds}s"),
-                    None => "—".into(),
-                })
+                .child(replied_at.map(|time| time.format("%H:%M").to_string()).unwrap_or_else(|| "—".into()))
                 .with_animation(SharedString::from(format!("response-footer-{ix}-{hovered:?}")),
                     Animation::new(std::time::Duration::from_millis(160)).with_easing(ease_out_quint()),
                     move |footer, t| {

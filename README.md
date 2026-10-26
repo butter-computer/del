@@ -124,16 +124,18 @@ Drag sidebar rows to rearrange them, as with top tabs. Orders are saved across
 restarts. Dragging stays within chats or terminals and within the same pinned or
 unpinned group; it never pins, unpins, or replaces a row in another section.
 The source row hides while dragging; its floating preview retains the provider icon.
+Sidebar drag previews stay horizontally locked inside the sidebar.
 Neighboring rows slide with the top tabs’ easing and a small dead zone reduces jitter.
 Dragging top tabs or sidebar sessions into a new position emits a native haptic
 tick on supported macOS hardware; movement within the same slot stays silent.
 
 The sidebar starts with four equal-sized buttons: **Search**, **New session (+)**,
 **Keep Mac awake**, and **Memory usage**. Keep-awake uses a neutral hover-colored
-background and animated yellow steam while enabled.
+background and animated yellow steam while enabled. A small right inset keeps
+the last toolbar button clear of the sidebar divider.
 
-Memory usage opens a compact popover to the right of its button, with a pointer
-on the left. It lists loaded chats and terminals by process-tree RAM usage,
+Memory usage opens a compact popover below its button, clear of the top tabs, with a pointer
+on the top. It lists loaded chats and terminals by process-tree RAM usage,
 refreshing every three seconds while open. Each row shows a fading session title
 and its RAM usage; click the title to open the session. Delete and unload icons
 appear on hover with evenly padded click targets. Unload releases the live session
@@ -215,8 +217,8 @@ conversation. Unloading a running session also stops its current work.
 - A shimmering “Working for…” label sits beneath the latest user message and
   scrolls with it. There is no duplicate Working/Done indicator above the composer.
   Reduce Motion keeps the label static.
-- Hover an assistant reply to reveal Copy and its measured response duration.
-  Historical replies without timing data show a dash beside Copy. The overlapping-squares Copy icon and adjacent time fade
+- Hover an assistant reply to reveal Copy and its local reply time in 24-hour `HH:MM` format.
+  Historical replies without a recorded reply timestamp show a dash beside Copy. The overlapping-squares Copy icon and adjacent time fade
   in and out over 160 ms on hover, without shifting the transcript.
 - Local file links in replies open in Del’s file viewer; relative links resolve
   against the conversation’s project folder. Web links use the system browser.
@@ -579,6 +581,10 @@ Settings share that light surface. The shell opacity setting is fixed at 85%;
 light surfaces remain opaque to preserve their colors. Settings uses the same
 fade-and-slide entrance as search, with a strongly blurred and dimmed backdrop.
 **Escape**, Done, or clicking outside closes Settings and returns to the workspace.
+Top-tab titles use an edge fade instead of ellipses and fill the available space
+up to the action slot, including the close-button space while idle and not hovered.
+The text line preserves descenders; hidden unread markers do not reserve extra spacing.
+
 Hold Command to see numeric hints on the top tabs. There are no numeric sidebar
 session shortcuts.
 

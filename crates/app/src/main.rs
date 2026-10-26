@@ -134,10 +134,10 @@ fn tab_title(title: String) -> Div {
     div()
         .flex_1()
         .min_w_0()
-        .h(zpx(16.0))
-        .line_height(zpx(16.0))
-        .truncate()
-        .child(title)
+        .h(zpx(22.0))
+        .line_height(zpx(22.0))
+        .overflow_hidden()
+        .child(sidebar::fading_title(title))
 }
 
 /// The keyboard hint and hover close glyph share the reserved trailing slot.
@@ -1528,13 +1528,16 @@ impl AppShell {
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)
                                                                 .id(SharedString::from(format!("title-shimmer-{name}"))))
                                                     } else { tab_title(title).when(preview, |title| title.italic().opacity(0.65)) })
-                                                    .when_some(indicator_id.as_ref(), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
+                                                    .when_some(indicator_id.as_ref().filter(|id| { let (from, target, start) = self.state.read(cx).unread_motion(id); target > 0. || (from > 0. && start.is_some_and(|start| start.elapsed().as_millis() < 180)) }), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
                                                     .child(
                                                         div()
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
-                                                            .size(crate::icons::button_size())
+                                                            .h(crate::icons::button_size())
+                                                            .w(if shortcut_hint || indicator_id.as_ref().is_some_and(|id| self.state.read(cx).session_working(id)) { crate::icons::button_size() } else { zpx(0.) })
+                                                            .overflow_hidden()
+                                                            .group_hover(group.clone(), |slot| slot.w(crate::icons::button_size()))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()

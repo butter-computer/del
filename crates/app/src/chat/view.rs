@@ -109,7 +109,7 @@ pub struct ChatView {
     working_since: Option<std::time::Instant>,
     working_message: Option<usize>,
     pub(super) response_hover: std::collections::HashMap<usize, bool>,
-    pub(super) response_times: std::collections::HashMap<usize, u64>,
+    pub(super) response_times: std::collections::HashMap<usize, chrono::DateTime<chrono::Local>>,
     pub(super) expanded_activity: std::collections::HashSet<usize>,
     pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
@@ -272,11 +272,11 @@ impl ChatView {
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
         if let AgentEvent::TurnCompleted { turn_id, .. } = event {
             self.completed_turns += 1;
-            if !self.loading && let Some(started) = self.working_since
+            if !self.loading
                 && let Some(ix) = self.model.blocks.iter().rposition(|block|
                     matches!(block, Block::Assistant { turn_id: id, .. } if id == turn_id))
             {
-                self.response_times.insert(ix, started.elapsed().as_secs().max(1));
+                self.response_times.insert(ix, chrono::Local::now());
                 self.scroller.remeasure_items(ix..ix + 1);
             }
         }

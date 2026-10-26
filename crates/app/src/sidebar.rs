@@ -48,18 +48,21 @@ struct SidebarDrag {
     provider: Option<del_agent::Provider>,
     terminal: bool,
     pinned: bool,
+    start_pointer_x: Pixels,
 }
 
 impl Render for SidebarDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().h(zpx(ROW_HEIGHT)).w(zpx(SIDEBAR_WIDTH - 12.)).px_2()
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // Cancel horizontal pointer movement, retaining the original grab offset.
+        div().w(zpx(SIDEBAR_WIDTH - 12.)).h(zpx(ROW_HEIGHT)).child(
+        div().relative().left(self.start_pointer_x - window.mouse_position().x).h(zpx(ROW_HEIGHT)).w(zpx(SIDEBAR_WIDTH - 12.)).px_2()
             .flex().items_center().gap_1p5().rounded_md().bg(crate::appearance::popup_surface(0x262626))
             .text_size(zpx(TEXT_MD)).text_color(rgb(TEXT))
             .child(match self.provider {
                 Some(provider) => provider_logo(provider).into_any_element(),
                 None => crate::icons::path("icons/terminal.svg").text_color(rgba(MUTED)).into_any_element(),
             })
-            .child(div().truncate().child(self.title.clone()))
+            .child(div().truncate().child(self.title.clone())))
     }
 }
 
@@ -69,17 +72,19 @@ fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState
     let moving_state = state.clone();
     let state = state.clone();
     let starting_state = state.clone();
-    item.on_drag(drag, move |drag, _, _, cx| {
+    item.on_drag(drag, move |drag, _, window, cx| {
         starting_state.update(cx, |state, cx| {
             state.sidebar_drag.active = Some(drag.id.clone());
             state.sidebar_drag.shifts.clear();
             cx.notify();
         });
-        cx.new(|_| drag.clone())
+        let mut preview = drag.clone();
+        preview.start_pointer_x = window.mouse_position().x;
+        cx.new(|_| preview)
     })
         .on_drag_move(move |event: &DragMoveEvent<SidebarDrag>, _, cx| {
             let drag = event.drag(cx).clone();
-            if !event.bounds.contains(&event.event.position) || drag.id == moving_target.id
+            if event.event.position.y < event.bounds.top() || event.event.position.y > event.bounds.bottom() || drag.id == moving_target.id
                 || drag.terminal != moving_target.terminal || drag.pinned != moving_target.pinned { return; }
             let state = moving_state.read(cx);
             let ids: Vec<_> = if drag.terminal {
@@ -117,7 +122,7 @@ fn toolbar_tint(alpha: u8) -> Rgba {
 }
 
 fn toolbar_row() -> Div {
-    h_flex().w_full().min_w_0().gap(zpx(6.)).py(zpx(8.)).flex_none()
+    h_flex().w_full().min_w_0().gap(zpx(6.)).pr(zpx(6.)).py(zpx(8.)).flex_none()
 }
 
 fn toolbar_button(id: &'static str, cx: &App) -> Button {
@@ -172,7 +177,7 @@ pub(crate) fn fading_title(text: String) -> impl IntoElement {
                     (line, style)
                 },
                 |bounds, (line, style), window, cx| {
-                    let fade = zpx(18.).min(bounds.size.width);
+                    let fade = zpx(24.).min(bounds.size.width);
                     let overflow = line.width() > bounds.size.width;
                     let solid = if overflow {
                         bounds.size.width - fade
@@ -195,16 +200,16 @@ pub(crate) fn fading_title(text: String) -> impl IntoElement {
                         },
                     );
                     if overflow {
-                        for step in 0..18 {
-                            let start = solid + fade * (step as f32 / 18.);
-                            let end = solid + fade * ((step + 1) as f32 / 18.);
+                        for step in 0..48 {
+                            let start = solid + fade * (step as f32 / 48.);
+                            let end = solid + fade * ((step + 1) as f32 / 48.);
                             let clip = Bounds::new(
                                 point(bounds.left() + start, bounds.top()),
                                 size(end - start, bounds.size.height),
                             );
                             let decoration = DecorationRun {
                                 len: line.len() as u32,
-                                color: style.color.opacity(1. - (step as f32 + 0.5) / 18.),
+                                color: style.color.opacity(1. - (step as f32 + 0.5) / 48.),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -482,7 +487,7 @@ fn row_item(
         .child(provider_logo(row.provider));
 
     if !archived && !renaming {
-        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: Some(row.provider), terminal: false, pinned: row.pinned }, state);
+        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: Some(row.provider), terminal: false, pinned: row.pinned, start_pointer_x: Pixels::ZERO }, state);
     }
     item = if renaming {
         item.child(
@@ -760,7 +765,7 @@ pub fn render(
                         .trigger_style(toolbar_trigger_style())
                         .open(usage.read(cx).open)
                         .arrow(true)
-                        .anchor(Anchor::LeftCenter)
+                        .anchor(Anchor::TopLeft)
                         .on_open_change({
                             let usage = usage.clone();
                             move |open, _, cx| {
@@ -865,7 +870,7 @@ pub fn render(
                                     h_flex()
                                         .id(SharedString::from(format!("terminal-row-{}", id.0)))
                                         .when(!renaming, |item| draggable_row(item, SidebarDrag {
-                                            id: id.clone(), title: title.clone(), provider: row.provider, terminal: true, pinned,
+                                            id: id.clone(), title: title.clone(), provider: row.provider, terminal: true, pinned, start_pointer_x: Pixels::ZERO,
                                         }, &state))
                                         .relative()
                                         .group(group.clone())
