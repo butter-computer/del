@@ -17,7 +17,7 @@ impl EventEmitter<GoalSelected> for CommandMenu {}
 pub struct CommandMenu {
     input: Entity<TextareaState>,
     state: Entity<AppState>,
-    context: Option<(Provider, PathBuf)>,
+    context: Option<(Provider, Option<String>, PathBuf)>,
     commands: Vec<ComposerCommand>,
     chosen: Option<ComposerCommand>,
     matches: Vec<usize>,
@@ -156,7 +156,7 @@ impl CommandMenu {
             if this
                 .context
                 .as_ref()
-                .is_some_and(|context| context != &(provider, cwd))
+                .is_some_and(|context| context != &(provider, this.state.read(cx).selected_account(), cwd))
             {
                 this.context = None;
                 this.commands.clear();
@@ -191,7 +191,8 @@ impl CommandMenu {
         self.open = open;
         if self.open && self.context.is_none() {
             let (provider, _, cwd) = self.state.read(cx).effective();
-            self.context = Some((provider, cwd.clone()));
+            let account = self.state.read(cx).selected_account();
+            self.context = Some((provider, account.clone(), cwd.clone()));
             self.loading = true;
             self.error = None;
             self.generation += 1;
@@ -199,7 +200,7 @@ impl CommandMenu {
             let backend = self.state.read(cx).backend();
             let task = backend
                 .runtime
-                .spawn(async move { backend.manager.list_commands(provider, &cwd).await });
+                .spawn(async move { backend.manager.account_commands(provider, account.as_deref(), &cwd).await });
             cx.spawn(async move |this, cx| {
                 let result = task.await;
                 let _ = this.update(cx, |this, cx| {

@@ -37,6 +37,7 @@ mod mode_ui;
 mod model_picker;
 mod provider_updates;
 mod providers;
+mod accounts;
 mod readiness;
 mod right_panel;
 mod search_ui;
@@ -615,6 +616,7 @@ impl AppShell {
                 .records
                 .iter()
                 .map(|r| sessions::TerminalRow {
+                    account_id: r.launch.account_id.clone(),
                     id: r.id.clone(),
                     title: if r.title.trim().is_empty() {
                         r.launch.label()
@@ -1145,7 +1147,7 @@ impl AppShell {
                 provider,
                 cwd,
                 !st.is_draft(),
-                st.status_of(provider).is_some_and(providers::ready),
+                st.selected_account().is_some() || st.status_of(provider).is_some_and(providers::ready),
             )
         };
         let (shell, state_p, state_f) = (cx.entity(), self.state.clone(), self.state.clone());
@@ -1170,6 +1172,7 @@ impl AppShell {
             locked,
             running,
         )
+        .accounts(self.state.clone())
         .goal_mode(self.goal_modes.contains_key(&self.composer_owner(cx)))
         .on_cancel_goal(move |window, cx| {
             shell_goal.update(cx, |this, cx| this.cancel_goal_mode(window, cx))

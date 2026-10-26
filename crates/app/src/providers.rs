@@ -7,6 +7,9 @@
 
 use del_agent::{LoginState, Provider, ProviderStatus};
 
+/// Providers offered for new chats and account setup.
+pub const VISIBLE: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::OpenCode];
+
 /// Del starts the built-in agents with full access; ACP keeps its own policy.
 pub fn permission_mode(provider: Provider) -> del_agent::PermissionMode {
     match provider {
@@ -62,16 +65,6 @@ pub fn display_name(provider: Provider) -> &'static str {
     }
 }
 
-/// The command the user runs to sign in, shown in the panel.
-pub fn login_command(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Codex => "codex login",
-        Provider::Claude => "claude auth login",
-        Provider::OpenCode => "opencode auth login",
-        Provider::Acp => "Sign in with the selected agent’s CLI",
-    }
-}
-
 /// Installed ACP agents authenticate through their own CLI when launched.
 pub async fn detect_all() -> Vec<ProviderStatus> {
     let mut statuses = del_agent::detect_all().await;
@@ -100,24 +93,6 @@ pub async fn detect(provider: Provider) -> ProviderStatus {
         version: Some(warning.unwrap_or(names)),
         login: LoginState::Unknown,
     }
-}
-
-/// Open the CLI's official login in the user's terminal (macOS Terminal).
-/// The login flow, browser step and token storage are entirely the CLI's.
-pub fn launch_login(provider: Provider, path: &std::path::Path) -> std::io::Result<()> {
-    let command = format!(
-        "'{}' {}",
-        path.display(),
-        login_command(provider).split_once(' ').map_or("", |x| x.1)
-    );
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-        command.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn()
-        .map(|_| ())
 }
 
 #[cfg(test)]

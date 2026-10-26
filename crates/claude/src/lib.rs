@@ -14,3 +14,5 @@ mod titles;
 
 mod goals;
 pub mod history;
+
+pub use models::usage as account_usage;

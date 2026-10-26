@@ -75,8 +75,14 @@ enum Msg {
     /// A draft tab became a session: (draft key, session, first prompt).
     Started(u64, SessionId, String),
     StartFailed(u64, String),
+    AccountUsage(Provider, Option<String>, Option<f64>),
+    AccountUsageFinished,
+    AccountSwitched(SessionId, std::result::Result<(), String>),
+    AccountIdentity(Provider, Option<String>, String),
+    AccountChecked(String, std::result::Result<Option<String>, String>),
     Models(
         Provider,
+        Option<String>,
         PathBuf,
         std::result::Result<Vec<ModelInfo>, String>,
     ),
@@ -99,7 +105,13 @@ pub struct ModelCatalog {
 }
 
 pub struct AppState {
-    catalogs: HashMap<(Provider, PathBuf), ModelCatalog>,
+    catalogs: HashMap<(Provider, Option<String>, PathBuf), ModelCatalog>,
+    pub accounts: Vec<crate::accounts::Account>,
+    pub account_status: HashMap<String, String>,
+    pub default_identities: HashMap<Provider, String>,
+    pub account_usage: HashMap<(Provider, Option<String>), Option<f64>>,
+    usage_loading: bool,
+    draft_accounts: HashMap<u64, String>,
     rt: Arc<Runtime>,
     manager: SessionManager,
     tx: UnboundedSender<Msg>,
@@ -157,6 +169,7 @@ pub struct AppState {
     pub ghosts: Vec<Ghost>,
     /// A draft is being turned into a session; blocks a double send.
     starting: std::collections::HashSet<u64>,
+    switching_accounts: std::collections::HashSet<SessionId>,
 }
 
 impl AppState {
@@ -185,6 +198,28 @@ impl AppState {
                 SessionManager::new(&fallback, crate::backends()).expect("fallback session index")
             }
         };
+
+        let accounts = match crate::accounts::load() {
+            Ok(accounts) => accounts,
+            Err(e) => { error = Some(format!("Could not read accounts: {e}")); vec![] }
+        };
+        for account in &accounts { manager.register_account(account.id.clone(), account.backend()); }
+        let initial_account = accounts.iter().find(|a| a.provider == Provider::Claude && a.is_default).map(|a| a.id.clone());
+
+        let identity_accounts = accounts.clone();
+        let identity_tx = tx.clone();
+        rt.spawn(async move {
+            for provider in [Provider::Codex, Provider::Claude] {
+                let Ok(binary) = crate::accounts::login_binary(provider).await else { continue; };
+                if let Ok(Some(identity)) = crate::accounts::provider_identity(provider, None, &binary).await {
+                    let _ = identity_tx.send(Msg::AccountIdentity(provider, None, identity));
+                }
+                for account in identity_accounts.iter().filter(|a| a.provider == provider) {
+                    let result = crate::accounts::identity(account, &binary).await;
+                    let _ = identity_tx.send(Msg::AccountChecked(account.id.clone(), result));
+                }
+            }
+        });
 
         // Status changes anywhere refresh the sidebar.
         let mut events = manager.subscribe_all();
@@ -259,6 +294,12 @@ impl AppState {
         overrides.initialize_pins(&records);
         Self {
             catalogs: HashMap::new(),
+            accounts,
+            account_status: HashMap::new(),
+            default_identities: HashMap::new(),
+            account_usage: HashMap::new(),
+            usage_loading: false,
+            draft_accounts: initial_account.map(|id| HashMap::from([(0, id)])).unwrap_or_default(),
             rt,
             manager,
             tx,
@@ -308,6 +349,7 @@ impl AppState {
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
             starting: Default::default(),
+            switching_accounts: Default::default(),
             tabs: vec![Tab::Draft(0)],
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
@@ -345,8 +387,41 @@ impl AppState {
 
     fn apply(&mut self, msg: Msg, cx: &mut Context<Self>) {
         match msg {
-            Msg::Models(provider, cwd, result) => {
-                let catalog = self.catalogs.entry((provider, cwd)).or_default();
+            Msg::AccountSwitched(id, result) => {
+                self.switching_accounts.remove(&id);
+                self.records = self.manager.list_sessions();
+                if let Err(error) = result { self.error = Some(format!("Could not switch account: {error}")); }
+                self.load_models(true, cx);
+            }
+            Msg::AccountUsage(provider, id, usage) => { self.account_usage.insert((provider, id), usage); }
+            Msg::AccountUsageFinished => { self.usage_loading = false; }
+            Msg::AccountIdentity(provider, id, identity) => {
+                if let Some(id) = id {
+                    if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) { account.identity = Some(identity); }
+                    if let Err(e) = crate::accounts::save(&self.accounts) { self.error = Some(format!("Could not save account: {e}")); }
+                } else { self.default_identities.insert(provider, identity); }
+            }
+            Msg::AccountChecked(id, result) => {
+                match result {
+                    Ok(identity) => {
+                        if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
+                            if let Some(identity) = identity { account.identity = Some(identity); }
+                            account.requires_login = false;
+                        }
+                        self.catalogs.retain(|(_, account, _), _| account.as_ref() != Some(&id));
+                        self.account_status.insert(id, "Connected".into());
+                        self.refresh_account_usage(cx);
+                        if let Err(e) = crate::accounts::save(&self.accounts) { self.error = Some(format!("Could not save account: {e}")); }
+                    }
+                    Err(error) => {
+                        if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) { account.requires_login = true; }
+                        self.account_status.insert(id, error);
+                        if !cfg!(test) { let _ = crate::accounts::save(&self.accounts); }
+                    }
+                }
+            }
+            Msg::Models(provider, account, cwd, result) => {
+                let catalog = self.catalogs.entry((provider, account, cwd)).or_default();
                 catalog.loading = false;
                 catalog.loaded = true;
                 match result {
@@ -386,12 +461,10 @@ impl AppState {
                 if self.signin == Some(provider) {
                     self.signin = None;
                 }
+                self.refresh_account_usage(cx);
             }
             Msg::Checked(status) => {
                 self.checking.remove(&status.provider);
-                if self.signin == Some(status.provider) && providers::ready(&status) {
-                    self.signin = None;
-                }
                 if let Some(old) = self
                     .providers
                     .iter_mut()
@@ -405,7 +478,8 @@ impl AppState {
             Msg::Statuses(list) => {
                 // Default the draft to a usable provider once we know.
                 if let Some(ready) = list.iter().find(|s| providers::ready(s)) {
-                    for draft in self.drafts.values_mut() {
+                    for (key, draft) in self.drafts.iter_mut() {
+                        if self.draft_accounts.contains_key(key) { continue; }
                         let draft_ready = list
                             .iter()
                             .any(|s| s.provider == draft.provider && providers::ready(s));
@@ -417,11 +491,6 @@ impl AppState {
                             draft.service_tier = None;
                         }
                     }
-                }
-                if let Some(p) = self.signin
-                    && list.iter().any(|s| s.provider == p && providers::ready(s))
-                {
-                    self.signin = None;
                 }
                 self.providers = list;
             }
@@ -488,7 +557,7 @@ impl AppState {
         });
         // Wait for provider discovery/sign-in; never open an authentication UI
         // or prepare a chat for a terminal tab.
-        let config = config.filter(|c| self.status_of(c.provider).is_some_and(providers::ready));
+        let config = config.filter(|c| self.selected_account().is_none() && self.status_of(c.provider).is_some_and(providers::ready));
         readiness.set_config(config);
     }
 
@@ -859,14 +928,15 @@ impl AppState {
     pub fn model_catalog(&self) -> ModelCatalog {
         let (provider, _, cwd) = self.effective();
         self.catalogs
-            .get(&(provider, cwd))
+            .get(&(provider, self.selected_account(), cwd))
             .cloned()
             .unwrap_or_default()
     }
 
     pub fn load_models(&mut self, refresh: bool, cx: &mut Context<Self>) {
         let (provider, _, cwd) = self.effective();
-        let catalog = self.catalogs.entry((provider, cwd.clone())).or_default();
+        let account = self.selected_account();
+        let catalog = self.catalogs.entry((provider, account.clone(), cwd.clone())).or_default();
         if catalog.loading || (catalog.loaded && !refresh) {
             return;
         }
@@ -876,12 +946,12 @@ impl AppState {
         self.rt.spawn(async move {
             let result = async {
                 manager
-                    .list_models(provider, &cwd)
+                    .account_models(provider, account.as_deref(), &cwd)
                     .await
                     .map_err(|e| e.to_string())
             }
             .await;
-            let _ = tx.send(Msg::Models(provider, cwd, result));
+            let _ = tx.send(Msg::Models(provider, account, cwd, result));
         });
         cx.notify();
     }
@@ -990,6 +1060,7 @@ impl AppState {
     /// Whether the open draft is being turned into a session.
     pub fn is_starting(&self) -> bool {
         matches!(self.selection, Selection::Draft(k) if self.starting.contains(&k))
+            || matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id))
     }
 
     /// Open an independent draft, inheriting the current provider settings.
@@ -997,7 +1068,9 @@ impl AppState {
         let (provider, model, cwd) = self.effective();
         let effort = self.effort();
         let tier = self.service_tier();
+        let account = self.default_account(provider).map(str::to_owned);
         self.open_draft(provider, model, cwd, cx);
+        if let (Selection::Draft(key), Some(account)) = (&self.selection, account) { self.draft_accounts.insert(*key, account); }
         if let Some(draft) = self.draft_mut() {
             draft.reasoning_effort = effort;
             draft.service_tier = tier;
@@ -1024,6 +1097,7 @@ impl AppState {
                 permission_mode: providers::permission_mode(provider),
             },
         );
+        if let Some(account) = self.default_account(provider).map(str::to_owned) { self.draft_accounts.insert(key, account); }
         self.new_uid(Tab::Draft(key));
         self.tabs.push(Tab::Draft(key));
         self.selection = Selection::Draft(key);
@@ -1220,6 +1294,7 @@ impl AppState {
     }
 
     pub fn send_input(&mut self, input: UserInput, cx: &mut Context<Self>) {
+        if matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id)) { return; }
         let text = input.text.clone();
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
@@ -1240,9 +1315,10 @@ impl AppState {
                         error: None,
                     },
                 );
+                let account = self.draft_accounts.get(&key).cloned();
                 self.rt.spawn(async move {
                     let result = async {
-                        let handle = manager.start_session(config).await?;
+                        let handle = manager.start_account_session(config, account).await?;
                         let submitted = std::time::Instant::now();
                         manager.send_prompt(&handle.id, input.clone()).await?;
                         eprintln!(
@@ -1454,7 +1530,238 @@ impl AppState {
         matches!(self.selection, Selection::Draft(_))
     }
 
+    pub fn session_account(&self, id: &SessionId) -> Option<crate::accounts::Account> {
+        let record = self.records.iter().find(|r| &r.id == id)?;
+        crate::accounts::for_record(record)
+    }
+
+    pub fn selected_account(&self) -> Option<String> {
+        match &self.selection {
+            Selection::Draft(key) => self.draft_accounts.get(key).cloned(),
+            Selection::Session(id) => self.records.iter().find(|r| &r.id == id).and_then(|r| r.account_id.clone()),
+            Selection::Terminal(id) => self.terminal_rows.iter().find(|r| &r.id == id).and_then(|r| r.account_id.clone()),
+        }
+    }
+
+    pub fn select_default_account(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        let account = self.default_account(provider).map(str::to_owned);
+        self.select_account(provider, account, cx);
+    }
+
+    pub fn select_account(&mut self, provider: Provider, account: Option<String>, cx: &mut Context<Self>) {
+        if self.is_starting() { return; }
+        if account.as_ref().is_some_and(|id| !self.accounts.iter().any(|a| &a.id == id && a.provider == provider)) { return; }
+        if account.as_ref().is_some_and(|id| self.account_status.get(id).is_some_and(|status| status == "Waiting for sign-in…")) {
+            self.error = Some("Finish signing in before selecting this account.".into()); cx.notify(); return;
+        }
+        if self.effective().0 == provider && self.selected_account() == account { return; }
+        if let Selection::Session(id) = self.selection.clone() {
+            if self.effective().0 == provider {
+                if matches!(self.manager.status(&id), Some(SessionStatus::Running | SessionStatus::WaitingApproval)) {
+                    self.error = Some("Wait for the response to finish before switching accounts.".into()); cx.notify(); return;
+                }
+                let target = account.as_ref().and_then(|id| self.accounts.iter().find(|a| &a.id == id)).cloned();
+                self.switching_accounts.insert(id.clone());
+                let (manager, tx) = (self.manager.clone(), self.tx.clone());
+                self.rt.spawn(async move {
+                    let result = manager.switch_account(&id, account, |record| crate::accounts::transfer_conversation(record, target)).await;
+                    let _ = tx.send(Msg::AccountSwitched(id, result.map_err(|e| e.to_string())));
+                });
+                cx.notify(); return;
+            }
+        }
+        if !self.is_draft() { self.fork_with(provider, None, cx); }
+        self.set_provider(provider, cx);
+        if let Selection::Draft(key) = self.selection {
+            self.draft_accounts.remove(&key);
+            if let Some(account) = account { self.draft_accounts.insert(key, account); }
+        }
+        if let Some(draft) = self.draft_mut() { draft.model = None; draft.reasoning_effort = None; draft.service_tier = None; }
+        self.load_models(false, cx);
+        cx.notify();
+    }
+
+    pub fn visible_accounts(&self, provider: Provider) -> Vec<&crate::accounts::Account> {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(identity) = self.default_identities.get(&provider).and_then(|s| crate::accounts::identity_key(s)) {
+            seen.insert(identity);
+        }
+        self.accounts.iter().filter(|account| account.provider == provider)
+            .filter(|account| account.identity.as_deref().and_then(crate::accounts::identity_key)
+                .is_none_or(|identity| seen.insert(identity))).collect()
+    }
+
+    pub fn account_usage_remaining(&self, provider: Provider, id: Option<&str>) -> Option<f64> {
+        self.account_usage.get(&(provider, id.map(str::to_owned))).copied().flatten()
+    }
+
+    pub fn account_is_selected(&self, provider: Provider, candidate: Option<&str>) -> bool {
+        if self.effective().0 != provider { return false; }
+        let selected = self.selected_account();
+        if selected.as_deref() == candidate { return true; }
+        let identity = |id: Option<&str>| {
+            let value = match id {
+                Some(id) => self.accounts.iter().find(|a| a.id == id && a.provider == provider).and_then(|a| a.identity.as_deref()),
+                None => self.default_identities.get(&provider).map(String::as_str),
+            };
+            value.and_then(crate::accounts::identity_key)
+        };
+        identity(selected.as_deref()).is_some_and(|key| identity(candidate).as_ref() == Some(&key))
+    }
+
+    fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
+        if self.usage_loading || cfg!(test) { return; }
+        self.usage_loading = true;
+        let accounts = [Provider::Codex, Provider::Claude].into_iter()
+            .map(|provider| (provider, self.visible_accounts(provider).into_iter().cloned().collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            for (provider, accounts) in accounts {
+                let usage = crate::accounts::remaining_usage(provider, None).await;
+                let _ = tx.send(Msg::AccountUsage(provider, None, usage));
+                for account in accounts {
+                    let usage = crate::accounts::remaining_usage(provider, Some(&account)).await;
+                    let _ = tx.send(Msg::AccountUsage(provider, Some(account.id), usage));
+                }
+            }
+            let _ = tx.send(Msg::AccountUsageFinished);
+        });
+        cx.notify();
+    }
+
+    pub fn default_account(&self, provider: Provider) -> Option<&str> {
+        self.accounts.iter().find(|a| a.provider == provider && a.is_default).map(|a| a.id.as_str())
+    }
+
+    pub fn account_needs_login(&self, id: &str) -> bool {
+        self.account_status.get(id).map(|status| status != "Connected" && status != "Waiting for sign-in…")
+            .unwrap_or_else(|| self.accounts.iter().find(|a| a.id == id).is_some_and(|a| a.requires_login))
+    }
+
+    pub fn make_default_account(&mut self, provider: Provider, id: Option<String>, cx: &mut Context<Self>) {
+        if self.account_login_pending(provider) { return; }
+        if id.as_ref().is_some_and(|id| self.account_needs_login(id) || !self.accounts.iter().any(|a| &a.id == id && a.provider == provider)) { return; }
+        let mut accounts = self.accounts.clone();
+        for account in accounts.iter_mut().filter(|a| a.provider == provider) { account.is_default = id.as_ref() == Some(&account.id); }
+        if !cfg!(test) && let Err(error) = crate::accounts::save(&accounts) {
+            self.error = Some(format!("Could not save default account: {error}"));
+        } else { self.accounts = accounts; }
+        cx.notify();
+    }
+
+    pub fn delete_account(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else { return; };
+        if self.account_login_pending(account.provider) { return; }
+        if !self.switching_accounts.is_empty() || self.starting.iter().any(|key| self.draft_accounts.get(key).is_some_and(|account| account == id)) {
+            self.error = Some("Wait for account switching or chat startup to finish before deleting an account.".into()); cx.notify(); return;
+        }
+        if self.manager.list_sessions().iter().any(|r| r.account_id.as_deref() == Some(id))
+            || self.terminal_rows.iter().any(|r| r.account_id.as_deref() == Some(id)) {
+            self.error = Some("This account is used by existing chats. Switch those chats to another account before deleting it.".into());
+            cx.notify(); return;
+        }
+        let accounts: Vec<_> = self.accounts.iter().filter(|a| a.id != id).cloned().collect();
+        let result = (|| -> std::io::Result<()> {
+            if cfg!(test) { return Ok(()); }
+            let source = account.root();
+            let destination = del_agent::data_dir().unwrap().join("removed-accounts").join(format!("{}-{}", id, uuid::Uuid::new_v4()));
+            let moved = source.exists();
+            if moved { std::fs::create_dir_all(destination.parent().unwrap())?; std::fs::rename(&source, &destination)?; }
+            if let Err(error) = crate::accounts::save(&accounts) {
+                if moved { let _ = std::fs::rename(destination, source); }
+                return Err(error);
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.accounts = accounts;
+                self.draft_accounts.retain(|_, account| account != id);
+                self.account_status.remove(id);
+                self.account_usage.retain(|(_, account_id), _| account_id.as_deref() != Some(id));
+                self.catalogs.retain(|(_, account, _), _| account.as_deref() != Some(id));
+                if let Some(backend) = self.manager.unregister_account(account.provider, id) {
+                    self.rt.spawn(async move { let _ = backend.shutdown().await; });
+                }
+            }
+            Err(error) => self.error = Some(format!("Could not delete account: {error}")),
+        }
+        cx.notify();
+    }
+
+    pub fn default_account_label(&self, provider: Provider) -> String {
+        if provider == Provider::OpenCode { return "System".into(); }
+        self.default_identities.get(&provider).map(|identity| crate::accounts::display_identity(identity)).unwrap_or_else(|| "Account 1".into())
+    }
+
+    pub fn account_login_pending(&self, provider: Provider) -> bool {
+        self.signin == Some(provider) || self.accounts.iter().any(|a| a.provider == provider
+            && self.account_status.get(&a.id).is_some_and(|status| status == "Waiting for sign-in…"))
+    }
+
+    pub fn add_account(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if self.account_login_pending(provider) { return; }
+        if provider == Provider::Acp { return; }
+        match crate::accounts::create(provider, &self.accounts) {
+            Ok(account) => {
+                let id = account.id.clone();
+                self.accounts.push(account.clone());
+                if let Err(e) = crate::accounts::save(&self.accounts) {
+                    self.accounts.pop(); self.error = Some(format!("Could not save account: {e}"));
+                } else {
+                    self.manager.register_account(id.clone(), account.backend());
+                    self.login_account(&id, cx);
+                }
+            }
+            Err(e) => self.error = Some(format!("Could not add account: {e}")),
+        }
+        cx.notify();
+    }
+
+    pub fn login_account(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.account_status.get(id).is_some_and(|status| status == "Waiting for sign-in…") { return; }
+        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else { return; };
+        if self.account_login_pending(account.provider) { return; }
+        self.account_status.insert(id.to_owned(), "Waiting for sign-in…".into());
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let binary = match crate::accounts::login_binary(account.provider).await {
+                Ok(binary) => binary,
+                Err(error) => { let _ = tx.send(Msg::AccountChecked(account.id, Err(error))); return; }
+            };
+            let login_account = account.clone();
+            let login_binary = binary.clone();
+            let marker = match tokio::task::spawn_blocking(move || crate::accounts::launch_login(&login_account, &login_binary)).await {
+                Ok(Ok(marker)) => marker,
+                result => { let _ = tx.send(Msg::AccountChecked(account.id, Err(format!("Could not open sign-in: {result:?}")))); return; }
+            };
+            for _ in 0..100 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
+                if status.is_empty() { continue; }
+                if status.trim() != "0" {
+                    let _ = std::fs::remove_file(&marker);
+                    let _ = tx.send(Msg::AccountChecked(account.id, Err("Sign-in failed or was cancelled. Check Terminal, then try Sign in again.".into()))); return;
+                }
+                if let Ok(identity) = crate::accounts::identity(&account, &binary).await {
+                    let close_marker = marker.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::accounts::close_login_terminal(&close_marker)).await;
+                    let _ = std::fs::remove_file(&marker);
+                    let _ = tx.send(Msg::AccountChecked(account.id, Ok(identity))); return;
+                }
+            }
+            let _ = std::fs::remove_file(&marker);
+            let _ = tx.send(Msg::AccountChecked(account.id, Err("Sign-in not confirmed. Try reconnecting.".into())));
+        });
+        cx.notify();
+    }
+
     pub fn set_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if self.effective().0 != provider && let Selection::Draft(key) = self.selection {
+            self.draft_accounts.remove(&key);
+            if let Some(account) = self.default_account(provider).map(str::to_owned) { self.draft_accounts.insert(key, account); }
+        }
         if let Some(d) = self.draft_mut() {
             if d.provider != provider {
                 d.provider = provider;
@@ -1577,6 +1884,7 @@ impl AppState {
     }
 
     pub fn recheck_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        if matches!(provider, Provider::Codex | Provider::Claude) { self.refresh_account_usage(cx); }
         if !self.checking.insert(provider) {
             return;
         }
@@ -1590,31 +1898,34 @@ impl AppState {
     /// Run the CLI's own login in the user's terminal, then poll its status
     /// command until it reports signed in (or five minutes pass).
     pub fn sign_in(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        if self.signin.is_some() {
-            return;
-        }
-        let Some(path) = self.status_of(provider).and_then(|s| s.path.clone()) else {
-            return;
-        };
-        if let Err(e) = providers::launch_login(provider, &path) {
-            self.error = Some(format!("Could not open Terminal: {e}"));
-            cx.notify();
+        if self.signin.is_some() || self.account_login_pending(provider) {
             return;
         }
         self.signin = Some(provider);
         let tx = self.tx.clone();
         self.rt.spawn(async move {
-            for _ in 0..100 {
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                let all = providers::detect_all().await;
-                let done = all
-                    .iter()
-                    .any(|s| s.provider == provider && s.login == LoginState::LoggedIn);
-                let _ = tx.send(Msg::Statuses(all));
-                if done {
-                    return;
+            let result = async {
+                let binary = crate::accounts::login_binary(provider).await?;
+                let launch_binary = binary.clone();
+                let marker = tokio::task::spawn_blocking(move || crate::accounts::launch_provider_login(provider, None, &launch_binary))
+                    .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+                for _ in 0..100 {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
+                    if status.is_empty() { continue; }
+                    if status.trim() != "0" { return Err("Sign-in cancelled or failed. Try Sign in again.".to_string()); }
+                    let closing = marker.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::accounts::close_login_terminal(&closing)).await;
+                    let _ = std::fs::remove_file(&marker);
+                    if let Ok(Some(identity)) = crate::accounts::provider_identity(provider, None, &binary).await {
+                        let _ = tx.send(Msg::AccountIdentity(provider, None, identity));
+                    }
+                    let _ = tx.send(Msg::Checked(providers::detect(provider).await));
+                    return Ok(());
                 }
-            }
+                Err("Sign-in timed out. Try Sign in again.".into())
+            }.await;
+            if let Err(error) = result { let _ = tx.send(Msg::Error(error)); }
             let _ = tx.send(Msg::SigninFinished(provider));
         });
         cx.notify();
@@ -1695,6 +2006,12 @@ mod tests {
         let (tx, _rx) = unbounded_channel();
         cx.new(|_| AppState {
             catalogs: HashMap::new(),
+            accounts: Vec::new(),
+            account_status: HashMap::new(),
+            default_identities: HashMap::new(),
+            account_usage: HashMap::new(),
+            usage_loading: false,
+            draft_accounts: HashMap::new(),
             rt: Arc::new(
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1756,6 +2073,7 @@ mod tests {
             next_uid: 1,
             ghosts: vec![],
             starting: Default::default(),
+            switching_accounts: Default::default(),
         })
     }
 
@@ -1933,6 +2251,7 @@ mod tests {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let mut row = crate::sessions::TerminalRow {
+                account_id: None,
                 id: del_agent::SessionId::new("terminal-a"),
                 title: "Task".into(),
                 cwd: "/tmp".into(),
@@ -1979,6 +2298,7 @@ mod tests {
             s.terminal_started(
                 Some(key),
                 TerminalRow {
+                    account_id: None,
                     id: id.clone(),
                     title: "Codex".into(),
                     cwd: config.cwd,
@@ -2055,6 +2375,110 @@ mod tests {
         });
     }
     #[gpui::test]
+    fn account_lists_deduplicate_full_identity_without_losing_profiles(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, _| {
+            s.default_identities.insert(Provider::Codex, "user@gmail.com".into());
+            for (i, identity) in ["USER@gmail.com", "other@gmail.com", "other@gmail.com", "user@work.com", "API key", "API key"].into_iter().enumerate() {
+                s.accounts.push(crate::accounts::Account { id: i.to_string(), provider: Provider::Codex, number: i + 2, identity: Some(identity.into()), is_default: false, requires_login: false });
+            }
+            assert_eq!(s.visible_accounts(Provider::Codex).iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["1", "3", "4", "5"]);
+            assert_eq!(s.accounts.len(), 6); // Existing chats retain their credential profiles.
+            assert!(s.visible_accounts(Provider::Claude).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn adding_accounts_waits_for_login_to_finish(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let provider = s.effective().0;
+            let id = uuid::Uuid::new_v4().to_string();
+            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 2, identity: None, is_default: false, requires_login: false });
+            s.account_status.insert(id.clone(), "Waiting for sign-in…".into());
+            assert!(s.account_login_pending(provider));
+            s.add_account(provider, cx);
+            assert_eq!(s.accounts.len(), 1);
+            s.login_account(&id, cx);
+            assert_eq!(s.accounts.len(), 1);
+            s.account_status.insert(id, "Sign-in cancelled".into());
+            assert!(!s.account_login_pending(provider));
+            assert_eq!(s.default_account_label(provider), "Account 1");
+            s.default_identities.insert(provider, "user@example.com".into());
+            assert_eq!(s.default_account_label(provider), "user");
+        });
+    }
+
+    #[gpui::test]
+    fn account_default_and_delete_actions_preserve_other_choices(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let provider = s.effective().0;
+            let id = uuid::Uuid::new_v4().to_string();
+            let account = crate::accounts::Account { id: id.clone(), provider, number: 2, identity: Some("user@example.com".into()), is_default: false, requires_login: false };
+            s.accounts.push(account);
+            assert!(!s.account_needs_login(&id));
+            s.make_default_account(provider, Some(id.clone()), cx);
+            let saved = serde_json::to_vec(&s.accounts).unwrap();
+            let restored: Vec<crate::accounts::Account> = serde_json::from_slice(&saved).unwrap();
+            assert!(restored[0].is_default);
+            s.new_session(cx);
+            assert_eq!(s.selected_account().as_deref(), Some(id.as_str()));
+            s.account_status.insert(id.clone(), "Authentication expired".into());
+            assert!(s.account_needs_login(&id));
+            s.delete_account(&id, cx);
+            assert!(s.accounts.is_empty());
+            assert_eq!(s.default_account(provider), None);
+            assert_eq!(s.selected_account(), None);
+        });
+    }
+
+    #[gpui::test]
+    fn provider_click_selects_only_its_default_account(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let provider = s.effective().0;
+            let id = uuid::Uuid::new_v4().to_string();
+            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 2, identity: None, is_default: true, requires_login: false });
+            s.select_default_account(provider, cx);
+            assert_eq!(s.selected_account().as_deref(), Some(id.as_str()));
+            assert!(s.account_is_selected(provider, Some(&id)));
+            assert!(!s.account_is_selected(provider, None));
+            s.select_account(provider, None, cx);
+            assert!(s.account_is_selected(provider, None));
+            s.select_default_account(provider, cx);
+            assert!(s.account_is_selected(provider, Some(&id)));
+            assert_eq!(s.default_account_label(del_agent::Provider::OpenCode), "System");
+        });
+    }
+
+    #[gpui::test]
+    fn account_choices_isolate_models_and_allow_terminal_mode(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let provider = s.effective().0;
+            let id = uuid::Uuid::new_v4().to_string();
+            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 1, identity: None, is_default: false, requires_login: false });
+            s.select_account(provider, Some(id.clone()), cx);
+            assert_eq!(s.selected_account(), Some(id.clone()));
+            assert!(s.account_is_selected(provider, Some(&id)));
+            assert!(!s.account_is_selected(provider, None));
+            let cwd = s.effective().2;
+            s.apply(super::Msg::Models(provider, Some(id.clone()), cwd, Ok(vec![])), cx);
+            assert!(s.model_catalog().loaded);
+            s.set_mode(del_mcp::SessionMode::Terminal, cx);
+            assert_eq!(s.mode(), del_mcp::SessionMode::Terminal);
+            s.make_default_account(provider, Some(id.clone()), cx);
+            s.new_session(cx);
+            assert_eq!(s.selected_account(), Some(id));
+            s.select_account(provider, None, cx);
+            assert_eq!(s.selected_account(), None);
+            assert!(s.account_is_selected(provider, None));
+            assert!(!s.model_catalog().loaded);
+        });
+    }
+
+    #[gpui::test]
     fn model_choices_validate_and_reset_effort(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
@@ -2062,6 +2486,7 @@ mod tests {
             s.apply(
                 super::Msg::Models(
                     provider,
+                    None,
                     cwd,
                     Ok(vec![del_agent::ModelInfo {
                         id: "model-a".into(),
@@ -2132,6 +2557,7 @@ mod tests {
             s.apply(
                 super::Msg::Models(
                     config.provider,
+                    None,
                     config.cwd,
                     Ok(vec![del_agent::ModelInfo {
                         id: "model-a".into(),
@@ -2243,6 +2669,7 @@ mod tests {
         state.update(cx, |s, cx| {
             let id = del_agent::SessionId::new("unload-terminal");
             s.terminal_rows.push(crate::sessions::TerminalRow {
+                account_id: None,
                 id: id.clone(),
                 title: "Saved conversation".into(),
                 cwd: "/tmp".into(),
@@ -2274,6 +2701,7 @@ mod tests {
         state.update(cx, |s, cx| {
             for name in ["a", "b", "c", "d"] {
                 s.terminal_rows.push(crate::sessions::TerminalRow {
+                    account_id: None,
                     id: SessionId::new(name), title: name.into(), cwd: "/tmp".into(),
                     provider: None, active: false, summary: String::new(), pinned: false,
                 });
@@ -2310,6 +2738,7 @@ mod tests {
             let second = del_agent::SessionId::new("second-terminal");
             for id in [&first, &second] {
                 s.terminal_rows.push(crate::sessions::TerminalRow {
+                    account_id: None,
                     id: id.clone(),
                     title: "Shell".into(),
                     cwd: "/tmp".into(),
@@ -2337,6 +2766,7 @@ mod tests {
         state.update(cx, |s, cx| {
             let id = del_agent::SessionId::new("terminal-menu-test");
             s.terminal_rows.push(crate::sessions::TerminalRow {
+                account_id: None,
                 id: id.clone(),
                 title: "Provider title".into(),
                 cwd: "/tmp".into(),

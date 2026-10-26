@@ -1,7 +1,7 @@
 # Del
 
 Del is a native Rust desktop workspace for coding agents, built with GPUI. It
-combines Codex, Claude Code, OpenCode 2.x, and installed ACP agents with conversation tabs,
+combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
@@ -12,6 +12,45 @@ Del does not include model weights or replace their account requirements.
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
 when making future changes.
+
+## Multiple provider accounts
+
+In **Settings → Providers**, use **+** beside Claude, Codex, or OpenCode to add
+an account. Del opens the provider's own sign-in flow in Terminal and saves a
+separate local profile. Sign-in skips broken CLI launchers and uses a working
+installation when available; failures are reported in Settings. No account name is required: Codex and Claude
+usernames are shown without the email domain, with green text identifying the
+default account in Settings, without a checkmark. OpenCode’s built-in login is
+labeled **System**. When identity is unavailable, Codex and Claude fall back to
+**Account 1** for the system login; added profiles start at **Account 2**. Add account is disabled while that provider has
+a sign-in in progress; complete it or cancel in Terminal before adding another.
+Use **Make default** for the account new chats should use, or the red trash icon
+to remove an unused saved account. Accounts referenced by saved chats or terminals
+cannot be deleted; switch chats away and remove terminal references first. Sign in appears only when reconnecting is needed. Removed profiles are
+kept locally under `removed-accounts/` for recovery.
+Successful sign-in closes only its own idle Terminal window. Duplicate email
+identities appear once. Codex and Claude accounts show a slim usage bar and percentage
+remaining, using the most constrained reported allowance. The account picker shows
+a small ring without a number. Claude usage comes from its native `get_usage`
+control request, without sending a prompt or reading credentials. Unavailable quota
+(including older Claude CLIs without this query) stays hidden.
+
+In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection.
+A new chat remembers its account across restarts. Choosing a different account of the same provider
+resumes the existing chat with its native history under that account. Switching
+is blocked during a running response; a failed transfer reconnects the original
+account. Changing providers still opens a new draft. New chats use the provider’s chosen default
+account. Saved accounts work in Chat and Terminal modes. Terminal launches retain their
+selected account when reopened. OpenCode’s built-in account is labeled **System**.
+
+Profiles live under Del's local `accounts/<UUID>/` directory; `accounts.json`
+stores profile metadata, not tokens. Provider CLIs manage credentials and refresh:
+Claude uses `CLAUDE_CONFIG_DIR`, Codex uses a separate `CODEX_HOME` with file
+credential storage, and OpenCode 2.x uses isolated config/data/database paths
+and a private server for sign-in. Each OpenCode profile can contain connections
+to several upstream providers. Profiles are local to this Mac, not synced through Git.
+Claude Console accounts should use API keys for isolation; separate config
+directories alone do not isolate two keyless Console logins.
 
 ## Build and run
 
@@ -217,7 +256,8 @@ conversation. Unloading a running session also stops its current work.
 - A shimmering “Working for…” label sits beneath the latest user message and
   scrolls with it. There is no duplicate Working/Done indicator above the composer.
   Reduce Motion keeps the label static.
-- Hover an assistant reply to reveal Copy and its local reply time in 24-hour `HH:MM` format.
+- Hover the final reply of a completed response to reveal Copy and its local reply time
+  in 24-hour `HH:MM` format. Intermediate updates and streaming replies have no copy footer.
   Reply times are saved across reopening; older Codex and Claude replies recover their
   timestamps from local transcripts. If no timestamp exists, only Copy is shown.
   The 13 px overlapping-squares Copy icon and 11 px time text fade in and out over
@@ -292,7 +332,6 @@ default is labeled **Default**.
 | Codex | Paginated app-server `model/list`; advertised reasoning levels and priority/fast tier |
 | Claude | CLI initialization metadata; advertised effort levels and Fast support, applied with `--effort` and session-scoped `--settings` |
 | OpenCode 2.x | Native model catalog and per-model effort variants; white provider accent |
-| ACP | Installed registry agents and their advertised model/config options; `thought_level` is exposed for the agent's default entry when available |
 
 Selecting a model opens its reasoning controls. Slider stops correspond to
 advertised effort levels, and the accent follows the selected provider (including
@@ -308,8 +347,8 @@ Model, effort, and service-tier selections are stored with the conversation.
 Existing chat settings apply on subsequent prompts through the backend's
 reconfiguration path; they do not rewrite a turn already in flight. Changing a
 model clears incompatible effort/tier choices. Provider changes use a new draft.
-Catalog discovery submits no prompt, but can start a CLI process; ACP discovery
-may create a temporary session.
+Catalog discovery submits no prompt, but can start a CLI process. ACP is no longer
+offered in the provider picker or Settings; its backend remains for legacy records.
 
 ### Skills and slash commands
 

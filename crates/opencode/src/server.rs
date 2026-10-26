@@ -22,11 +22,13 @@ impl Server {
     pub async fn start(
         cwd: &Path,
         tools: Option<&del_agent::backend::BrowserTools>,
+        environment: &[(String, String)],
     ) -> Result<Self> {
         let binary = del_agent::detect::find_binary("opencode")
             .ok_or_else(|| error("not installed; install OpenCode and refresh Providers"))?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(binary);
+        command.envs(environment.iter().cloned());
         command
             .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
             .current_dir(cwd)

@@ -34,6 +34,7 @@ pub fn messages(model: &ChatModel) -> Vec<Message> {
 
 #[derive(Clone)]
 pub struct Source {
+    pub account: Option<crate::accounts::Account>,
     pub tab: Tab,
     pub title: String,
     pub provider: Option<Provider>,
@@ -85,9 +86,13 @@ impl Index {
         };
         for source in sources {
             let id = source.conversation_id.as_deref();
+            let account_rollouts = source.account.as_ref().map(|a| crate::terminal_conversation::rollouts(&a.root()));
             let path = match (source.provider, id) {
-                (Some(Provider::Claude), Some(id)) => del_claude::history::path(&source.cwd, id),
-                (Some(Provider::Codex), Some(id)) => rollouts
+                (Some(Provider::Claude), Some(id)) => match &source.account {
+                    Some(a) => del_claude::history::path_from(&a.root(), &source.cwd, id),
+                    None => del_claude::history::path(&source.cwd, id),
+                },
+                (Some(Provider::Codex), Some(id)) => account_rollouts.as_ref().unwrap_or(&rollouts)
                     .iter()
                     .find(|p| {
                         p.file_name()
@@ -108,7 +113,7 @@ impl Index {
             if source.provider == Some(Provider::OpenCode)
                 && let Some(id) = id
             {
-                match self.opencode.read(&source.cwd, id) {
+                match self.opencode.read_with_environment(&source.cwd, id, &source.account.as_ref().map(|a| a.environment()).unwrap_or_default()) {
                     Ok(events) => {
                         let mut model = ChatModel::default();
                         for event in events.iter() {
@@ -370,6 +375,7 @@ mod tests {
     fn document(terminal: bool, archived: bool, text: &str) -> Arc<Document> {
         Arc::new(Document {
             source: Source {
+                account: None,
                 tab: if terminal {
                     Tab::Terminal(SessionId::new("t"))
                 } else {

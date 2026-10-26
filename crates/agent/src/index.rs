@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 pub struct SessionRecord {
     pub id: SessionId,
     pub provider: Provider,
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
     #[serde(default)]
@@ -154,6 +156,7 @@ mod tests {
         SessionRecord {
             id: SessionId::new(id),
             provider: Provider::Claude,
+            account_id: None,
             cwd: "/tmp".into(),
             model: None,
             reasoning_effort: None,

@@ -16,6 +16,15 @@ pub fn load(cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
     read(BufReader::new(std::fs::File::open(path)?), id)
 }
 
+pub fn load_from(root: &Path, cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
+    let Some(path) = crate::titles::transcript_path(root, cwd, id) else { return Ok(vec![]) };
+    read(BufReader::new(std::fs::File::open(path)?), id)
+}
+
+pub fn path_from(root: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
+    crate::titles::transcript_path(root, cwd, id)
+}
+
 /// Locate saved messages without resuming the CLI.
 pub fn path(cwd: &Path, id: &str) -> Option<PathBuf> {
     let root = std::env::var_os("CLAUDE_CONFIG_DIR")

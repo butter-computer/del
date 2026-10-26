@@ -193,6 +193,10 @@ pub trait AgentBackend: Send + Sync {
     async fn interrupt(&self, session: &SessionId) -> Result<()>;
     /// Reattach to a previously started session (e.g. after app restart).
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle>;
+    /// Resume a native transcript copied into this account's storage.
+    async fn resume_transferred(&self, config: SessionConfig, session: &SessionId, _path: Option<&std::path::Path>) -> Result<SessionHandle> {
+        self.resume(config, session).await
+    }
     /// Apply settings between turns while retaining the provider session ID.
     /// Providers with live controls may override this; CLI-only providers resume
     /// the same saved conversation with their new launch settings.

@@ -10,15 +10,15 @@ use std::{
 type Stamp = Vec<(Option<SystemTime>, u64)>;
 #[derive(Default)]
 pub struct Cache {
-    entries: HashMap<(PathBuf, String), CachedHistory>,
+    entries: HashMap<(PathBuf, String, Vec<(String, String)>), CachedHistory>,
 }
 struct CachedHistory {
     stamp: Stamp,
     events: Arc<Vec<AgentEvent>>,
 }
-fn stamp() -> Stamp {
-    let directory = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
+fn stamp(environment: &[(String, String)]) -> Stamp {
+    let directory = environment.iter().find(|(key, _)| key == "XDG_DATA_HOME").map(|(_, value)| PathBuf::from(value))
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
@@ -38,8 +38,11 @@ fn stamp() -> Stamp {
 impl Cache {
     /// Called only by the search worker, never the UI thread.
     pub fn read(&mut self, cwd: &Path, id: &str) -> std::io::Result<Arc<Vec<AgentEvent>>> {
-        let stamp = stamp();
-        let key = (cwd.to_owned(), id.to_owned());
+        self.read_with_environment(cwd, id, &[])
+    }
+    pub fn read_with_environment(&mut self, cwd: &Path, id: &str, environment: &[(String, String)]) -> std::io::Result<Arc<Vec<AgentEvent>>> {
+        let stamp = stamp(environment);
+        let key = (cwd.to_owned(), id.to_owned(), environment.to_vec());
         if let Some(cached) = self.entries.get(&key)
             && stamp.iter().any(|(modified, _)| modified.is_some())
             && cached.stamp == stamp
@@ -53,7 +56,7 @@ impl Cache {
             .build()?;
         let output = runtime.block_on(async {
             let mut command = tokio::process::Command::new(binary);
-            command
+            command.envs(environment.iter().cloned())
                 .args(["session", "export", "--standalone", id])
                 .current_dir(cwd)
                 .stdin(std::process::Stdio::null())

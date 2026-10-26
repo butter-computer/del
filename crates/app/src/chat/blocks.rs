@@ -35,7 +35,7 @@ impl ChatView {
         {
             return h_flex().w_full().justify_center().px_3().pb(zpx(6.))
                 .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH))
-                    .child(assistant_message(ix, String::new(), Some(state), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), cx.reduce_motion())))
+                    .child(assistant_message(ix, String::new(), Some(state), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), self.model.is_completed_response(ix), cx.reduce_motion())))
                 .into_any_element();
         }
         let Some(block) = self.model.blocks.get(ix).cloned() else {
@@ -184,7 +184,7 @@ impl ChatView {
                             .flex_none().highlight_color(rgb(STRONG))
                             .spread(0.22).duration(std::time::Duration::from_millis(1200)))
                 )).into_any_element(),
-            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), cx.reduce_motion()).into_any_element(),
+            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), self.model.is_completed_response(ix), cx.reduce_motion()).into_any_element(),
             Block::Reasoning {
                 text,
                 open,
@@ -515,7 +515,7 @@ fn user_message(
         )
 }
 
-fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, replied_at: Option<chrono::DateTime<chrono::Local>>, hovered: Option<bool>, copied: bool, reduced: bool) -> impl IntoElement {
+fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, replied_at: Option<chrono::DateTime<chrono::Local>>, hovered: Option<bool>, copied: bool, completed: bool, reduced: bool) -> impl IntoElement {
     let style = TextViewStyle::default().heading_font_size(|level, _| {
         if level <= 2 {
             zpx(TEXT_LG)
@@ -549,7 +549,7 @@ fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextVi
                     let _ = chat.update(cx, |_, cx| cx.emit(super::view::OpenLink(url.to_string())));
                 }),
         )
-        .child(
+        .when(completed, |message| message.child(
             h_flex().h(zpx(26.)).ml(-zpx(6.)).gap(zpx(4.)).items_center().justify_start()
                 .text_size(zpx(11.)).text_color(rgba(MUTED))
 
@@ -577,7 +577,7 @@ fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextVi
                         };
                         footer.opacity(opacity)
                     }),
-        )
+        ))
 }
 
 fn turn_end(status: TurnStatus) -> impl IntoElement {

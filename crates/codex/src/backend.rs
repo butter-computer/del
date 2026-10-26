@@ -181,6 +181,12 @@ impl CodexBackend {
         auth::ensure_authenticated(&conn.client, self.opts.api_key.as_deref()).await
     }
 
+    /// Read account quota without starting a conversation or model request.
+    pub async fn account_rate_limits(&self) -> Result<Value> {
+        let conn = self.connection().await.map_err(AgentError::from)?;
+        conn.client.call("account/rateLimits/read", json!({})).await.map_err(be)
+    }
+
     /// Attach to an already-connected client (tests, replay). Performs the
     /// initialize handshake and the auth check.
     pub async fn attach(
@@ -570,6 +576,12 @@ impl AgentBackend for CodexBackend {
             config.provider,
         )
         .await
+    }
+
+    async fn resume_transferred(&self, config: SessionConfig, session: &SessionId, path: Option<&std::path::Path>) -> Result<SessionHandle> {
+        let mut params = thread_params(&config);
+        if let Some(path) = path { params.insert("path".into(), json!(path)); }
+        self.open("thread/resume", params, Some(session), config.provider).await
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {

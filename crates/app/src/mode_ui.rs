@@ -172,13 +172,14 @@ impl AppShell {
         if self.state.read(cx).is_starting() {
             return true;
         }
-        let spec = match TerminalLaunchSpec::from_config(&config) {
+        let mut spec = match TerminalLaunchSpec::from_config(&config) {
             Ok(spec) => spec,
             Err(error) => {
                 self.set_mode_error(error.to_string(), cx);
                 return true;
             }
         };
+        spec.account_id = self.state.read(cx).selected_account();
         let prompt = crate::attachments::terminal_prompt(prompt, attachments);
         self.state.update(cx, |state, cx| {
             state.begin_terminal_prompt(key, prompt.to_owned(), cx)
@@ -273,16 +274,26 @@ impl AppShell {
                 }
             });
         }
+        let profile_env = match spec.account() {
+            Ok(account) => account.map(|a| a.environment()).unwrap_or_default(),
+            Err(error) => {
+                self.terminal_opening.remove(&id);
+                if let Some(key) = draft { self.state.update(cx, |s, cx| s.terminal_start_failed(key, error.to_string(), cx)); }
+                else { self.set_mode_error(error.to_string(), cx); }
+                return;
+            }
+        };
+        let codex_root = spec.codex_root();
         let opencode_model = spec.model.clone();
         let opencode_variant = spec.variant.clone();
         let prepare = runtime.spawn(async move {
             let conversation_id = if prepare_info.provider == Some(Provider::OpenCode) && !resuming {
-                Some(del_opencode::create_terminal_session(&prepare_info.cwd, opencode_model.as_deref(), opencode_variant.as_deref()).await.map_err(|e| e.to_string())?)
+                Some(del_opencode::create_terminal_session_with_environment(&prepare_info.cwd, opencode_model.as_deref(), opencode_variant.as_deref(), &profile_env).await.map_err(|e| e.to_string())?)
             } else { conversation_id };
             tokio::task::spawn_blocking(move || {
             let conversation_id = if resuming && prepare_info.provider == Some(Provider::Codex) && conversation_id.is_none() {
                 previous.as_ref().and_then(|record| crate::terminal_conversation::recover_legacy_codex(
-                    &crate::terminal_conversation::codex_root(), record, &saved_records))
+                    &codex_root, record, &saved_records))
             } else { conversation_id };
             if resuming && prepare_info.provider.is_some() && conversation_id.is_none() {
                 return Err("The original conversation could not be identified uniquely. Its saved history has been preserved.".into());
@@ -366,6 +377,7 @@ impl AppShell {
                     }
                     this.state.update(cx, |s, cx| {
                         let row = TerminalRow {
+                            account_id: spec.account_id.clone(),
                             id: id.clone(),
                             title: saved_title.clone(),
                             cwd: spec.cwd.clone(),
@@ -427,8 +439,8 @@ impl AppShell {
                         {
                             tokio::time::timeout(
                                 Duration::from_secs(3),
-                                backend.manager.session_display_title(
-                                    provider,
+                                backend.manager.account_session_display_title(
+                                    provider, record.launch.account_id.as_deref(),
                                     &SessionId::new(identity.clone()),
                                     &record.launch.cwd,
                                 ),
@@ -537,13 +549,15 @@ impl AppShell {
             let id = id.clone();
             let pid = snapshot.pid;
             let runtime = self.state.read(cx).backend().runtime;
+            let codex_root = self.terminal_store.records.iter().find(|r| r.id == id).map(|r| r.launch.codex_root()).unwrap_or_else(crate::terminal_conversation::codex_root);
             let lookup_hint = hint.clone();
             let lookup = runtime.spawn(async move {
                 for _ in 0..20 {
                     let hint = lookup_hint.clone();
+                    let codex_root = codex_root.clone();
                     let found = tokio::task::spawn_blocking(move || {
                         crate::terminal_conversation::resolve_codex_prefix(
-                            &crate::terminal_conversation::codex_root(),
+                            &codex_root,
                             &hint,
                         )
                     })

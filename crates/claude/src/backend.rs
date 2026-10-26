@@ -27,6 +27,7 @@ use base64::Engine as _;
 pub struct ClaudeOptions {
     /// Path or name of the `claude` executable.
     pub binary: PathBuf,
+    pub config_dir: Option<PathBuf>,
     /// Value for `--setting-sources` (e.g. `"project"`); `None` loads all of the user's settings.
     pub setting_sources: Option<String>,
     /// Extra raw CLI arguments appended after del's own.
@@ -37,8 +38,17 @@ impl Default for ClaudeOptions {
     fn default() -> Self {
         Self {
             binary: PathBuf::from(Provider::Claude.binary()),
+            config_dir: None,
             setting_sources: None,
             extra_args: vec![],
+        }
+    }
+}
+
+impl ClaudeOptions {
+    pub(crate) fn prepare(&self, command: &mut Command) {
+        if let Some(root) = &self.config_dir {
+            command.env("CLAUDE_CONFIG_DIR", root).env("DEL_ACCOUNT_PROFILE", "1");
         }
     }
 }
@@ -169,6 +179,7 @@ impl ClaudeBackend {
             ));
         }
         let mut command = Command::new(&self.options.binary);
+        self.options.prepare(&mut command);
         let mut args = self.args(config, session_flag);
         if let Some(factory) = self
             .browser_tools
@@ -272,6 +283,7 @@ impl ClaudeBackend {
 
         let watcher = live.clone();
         let goal_cwd = config.cwd.clone();
+        let goal_root = self.options.config_dir.clone();
         let goal_id = id.as_str().to_owned();
         tokio::spawn(async move {
             let mut reader = crate::goals::Reader::new();
@@ -283,7 +295,10 @@ impl ClaudeBackend {
                     break;
                 }
                 if path.is_none() {
-                    path = crate::history::path(&goal_cwd, &goal_id);
+                    path = match &goal_root {
+                        Some(root) => crate::titles::transcript_path(root, &goal_cwd, &goal_id),
+                        None => crate::history::path(&goal_cwd, &goal_id),
+                    };
                 }
                 if let Some(path) = &path
                     && let Ok(events) = reader.read(path, &goal_id)
@@ -362,6 +377,7 @@ impl AgentBackend for ClaudeBackend {
 
     async fn generate_title(&self, context: &str) -> Result<Option<String>> {
         let mut command = Command::new(&self.options.binary);
+        self.options.prepare(&mut command);
         command
             .args([
                 "-p",
@@ -487,8 +503,7 @@ impl AgentBackend for ClaudeBackend {
         session: &SessionId,
         cwd: &std::path::Path,
     ) -> Result<Option<String>> {
-        let Some(root) = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
+        let Some(root) = self.options.config_dir.clone().or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
         else {
             return Ok(None);
@@ -543,7 +558,11 @@ impl AgentBackend for ClaudeBackend {
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
         let cwd = config.cwd.clone();
         let id = session.as_str().to_owned();
-        let history = tokio::task::spawn_blocking(move || crate::history::load(&cwd, &id))
+        let root = self.options.config_dir.clone();
+        let history = tokio::task::spawn_blocking(move || match root {
+            Some(root) => crate::history::load_from(&root, &cwd, &id),
+            None => crate::history::load(&cwd, &id),
+        })
             .await
             .map_err(|e| AgentError::Backend(e.to_string()))??;
         Ok(self
@@ -611,6 +630,7 @@ pub struct AuthStatus {
 /// prints; no credentials are touched.
 pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
     let mut command = Command::new(&options.binary);
+    options.prepare(&mut command);
     del_agent::environment::prepare_provider_command(command.as_std_mut());
     let out = command
         .args(["auth", "status"])

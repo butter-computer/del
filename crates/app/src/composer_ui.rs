@@ -21,6 +21,31 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::rc::Rc;
 
+fn account_menu_label(name: String, remaining: Option<f64>, selected: bool) -> impl IntoElement {
+    let scale = 18. / 26.;
+    h_flex().w_full().gap_3().items_center()
+        .child(div().flex_1().when(selected, |label| label.text_color(rgb(0x4cc38a))).child(name))
+        .children(remaining.map(|remaining| {
+            div().id("account-usage-ring").size(zpx(26. * scale)).flex_none().relative().flex().items_center().justify_center()
+                .aria_label(format!("{remaining:.0}% usage left"))
+                .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    let center = bounds.center();
+                    let radius = bounds.size.width / 2. - zpx(1.5 * scale);
+                    for (fraction, color) in [(1., rgba(0xffffff26)), ((remaining / 100.) as f32, rgb(0xebebeb))] {
+                        if fraction <= 0. { continue; }
+                        let mut path = PathBuilder::stroke(zpx(1.7 * scale));
+                        let steps = 80;
+                        for i in 0..=steps {
+                            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * fraction * i as f32 / steps as f32;
+                            let position = point(center.x + radius * angle.cos(), center.y + radius * angle.sin());
+                            if i == 0 { path.move_to(position); } else { path.line_to(position); }
+                        }
+                        if let Ok(path) = path.build() { window.paint_path(path, color); }
+                    }
+                }).absolute().size_full())
+        }))
+}
+
 pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -33,6 +58,7 @@ pub struct ComposerCard {
     max_width: f32,
     provider: Provider,
     provider_ready: bool,
+    account_state: Option<Entity<crate::state::AppState>>,
     model_picker: Entity<crate::model_picker::ModelPicker>,
     folder: String,
     /// The session exists, so its working folder can no longer change.
@@ -72,6 +98,7 @@ impl ComposerCard {
             max_width,
             provider,
             provider_ready,
+            account_state: None,
             model_picker,
             folder,
             folder_locked,
@@ -92,6 +119,8 @@ impl ComposerCard {
             on_provider: Rc::new(|_, _, _| {}),
         }
     }
+
+    pub fn accounts(mut self, state: Entity<crate::state::AppState>) -> Self { self.account_state = Some(state); self }
 
     pub fn goal_mode(mut self, enabled: bool) -> Self {
         self.goal_mode = enabled;
@@ -191,6 +220,7 @@ impl RenderOnce for ComposerCard {
             max_width,
             provider,
             provider_ready,
+            account_state,
             model_picker,
             folder,
             folder_locked,
@@ -220,27 +250,39 @@ impl RenderOnce for ComposerCard {
         );
         let agent_el = {
             let current = provider;
-            agent.dropdown_menu(move |menu, _, _| {
-                Provider::ALL
-                    .iter()
-                    .fold(menu.check_side(Side::Right), |menu, &p| {
-                        let on_provider = on_provider.clone();
-                        menu.item(
-                            PopupMenuItem::element(move |_, _| {
-                                h_flex()
-                                    .h(crate::icons::button_size())
-                                    .gap_2()
-                                    .items_center()
-                                    .child(provider_logo(p))
-                                    .child(providers::display_name(p))
-                                    .child(div().flex_1())
-                                    .when(p == current, |row| {
-                                        row.child(crate::icons::icon(IconName::Check))
-                                    })
+            agent.dropdown_menu(move |menu, window, cx| {
+                providers::VISIBLE.iter().fold(menu.check_side(Side::Right), |menu, &p| {
+                    let on_provider = on_provider.clone();
+                    if let Some(state) = account_state.clone().filter(|_| p != Provider::Acp) {
+                        let default_state = state.clone();
+                        let (logo, color) = provider_brand(p);
+                        menu.submenu_with_icon(Some(crate::icons::path(logo).text_color(rgb(color))), providers::display_name(p), window, cx, move |menu, _, cx| {
+                            let accounts = state.read(cx).visible_accounts(p).into_iter().cloned().collect::<Vec<_>>();
+                            let system = state.clone();
+                            let system_label = state.clone();
+                            let mut menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                                let s = system_label.read(cx);
+                                account_menu_label(s.default_account_label(p), s.account_usage_remaining(p, None), s.account_is_selected(p, None))
                             })
-                            .on_click(move |_, w, cx| on_provider(p, w, cx)),
-                        )
-                    })
+                                .on_click(move |_, _, cx| system.update(cx, |s, cx| s.select_account(p, None, cx))));
+                            for account in accounts {
+                                let state = state.clone();
+                                let id = account.id.clone();
+                                let selected = state.read(cx).account_is_selected(p, Some(&id));
+                                let label_state = state.clone();
+                                let label_id = id.clone();
+                                menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                                    account_menu_label(account.display(), label_state.read(cx).account_usage_remaining(p, Some(&label_id)), selected)
+                                })
+                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_account(p, Some(id.clone()), cx))));
+                            }
+                            menu
+                        }).submenu_on_click(move |_, _, cx| default_state.update(cx, |s, cx| s.select_default_account(p, cx)))
+                    } else {
+                        menu.item(PopupMenuItem::new(providers::display_name(p))
+                            .checked(p == current).on_click(move |_, w, cx| on_provider(p, w, cx)))
+                    }
+                })
             })
         };
         let folder_el = if folder_locked {

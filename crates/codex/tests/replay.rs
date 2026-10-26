@@ -267,6 +267,7 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
     let record = SessionRecord {
         id: id.clone(),
         provider: Provider::Codex,
+        account_id: None,
         cwd: "/work".into(),
         model: None,
         reasoning_effort: None,
@@ -330,6 +331,7 @@ async fn resumed_history_reaches_chat_subscribers() {
         .upsert(SessionRecord {
             id: id.clone(),
             provider: Provider::Codex,
+            account_id: None,
             cwd: "/work".into(),
             model: None,
             reasoning_effort: None,
@@ -795,6 +797,33 @@ async fn goal_controls_use_native_rpcs_and_preserve_literal_objectives() {
             assert_eq!(goal.time_used_seconds, 4);
         }
     }
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn account_usage_reads_the_selected_connection() {
+    let lines = script(&[HANDSHAKE[0], HANDSHAKE[1], HANDSHAKE[2], ACCOUNT_OK[0], ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"account/rateLimits/read","params":{}}"#,
+        r#"< {"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}"#]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    assert_eq!(backend.account_rate_limits().await.unwrap()["rateLimits"]["primary"]["usedPercent"], 25);
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn account_transfer_resumes_the_copied_native_transcript() {
+    let lines = script(&[HANDSHAKE[0], HANDSHAKE[1], HANDSHAKE[2], ACCOUNT_OK[0], ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved","path":"/profile/sessions/copied.jsonl"}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[]}}}"#,
+        r#"> {"id":4,"method":"thread/goal/get","params":{"threadId":"saved"}}"#,
+        r#"< {"id":4,"result":{"goal":null}}"#]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let handle = backend.resume_transferred(config(), &SessionId::new("saved"), Some(std::path::Path::new("/profile/sessions/copied.jsonl"))).await.unwrap();
+    assert_eq!(handle.id.as_str(), "saved");
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

@@ -272,6 +272,7 @@ impl ChatView {
     }
 
     pub(super) fn copy_response(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !self.model.is_completed_response(ix) { return; }
         let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) else { return };
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         let copied_at = std::time::Instant::now();
@@ -942,6 +943,9 @@ mod tests {
         view.update(cx, |view, cx| {
             view.on_event(&AgentEvent::AssistantMessage { turn_id: "copy".into(), text: reply.into() }, cx);
             view.copy_response(0, cx);
+            assert!(view.copied_responses.is_empty());
+            view.on_event(&AgentEvent::TurnCompleted { turn_id: "copy".into(), status: del_agent::TurnStatus::Completed }, cx);
+            view.copy_response(0, cx);
             assert!(view.copied_responses.contains_key(&0));
         });
         assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some(reply));
@@ -1279,6 +1283,7 @@ mod search_tests {
     fn hit(messages: Vec<search::Message>, query: &str, n: usize) -> search::Hit {
         let doc = Arc::new(search::Document {
             source: search::Source {
+                    account: None,
                 tab: crate::state::Tab::Session(SessionId::new("saved")),
                 title: "Task".into(),
                 provider: Some(del_agent::Provider::Codex),

@@ -22,6 +22,12 @@ pub const WORKER_SESSION_ENV: &[&str] = &[
 /// Prepare an independent provider child, including runtimes omitted from Finder's PATH.
 /// Keep explicit launch settings and credentials; never change the app's environment.
 pub fn prepare_provider_command(command: &mut std::process::Command) {
+    if command.get_envs().any(|(key, value)| key == "DEL_ACCOUNT_PROFILE" && value.is_some()) {
+        // Ambient credentials must not silently override the account selected in Del.
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ACCESS_TOKEN", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_IDENTITY_PROVIDER_ID"] {
+            command.env_remove(key);
+        }
+    }
     let inherited = command.get_envs()
         .find(|(key, _)| *key == "PATH")
         .map(|(_, value)| value.unwrap_or_default().to_owned())
@@ -53,6 +59,18 @@ pub fn clear_worker_session_env(command: &mut std::process::Command) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_profile_clears_ambient_credentials_without_changing_its_home() {
+        let mut command = std::process::Command::new("provider");
+        command.env("DEL_ACCOUNT_PROFILE", "1").env("CODEX_HOME", "/private/account")
+            .env("OPENAI_API_KEY", "fixture").env("CLAUDE_CODE_OAUTH_TOKEN", "fixture");
+        prepare_provider_command(&mut command);
+        let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(env.get(std::ffi::OsStr::new("CODEX_HOME")), Some(&Some(std::ffi::OsStr::new("/private/account"))));
+        assert_eq!(env.get(std::ffi::OsStr::new("OPENAI_API_KEY")), Some(&None));
+        assert_eq!(env.get(std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")), Some(&None));
+    }
 
     #[test]
     fn gui_launch_resolves_runtime_beside_provider() {

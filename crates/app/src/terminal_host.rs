@@ -52,6 +52,8 @@ impl TerminalLaunchKind {
 /// before persisting it; pass that configuration to `new_prepared` instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalLaunchSpec {
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub kind: TerminalLaunchKind,
     pub cwd: PathBuf,
     pub program: Option<String>,
@@ -73,12 +75,22 @@ impl TerminalLaunchSpec {
             _ => None,
         }
     }
+    pub fn account(&self) -> io::Result<Option<crate::accounts::Account>> {
+        let Some(id) = &self.account_id else { return Ok(None); };
+        crate::accounts::load().map_err(io::Error::other)?.into_iter()
+            .find(|a| &a.id == id && Some(a.provider) == self.provider())
+            .map(Some).ok_or_else(|| io::Error::other("This terminal's saved account is unavailable"))
+    }
+    pub fn codex_root(&self) -> PathBuf {
+        self.account().ok().flatten().map(|a| a.root()).unwrap_or_else(crate::terminal_conversation::codex_root)
+    }
     pub fn label(&self) -> String {
         self.title.clone()
     }
 
     pub fn shell(cwd: impl Into<PathBuf>) -> Self {
         Self {
+            account_id: None,
             kind: TerminalLaunchKind::Shell,
             cwd: cwd.into(),
             program: None,
@@ -108,6 +120,7 @@ impl TerminalLaunchSpec {
             )
         })?;
         Ok(Self {
+            account_id: None,
             kind,
             cwd: cwd.into(),
             program: Some(path.to_string_lossy().into_owned()),
@@ -190,6 +203,7 @@ impl TerminalLaunchSpec {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/bin/zsh".into());
         Ok(Self {
+            account_id: None,
             kind: TerminalLaunchKind::Custom,
             cwd: cwd.into(),
             program: Some(shell),
@@ -199,6 +213,26 @@ impl TerminalLaunchSpec {
             variant: None,
             model: None,
         })
+    }
+
+    fn isolate_account(&self, account: &crate::accounts::Account) -> io::Result<Self> {
+        // Apply profile variables after the login shell, so shell startup
+        // cannot redirect authentication to another account.
+        let mut profile_args = Vec::new();
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ACCESS_TOKEN", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_IDENTITY_PROVIDER_ID"] {
+            profile_args.extend(["-u".into(), key.into()]);
+        }
+        for (key, value) in account.environment() { profile_args.push(format!("{key}={value}")); }
+        profile_args.push(self.program.clone().ok_or_else(|| io::Error::other("Missing provider command"))?);
+        let mut isolated = self.clone();
+        isolated.account_id = None;
+        isolated.program = Some("/usr/bin/env".into());
+        profile_args.extend(self.args.clone());
+        if self.kind == TerminalLaunchKind::Codex {
+            profile_args.extend(["-c".into(), "cli_auth_credentials_store=\"file\"".into()]);
+        }
+        isolated.args = profile_args;
+        Ok(isolated)
     }
 
     fn prepare(
@@ -240,6 +274,9 @@ impl TerminalLaunchSpec {
             ));
         }
         let mut args = self.args.clone();
+        if let Some(account) = self.account()? {
+            return self.isolate_account(&account)?.prepare(extra_args, env);
+        }
         let bypass = match self.kind {
             TerminalLaunchKind::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
             TerminalLaunchKind::Claude => Some("--dangerously-skip-permissions"),
@@ -911,6 +948,30 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn saved_terminal_account_survives_restore_and_isolates_authentication() {
+        for (provider, kind, key) in [
+            (del_agent::Provider::Codex, TerminalLaunchKind::Codex, "CODEX_HOME"),
+            (del_agent::Provider::Claude, TerminalLaunchKind::Claude, "CLAUDE_CONFIG_DIR"),
+            (del_agent::Provider::OpenCode, TerminalLaunchKind::OpenCode, "OPENCODE_DB"),
+        ] {
+            let account = crate::accounts::Account { id: uuid::Uuid::new_v4().to_string(), provider, number: 2, identity: None, is_default: false, requires_login: false };
+            let mut spec = TerminalLaunchSpec::shell(std::env::temp_dir());
+            spec.kind = kind;
+            spec.program = Some("/bin/echo".into());
+            spec.account_id = Some(account.id.clone());
+            let restored: TerminalLaunchSpec = serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
+            assert_eq!(restored.account_id, spec.account_id);
+            let prepared = restored.isolate_account(&account).unwrap().prepare(vec![], vec![]).unwrap();
+            assert_eq!(prepared.program.as_deref(), Some("/usr/bin/env"));
+            let binary = prepared.args.iter().position(|a| a == "/bin/echo").unwrap();
+            assert!(prepared.args[..binary].iter().any(|a| a.starts_with(&format!("{key}=")) && a.contains(&account.id)));
+            assert!(prepared.args[..binary].windows(2).any(|a| a == ["-u", "OPENAI_API_KEY"]));
+            assert!(prepared.args[..binary].windows(2).any(|a| a == ["-u", "CLAUDE_CODE_OAUTH_TOKEN"]));
+            if provider == del_agent::Provider::Codex { assert!(prepared.args.contains(&"cli_auth_credentials_store=\"file\"".into())); }
+        }
+    }
+
+    #[test]
     fn codex_confirms_only_the_selected_workspace_startup_prompt() {
         let cwd = std::path::Path::new("/work/project");
         let screen = "Folder access\n/work/project\n\nTrust this folder? Codex can read, edit, and run files here.\nContinue only if you trust these files. Your trust decision will be saved.\n› 1. Trust and continue\n  2. Quit\n\n  enter continue · esc quit\n";
@@ -971,6 +1032,7 @@ mod tests {
     #[test]
     fn codex_publishes_conversation_name_instead_of_project_directory() {
         let spec = TerminalLaunchSpec {
+            account_id: None,
             kind: TerminalLaunchKind::Codex,
             cwd: std::env::temp_dir(),
             program: Some("/bin/cat".into()),
@@ -1060,6 +1122,7 @@ mod tests {
                 permission_mode: Default::default(),
             };
             let mut spec = TerminalLaunchSpec {
+                account_id: None,
                 kind,
                 cwd: config.cwd.clone(),
                 program: Some("/bin/cat".into()),
@@ -1117,6 +1180,7 @@ mod tests {
             (TerminalLaunchKind::Claude, "--dangerously-skip-permissions"),
         ] {
             let mut spec = TerminalLaunchSpec {
+                account_id: None,
                 kind,
                 cwd: std::env::temp_dir(),
                 program: Some("/bin/cat".into()),
@@ -1158,6 +1222,7 @@ mod tests {
     #[test]
     fn injected_bridge_configuration_never_mutates_serialized_history() {
         let spec = TerminalLaunchSpec {
+            account_id: None,
             kind: TerminalLaunchKind::Codex,
             cwd: std::env::temp_dir(),
             program: Some("/bin/cat".into()),
@@ -1224,6 +1289,7 @@ mod tests {
     fn prepared_launch_reaches_real_pty_at_workspace_and_reaps_child() {
         let cwd = std::env::temp_dir().canonicalize().unwrap();
         let spec = TerminalLaunchSpec {
+            account_id: None,
             kind: TerminalLaunchKind::Custom,
             cwd: cwd.clone(),
             program: Some("/bin/sh".into()),
@@ -1269,6 +1335,7 @@ mod tests {
     #[test]
     fn failed_program_returns_error_before_entity_construction() {
         let spec = TerminalLaunchSpec {
+            account_id: None,
             kind: TerminalLaunchKind::Custom,
             cwd: std::env::temp_dir(),
             program: Some("/del-no-such-program/terminal-host-test".into()),
@@ -1288,6 +1355,7 @@ mod opencode_tests {
     #[::core::prelude::v1::test]
     fn native_terminal_flags_and_model_metadata_are_kept_separate() {
         let spec = TerminalLaunchSpec {
+            account_id: None,
             kind: TerminalLaunchKind::OpenCode,
             cwd: std::env::temp_dir(),
             program: Some("opencode".into()),

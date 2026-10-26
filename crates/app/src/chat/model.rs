@@ -134,6 +134,7 @@ pub enum Change {
 #[derive(Debug, Clone, Default)]
 pub struct ChatModel {
     pub blocks: Vec<Block>,
+    completed_responses: std::collections::HashSet<usize>,
     pub goal: Option<del_agent::Goal>,
     goal_updated_at: Option<std::time::Instant>,
     pub phase: Phase,
@@ -148,6 +149,10 @@ pub struct ChatModel {
 }
 
 impl ChatModel {
+    pub fn is_completed_response(&self, ix: usize) -> bool {
+        self.completed_responses.contains(&ix)
+    }
+
     pub fn goal(&self) -> Option<del_agent::Goal> {
         let mut goal = self.goal.clone()?;
         if goal.status == del_agent::GoalStatus::Active {
@@ -441,15 +446,21 @@ impl ChatModel {
                 };
                 None
             }
-            AgentEvent::TurnCompleted { status, .. } => {
+            AgentEvent::TurnCompleted { turn_id, status } => {
                 self.seal();
                 self.phase = Phase::Idle;
                 self.current_turn = None;
                 self.last_status = Some(*status);
                 self.settled_usage = self.settled_usage.add(self.turn_usage);
                 self.turn_usage = Usage::default();
-                (*status != TurnStatus::Completed)
-                    .then(|| self.push(Block::TurnEnd { status: *status }))
+                if *status == TurnStatus::Completed {
+                    let ix = self.blocks.iter().rposition(|block| matches!(block,
+                        Block::Assistant { turn_id: id, .. } if id == turn_id));
+                    if let Some(ix) = ix { self.completed_responses.insert(ix); }
+                    ix.map(Change::Updated)
+                } else {
+                    Some(self.push(Block::TurnEnd { status: *status }))
+                }
             }
             AgentEvent::Error {
                 message,
@@ -513,6 +524,25 @@ mod tests {
             name: "bash".into(),
             input_summary: "ls".into(),
         }
+    }
+
+    #[test]
+    fn copy_footer_only_belongs_to_final_completed_reply() {
+        let mut model = ChatModel::default();
+        for text in ["Checking files…", "Here is the result."] {
+            model.apply(&AgentEvent::AssistantMessage { turn_id: "one".into(), text: text.into() });
+        }
+        assert!(!model.is_completed_response(0));
+        assert!(!model.is_completed_response(1));
+        assert_eq!(model.apply(&AgentEvent::TurnCompleted { turn_id: "one".into(), status: TurnStatus::Completed }), Some(Change::Updated(1)));
+        assert!(!model.is_completed_response(0));
+        assert!(model.is_completed_response(1));
+        model.apply(&AgentEvent::TurnStarted { turn_id: "two".into() });
+        model.apply(&AgentEvent::AssistantMessage { turn_id: "two".into(), text: "Working…".into() });
+        assert!(model.is_completed_response(1));
+        assert!(!model.is_completed_response(2));
+        model.apply(&AgentEvent::TurnCompleted { turn_id: "two".into(), status: TurnStatus::Interrupted });
+        assert!(!model.is_completed_response(2));
     }
 
     #[test]

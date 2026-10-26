@@ -1,0 +1,1 @@
+Based on gpui-component 0.8.0 (Apache-2.0). Local change: optional primary click handler for submenu rows, used to select a provider default account while preserving hover and keyboard submenu navigation.

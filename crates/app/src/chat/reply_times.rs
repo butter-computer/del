@@ -53,10 +53,15 @@ pub fn load(record: &SessionRecord) -> History {
         history.saved = std::io::BufReader::new(file).lines().map_while(Result::ok)
             .filter_map(|line| serde_json::from_str(&line).ok()).collect();
     }
+    let account = crate::accounts::for_record(record);
+    let root = account.as_ref().map(|a| a.root());
     let native = match record.provider {
-        Provider::Codex => crate::terminal_conversation::rollouts(&crate::terminal_conversation::codex_root()).into_iter()
+        Provider::Codex => crate::terminal_conversation::rollouts(&root.clone().unwrap_or_else(crate::terminal_conversation::codex_root)).into_iter()
             .find(|path| path.file_name().is_some_and(|name| name.to_string_lossy().ends_with(&format!("{}.jsonl", record.id.0)))),
-        Provider::Claude => del_claude::history::path(&record.cwd, &record.id.0),
+        Provider::Claude => match root {
+            Some(root) => del_claude::history::path_from(&root, &record.cwd, &record.id.0),
+            None => del_claude::history::path(&record.cwd, &record.id.0),
+        },
         _ => None,
     };
     if let Some(path) = native && let Ok(file) = std::fs::File::open(path) {

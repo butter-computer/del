@@ -217,3 +217,74 @@ This records the final decisions, including corrections to earlier experiments.
   credentials, or account-specific model assumptions as setup requirements.
 - A fresh Mac requires its own installed and authenticated provider. Document
   this setup in README; pulling source does not transfer working provider access.
+
+## Multiple provider accounts
+
+- Settings → Providers has an Add account (+) action for Claude, Codex, and OpenCode.
+- Saved account rows show a red trash icon (with Delete account tooltip and
+  accessibility label) and Make default action, without “Saved account”
+  or “Connected” text. Show Sign in only when authentication needs attention.
+  Persist the chosen default for new chats; keep existing chat selections intact.
+  Prevent deleting accounts still used by chats; move removed profiles to local
+  recovery storage instead of destroying credentials.
+- Do not require a user-created account label. Use the sign-in identity where
+  available and automatic Account N names otherwise.
+- Provider rows in the composer picker have arrows that open account submenus
+  on hover. Include the default account and each saved profile, with one selection.
+- Keep model catalogs, slash commands, title generation, history, and chat
+  execution scoped to the selected profile. Never fall back silently to system
+  credentials when a profile is missing.
+- Persist the account on each chat. Switching accounts within the same provider
+  keeps the same chat, native history, and workspace, including across restarts.
+  Block switching during running turns and restore the original account on failure.
+  Changing providers still creates a new draft.
+- Deduplicate full account identities while showing only the username. Close only
+  the successful login attempt's own idle Terminal window. Show per-account Codex and Claude
+  remaining usage as a slim bar and percentage only: no window labels, reset
+  details, or unavailable text. Use the most constrained reported allowance.
+  Query Claude through its native get_usage control with skip_behaviors; never
+  send an inference prompt or read OAuth credentials to populate the meter.
+  Keep usage caches keyed by both provider and account, including system accounts.
+  In the composer account picker, only the current chat’s selected account name is green;
+  account checkmarks are hidden. Keep usage rings unchanged. Show each account’s
+  remaining usage as a compact circular ring beside its name when available,
+  without a number inside. Keep the percentage available to accessibility.
+- Use separate provider storage and child-process environments; never mutate
+  the app-wide environment or overwrite the system CLI's saved login.
+- Account sign-in uses the provider's own flow. Do not report success merely
+  because a credentials-list command exited successfully.
+- Saved accounts apply to Chat and Terminal modes. Persist the terminal account
+  and isolate its CLI environment on launch and reopen. Never fall back to the
+  system account when a saved profile is unavailable.
+- Clicking a provider selects its configured default account; hovering the arrow
+  opens per-chat account choices. Only the selected account name is green, with no picker tick.
+  Label OpenCode’s built-in account System.
+
+- Account sign-in must validate CLI executables, skipping broken launchers just
+  like chat startup. Prepare the child runtime PATH consistently and report
+  a failed or cancelled login promptly instead of waiting for a success timeout.
+
+- Show the reply copy/time footer only on the final assistant message of a
+  successfully completed turn. Intermediate updates and streaming messages have
+  no copy footer or reserved footer space; earlier finished replies keep theirs.
+
+- Account 1 is the existing default provider login; extra profiles start at
+  Account 2. Prefer the signed-in email in Settings and the account submenu.
+- Disable Add account while that provider has a login in progress, including
+  duplicate actions. Re-enable after success, failure, cancellation, or timeout.
+
+- Display account email usernames without the domain. Replace the default-account
+  text badge with green account-name text: the default in Settings and the selected
+  account in the picker. Do not show account checkmarks.
+  Preserve the full identity internally.
+
+- Launch provider sign-in through a short, quoted script path in Terminal. Keep
+  long environments inside a private temporary script to avoid input truncation;
+  clean it up and report success, failure, or Ctrl+C cancellation.
+
+- Show each provider account once in Settings and the account picker. Compare
+  full email identities, not the shortened visible username; the default row
+  takes precedence. Preserve stored profiles used by existing chats.
+
+- Offer only Codex, Claude, and OpenCode in the provider picker and Settings.
+  Keep legacy ACP records readable, but do not offer ACP for new selections.

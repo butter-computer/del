@@ -57,6 +57,8 @@ struct Standby {
 
 struct Shared {
     backends: HashMap<Provider, Arc<dyn AgentBackend>>,
+    account_backends: Mutex<HashMap<(Provider, String), Arc<dyn AgentBackend>>>,
+    browser_tools: Mutex<Option<BrowserTools>>,
     index: Mutex<SessionIndex>,
     live: Mutex<HashMap<SessionId, Live>>,
     resume_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
@@ -135,6 +137,10 @@ impl SessionManager {
         self.backend(provider)?.session_display_title(id, cwd).await
     }
 
+    pub async fn account_session_display_title(&self, provider: Provider, account: Option<&str>, id: &SessionId, cwd: &Path) -> Result<Option<String>> {
+        self.account_backend(provider, account)?.session_display_title(id, cwd).await
+    }
+
     /// Refresh provider-owned names without changing session order or live state.
     pub async fn refresh_titles(&self) -> Result<bool> {
         let mut changed = false;
@@ -142,7 +148,7 @@ impl SessionManager {
             if record.title_turns > 0 {
                 continue;
             }
-            let Ok(backend) = self.backend(record.provider) else {
+            let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref()) else {
                 continue;
             };
             let Ok(Ok(Some(title))) = tokio::time::timeout(
@@ -200,7 +206,7 @@ impl SessionManager {
         if !crate::titles::due(record.title_turns, turns) {
             return Ok(false);
         }
-        let backend = self.backend(record.provider)?;
+        let backend = self.account_backend(record.provider, record.account_id.as_deref())?;
         let _ = self.shared.all_tx.send(ManagerEvent::TitleLoading {
             session: id.clone(),
             loading: true,
@@ -237,6 +243,8 @@ impl SessionManager {
         Ok(Self {
             shared: Arc::new(Shared {
                 backends: backends.into_iter().map(|b| (b.provider(), b)).collect(),
+                account_backends: Mutex::new(HashMap::new()),
+                browser_tools: Mutex::new(None),
                 index: Mutex::new(SessionIndex::open(index_path.as_ref())?),
                 live: Mutex::new(HashMap::new()),
                 resume_locks: Mutex::new(HashMap::new()),
@@ -246,6 +254,39 @@ impl SessionManager {
                 title_generation: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    pub fn register_account(&self, account: String, backend: Arc<dyn AgentBackend>) {
+        if let Some(tools) = self.shared.browser_tools.lock().unwrap().clone() {
+            backend.set_browser_tools(tools);
+        }
+        self.shared.account_backends.lock().unwrap().insert((backend.provider(), account), backend);
+    }
+
+    pub fn unregister_account(&self, provider: Provider, account: &str) -> Option<Arc<dyn AgentBackend>> {
+        self.shared.account_backends.lock().unwrap().remove(&(provider, account.to_owned()))
+    }
+
+    fn account_backend(&self, provider: Provider, account: Option<&str>) -> Result<Arc<dyn AgentBackend>> {
+        match account {
+            None => self.backend(provider),
+            Some(account) => self.shared.account_backends.lock().unwrap().get(&(provider, account.to_owned())).cloned()
+                .ok_or_else(|| AgentError::Backend("This account is unavailable. Reconnect it in Settings → Providers.".into())),
+        }
+    }
+
+    fn session_backend(&self, id: &SessionId) -> Result<Arc<dyn AgentBackend>> {
+        let record = self.shared.index.lock().unwrap().get(id).cloned()
+            .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        self.account_backend(record.provider, record.account_id.as_deref())
+    }
+
+    pub async fn account_models(&self, provider: Provider, account: Option<&str>, cwd: &Path) -> Result<Vec<crate::ModelInfo>> {
+        self.account_backend(provider, account)?.list_models(cwd).await
+    }
+
+    pub async fn account_commands(&self, provider: Provider, account: Option<&str>, cwd: &Path) -> Result<Vec<crate::ComposerCommand>> {
+        self.account_backend(provider, account)?.list_commands(cwd).await
     }
 
     fn backend(&self, p: Provider) -> Result<Arc<dyn AgentBackend>> {
@@ -383,10 +424,14 @@ impl SessionManager {
     }
 
     pub async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        self.start_account_session(config, None).await
+    }
+
+    pub async fn start_account_session(&self, config: SessionConfig, account_id: Option<String>) -> Result<SessionHandle> {
         let applied_config = config.clone();
         let prepared = {
             let mut slot = self.shared.standby.lock().unwrap();
-            if slot
+            if account_id.is_none() && slot
                 .as_ref()
                 .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
             {
@@ -400,7 +445,7 @@ impl SessionManager {
         let handle = match prepared {
             Some(handle) => handle,
             None => {
-                self.backend(config.provider)?
+                self.account_backend(config.provider, account_id.as_deref())?
                     .start_session(config.clone())
                     .await?
             }
@@ -413,6 +458,7 @@ impl SessionManager {
         self.shared.index.lock().unwrap().upsert(SessionRecord {
             id: handle.id.clone(),
             provider: config.provider,
+            account_id,
             cwd: config.cwd,
             model: config.model,
             reasoning_effort: config.reasoning_effort,
@@ -451,7 +497,7 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
         let handle = self
-            .backend(record.provider)?
+            .account_backend(record.provider, record.account_id.as_deref())?
             .resume(record.config(), id)
             .await?;
         self.attach(handle.clone(), record.config());
@@ -460,8 +506,8 @@ impl SessionManager {
     }
 
     pub async fn control_goal(&self, id: &SessionId, action: crate::GoalAction) -> Result<()> {
-        let provider = self.live_provider(id)?;
-        self.backend(provider)?.control_goal(id, action).await
+        self.live_provider(id)?;
+        self.session_backend(id)?.control_goal(id, action).await
     }
 
     pub async fn agent_goal(
@@ -469,7 +515,7 @@ impl SessionManager {
         id: &SessionId,
         action: Option<crate::GoalAction>,
     ) -> Result<Option<crate::Goal>> {
-        self.backend(self.live_provider(id)?)?
+        self.session_backend(id)?
             .agent_goal(id, action)
             .await
     }
@@ -538,7 +584,7 @@ impl SessionManager {
             .or_default()
             .clone();
         let _sending = lock.lock().await;
-        let p = self.live_provider(id)?;
+        self.live_provider(id)?;
         let config = self
             .shared
             .index
@@ -562,11 +608,11 @@ impl SessionManager {
                     "settings apply after the current turn finishes".into(),
                 ));
             }
-            let handle = self.backend(p)?.reconfigure(config.clone(), id).await?;
+            let handle = self.session_backend(id)?.reconfigure(config.clone(), id).await?;
             self.attach(handle, config.clone());
         }
         let title: String = input.text.trim().chars().take(60).collect();
-        let backend = self.backend(p)?;
+        let backend = self.session_backend(id)?;
         let command = self.resolve_command(&*backend, &config.cwd, &input).await?;
         // Local commands can finish before the call returns. Never overwrite
         // their completion (or a very fast provider result) with Running.
@@ -609,6 +655,47 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Move an idle conversation to another account without changing its identity.
+    /// The transfer runs after closing the old writer, under the same lock as sends.
+    pub async fn switch_account<F, Fut>(&self, id: &SessionId, account: Option<String>, transfer: F) -> Result<()>
+    where F: FnOnce(SessionRecord) -> Fut + Send,
+          Fut: std::future::Future<Output = Result<Option<std::path::PathBuf>>> + Send,
+    {
+        self.resume(id).await?;
+        let lock = self.shared.resume_locks.lock().unwrap().entry(id.clone()).or_default().clone();
+        let _switching = lock.lock().await;
+        if matches!(self.status(id), Some(SessionStatus::Running | SessionStatus::WaitingApproval)) {
+            return Err(AgentError::Busy("Wait for the response to finish before switching accounts.".into()));
+        }
+        let record = self.shared.index.lock().unwrap().get(id).cloned()
+            .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        if record.account_id == account { return Ok(()); }
+        let old = self.session_backend(id)?;
+        let target = self.account_backend(record.provider, account.as_deref())?;
+        old.close(id).await?;
+        let result = async {
+            let path = transfer(record.clone()).await?;
+            let handle = target.resume_transferred(record.config(), id, path.as_deref()).await?;
+            if handle.id != *id {
+                let _ = target.close(&handle.id).await;
+                return Err(AgentError::Backend("The provider changed this conversation's identity during account transfer.".into()));
+            }
+            self.shared.index.lock().unwrap().update(id, |r| r.account_id = account)?;
+            Ok(handle)
+        }.await;
+        match result {
+            Ok(handle) => { self.attach(handle, record.config()); Ok(()) }
+            Err(error) => {
+                let _ = target.close(id).await;
+                match old.resume(record.config(), id).await {
+                    Ok(handle) => self.attach(handle, record.config()),
+                    Err(restore) => return Err(AgentError::Backend(format!("{error}; could not reconnect the original account: {restore}"))),
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Persist next-turn settings without creating or selecting another session.
     pub fn set_model_settings(
         &self,
@@ -626,6 +713,10 @@ impl SessionManager {
 
     /// Persist permissions for the next launch or idle-turn reconfiguration.
     pub fn set_browser_tools(&self, tools: crate::backend::BrowserTools) {
+        *self.shared.browser_tools.lock().unwrap() = Some(tools.clone());
+        for backend in self.shared.account_backends.lock().unwrap().values() {
+            backend.set_browser_tools(tools.clone());
+        }
         for backend in self.shared.backends.values() {
             backend.set_browser_tools(tools.clone());
         }
@@ -647,7 +738,7 @@ impl SessionManager {
     }
 
     pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
-        let backend = self.backend(self.live_provider(id)?)?;
+        let backend = self.session_backend(id)?;
         if crate::split_command(&input.text).is_some() || !input.skills.is_empty() {
             let cwd = self
                 .shared
@@ -676,7 +767,7 @@ impl SessionManager {
     }
 
     pub async fn interrupt(&self, id: &SessionId) -> Result<()> {
-        self.backend(self.live_provider(id)?)?.interrupt(id).await
+        self.session_backend(id)?.interrupt(id).await
     }
 
     pub async fn respond_approval(
@@ -685,7 +776,7 @@ impl SessionManager {
         approval_id: &str,
         response: ApprovalResponse,
     ) -> Result<()> {
-        self.backend(self.live_provider(id)?)?
+        self.session_backend(id)?
             .respond_approval(id, approval_id, response)
             .await?;
         self.shared.set_status(id, SessionStatus::Running);
@@ -706,8 +797,8 @@ impl SessionManager {
         if !self.is_live(id) {
             return Ok(());
         }
-        let p = self.live_provider(id)?;
-        let res = self.backend(p)?.close(id).await;
+        self.live_provider(id)?;
+        let res = self.session_backend(id)?.close(id).await;
         if let Some(l) = self.shared.live.lock().unwrap().remove(id) {
             l.pump.abort();
         }
@@ -729,8 +820,8 @@ impl SessionManager {
     }
 
     pub async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
-        let provider = self.live_provider(id).ok()?;
-        self.backend(provider).ok()?.session_process(id).await
+        self.live_provider(id).ok()?;
+        self.session_backend(id).ok()?.session_process(id).await
     }
 
     pub fn is_live(&self, id: &SessionId) -> bool {
@@ -781,7 +872,8 @@ impl SessionManager {
         for id in ids {
             let _ = self.close(&id).await;
         }
-        for b in self.shared.backends.values() {
+        let accounts: Vec<_> = self.shared.account_backends.lock().unwrap().values().cloned().collect();
+        for b in accounts.into_iter().chain(self.shared.backends.values().cloned()) {
             let _ = b.shutdown().await;
         }
     }
@@ -832,6 +924,76 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {want:?}"));
+    }
+
+    #[tokio::test]
+    async fn account_switch_preserves_identity_history_and_rolls_back_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.jsonl");
+        let source: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let target: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let manager = SessionManager::new(&path, [source.clone()]).unwrap();
+        manager.register_account("second".into(), target.clone());
+        let handle = manager.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = manager.subscribe_all();
+        manager.send_prompt(&handle.id, UserInput::text("remember this conversation")).await.unwrap();
+        assert!(manager.switch_account(&handle.id, Some("second".into()), |_| async { panic!("must not transfer a running turn") }).await.is_err());
+        wait_status(&mut events, &handle.id, SessionStatus::Idle).await;
+        let history = manager.subscribe_with_history(&handle.id).unwrap().0;
+        manager.switch_account(&handle.id, Some("second".into()), |record| async move {
+            assert_eq!(record.account_id, None);
+            Ok(None)
+        }).await.unwrap();
+        assert_eq!(manager.list_sessions().len(), 1);
+        assert_eq!(manager.list_sessions()[0].id, handle.id);
+        assert_eq!(manager.subscribe_with_history(&handle.id).unwrap().0, history);
+        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &target));
+        let failed = manager.switch_account(&handle.id, None, |_| async {
+            Err(AgentError::Backend("transfer failed".into()))
+        }).await;
+        assert!(failed.is_err());
+        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &target));
+        manager.send_prompt(&handle.id, UserInput::text("continue after rollback")).await.unwrap();
+        wait_status(&mut events, &handle.id, SessionStatus::Idle).await;
+        manager.switch_account(&handle.id, None, |_| async { Ok(None) }).await.unwrap();
+        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &source));
+        manager.shutdown().await;
+        let restored = SessionManager::new(path, [source.clone()]).unwrap();
+        restored.resume(&handle.id).await.unwrap();
+        assert!(Arc::ptr_eq(&restored.session_backend(&handle.id).unwrap(), &source));
+        restored.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn accounts_route_independently_and_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.jsonl");
+        let default: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let first: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let second: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let manager = SessionManager::new(&path, [default.clone()]).unwrap();
+        manager.register_account("first".into(), first.clone());
+        manager.register_account("second".into(), second.clone());
+        let a = manager.start_account_session(cfg(Provider::Codex), Some("first".into())).await.unwrap();
+        let b = manager.start_account_session(cfg(Provider::Codex), Some("second".into())).await.unwrap();
+        let system = manager.start_session(cfg(Provider::Codex)).await.unwrap();
+        assert!(Arc::ptr_eq(&manager.session_backend(&a.id).unwrap(), &first));
+        assert!(Arc::ptr_eq(&manager.session_backend(&b.id).unwrap(), &second));
+        assert!(Arc::ptr_eq(&manager.session_backend(&system.id).unwrap(), &default));
+        manager.send_prompt(&a.id, UserInput::text("hello a")).await.unwrap();
+        manager.send_prompt(&b.id, UserInput::text("hello b")).await.unwrap();
+        manager.interrupt(&a.id).await.unwrap();
+        manager.interrupt(&b.id).await.unwrap();
+        manager.shutdown().await;
+        let restored = SessionManager::new(&path, [default]).unwrap();
+        // Missing profiles must never silently use the system account.
+        assert!(restored.resume(&a.id).await.is_err());
+        restored.register_account("first".into(), first.clone());
+        restored.resume(&a.id).await.unwrap();
+        assert!(Arc::ptr_eq(&restored.session_backend(&a.id).unwrap(), &first));
+        assert!(restored.resume(&b.id).await.is_err());
+        assert_eq!(restored.list_sessions().iter().find(|r| r.id == b.id).unwrap().account_id.as_deref(), Some("second"));
+        restored.shutdown().await;
     }
 
     #[tokio::test]

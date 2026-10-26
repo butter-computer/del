@@ -47,6 +47,7 @@ pub struct Row {
 /// A terminal session stays separate from the manager's chat index.
 #[derive(Debug, Clone)]
 pub struct TerminalRow {
+    pub account_id: Option<String>,
     pub id: SessionId,
     pub title: String,
     pub cwd: PathBuf,
@@ -185,6 +186,7 @@ mod tests {
         SessionRecord {
             id: SessionId::new(id),
             provider: Provider::Claude,
+            account_id: None,
             cwd: "/tmp/proj".into(),
             model: None,
             reasoning_effort: None,

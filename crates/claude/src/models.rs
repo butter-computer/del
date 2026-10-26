@@ -86,7 +86,17 @@ pub async fn discover(options: &ClaudeOptions, cwd: &Path) -> Result<Vec<ModelIn
 }
 
 pub async fn discover_catalog(options: &ClaudeOptions, cwd: &Path) -> Result<Value> {
+    control_query(options, cwd, None).await
+}
+
+/// Read native plan limits without submitting a prompt or saving a session.
+pub async fn usage(options: &ClaudeOptions, cwd: &Path) -> Result<Value> {
+    control_query(options, cwd, Some(json!({"subtype":"get_usage","skip_behaviors":true}))).await
+}
+
+async fn control_query(options: &ClaudeOptions, cwd: &Path, followup: Option<Value>) -> Result<Value> {
     let mut cmd = Command::new(&options.binary);
+    options.prepare(&mut cmd);
     cmd.args([
         "-p",
         "--input-format",
@@ -114,11 +124,18 @@ pub async fn discover_catalog(options: &ClaudeOptions, cwd: &Path) -> Result<Val
         let request = json!({"type":"control_request","request_id":"del-models","request":{"subtype":"initialize"}});
         stdin.write_all(format!("{request}\n").as_bytes()).await?;
         stdin.flush().await?;
+        let mut followup = followup;
         while let Some(line) = lines.next_line().await? {
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue; };
             if v["type"] == "control_response" && v["response"]["request_id"] == "del-models" {
                 if v["response"]["subtype"] == "error" {
                     return Err(AgentError::Backend(v["response"]["error"].as_str().unwrap_or("Claude model discovery failed").into()));
+                }
+                if let Some(request) = followup.take() {
+                    let request = json!({"type":"control_request","request_id":"del-models","request":request});
+                    stdin.write_all(format!("{request}\n").as_bytes()).await?;
+                    stdin.flush().await?;
+                    continue;
                 }
                 return Ok(v["response"]["response"].clone());
             }

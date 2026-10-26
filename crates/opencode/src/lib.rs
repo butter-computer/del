@@ -20,6 +20,7 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 #[derive(Default)]
 pub struct OpenCodeBackend {
+    environment: Vec<(String, String)>,
     servers: AsyncMutex<HashMap<PathBuf, Arc<Server>>>,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
     tools: Mutex<Option<backend::BrowserTools>>,
@@ -48,6 +49,7 @@ fn err(message: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {message}"))
 }
 impl OpenCodeBackend {
+    pub fn with_environment(environment: Vec<(String, String)>) -> Self { { let mut backend = Self::default(); backend.environment = environment; backend } }
     async fn server(&self, cwd: &Path) -> Result<Arc<Server>> {
         let cwd = cwd.canonicalize()?;
         let mut servers = self.servers.lock().await;
@@ -55,7 +57,7 @@ impl OpenCodeBackend {
             return Ok(server.clone());
         }
         let tools = self.tools.lock().unwrap().clone();
-        let server = Arc::new(Server::start(&cwd, tools.as_ref()).await?);
+        let server = Arc::new(Server::start(&cwd, tools.as_ref(), &self.environment).await?);
         servers.insert(cwd, server.clone());
         Ok(server)
     }
@@ -707,8 +709,12 @@ pub async fn create_terminal_session(
     model: Option<&str>,
     variant: Option<&str>,
 ) -> Result<String> {
+    create_terminal_session_with_environment(cwd, model, variant, &[]).await
+}
+
+pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<&str>, variant: Option<&str>, env: &[(String, String)]) -> Result<String> {
     let cwd = cwd.canonicalize()?;
-    let server = Server::start(&cwd, None).await?;
+    let server = Server::start(&cwd, None, env).await?;
     let mut body = json!({"location":{"directory":cwd}});
     if let Some(model) = model {
         let (provider, id) = model.split_once('/').ok_or_else(|| err("invalid model"))?;
