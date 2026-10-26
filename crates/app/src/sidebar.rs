@@ -661,28 +661,24 @@ fn project_menu(menu: PopupMenu, state: &Entity<AppState>, path: &std::path::Pat
             let Some(action) = click_motion.clicked(event) else { return; };
             if action == "Restore project" { state.update(cx, |s, cx| s.restore_project(path.clone(), cx)); return; }
             if action == "Archive" { state.update(cx, |s, cx| s.archive_project(path.clone(), false, cx)); return; }
-            let rename = action == "Rename";
-            let input = cx.new(|cx| InputState::new(window, cx).default_value(state.read(cx).project_name(&path)));
+            if action == "Rename" {
+                state.update(cx, |s, cx| s.start_project_rename(path.clone(), cx));
+                return;
+            }
             let state = state.clone(); let path = path.clone();
             window.open_dialog(cx, move |dialog, _, _| {
-                let input_value = input.clone(); let state = state.clone(); let path = path.clone();
-                dialog.title(if rename { "Rename project" } else { "Permanently delete project?" })
+                let state = state.clone(); let path = path.clone();
+                dialog.title("Permanently delete project?")
                     .bg(crate::appearance::popup_surface(0x0b0b0d))
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                     .footer(gpui_kit::component::dialog::DialogFooter::new()
                         .child(Button::new("project-cancel").label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("project-confirm").label(if rename { "Save" } else { "Permanently delete" })
-                            .when(!rename, |button| button.danger())
+                        .child(Button::new("project-confirm").label("Permanently delete").danger()
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::dialog::Confirm { secondary: false }), cx))))
-                    .button_props(gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true).ok_text(if rename { "Save" } else { "Delete" }))
-                    .child(if rename { Input::new(&input).into_any_element() } else { div().child(if archived_only { "Permanently delete this project’s archived session histories. Active sessions, your directory, and files will stay untouched." } else { "Permanently delete this project and all its session histories. Your directory and files will stay untouched." }).into_any_element() })
+                    .child(div().child(if archived_only { "Permanently delete this project’s archived session histories. Active sessions, your directory, and files will stay untouched." } else { "Permanently delete this project and all its session histories. Your directory and files will stay untouched." }))
                     .on_ok(move |_, _, cx| {
-                        if rename {
-                            let name = input_value.read(cx).value().to_string();
-                            if name.trim().is_empty() { return false; }
-                            state.update(cx, |s, cx| s.rename_project(path.clone(), name, cx));
-                        } else { state.update(cx, |s, cx| s.archive_project(path.clone(), true, cx)); }
+                        state.update(cx, |s, cx| s.archive_project(path.clone(), true, cx));
                         true
                     })
             });
@@ -865,6 +861,7 @@ pub fn render(
                     .content(v_flex().w_full().gap_0p5()
                 .children(s.project_paths().into_iter().map(|path| {
                     let collapsed = s.project_preferences.collapsed.contains(&path);
+                    let project_renaming = s.project_renaming.as_ref() == Some(&path);
                     let toggle_state = state.clone();
                     let toggle_path = path.clone();
                     let new_state = state.clone();
@@ -881,13 +878,15 @@ pub fn render(
                             .text_color(rgba(0xffffffcc)).text_size(zpx(TEXT_MD))
                             .hover(|row| row.bg(rgba(0xffffff0a)))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
-                            .on_click(move |_, _, cx| toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)))
+                            .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
                             .context_menu(move |menu, _, _| {
                                 let state = cleanup_state.clone(); let path = cleanup_path.clone();
                                 menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
                             })
                             .child(crate::icons::icon(IconName::Folder))
-                            .child(div().flex_1().min_w_0().child(fading_title(s.project_name(&path))))
+                            .child(div().flex_1().min_w_0().child(if project_renaming {
+                                Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD)).into_any_element()
+                            } else { fading_title(s.project_name(&path)).into_any_element() }))
                             .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
                                 .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
                                 .dropdown_menu(move |menu, _, cx| project_menu(menu, &menu_state, &menu_path, cx)))

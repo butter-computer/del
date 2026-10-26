@@ -365,6 +365,7 @@ struct AppShell {
     rename: Entity<InputState>,
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
+    project_renaming_loaded: Option<std::path::PathBuf>,
     sidebar_widths: SidebarWidths,
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
     tab_drag_origin: std::rc::Rc<std::cell::Cell<Pixels>>,
@@ -661,6 +662,7 @@ impl AppShell {
             model_picker,
             rename,
             renaming_loaded: None,
+            project_renaming_loaded: None,
             sidebar_widths: SidebarWidths::load(),
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
@@ -2015,15 +2017,18 @@ impl Render for AppShell {
 
         // Load the title into the rename field when a rename starts.
         let renaming = self.state.read(cx).renaming.clone();
-        if renaming != self.renaming_loaded {
-            if let Some(id) = &renaming {
-                let title = self.state.read(cx).current_title(id);
+        let project_renaming = self.state.read(cx).project_renaming.clone();
+        if renaming != self.renaming_loaded || project_renaming != self.project_renaming_loaded {
+            let title = project_renaming.as_ref().map(|path| self.state.read(cx).project_name(path))
+                .or_else(|| renaming.as_ref().map(|id| self.state.read(cx).current_title(id)));
+            if let Some(title) = title {
                 self.rename.update(cx, |input, cx| {
                     input.set_value(title, window, cx);
                     input.focus(window, cx);
                 });
             }
             self.renaming_loaded = renaming;
+            self.project_renaming_loaded = project_renaming;
         }
 
         v_flex()
@@ -2075,7 +2080,10 @@ impl Render for AppShell {
             ))
             .capture_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
-                    if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
+                    if this.state.read(cx).project_renaming.is_some() || this.state.read(cx).renaming.is_some() {
+                        this.state.update(cx, |s, cx| s.finish_rename(None, cx));
+                        cx.stop_propagation();
+                    } else if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
                         cx.stop_propagation();
                     }
                 }),

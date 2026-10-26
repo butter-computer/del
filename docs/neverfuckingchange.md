@@ -355,9 +355,12 @@ This records the final decisions, including corrections to earlier experiments.
 - Project expand/collapse uses a reversible measured reveal with reduced-motion
   support; repeated clicks reverse smoothly without snapping or losing rows.
 
-- Project rename/delete dialogs must have an opaque theme-aware surface, readable
-  copy, Cancel, and an explicit Save or red Permanently delete button. Setting
-  Dialog button props alone does not create a footer; render the buttons.
+- Rename projects inline in their sidebar row, using the same editor styling as
+  sessions. Enter saves a nonempty display name; Escape or blur cancels. Clicking
+  inside the editor must not collapse the project. Do not open a rename modal.
+- Project deletion keeps an opaque theme-aware confirmation dialog with readable
+  copy, Cancel, and a red Permanently delete button. Setting Dialog button props
+  alone does not create a footer; render the buttons.
 - Archiving/deleting the final project leaves an empty usable new-session page.
   Do not create a replacement `/` or home project from an automatic fallback draft.
   Only explicit draft tabs and saved sessions determine project visibility.

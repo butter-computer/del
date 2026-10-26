@@ -186,7 +186,9 @@ session; archived siblings stay in Archived, so a project can appear in both vie
 Restoring a project restores all its archived sessions. Deleting from Projects
 removes all its histories; deleting from Archived removes only archived histories.
 Deletion requires confirmation and never deletes directory contents or Git work.
-Rename and delete dialogs use opaque surfaces and explicit action/cancel buttons.
+Rename edits the project name in place in the sidebar, like session renaming.
+Enter saves; Escape or leaving the field cancels. Project deletion uses an opaque
+confirmation dialog with Cancel and a red Permanently delete button.
 Archiving or deleting the last project leaves an empty, usable new-session page,
 without inventing a replacement `/` project. App startup also shows an empty
 composer without creating a draft tab or project. You can submit directly from

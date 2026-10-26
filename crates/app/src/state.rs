@@ -152,6 +152,7 @@ pub struct AppState {
     pub caffeine_enabled: bool,
     /// Session being renamed in the sidebar.
     pub renaming: Option<SessionId>,
+    pub project_renaming: Option<PathBuf>,
     pub show_archived: bool,
     /// Last problem worth telling the user about.
     pub error: Option<String>,
@@ -347,6 +348,7 @@ impl AppState {
             checking: Default::default(),
             caffeine_enabled: false,
             renaming: None,
+            project_renaming: None,
             show_archived: false,
             error,
             first_prompts: HashMap::new(),
@@ -1512,12 +1514,24 @@ impl AppState {
     }
 
     pub fn start_rename(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.project_renaming = None;
         self.renaming = Some(id);
+        cx.notify();
+    }
+
+    pub fn start_project_rename(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.project_renaming = Some(path);
         cx.notify();
     }
 
     /// `None` cancels.
     pub fn finish_rename(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if let Some(path) = self.project_renaming.take() {
+            if let Some(name) = title { self.rename_project(path, name, cx); }
+            cx.notify();
+            return;
+        }
         if let (Some(id), Some(title)) = (self.renaming.take(), title) {
             self.overrides.rename(&id, &title);
             self.save_overrides();
@@ -2271,6 +2285,7 @@ pub(crate) mod tests {
             checking: Default::default(),
             caffeine_enabled: false,
             renaming: None,
+            project_renaming: None,
             show_archived: false,
             error: None,
             first_prompts: HashMap::new(),
