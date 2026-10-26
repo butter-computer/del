@@ -146,6 +146,17 @@ struct ModelPanel {
 impl EventEmitter<CloseModelPicker> for ModelPanel {}
 
 impl ModelPanel {
+    fn choose_effort(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.state.read(cx).is_starting() || index == self.effort_index { return; }
+        let Some(level) = self.levels.get(index) else { return; };
+        let effort = Some(level.id.clone());
+        self.previous_effort_index = self.effort_index;
+        self.effort_index = index;
+        self.state.update(cx, |state, cx| state.set_effort(effort, cx));
+        crate::haptics::tick();
+        cx.notify();
+    }
+
     fn new(
         state: Entity<AppState>,
         trigger_bottom: Rc<Cell<Pixels>>,
@@ -219,12 +230,7 @@ impl Render for ModelPanel {
                 {
                     window.prevent_default();
                     cx.stop_propagation();
-                    this.previous_effort_index = this.effort_index;
-                    this.effort_index = index;
-                    let effort = Some(this.levels[index].id.clone());
-                    this.state
-                        .update(cx, |state, cx| state.set_effort(effort, cx));
-                    cx.notify();
+                    this.choose_effort(index, cx);
                 }
             }))
             .w(zpx(278.))
@@ -605,9 +611,7 @@ impl Render for ModelPanel {
                                 .round()
                                 .clamp(0.0, stops as f32)
                                 as usize;
-                            let effort = this.levels.get(stop).map(|level| level.id.clone());
-                            this.state
-                                .update(cx, |state, cx| state.set_effort(effort, cx));
+                            this.choose_effort(stop, cx);
                         }),
                     )
                     .child(
@@ -669,7 +673,6 @@ impl Render for ModelPanel {
                             ),
                     )
                     .children((0..stops).map(|stop| {
-                        let effort = self.levels.get(stop).map(|level| level.id.clone());
                         div()
                             .id(("effort-stop", stop))
                             .absolute()
@@ -680,8 +683,7 @@ impl Render for ModelPanel {
                             .cursor_pointer()
                             .on_drag(EffortDrag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |state, cx| state.set_effort(effort.clone(), cx))
+                                this.choose_effort(stop, cx)
                             }))
                     })),
             )

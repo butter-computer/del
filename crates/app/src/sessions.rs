@@ -21,6 +21,8 @@ struct Meta {
     pinned: bool,
     #[serde(default)]
     unread: bool,
+    #[serde(default)]
+    order: Option<u64>,
 }
 
 /// User-level overrides on top of the manager's index, keyed by session id.
@@ -72,7 +74,29 @@ impl Overrides {
     }
 
     pub fn set_pinned(&mut self, id: &SessionId, pinned: bool) {
-        self.meta(id).pinned = pinned;
+        let next = self.0.values().filter_map(|meta| meta.order).max().unwrap_or(0) + 1;
+        let meta = self.meta(id);
+        if meta.pinned != pinned {
+            meta.pinned = pinned;
+            meta.order = pinned.then_some(next);
+        }
+    }
+
+    pub fn set_order(&mut self, ids: &[SessionId]) {
+        for (index, id) in ids.iter().enumerate() {
+            self.meta(id).order = Some(index as u64 + 1);
+        }
+    }
+
+    pub fn order(&self, id: &SessionId) -> Option<u64> {
+        self.0.get(&id.0).and_then(|meta| meta.order)
+    }
+
+    pub fn initialize_pins(&mut self, records: &[SessionRecord]) {
+        let ids: Vec<_> = self.rows(records).into_iter().filter(|row| row.pinned).map(|row| row.id).collect();
+        if ids.iter().any(|id| self.order(id).is_none()) {
+            self.set_order(&ids);
+        }
     }
 
     pub fn set_unread(&mut self, id: &SessionId, unread: bool) {
@@ -117,7 +141,9 @@ impl Overrides {
                 }
             })
             .collect();
-        rows.sort_by_key(|r| (!r.pinned, std::cmp::Reverse(r.updated_secs)));
+        rows.sort_by_key(|r| (!r.pinned,
+            self.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }),
+            std::cmp::Reverse(r.updated_secs)));
         rows
     }
 
@@ -222,6 +248,35 @@ mod tests {
         assert!(restored.rows(&[record("older", None, 0)])[0].unread);
         restored.remove(&older);
         assert!(!restored.rows(&[record("older", None, 0)])[0].unread);
+    }
+
+    #[test]
+    fn pin_order_is_stable_and_repin_appends() {
+        let mut overrides = Overrides::default();
+        let a = SessionId::new("a");
+        let b = SessionId::new("b");
+        overrides.set_pinned(&a, true);
+        overrides.set_pinned(&b, true);
+        let records = [record("b", None, 9000), record("a", None, 1000)];
+        assert_eq!(overrides.rows(&records).iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b]);
+        overrides.set_pinned(&a, false);
+        overrides.set_pinned(&a, true);
+        assert_eq!(overrides.rows(&records)[0].id, b);
+        overrides.set_order(&[a.clone(), b.clone()]);
+        let restored: Overrides = serde_json::from_str(&serde_json::to_string(&overrides).unwrap()).unwrap();
+        assert_eq!(restored.rows(&records)[0].id, a);
+    }
+
+    #[test]
+    fn manual_regular_order_survives_activity_and_legacy_pins_are_initialized() {
+        let mut overrides: Overrides = serde_json::from_str(r#"{"a":{"pinned":true},"b":{"pinned":true}}"#).unwrap();
+        let records = [record("a", None, 1000), record("b", None, 2000), record("c", None, 3000), record("d", None, 4000)];
+        overrides.initialize_pins(&records);
+        overrides.set_order(&[SessionId::new("c"), SessionId::new("d")]);
+        let mut changed = records.clone();
+        changed[0].updated_at_ms = 90000;
+        changed[3].updated_at_ms = 99000;
+        assert_eq!(overrides.rows(&changed).iter().map(|r| r.id.0.as_str()).collect::<Vec<_>>(), vec!["b", "a", "c", "d"]);
     }
 
     #[test]

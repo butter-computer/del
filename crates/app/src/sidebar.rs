@@ -22,6 +22,85 @@ const TOOLBAR_BACKGROUND: u8 = 0x0e;
 const TOOLBAR_HOVER: u8 = 0x1a;
 const TOOLBAR_PRESSED: u8 = 0x24;
 
+#[derive(Default)]
+pub struct DragMotion {
+    pub active: Option<del_agent::SessionId>,
+    pub shifts: std::collections::HashMap<String, f32>,
+    pub generation: usize,
+}
+
+fn moving_row(item: impl IntoElement, id: &del_agent::SessionId, state: &Entity<AppState>, cx: &App) -> AnyElement {
+    let motion = &state.read(cx).sidebar_drag;
+    let offset = motion.shifts.get(&id.0).copied().unwrap_or(0.);
+    let hidden = motion.active.as_ref() == Some(id) && cx.has_active_drag();
+    div().flex_none().opacity(if hidden { 0. } else { 1. }).child(item)
+        .with_animation(SharedString::from(format!("sidebar-shift-{}-{}", id.0, motion.generation)),
+            Animation::new(std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 90 }))
+                .with_easing(ease_out_quint()),
+            move |row, t| row.relative().top(zpx(offset * (1. - t))))
+        .into_any_element()
+}
+
+#[derive(Clone)]
+struct SidebarDrag {
+    id: del_agent::SessionId,
+    title: String,
+    provider: Option<del_agent::Provider>,
+    terminal: bool,
+    pinned: bool,
+}
+
+impl Render for SidebarDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().h(zpx(ROW_HEIGHT)).w(zpx(SIDEBAR_WIDTH - 12.)).px_2()
+            .flex().items_center().gap_1p5().rounded_md().bg(crate::appearance::popup_surface(0x262626))
+            .text_size(zpx(TEXT_MD)).text_color(rgb(TEXT))
+            .child(match self.provider {
+                Some(provider) => provider_logo(provider).into_any_element(),
+                None => crate::icons::path("icons/terminal.svg").text_color(rgba(MUTED)).into_any_element(),
+            })
+            .child(div().truncate().child(self.title.clone()))
+    }
+}
+
+fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState>) -> Stateful<Div> {
+    let target = drag.clone();
+    let moving_target = drag.clone();
+    let moving_state = state.clone();
+    let state = state.clone();
+    let starting_state = state.clone();
+    item.on_drag(drag, move |drag, _, _, cx| {
+        starting_state.update(cx, |state, cx| {
+            state.sidebar_drag.active = Some(drag.id.clone());
+            state.sidebar_drag.shifts.clear();
+            cx.notify();
+        });
+        cx.new(|_| drag.clone())
+    })
+        .on_drag_move(move |event: &DragMoveEvent<SidebarDrag>, _, cx| {
+            let drag = event.drag(cx).clone();
+            if !event.bounds.contains(&event.event.position) || drag.id == moving_target.id
+                || drag.terminal != moving_target.terminal || drag.pinned != moving_target.pinned { return; }
+            let state = moving_state.read(cx);
+            let ids: Vec<_> = if drag.terminal {
+                state.terminal_rows.iter().map(|row| row.id.clone()).collect()
+            } else { state.rows().into_iter().map(|row| row.id).collect() };
+            let from = ids.iter().position(|id| id == &drag.id);
+            let to = ids.iter().position(|id| id == &moving_target.id);
+            let (Some(from), Some(to)) = (from, to) else { return; };
+            let midpoint = event.bounds.top() + event.bounds.size.height / 2.;
+            let dead_zone = zpx(3.);
+            if (from < to && event.event.position.y < midpoint + dead_zone)
+                || (from > to && event.event.position.y > midpoint - dead_zone) { return; }
+            moving_state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &moving_target.id, drag.terminal, cx));
+        })
+        .on_drop(move |drag: &SidebarDrag, _, cx| {
+            if drag.terminal == target.terminal && drag.pinned == target.pinned {
+                state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &target.id, drag.terminal, cx));
+            }
+        })
+}
+
 fn toolbar_tint(alpha: u8) -> Rgba {
     let tint = if crate::appearance::light() { 0x00000000 } else { 0xffffff00 };
     gpui_kit::rgba(tint | u32::from(alpha))
@@ -230,11 +309,11 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
         .tooltip(if pinned { "Unpin" } else { "Pin" })
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
         .text_color(if pinned { rgb(0xf5f5f5) } else { rgba(MUTED) })
-        .child(crate::icons::path(if pinned {
-            "icons/pin-filled.svg"
+        .child(if pinned {
+            crate::icons::path("icons/pin-filled.svg")
         } else {
-            "icons/pin-outline.svg"
-        }))
+            crate::icons::icon(ActionIcon::Pin)
+        })
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
@@ -245,7 +324,7 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .tooltip("Archive")
         .accessibility_label("Archive")
         .text_color(rgba(MUTED))
-        .child(crate::icons::path("icons/archive.svg"))
+        .child(crate::icons::icon(ActionIcon::Archive))
 }
 
 fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div {
@@ -377,7 +456,7 @@ fn row_item(
         .text_size(zpx(TEXT_MD))
         .text_color(rgb(TEXT))
         .on_hover(move |entered, window, cx| hover.hover(&hover_key, *entered, window, cx))
-        .child(motion.marker(
+        .child(motion.marker_with_opacity(
             id.0.clone(),
             if selected {
                 rgba(0xffffff14)
@@ -385,9 +464,13 @@ fn row_item(
                 rgba(0xffffff00)
             },
             rgba(0xffffff0a),
+            Some(std::rc::Rc::new(std::cell::Cell::new(if state.read(cx).sidebar_drag.active.as_ref() == Some(&id) && cx.has_active_drag() { 0. } else { 1. }))),
         ))
         .child(provider_logo(row.provider));
 
+    if !archived && !renaming {
+        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: Some(row.provider), terminal: false, pinned: row.pinned }, state);
+    }
     item = if renaming {
         item.child(
             div().flex_1().min_w_0().child(
@@ -495,12 +578,12 @@ fn row_item(
             let state = state.clone();
             let id = id.clone();
             let pinned = row.pinned;
-            return item
-                .context_menu(move |menu, _, cx| session_menu(menu, &state, &id, pinned, cx))
-                .into_any_element();
+            let motion_state = state.clone();
+            let motion_id = id.clone();
+            return moving_row(item.context_menu(move |menu, _, cx| session_menu(menu, &state, &id, pinned, cx)), &motion_id, &motion_state, cx);
         }
     }
-    item.into_any_element()
+    moving_row(item, &id, state, cx)
 }
 
 fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool, cx: &App) -> Div {
@@ -676,8 +759,8 @@ pub fn render(
                             toolbar_button("session-usage-trigger", cx)
                                 .w_full()
                                 .flex_none()
-                                .tooltip("Session memory")
-                                .accessibility_label("Session memory")
+                                .tooltip("Memory usage")
+                                .accessibility_label("Memory usage")
                                 .child(crate::icons::icon(ActionIcon::Activity)),
                         )
                         .content({
@@ -754,6 +837,7 @@ pub fn render(
                                         && !providers_open;
                                     let state = state.clone();
                                     let pin_state = state.clone();
+                                    let pin_motion_state = state.clone();
                                     let close_state = state.clone();
                                     let id = row.id.clone();
                                     let pin_id = row.id.clone();
@@ -767,6 +851,9 @@ pub fn render(
                                     let hover_key = id.0.clone();
                                     h_flex()
                                         .id(SharedString::from(format!("terminal-row-{}", id.0)))
+                                        .when(!renaming, |item| draggable_row(item, SidebarDrag {
+                                            id: id.clone(), title: title.clone(), provider: row.provider, terminal: true, pinned,
+                                        }, &state))
                                         .relative()
                                         .group(group.clone())
                                         .h(zpx(ROW_HEIGHT))
@@ -787,7 +874,7 @@ pub fn render(
                                                 rgba(0xffffff00)
                                             },
                                             rgba(0xffffff0a),
-                                            Some(terminal_opacity.clone()),
+                                            Some(if s.sidebar_drag.active.as_ref() == Some(&row.id) && cx.has_active_drag() { std::rc::Rc::new(std::cell::Cell::new(0.)) } else { terminal_opacity.clone() }),
                                         ))
                                         .on_click(move |event, _, cx| {
                                             if !renaming {
@@ -905,6 +992,7 @@ pub fn render(
                                         .context_menu(move |menu, _, cx| {
                                             session_menu(menu, &menu_state, &menu_id, pinned, cx)
                                         })
+                                        .map(|item| moving_row(item, &row.id, &pin_motion_state, cx))
                                 }),
                         )
                         .with_animation(

@@ -72,6 +72,23 @@ fn escaped_search_text(
     (out, start..end)
 }
 
+/// Combine only adjacent, already-received chunks for the same turn. Never wait
+/// for a newline, timer, or a later event, and never cross tool/status boundaries.
+fn coalesce_deltas(events: impl IntoIterator<Item = AgentEvent>) -> Vec<AgentEvent> {
+    let mut ready = Vec::new();
+    for event in events {
+        if let AgentEvent::AssistantTextDelta { turn_id, text } = &event
+            && let Some(AgentEvent::AssistantTextDelta { turn_id: previous, text: accumulated }) = ready.last_mut()
+            && previous == turn_id
+        {
+            accumulated.push_str(text);
+        } else {
+            ready.push(event);
+        }
+    }
+    ready
+}
+
 pub struct PromptSubmitted;
 
 pub struct ChatView {
@@ -88,6 +105,9 @@ pub struct ChatView {
     loading: bool,
     first_prompt: Option<String>,
     completed_turns: u64,
+    working_since: Option<std::time::Instant>,
+    working_message: Option<usize>,
+    pub(super) expanded_activity: std::collections::HashSet<usize>,
     pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
     pub(super) search_pending: Option<crate::conversation_search::Hit>,
@@ -139,6 +159,9 @@ impl ChatView {
             loading: session.is_some(),
             first_prompt: first_prompt.as_ref().map(|input| input.text.clone()),
             completed_turns: 0,
+            working_since: None,
+            working_message: None,
+            expanded_activity: Default::default(),
             assistant_text: Default::default(),
             pending_errors: Vec::new(),
             search_pending: None,
@@ -250,19 +273,54 @@ impl ChatView {
             self.pending_errors.push(message.clone());
         }
         let change = self.model.apply(event);
-        self.sync(change, cx);
+        let delta = match event { AgentEvent::AssistantTextDelta { text, .. } => Some(text.as_str()), _ => None };
+        self.sync_text(change, delta, cx);
+    }
+
+    pub(super) fn working_label(&self, ix: usize) -> Option<String> {
+        if self.working_message != Some(ix) { return None; }
+        let seconds = self.working_since?.elapsed().as_secs();
+        let elapsed = if seconds >= 60 { format!("{}m", seconds / 60) } else { format!("{seconds}s") };
+        Some(format!("Working for {elapsed}"))
     }
 
     /// Keep the virtual list's rows in step with the model.
     fn sync(&mut self, change: Option<Change>, cx: &mut Context<Self>) {
+        self.sync_text(change, None, cx);
+    }
+
+    fn sync_text(&mut self, change: Option<Change>, delta: Option<&str>, cx: &mut Context<Self>) {
+        if self.model.is_running() && self.working_since.is_none() && !self.loading {
+            let started = std::time::Instant::now();
+            self.working_since = Some(started);
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    if !this.update(cx, |this, cx| {
+                        let active = this.working_since == Some(started) && this.model.is_running();
+                        if active {
+                            if let Some(ix) = this.working_message { this.scroller.remeasure_items(ix..ix + 1); }
+                            cx.notify();
+                        }
+                        active
+                    }).unwrap_or(false) { break; }
+                }
+            }).detach();
+        } else if !self.model.is_running() {
+            self.working_since = None;
+        }
+        let previous_working_message = self.working_message;
+        self.working_message = self.working_since.and_then(|_| self.model.blocks.iter().rposition(|block| matches!(block, Block::User { .. })));
         if let Some(change) = change {
             let ix = match change { Change::Pushed(ix) | Change::Updated(ix) => ix };
             if let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) {
-                let text = text.clone();
                 if let Some(view) = self.assistant_text.get(&ix) {
-                    view.update(cx, |view, cx| view.set_text(&text, cx));
+                    view.update(cx, |view, cx| {
+                        if let Some(delta) = delta { view.push_str(delta, cx); }
+                        else { view.set_text(text, cx); }
+                    });
                 } else {
-                    let view = cx.new(|cx| text::TextViewState::markdown(&text, cx));
+                    let view = cx.new(|cx| text::TextViewState::markdown(text, cx));
                     cx.observe(&view, move |this, _, cx| {
                         this.scroller.remeasure_items(ix..ix + 1);
                         cx.notify();
@@ -277,6 +335,20 @@ impl ChatView {
                 }
                 Change::Updated(ix) => self.scroller.remeasure_items(ix..ix + 1),
             }
+            let mut start = ix;
+            while start > 0 && matches!(self.model.blocks[start - 1], Block::Tool(_)) { start -= 1; }
+            let mut end = ix + 1;
+            while end < self.model.blocks.len() && matches!(self.model.blocks[end], Block::Tool(_)) { end += 1; }
+            self.scroller.remeasure_items(start..end);
+        } else if !self.model.is_running() {
+            // A successful final tool sequence can collapse when the turn settles.
+            let end = self.model.blocks.len();
+            let mut start = end;
+            while start > 0 && matches!(self.model.blocks[start - 1], Block::Tool(_)) { start -= 1; }
+            if start < end { self.scroller.remeasure_items(start..end); }
+        }
+        for ix in [previous_working_message, self.working_message].into_iter().flatten() {
+            if ix < self.scroller.item_count() { self.scroller.remeasure_items(ix..ix + 1); }
         }
         cx.notify();
     }
@@ -473,6 +545,7 @@ impl ChatView {
                 this.scroller.set_follow_mode(FollowMode::Tail);
                 this.scroller.scroll_to_end();
                 this.loading = false;
+                this.sync(None, cx);
                 if this.model.last_status.is_none()
                     || this.model.last_status == Some(del_agent::TurnStatus::Completed)
                 {
@@ -489,15 +562,13 @@ impl ChatView {
                         if this
                             .update(cx, |this, cx| {
                                 let before = this.completed_turns;
-                                this.on_event(&event, cx);
-                                // Claude emits completion and the next queued
-                                // turn's start together. Fold both before deciding
-                                // whether the provider is ready for another prompt.
+                                let mut ready = vec![event];
+                                // Drain only what is ready now, bounded so rendering gets
+                                // control back. Preserve completion/start boundaries.
                                 for _ in 0..rx.len().min(128) {
-                                    if let Ok(event) = rx.try_recv() {
-                                        this.on_event(&event, cx);
-                                    }
+                                    if let Ok(event) = rx.try_recv() { ready.push(event); }
                                 }
+                                for event in coalesce_deltas(ready) { this.on_event(&event, cx); }
                                 if this.completed_turns > before
                                     && this.model.last_status
                                         == Some(del_agent::TurnStatus::Completed)
@@ -540,16 +611,16 @@ impl ChatView {
         .detach();
     }
 
-    fn render_status(&self) -> impl IntoElement {
+    fn render_status(&self) -> AnyElement {
         let muted = rgba(0xffffff8c);
         let waiting = self.model.has_pending_approval();
-        let (label, hint) = match (self.model.phase, self.model.last_status) {
-            (Phase::Running, _) if waiting => ("Waiting for your approval", ""),
-            (Phase::Running, _) => ("Working", "Enter queues · ⌘ + Enter steers"),
-            (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => ("Done", ""),
-            (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => ("Stopped", ""),
-            (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => ("Turn failed", ""),
-            (Phase::Idle, None) => ("", ""),
+        let label = match (self.model.phase, self.model.last_status) {
+            (Phase::Running, _) if waiting => "Waiting for your approval",
+            (Phase::Running, _) => "",
+            (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => "",
+            (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => "Stopped",
+            (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => "Turn failed",
+            (Phase::Idle, None) => "",
         };
         let usage = self.model.usage();
         let usage_text = (usage.input + usage.output > 0).then(|| {
@@ -560,6 +631,10 @@ impl ChatView {
                 compact_count(usage.cached)
             )
         });
+
+        if label.is_empty() && usage_text.is_none() {
+            return div().into_any_element();
+        }
 
         h_flex()
             .id("status")
@@ -575,19 +650,9 @@ impl ChatView {
             .justify_between()
             .text_size(zpx(TEXT_SM))
             .text_color(muted)
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .when(self.model.is_running() && !waiting, |row| {
-                        row.child(crate::icons::spinner().color(muted.into()))
-                    })
-                    .child(label)
-                    .when(!hint.is_empty(), |row| {
-                        row.child(div().text_color(rgba(0xffffff4d)).child(hint))
-                    }),
-            )
+            .child(label)
             .children(usage_text)
+            .into_any_element()
     }
 }
 
@@ -686,7 +751,7 @@ impl Render for ChatView {
                                             };
                                             let previous = strength(previous_hover);
                                             let next = strength(hover);
-                                            let selected = active == Some(ix);
+                                            let selected = hover.map_or(active == Some(ix), |hover| hover == position);
                                             div()
                                                 .id(("message-jump", ix))
                                                 .role(gpui::Role::Button)
@@ -714,6 +779,7 @@ impl Render for ChatView {
                                                             this.rail_previous_hover =
                                                                 this.rail_hover;
                                                             this.rail_hover = next;
+                                                            if next.is_some() { crate::haptics::tick(); }
                                                             cx.notify();
                                                         }
                                                     },
@@ -752,9 +818,9 @@ impl Render for ChatView {
                                                             let weight =
                                                                 previous + (next - previous) * t;
                                                             let width = 7.0 + 15.0 * weight;
-                                                            let alpha = (0.22 + 0.68 * weight).max(
-                                                                if selected { 0.8 } else { 0.22 },
-                                                            );
+                                                            // Only the hovered marker (or current message when idle)
+                                                            // is bright. Neighbor magnification changes width only.
+                                                            let alpha = if selected { 0.9 } else { 0.22 };
                                                             tick.w(zpx(width))
                                                                 .bg(rgba(0xffffffff).opacity(alpha))
                                                         },
@@ -765,17 +831,18 @@ impl Render for ChatView {
                             })),
                     )
                     .child(
-                        div().flex_1().min_w_0().h_full().child(
+                        v_flex().flex_1().min_w_0().h_full()
+                        .child(
                             list(self.scroller.clone(), move |ix, _, cx| {
                                 div()
                                     .w_full()
                                     .min_w_0()
                                     .px_3()
-                                    .pb(zpx(6.0))
                                     .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
                                     .into_any_element()
                             })
-                            .size_full()
+                            .w_full()
+                            .flex_1()
                             .min_h_0()
                             .py_2(),
                         ),
@@ -805,6 +872,41 @@ mod tests {
         assert_eq!(active_prompt(&[0, 3, 6, 9], 8, false), Some(6));
         assert_eq!(active_prompt(&[], 0, true), None);
     }
+    #[test]
+    fn ready_deltas_coalesce_without_crossing_turns_or_tools() {
+        let delta = |turn: &str, text: &str| AgentEvent::AssistantTextDelta { turn_id: turn.into(), text: text.into() };
+        let events = coalesce_deltas(vec![delta("a", "hello "), delta("a", "世界"),
+            AgentEvent::ToolCallStarted { id: "tool".into(), name: "Read".into(), input_summary: "main.rs".into() },
+            delta("a", "tail"), delta("b", "next")]);
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], AgentEvent::AssistantTextDelta { text, .. } if text == "hello 世界"));
+        assert!(matches!(&events[1], AgentEvent::ToolCallStarted { .. }));
+        assert!(matches!(&events[2], AgentEvent::AssistantTextDelta { turn_id, text } if turn_id == "a" && text == "tail"));
+        assert!(matches!(&events[3], AgentEvent::AssistantTextDelta { turn_id, text } if turn_id == "b" && text == "next"));
+        assert_eq!(coalesce_deltas(vec![delta("a", "partial")]).len(), 1);
+    }
+
+    #[gpui::test]
+    fn working_label_follows_latest_user_message_and_clears_on_completion(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>()).unwrap();
+        let view = cx.new(|cx| ChatView::new(Backend { runtime: runtime.handle().clone(), manager }, None, None, cx));
+        view.update(cx, |view, cx| {
+            let change = view.model.push_user("first".into(), false);
+            view.sync(Some(change), cx);
+            assert_eq!(view.working_label(0).as_deref(), Some("Working for 0s"));
+            let change = view.model.push_user("followup".into(), true);
+            view.sync(Some(change), cx);
+            assert!(view.working_label(0).is_none());
+            assert!(view.working_label(1).is_some());
+            view.model.phase = Phase::Idle;
+            view.sync(None, cx);
+            assert!(view.working_label(1).is_none());
+        });
+    }
+
     #[gpui::test]
     fn streamed_chunks_update_markdown_before_turn_completion(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -825,6 +927,15 @@ mod tests {
                 assert!(view.model.last_status.is_none());
             });
         }
+        // A provider's final snapshot may revise already streamed Markdown.
+        view.update(cx, |view, cx| view.on_event(&AgentEvent::AssistantMessage {
+            turn_id: "streaming".into(), text: "**Corrected** 世界".into(),
+        }, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let text = view.assistant_text.values().next().unwrap();
+            assert_eq!(text.read(cx).rendered_text().as_str().trim(), "Corrected 世界");
+        });
     }
 
     #[gpui::test]

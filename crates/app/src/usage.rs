@@ -167,7 +167,7 @@ impl Render for Usage {
             .w(zpx(240.))
             .whitespace_normal()
             .gap_2()
-            .child(div().text_size(zpx(14.)).child("Session memory"))
+            .child(div().text_size(zpx(14.)).child("Memory usage"))
             .child(
                 div()
                     .relative()

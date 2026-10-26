@@ -235,6 +235,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidebar_actions_use_sf_symbols() {
+        assert_eq!(symbol_name("icons/archive.svg"), Some("archivebox"));
+        assert_eq!(symbol_name("icons/pin.svg"), Some("pin"));
+        assert_eq!(symbol_name("icons/pin-filled.svg"), Some("pin.fill"));
+    }
+
+    #[test]
     fn provider_identity_assets_are_not_replaced() {
         for path in [
             "icons/claude.svg",

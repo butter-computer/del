@@ -124,6 +124,8 @@ pub struct AppState {
     pub panel: Panel,
     pub preferences_open: bool,
     pub shortcut_hints: bool,
+    pub window_active: bool,
+    pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
     pub providers: Vec<ProviderStatus>,
     /// Provider whose sign-in is running in the user's terminal.
@@ -250,9 +252,10 @@ impl AppState {
         Self::pump(rx, cx);
 
         let records = manager.list_sessions();
-        let overrides = sessions::overrides_path()
+        let mut overrides = sessions::overrides_path()
             .map(|p| Overrides::load(&p))
             .unwrap_or_default();
+        overrides.initialize_pins(&records);
         Self {
             catalogs: HashMap::new(),
             rt,
@@ -279,6 +282,8 @@ impl AppState {
             panel: Panel::Chat,
             preferences_open: true,
             shortcut_hints: false,
+            window_active: true,
+            sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             providers: Provider::ALL
                 .iter()
@@ -663,7 +668,45 @@ impl AppState {
         };
         row.pinned = !row.pinned;
         self.terminal_pin_changes.push((id.clone(), row.pinned));
-        self.terminal_rows.sort_by_key(|row| !row.pinned);
+        self.overrides.set_pinned(id, row.pinned);
+        self.sort_terminal_rows();
+        self.save_overrides();
+        cx.notify();
+    }
+
+    pub fn sort_terminal_rows(&mut self) {
+        self.terminal_rows.sort_by_key(|row| (!row.pinned,
+            self.overrides.order(&row.id).unwrap_or(if row.pinned { 0 } else { u64::MAX })));
+    }
+
+    /// Reorder only within the same visible section and pin group.
+    pub fn reorder_sidebar(&mut self, dragged: &SessionId, target: &SessionId, terminal: bool, cx: &mut Context<Self>) {
+        let rows: Vec<_> = if terminal {
+            self.terminal_rows.iter().filter(|row| !self.terminal_archived(&row.id))
+                .map(|row| (row.id.clone(), row.pinned)).collect()
+        } else {
+            self.rows().into_iter().map(|row| (row.id, row.pinned)).collect()
+        };
+        let Some((_, pinned)) = rows.iter().find(|(id, _)| id == dragged) else { return };
+        if !rows.iter().any(|(id, pin)| id == target && pin == pinned) { return; }
+        let mut ids: Vec<_> = rows.iter().filter(|(_, pin)| pin == pinned).map(|(id, _)| id.clone()).collect();
+        let from = ids.iter().position(|id| id == dragged).unwrap();
+        let to = ids.iter().position(|id| id == target).unwrap();
+        if from == to { return; }
+        let previous = ids.clone();
+        let id = ids.remove(from);
+        ids.insert(to, id);
+        if self.sidebar_drag.active.is_some() {
+            self.sidebar_drag.shifts = ids.iter().enumerate().map(|(at, id)| {
+                let before = previous.iter().position(|old| old == id).unwrap();
+                (id.0.clone(), (before as f32 - at as f32) * 30.)
+            }).collect();
+            self.sidebar_drag.generation += 1;
+            crate::haptics::tick();
+        }
+        self.overrides.set_order(&ids);
+        if terminal { self.sort_terminal_rows(); }
+        self.save_overrides();
         cx.notify();
     }
 
@@ -675,13 +718,14 @@ impl AppState {
         let Some(row) = self.rows().into_iter().find(|row| &row.id == id) else {
             return;
         };
+        self.overrides.initialize_pins(&self.records);
         self.overrides.set_pinned(id, !row.pinned);
         self.save_overrides();
         cx.notify();
     }
 
     pub fn reply_finished(&mut self, id: &SessionId, cx: &mut Context<Self>) {
-        let visible = self.panel == Panel::Chat
+        let visible = self.window_active && self.panel == Panel::Chat
             && matches!(&self.selection,
             Selection::Session(current) | Selection::Terminal(current) if current == id);
         if !visible {
@@ -1660,6 +1704,8 @@ mod tests {
             panel: Panel::Chat,
             preferences_open: true,
             shortcut_hints: false,
+            window_active: true,
+            sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             providers: vec![],
             signin: None,
@@ -1790,6 +1836,20 @@ mod tests {
                 s.tabs,
                 vec![Tab::Draft(0), Tab::Session(a), Tab::Session(b)]
             );
+        });
+    }
+
+    #[gpui::test]
+    fn selected_chat_finishing_in_inactive_window_is_unread(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let id = del_agent::SessionId::new("away-reply");
+            s.select(id.clone(), cx);
+            s.window_active = false;
+            s.apply(super::Msg::ReplyFinished(id.clone()), cx);
+            assert!(s.terminal_unread(&id));
+            s.select(id.clone(), cx);
+            assert!(!s.terminal_unread(&id));
         });
     }
 
@@ -2149,6 +2209,41 @@ mod tests {
             assert!(!s.terminal_archived(&id));
             s.select_terminal(id.clone(), cx);
             assert_eq!(s.selection, Selection::Terminal(id));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_reorder_keeps_pin_groups_and_selection(cx: &mut gpui::TestAppContext) {
+        use del_agent::SessionId;
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            for name in ["a", "b", "c", "d"] {
+                s.terminal_rows.push(crate::sessions::TerminalRow {
+                    id: SessionId::new(name), title: name.into(), cwd: "/tmp".into(),
+                    provider: None, active: false, summary: String::new(), pinned: false,
+                });
+            }
+            let a = SessionId::new("a"); let b = SessionId::new("b");
+            let c = SessionId::new("c"); let d = SessionId::new("d");
+            s.toggle_terminal_pin(&b, cx);
+            s.toggle_terminal_pin(&a, cx);
+            assert_eq!(s.terminal_rows[0].id, b);
+            s.select_terminal(c.clone(), cx);
+            let selection = s.selection.clone();
+            s.reorder_sidebar(&a, &b, true, cx);
+            assert_eq!(s.terminal_rows[0].id, a);
+            s.reorder_sidebar(&d, &c, true, cx);
+            assert_eq!(s.terminal_rows[2].id, d);
+            s.reorder_sidebar(&d, &a, true, cx);
+            s.reorder_sidebar(&a, &d, true, cx);
+            s.reorder_sidebar(&a, &b, false, cx);
+            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b, &d, &c]);
+            assert_eq!(s.selection, selection);
+            let saved = serde_json::to_string(&s.overrides).unwrap();
+            s.overrides = serde_json::from_str(&saved).unwrap();
+            s.terminal_rows.reverse();
+            s.sort_terminal_rows();
+            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b, &d, &c]);
         });
     }
 

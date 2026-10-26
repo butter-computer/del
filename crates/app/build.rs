@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-changed=src/haptics.m");
     println!("cargo:rerun-if-changed=src/document_preview.m");
     println!("cargo:rerun-if-changed=src/app_icon.m");
     println!("cargo:rerun-if-changed=src/symbols.m");
@@ -23,6 +24,7 @@ fn main() {
             .file("src/document_preview.m")
             .file("src/app_icon.m")
             .file("src/symbols.m")
+            .file("src/haptics.m")
             .file("src/browser.m")
             .file("src/dictation.m")
             .file("src/fluid.m")

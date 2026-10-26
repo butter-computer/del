@@ -3,6 +3,7 @@
 //! composer.
 
 pub(crate) mod attachments;
+mod activity;
 mod blocks;
 mod loading;
 pub mod model;

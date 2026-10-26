@@ -554,7 +554,7 @@ impl RightPanel {
                                             .justify_center()
                                             .role(gpui::Role::Button)
                                             .aria_label("Close browser tab")
-                                            .child(crate::icons::icon(IconName::Close))
+                                            .child(crate::icons::icon(IconName::Close).with_size(zpx(14.)))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 this.close_browser_tab(index, cx);

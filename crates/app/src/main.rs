@@ -14,6 +14,7 @@ mod wallpaper;
 mod ambient;
 mod backdrop;
 mod appearance;
+mod haptics;
 mod assets;
 mod attachments;
 mod browser;
@@ -487,6 +488,7 @@ impl AppShell {
         }
         self.previous_drag_target = self.drag_target;
         self.drag_target = Some(target);
+        haptics::tick();
         cx.notify();
     }
 
@@ -621,7 +623,7 @@ impl AppShell {
                     pinned: r.pinned,
                 })
                 .collect();
-            s.terminal_rows.sort_by_key(|row| !row.pinned);
+            s.sort_terminal_rows();
             if let Some(error) = &terminal_store.error {
                 s.error = Some(error.clone());
             }
@@ -733,6 +735,13 @@ impl AppShell {
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
+        shell.state.update(cx, |state, _| state.window_active = window.is_window_active());
+        cx.observe_window_activation(window, |this, window, cx| {
+            this.state.update(cx, |state, cx| {
+                state.window_active = window.is_window_active();
+                cx.notify();
+            });
+        }).detach();
         cx.on_app_quit(|this, cx| {
             this.cancel_dictation(cx);
             this.remember_right(cx);
@@ -1829,6 +1838,9 @@ impl Render for AppShell {
             for chat in self.chats.values() {
                 chat.update(cx, |chat, cx| chat.remeasure_for_zoom(cx));
             }
+        }
+        if self.state.read(cx).sidebar_drag.active.is_some() && !cx.has_active_drag() {
+            self.state.update(cx, |state, _| state.sidebar_drag = Default::default());
         }
         if self.dragging_tab.is_some() && !cx.has_active_drag() {
             self.dragging_tab = None;

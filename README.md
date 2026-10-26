@@ -9,6 +9,10 @@ The project is a local-development application (version `0.1.0`), with macOS as
 the current desktop target. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
+The agreed UI and behavior rules are documented in
+[docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
+when making future changes.
+
 ## Build and run
 
 Install Rust with support for edition 2024, the macOS Xcode developer tools,
@@ -87,11 +91,20 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
+Pinned chats stay in pin order, oldest pin first; new pins append to that group.
+Drag sidebar rows to rearrange them, as with top tabs. Orders are saved across
+restarts. Dragging stays within chats or terminals and within the same pinned or
+unpinned group; it never pins, unpins, or replaces a row in another section.
+The source row hides while dragging; its floating preview retains the provider icon.
+Neighboring rows slide with the top tabs’ easing and a small dead zone reduces jitter.
+Dragging top tabs or sidebar sessions into a new position emits a native haptic
+tick on supported macOS hardware; movement within the same slot stays silent.
+
 The sidebar starts with four equal-sized buttons: **Search**, **New session (+)**,
-**Keep Mac awake**, and **Session memory**. Keep-awake uses a neutral hover-colored
+**Keep Mac awake**, and **Memory usage**. Keep-awake uses a neutral hover-colored
 background and animated yellow steam while enabled.
 
-Session memory opens a compact popover to the right of its button, with a pointer
+Memory usage opens a compact popover to the right of its button, with a pointer
 on the left. It lists loaded chats and terminals by process-tree RAM usage,
 refreshing every three seconds while open. Each row shows a fading session title
 and its RAM usage; click the title to open the session. Delete and unload icons
@@ -161,9 +174,23 @@ conversation. Unloading a running session also stops its current work.
   informational rather than a clickable folder picker.
 - Chat renders streaming answers, reasoning, tool activity, diffs, usage, and
   approval requests. The message rail appears after six user messages and provides
-  jump-to-prompt navigation. Its ticks lengthen only on hover.
+  jump-to-prompt navigation. Hover magnifies nearby ticks, but only the hovered
+  tick is white; neighbors stay gray. Away from the rail, only the current-message
+  tick is highlighted. Moving onto a different tick emits native haptic feedback
+  on supported macOS hardware.
+- The transcript uses left-aligned user message cards, unboxed assistant prose, and
+  compact expandable tool rows. Consecutive tools share a group immediately, even
+  while running. Its header shows the current action and any failure/decline count;
+  expanding it smoothly reveals indented calls with their full output and diffs.
+  Matching edit/file events share one row, and empty diff counts are omitted. See
+  [Codex chat reference](docs/codex-chat-reference.md) for source research and scope.
+- A shimmering “Working for…” label sits beneath the latest user message and
+  scrolls with it. There is no duplicate Working/Done indicator above the composer.
+  Reduce Motion keeps the label static.
 - Assistant text appears as it arrives, without streaming fades or animation
-  delays. Native Markdown rendering preserves text selection.
+  delays. Deltas append to a persistent Markdown view; already-received adjacent
+  chunks coalesce without waiting or crossing tool/turn boundaries. Native Markdown
+  rendering preserves text selection.
 - Opening a saved conversation shows a transcript shimmer while it loads,
   without a loading text line, with static placeholders when Reduce Motion is enabled.
 - Sessions have tabs and sidebar entries, with rename, pin, unread, archive,
@@ -185,7 +212,9 @@ conversation. Unloading a running session also stops its current work.
   Archived chat and terminal rows show Restore and Permanently delete icons on hover.
   The delete icon stays red, including when hovered.
 - A blue dot at the far right marks unread conversations, including background
-  replies that finish before being opened. Hover actions make room for the dot.
+  replies that finish before being opened. A selected chat also becomes unread
+  when its reply finishes while Del’s window is inactive. Opening the chat clears
+  the dot. Hover actions make room for it.
 - Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
@@ -227,6 +256,9 @@ Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
 Reset clears explicit effort/fast settings and refreshes the catalog.
+Changing effort by dragging, clicking a stop, or using arrow keys emits one native
+haptic tick per level transition on supported macOS hardware. Movement within the
+same level stays silent; devices without haptic support receive no feedback.
 
 Model, effort, and service-tier selections are stored with the conversation.
 Existing chat settings apply on subsequent prompts through the backend's
