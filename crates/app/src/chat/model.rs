@@ -101,23 +101,6 @@ pub enum Block {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Usage {
-    pub input: u64,
-    pub output: u64,
-    pub cached: u64,
-}
-
-impl Usage {
-    fn add(self, other: Usage) -> Usage {
-        Usage {
-            input: self.input + other.input,
-            output: self.output + other.output,
-            cached: self.cached + other.cached,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
     #[default]
     Idle,
@@ -140,11 +123,6 @@ pub struct ChatModel {
     pub phase: Phase,
     /// Status of the most recently finished turn.
     pub last_status: Option<TurnStatus>,
-    /// Usage of finished turns.
-    settled_usage: Usage,
-    /// Latest usage report of the turn in flight. Backends report a running
-    /// total for the turn, so the newest report replaces the previous one.
-    turn_usage: Usage,
     current_turn: Option<String>,
 }
 
@@ -165,10 +143,6 @@ impl ChatModel {
 
     pub fn is_running(&self) -> bool {
         self.phase == Phase::Running
-    }
-
-    pub fn usage(&self) -> Usage {
-        self.settled_usage.add(self.turn_usage)
     }
 
     pub fn has_pending_approval(&self) -> bool {
@@ -311,7 +285,6 @@ impl ChatModel {
             AgentEvent::TurnStarted { turn_id } => {
                 self.phase = Phase::Running;
                 self.current_turn = Some(turn_id.clone());
-                self.turn_usage = Usage::default();
                 None
             }
             AgentEvent::AssistantTextDelta { turn_id, text } => {
@@ -434,25 +407,12 @@ impl ChatModel {
                     state: ApprovalState::Pending,
                 })))
             }
-            AgentEvent::TokenUsage {
-                input,
-                output,
-                cached,
-            } => {
-                self.turn_usage = Usage {
-                    input: *input,
-                    output: *output,
-                    cached: *cached,
-                };
-                None
-            }
+            AgentEvent::TokenUsage { .. } => None,
             AgentEvent::TurnCompleted { turn_id, status } => {
                 self.seal();
                 self.phase = Phase::Idle;
                 self.current_turn = None;
                 self.last_status = Some(*status);
-                self.settled_usage = self.settled_usage.add(self.turn_usage);
-                self.turn_usage = Usage::default();
                 if *status == TurnStatus::Completed {
                     let ix = self.blocks.iter().rposition(|block| matches!(block,
                         Block::Assistant { turn_id: id, .. } if id == turn_id));
@@ -494,17 +454,6 @@ pub fn parse_diff(diff: &str) -> Vec<DiffLine> {
             }
         })
         .collect()
-}
-
-/// "1.2k"-style count for the usage line.
-pub fn compact_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}m", n as f64 / 1e6)
-    } else if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1e3)
-    } else {
-        n.to_string()
-    }
 }
 
 #[cfg(test)]
@@ -877,46 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_replaces_within_a_turn_and_sums_across_turns() {
-        let mut m = ChatModel::default();
-        let u = |i, o| AgentEvent::TokenUsage {
-            input: i,
-            output: o,
-            cached: 0,
-        };
-        let end = |s| AgentEvent::TurnCompleted {
-            turn_id: "t".into(),
-            status: s,
-        };
-        m.apply(&AgentEvent::TurnStarted {
-            turn_id: "t".into(),
-        });
-        m.apply(&u(10, 1));
-        m.apply(&u(10, 5));
-        assert_eq!(
-            m.usage(),
-            Usage {
-                input: 10,
-                output: 5,
-                cached: 0
-            }
-        );
-        m.apply(&end(TurnStatus::Completed));
-        m.apply(&AgentEvent::TurnStarted {
-            turn_id: "t2".into(),
-        });
-        m.apply(&u(20, 2));
-        assert_eq!(
-            m.usage(),
-            Usage {
-                input: 30,
-                output: 7,
-                cached: 0
-            }
-        );
-    }
-
-    #[test]
     fn user_message_starts_running_but_steer_does_not_change_phase() {
         let mut m = ChatModel::default();
         m.push_user("hi".into(), false);
@@ -963,13 +872,6 @@ mod tests {
         };
         assert!(t.expanded);
         assert_eq!(m.toggle(9), None);
-    }
-
-    #[test]
-    fn compact_counts() {
-        assert_eq!(compact_count(999), "999");
-        assert_eq!(compact_count(1200), "1.2k");
-        assert_eq!(compact_count(2_500_000), "2.5m");
     }
 }
 

@@ -1,7 +1,7 @@
 //! `ChatView`: session plumbing and the message list. The composer is shared
 //! with the new-chat page and lives in the app shell.
 
-use super::model::{Block, Change, ChatModel, Phase, compact_count};
+use super::model::{Block, Change, ChatModel, Phase};
 use crate::appearance::rgba;
 use crate::zoom::px as zpx;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
@@ -668,17 +668,7 @@ impl ChatView {
             (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => "Turn failed",
             (Phase::Idle, None) => "",
         };
-        let usage = self.model.usage();
-        let usage_text = (usage.input + usage.output > 0).then(|| {
-            format!(
-                "{} in · {} out · {} cached",
-                compact_count(usage.input),
-                compact_count(usage.output),
-                compact_count(usage.cached)
-            )
-        });
-
-        if label.is_empty() && usage_text.is_none() {
+        if label.is_empty() {
             return div().into_any_element();
         }
 
@@ -697,7 +687,6 @@ impl ChatView {
             .text_size(zpx(TEXT_SM))
             .text_color(muted)
             .child(label)
-            .children(usage_text)
             .into_any_element()
     }
 }

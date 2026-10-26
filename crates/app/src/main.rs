@@ -1166,6 +1166,10 @@ impl AppShell {
             .composer_attachments
             .get(&owner)
             .is_some_and(|images| !images.is_empty());
+        let folder_branch = locked.then(|| {
+            let state = self.state.read(cx);
+            state.project_info.get(&cwd).map(|info| info.current.clone()).filter(|b| !b.is_empty())
+        }).flatten();
         let composer = ComposerCard::new(
             &self.composer,
             COMPOSER_MAX_WIDTH,
@@ -1173,16 +1177,12 @@ impl AppShell {
             ready,
             self.model_picker.clone(),
             if locked {
-                let state = self.state.read(cx);
-                let project = sessions::folder_name(&state.project_root(&cwd));
-                match state.project_info.get(&cwd).filter(|info| !info.current.is_empty()) {
-                    Some(info) => format!("{project} · {}", info.current),
-                    None => project,
-                }
+                sessions::folder_name(&self.state.read(cx).project_root(&cwd))
             } else { sessions::folder_name(&cwd) },
             locked,
             running,
         )
+        .folder_tooltip(folder_branch.map(|branch| format!("Branch: {branch}")))
         .accounts(self.state.clone())
         .goal_mode(self.goal_modes.contains_key(&self.composer_owner(cx)))
         .on_cancel_goal(move |window, cx| {
