@@ -230,3 +230,19 @@ fn native_goal_continuations_get_distinct_turns_and_can_be_interrupted() {
         assert!(!translator.is_busy());
     }
 }
+
+#[test]
+fn steering_consumed_in_current_response_does_not_leave_phantom_turn() {
+    let mut translator = Translator::new();
+    translator.enqueue_turn("first".into());
+    translator.enqueue_turn("steering".into());
+    for text in ["first", "steering"] {
+        translator.handle_line(&serde_json::json!({
+            "type": "user", "isReplay": true,
+            "message": {"role": "user", "content": text}
+        }).to_string());
+    }
+    let events = translator.handle_line(r#"{"type":"result","is_error":false}"#);
+    assert!(!translator.is_busy(), "both inputs were consumed by the completed response");
+    assert!(!events.iter().any(|e| matches!(e, E::TurnStarted { .. })));
+}

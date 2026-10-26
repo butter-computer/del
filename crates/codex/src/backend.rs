@@ -634,14 +634,20 @@ impl AgentBackend for CodexBackend {
         let turn = s.state.lock().unwrap().mapper.turn_id().map(str::to_owned);
         let Some(turn) = turn else { return Ok(()) }; // nothing running
         let conn = self.connection().await?;
-        conn.client
+        match conn.client
             .request(
                 "turn/interrupt",
                 json!({ "threadId": session.as_str(), "turnId": turn }),
             )
             .await
-            .map_err(be)?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            // The turn can finish (or another Stop can land) between reading
+            // its id and the interrupt request. It is already stopped then.
+            Err(ClientError::Rpc(error)) if error.code == -32600
+                && error.message == "no active turn to interrupt" => Ok(()),
+            Err(error) => Err(be(error)),
+        }
     }
 
     async fn respond_approval(

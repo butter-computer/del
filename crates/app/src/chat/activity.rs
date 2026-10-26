@@ -30,7 +30,7 @@ impl Kind {
 pub fn describe(tool: &ToolCall) -> (Kind, String) {
     let name = tool.name.to_ascii_lowercase();
     let name = name.rsplit(['.', ':']).next().unwrap_or(&name);
-    let mut detail = tool.input.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut detail = tool.input.lines().next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
     // Providers sometimes include the shell launcher in their display input.
     for prefix in ["/bin/zsh -lc ", "/bin/bash -lc ", "bash -lc ", "zsh -lc "] {
         if let Some(command) = detail.strip_prefix(prefix) {
@@ -134,6 +134,14 @@ mod tests {
         assert_eq!(describe(&tool("apply_patch", "add /Users/nihal/index.html", ToolState::Ok)).1, "Edited index.html");
         assert_eq!(describe(&tool("Grep", "TODO", ToolState::Ok)).0, Kind::Search);
     }
+    #[test]
+    fn multiline_command_summary_uses_only_first_line() {
+        let call = tool("shell", "echo first\necho second", ToolState::Running);
+        assert_eq!(describe(&call).1, "Running echo first");
+        assert_eq!(call.input, "echo first\necho second");
+        assert_eq!(group_label(&[Block::Tool(call)]), "Running echo first · 1 tools");
+    }
+
     #[test]
     fn consecutive_calls_group_while_running() {
         let blocks = vec![Block::Tool(tool("shell", "pwd", ToolState::Ok)), Block::Tool(tool("shell", "date", ToolState::Running))];

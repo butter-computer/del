@@ -150,6 +150,9 @@ This records the final decisions, including corrections to earlier experiments.
   Copy the full reply and replace the glyph with a same-sized checkmark for
   1.5 seconds. Repeated clicks restart the confirmation for that reply only.
 - Tool rows use muted text and inline disclosure arrows; omit shell launch wrappers from summaries.
+- Tool summaries, including live shimmering group headers, show only the first
+  input line and truncate to available width. Never wrap or overlap neighboring
+  transcript rows. Keep full multiline input/output available when expanded.
   Merge matching successful edit/file events into one row, keep output/diffs in disclosure, and omit zero-count diff badges.
 - Keep tool input/output available through disclosure. Group consecutive tools immediately, including while running.
   Show the latest running action and failure/decline counts in the header; keep each tool’s
@@ -374,3 +377,31 @@ This records the final decisions, including corrections to earlier experiments.
   section with a reversible reveal. Persist each section independently from the
   individual projects' expansion states. Keep contents full-width, respect Reduce
   Motion, and keep the Projects plus action independent of the heading toggle.
+
+- Reasoning headers use shimmering Thinking while active and static Thought when
+  finished. Click the header to expand/collapse; no spinner or show/hide text.
+  Respect Reduce Motion.
+- Do not show the token-usage line above the composer. Existing session folder
+  labels show the project name only, with the branch in the hover tooltip.
+
+- Stop must survive provider resume/send preparation: retain the request and
+  interrupt a subsequently starting turn. Pause automatic queued follow-ups after
+  Stop; explicit prompt delivery resumes them. Show Stopping… until the provider
+  finishes instead of silently accepting a no-op interrupt. Keep Stop accessible.
+
+- A follow-up rejected as Busy after completion is still undelivered: clear its
+  optimistic running state and retry after yielding. Only provider TurnStarted
+  events establish an active turn; do not wait forever for a second completion.
+  Automatic retries must respect Stop, interrupted/failed turns, queue order,
+  and the single in-flight delivery guard. Steering must retain later follow-ups.
+
+- Claude steering is not necessarily one input per result. Enable native input
+  replay acknowledgements and retire every input consumed by a completed
+  response. Keep unconsumed inputs pending; never fabricate a running turn for
+  steering already absorbed into the finished response. Cover both native queued
+  steering and merged steering, plus a later Del follow-up, in regression tests.
+
+- Codex Stop is idempotent: its explicit “no active turn to interrupt” response
+  means the turn already ended, not a user-facing failure. Preserve all other
+  interrupt errors. Live provider queue checks cover Claude, Codex, and OpenCode;
+  verify ordered delivery, steering followed by queued work, and Stop/resume.

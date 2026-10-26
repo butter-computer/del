@@ -328,7 +328,7 @@ impl RenderOnce for ComposerCard {
 
         // One round button: send, or stop while a turn is running.
         let action = div()
-            .id("send")
+            .id("send").debug_selector(|| "composer-action".into())
             .size(crate::icons::button_size())
             .flex()
             .items_center()
@@ -340,6 +340,7 @@ impl RenderOnce for ComposerCard {
             action
                 .bg(rgb(0xffffff))
                 .cursor_pointer()
+                .role(Role::Button).aria_label("Stop response")
                 .on_click(move |_, w, cx| on_stop(w, cx))
                 .child(crate::icons::icon(IconName::Square).text_color(rgb(0x111113)))
         } else {
@@ -455,5 +456,44 @@ impl RenderOnce for ComposerCard {
                     )
                     .child(h_flex().items_center().gap_1().child(voice).child(action)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::gpui;
+    use core::prelude::v1::test;
+
+    struct StopFixture {
+        input: Entity<TextareaState>,
+        picker: Entity<crate::model_picker::ModelPicker>,
+        stopped: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Render for StopFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let stopped = self.stopped.clone();
+            div().w(px(600.)).child(ComposerCard::new(&self.input, 600., Provider::Claude,
+                true, self.picker.clone(), "project".into(), true, true)
+                .on_stop(move |_, _| stopped.set(stopped.get() + 1)))
+        }
+    }
+    #[gpui::test]
+    fn stop_button_click_reaches_handler_with_focused_input(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let stopped = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            input.update(cx, |input, cx| input.focus(window, cx));
+            let picker = cx.new(|cx| crate::model_picker::ModelPicker::new(state, window, cx));
+            StopFixture { input, picker, stopped: stopped.clone() }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("composer-action").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        assert_eq!(stopped.get(), 1);
     }
 }

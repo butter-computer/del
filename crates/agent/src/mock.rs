@@ -34,6 +34,7 @@ struct Inner {
 pub struct MockBackend {
     provider: Provider,
     delay: Duration,
+    completion_delay: Duration,
     #[cfg(test)]
     pub title_response: Option<String>,
     sessions: Arc<Mutex<HashMap<SessionId, Arc<SessionState>>>>,
@@ -44,6 +45,7 @@ impl MockBackend {
         Self {
             provider,
             delay: Duration::ZERO,
+            completion_delay: Duration::ZERO,
             #[cfg(test)]
             title_response: None,
             sessions: Default::default(),
@@ -53,6 +55,12 @@ impl MockBackend {
     /// Pause between scripted events; makes streaming visible in a UI.
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Simulate a provider publishing completion before releasing its send slot.
+    pub fn with_completion_delay(mut self, delay: Duration) -> Self {
+        self.completion_delay = delay;
         self
     }
 
@@ -81,7 +89,7 @@ fn emit(state: &SessionState, ev: AgentEvent) {
     let _ = state.tx.send(ev);
 }
 
-async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, delay: Duration) {
+async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, delay: Duration, completion_delay: Duration) {
     let pause = || async {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -253,10 +261,11 @@ async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, del
             cached: 30,
         },
     );
+    state.inner.lock().unwrap().current_turn = None;
     emit(&state, AgentEvent::TurnCompleted { turn_id, status });
+    if !completion_delay.is_zero() { tokio::time::sleep(completion_delay).await; }
     let mut inner = state.inner.lock().unwrap();
     inner.task = None;
-    inner.current_turn = None;
 }
 
 #[async_trait]
@@ -295,6 +304,7 @@ impl AgentBackend for MockBackend {
             turn_id,
             input.text,
             self.delay,
+            self.completion_delay,
         )));
         Ok(())
     }

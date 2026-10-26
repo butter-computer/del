@@ -128,6 +128,7 @@ impl ClaudeBackend {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--replay-user-messages",
             "--permission-prompt-tool",
             "stdio",
             "--permission-mode",
@@ -533,10 +534,9 @@ impl AgentBackend for ClaudeBackend {
         self.submit(session, input).await
     }
 
-    /// The CLI has no mid-turn injection over stream-json: a user message sent
-    /// while a turn runs is queued and handled as the next turn once the current
-    /// one finishes (verified against claude 2.1.308). When idle this behaves
-    /// like `send_prompt`.
+    /// The CLI may consume steering within the current response or queue it
+    /// for another response. Replayed input acknowledgements let the translator
+    /// distinguish those cases. When idle this behaves like `send_prompt`.
     async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
         self.submit(session, UserInput::text(text)).await
     }

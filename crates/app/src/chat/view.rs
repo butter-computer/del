@@ -106,6 +106,7 @@ pub struct ChatView {
     loading: bool,
     first_prompt: Option<String>,
     completed_turns: u64,
+    interrupt_requested: bool,
     working_since: Option<std::time::Instant>,
     working_message: Option<usize>,
     pub(super) copied_responses: std::collections::HashMap<usize, std::time::Instant>,
@@ -164,6 +165,7 @@ impl ChatView {
             loading: session.is_some(),
             first_prompt: first_prompt.as_ref().map(|input| input.text.clone()),
             completed_turns: 0,
+            interrupt_requested: false,
             working_since: None,
             working_message: None,
             response_times: Default::default(),
@@ -293,6 +295,10 @@ impl ChatView {
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
+        // Stop can arrive while resume/send is still preparing the provider turn.
+        if !self.loading && self.interrupt_requested && matches!(event, AgentEvent::TurnStarted { .. }) {
+            self.stop(cx);
+        }
         if let AgentEvent::TurnCompleted { turn_id, .. } = event {
             self.completed_turns += 1;
             if !self.loading
@@ -443,7 +449,8 @@ impl ChatView {
     }
 
     fn send_next(&mut self, cx: &mut Context<Self>) {
-        if !self.is_running()
+        if !self.interrupt_requested && !self.is_running()
+            && matches!(self.model.last_status, None | Some(del_agent::TurnStatus::Completed))
             && let Some(id) = self.queue.next()
         {
             self.deliver_queued(id, false, cx);
@@ -457,12 +464,12 @@ impl ChatView {
         let Some(input) = self.queue.begin(&item_id) else {
             return;
         };
+        self.interrupt_requested = false;
         cx.emit(PromptSubmitted);
         self.save_queue();
         let backend = self.backend.clone();
         let displayed_input = input.clone();
         let row_index = self.model.blocks.len();
-        let completed_turns = self.completed_turns;
         let delivery = self.backend.runtime.spawn(async move {
             backend.resume(&session).await?;
             if steer {
@@ -501,18 +508,18 @@ impl ChatView {
                         this.model.blocks.remove(row_index);
                         this.scroller.splice(row_index..row_index + 1, 0);
                     }
+                    this.model.reject_input();
                     if busy {
-                        // A provider may already be running a steered follow-up
-                        // before its next TurnStarted reaches this view.
-                        if this.completed_turns > completed_turns && !this.is_running() {
-                            if this.model.last_status == Some(del_agent::TurnStatus::Completed) {
-                                this.send_next(cx);
-                            }
-                        } else {
-                            this.model.phase = Phase::Running;
-                        }
-                    } else if !steer {
-                        this.model.phase = Phase::Idle;
+                        // Completion can precede provider readiness. A Busy rejection
+                        // is undelivered; retry after yielding, without inventing a
+                        // running turn that would wait forever for another completion.
+                        let ready = this.backend.runtime.spawn(async {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        });
+                        cx.spawn(async move |this, cx| {
+                            let _ = ready.await;
+                            let _ = this.update(cx, |this, cx| this.send_next(cx));
+                        }).detach();
                     }
                 }
                 cx.notify();
@@ -525,6 +532,8 @@ impl ChatView {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.interrupt_requested = true;
+        cx.notify();
         let Some(id) = self.session.clone() else {
             return;
         };
@@ -591,6 +600,7 @@ impl ChatView {
                 this.scroller.set_follow_mode(FollowMode::Tail);
                 this.scroller.scroll_to_end();
                 this.loading = false;
+                if this.interrupt_requested && this.is_running() { this.stop(cx); }
                 this.sync(None, cx);
                 if this.model.last_status.is_none()
                     || this.model.last_status == Some(del_agent::TurnStatus::Completed)
@@ -661,6 +671,7 @@ impl ChatView {
         let muted = rgba(0xffffff8c);
         let waiting = self.model.has_pending_approval();
         let label = match (self.model.phase, self.model.last_status) {
+            (Phase::Running, _) if self.interrupt_requested => "Stopping…",
             (Phase::Running, _) if waiting => "Waiting for your approval",
             (Phase::Running, _) => "",
             (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => "",
@@ -1004,28 +1015,91 @@ mod tests {
 
     #[gpui::test]
     fn followups_wait_for_completion_then_send_in_order(cx: &mut gpui::TestAppContext) {
+        followup_delivery_scenario(cx, None, FollowupScenario::Ordered);
+    }
+
+    #[gpui::test]
+    #[ignore = "requires an installed, authenticated Claude CLI"]
+    fn real_claude_followups_send_automatically(cx: &mut gpui::TestAppContext) {
+        followup_delivery_scenario(cx, Some(del_agent::Provider::Claude), FollowupScenario::Ordered);
+        followup_delivery_scenario(cx, Some(del_agent::Provider::Claude), FollowupScenario::Steering);
+    }
+
+    #[gpui::test]
+    fn followups_retry_when_completion_precedes_provider_readiness(cx: &mut gpui::TestAppContext) {
+        followup_delivery_scenario(cx, None, FollowupScenario::DelayedReady);
+    }
+
+    #[gpui::test]
+    fn stop_pauses_followups_during_busy_retry(cx: &mut gpui::TestAppContext) {
+        followup_delivery_scenario(cx, None, FollowupScenario::StopDuringRetry);
+    }
+
+    #[gpui::test]
+    fn steering_preserves_automatic_followups(cx: &mut gpui::TestAppContext) {
+        followup_delivery_scenario(cx, None, FollowupScenario::Steering);
+    }
+
+    #[gpui::test]
+    #[ignore = "requires an installed, authenticated Codex CLI"]
+    fn real_codex_followups_steering_and_stop(cx: &mut gpui::TestAppContext) {
+        for scenario in [FollowupScenario::Ordered, FollowupScenario::Steering, FollowupScenario::StopRunning] {
+            followup_delivery_scenario(cx, Some(del_agent::Provider::Codex), scenario);
+        }
+    }
+
+    #[gpui::test]
+    #[ignore = "requires installed OpenCode and access to its free model"]
+    fn real_opencode_followups_steering_and_stop(cx: &mut gpui::TestAppContext) {
+        for scenario in [FollowupScenario::Ordered, FollowupScenario::Steering, FollowupScenario::StopRunning] {
+            followup_delivery_scenario(cx, Some(del_agent::Provider::OpenCode), scenario);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FollowupScenario { Ordered, DelayedReady, StopDuringRetry, Steering, StopRunning }
+
+    fn followup_delivery_scenario(cx: &mut gpui::TestAppContext, native: Option<del_agent::Provider>, scenario: FollowupScenario) {
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+        let live = native.is_some();
+        let provider = native.unwrap_or(del_agent::Provider::Codex);
+        let agent: Arc<dyn del_agent::AgentBackend> = match native {
+            Some(del_agent::Provider::Claude) => Arc::new(del_claude::ClaudeBackend::new(del_claude::ClaudeOptions {
+                setting_sources: Some("project".into()), ..Default::default()
+            })),
+            Some(del_agent::Provider::Codex) => Arc::new(del_codex::CodexBackend::new(Default::default())),
+            Some(del_agent::Provider::OpenCode) => Arc::new(del_opencode::OpenCodeBackend::with_environment(
+                ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"].into_iter()
+                    .map(|key| (key.into(), dir.path().join(key).to_string_lossy().into_owned())).collect()
+            )),
+            Some(del_agent::Provider::Acp) => unreachable!(),
+            None => Arc::new(del_agent::MockBackend::new(provider)
+                .with_delay(std::time::Duration::from_millis(3))
+                .with_completion_delay(std::time::Duration::from_millis(if matches!(scenario, FollowupScenario::DelayedReady | FollowupScenario::StopDuringRetry) { 20 } else { 0 })))
+        };
         let manager = SessionManager::new(
             dir.path().join("sessions.jsonl"),
-            [Arc::new(
-                del_agent::MockBackend::new(del_agent::Provider::Codex)
-                    .with_delay(std::time::Duration::from_millis(3)),
-            ) as Arc<dyn del_agent::AgentBackend>],
+            [agent],
         )
         .unwrap();
         let session = runtime
             .block_on(manager.start_session(del_agent::SessionConfig {
                 cwd: dir.path().into(),
-                provider: del_agent::Provider::Codex,
-                model: None,
+                provider,
+                model: match native {
+                    Some(del_agent::Provider::Claude) => Some("haiku".into()),
+                    Some(del_agent::Provider::Codex) => Some("gpt-5.6-luna".into()),
+                    Some(del_agent::Provider::OpenCode) => Some("opencode/big-pickle".into()),
+                    _ => None,
+                },
                 reasoning_effort: None,
                 service_tier: None,
-                permission_mode: Default::default(),
+                permission_mode: del_agent::PermissionMode::FullAuto,
             }))
             .unwrap();
         let backend = Backend {
@@ -1047,20 +1121,67 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             });
         }
+        let prompts = if live {
+            ["Reply with exactly FIRST. No tools.", "Reply with exactly SECOND. No tools.", "Reply with exactly THIRD. No tools."]
+        } else { ["first", "second", "third"] };
         view.update(cx, |view, cx| {
-            view.submit_input(UserInput::text("first"), false, cx);
-            view.submit_input(UserInput::text("second"), false, cx);
-            view.submit_input(UserInput::text("third"), false, cx);
+            view.submit_input(UserInput::text(prompts[0]), false, cx);
+            view.submit_input(UserInput::text(prompts[1]), false, cx);
+            view.submit_input(UserInput::text(prompts[2]), false, cx);
             assert_eq!(view.queue.items.len(), 3);
             assert_eq!(
                 view.queue.items.iter().filter(|item| item.sending).count(),
                 1
             );
         });
-        for _ in 0..500 {
+        if matches!(scenario, FollowupScenario::Steering | FollowupScenario::StopDuringRetry | FollowupScenario::StopRunning) {
+            for _ in 0..500 {
+                cx.run_until_parked();
+                let ready = view.read_with(cx, |view, _| {
+                    !view.queue.items.iter().any(|item| item.sending)
+                        && if matches!(scenario, FollowupScenario::Steering | FollowupScenario::StopRunning) {
+                            view.is_running() && view.completed_turns == 0
+                        } else {
+                            !view.is_running() && view.completed_turns == 1
+                        }
+                });
+                if ready { break; }
+                runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(2)).await });
+            }
+            view.update(cx, |view, cx| {
+                assert_eq!(view.queue.items.len(), 2);
+                if matches!(scenario, FollowupScenario::Steering) {
+                    let id = view.queue.items[0].id.clone();
+                    view.deliver_queued(id, true, cx);
+                } else {
+                    view.stop(cx);
+                }
+            });
+            if matches!(scenario, FollowupScenario::StopDuringRetry | FollowupScenario::StopRunning) {
+                for _ in 0..if live { 6000 } else { 500 } {
+                    cx.run_until_parked();
+                    if view.read_with(cx, |view, _| !view.is_running()) { break; }
+                    runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(2)).await });
+                }
+                for _ in 0..100 {
+                    cx.run_until_parked();
+                    runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(2)).await });
+                }
+                view.update(cx, |view, cx| {
+                    assert_eq!(view.queue.items.len(), 2, "Stop must cancel the pending retry");
+                    assert_eq!(view.completed_turns, 1, "running={}, errors={:?}", view.is_running(), view.pending_errors);
+                    if matches!(scenario, FollowupScenario::StopRunning) {
+                        assert_eq!(view.model.last_status, Some(del_agent::TurnStatus::Interrupted));
+                    }
+                    let id = view.queue.items[0].id.clone();
+                    view.deliver_queued(id, false, cx);
+                });
+            }
+        }
+        for _ in 0..if live { 12000 } else { 500 } {
             cx.run_until_parked();
             if view.read_with(cx, |view, _| {
-                view.queue.items.is_empty() && !view.is_running()
+                (!view.pending_errors.is_empty()) || (view.queue.items.is_empty() && !view.is_running())
             }) {
                 break;
             }
@@ -1069,7 +1190,12 @@ mod tests {
             });
         }
         view.read_with(cx, |view, _| {
-            assert!(view.queue.items.is_empty());
+            assert!(view.queue.items.is_empty(), "remaining={:?}, running={}, completed={}, errors={:?}", view.queue.items.iter().map(|item| (&item.input.text, item.sending, &item.error)).collect::<Vec<_>>(), view.is_running(), view.completed_turns, view.pending_errors);
+            assert!(view.pending_errors.is_empty(), "{:?}", view.pending_errors);
+            assert_eq!(view.model.last_status, Some(del_agent::TurnStatus::Completed));
+            if matches!(scenario, FollowupScenario::Steering) {
+                assert!((2..=3).contains(&view.completed_turns));
+            } else { assert_eq!(view.completed_turns, 3); }
             let users = view
                 .model
                 .blocks
@@ -1082,10 +1208,51 @@ mod tests {
                     }
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(users, ["first", "second", "third"]);
+            assert_eq!(users, prompts);
         });
         runtime.block_on(manager.shutdown());
     }
+    #[gpui::test]
+    fn stop_before_provider_start_is_not_lost(cx: &mut gpui::TestAppContext) {
+        use std::{sync::Arc, time::Duration};
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            [Arc::new(del_agent::MockBackend::new(del_agent::Provider::Claude)
+                .with_delay(Duration::from_secs(1))) as Arc<dyn del_agent::AgentBackend>]).unwrap();
+        let session = runtime.block_on(manager.start_session(del_agent::SessionConfig {
+            cwd: dir.path().into(), provider: del_agent::Provider::Claude,
+            model: None, reasoning_effort: None, service_tier: None, permission_mode: Default::default(),
+        })).unwrap();
+        let mut events = session.subscribe();
+        let view = cx.new(|cx| ChatView::new(Backend { runtime: runtime.handle().clone(), manager: manager.clone() }, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.session = Some(session.id.clone());
+            view.stop(cx);
+        });
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(5)).await; });
+        runtime.block_on(manager.send_prompt(&session.id, UserInput::text("slow response"))).unwrap();
+        loop {
+            let event = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(1), events.recv()).await.unwrap().unwrap()
+            });
+            let started = matches!(event, AgentEvent::TurnStarted { .. });
+            view.update(cx, |view, cx| view.on_event(&event, cx));
+            if started { break; }
+        }
+        let interrupted = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), async {
+                loop {
+                    if let AgentEvent::TurnCompleted { status, .. } = events.recv().await.unwrap() {
+                        return status == del_agent::TurnStatus::Interrupted;
+                    }
+                }
+            }).await.unwrap_or(false)
+        });
+        runtime.block_on(manager.shutdown());
+        assert!(interrupted, "stop request was lost before the provider began its turn");
+    }
+
     #[gpui::test]
     fn first_prompt_replay_shows_exactly_one_user_row(cx: &mut gpui::TestAppContext) {
         use std::sync::Arc;

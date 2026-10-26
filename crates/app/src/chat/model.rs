@@ -145,6 +145,12 @@ impl ChatModel {
         self.phase == Phase::Running
     }
 
+    /// Discard the optimistic running state of a rejected prompt, retaining
+    /// only a turn actually announced by the provider.
+    pub fn reject_input(&mut self) {
+        self.phase = if self.current_turn.is_some() { Phase::Running } else { Phase::Idle };
+    }
+
     pub fn has_pending_approval(&self) -> bool {
         self.blocks
             .iter()

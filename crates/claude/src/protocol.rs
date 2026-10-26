@@ -22,6 +22,9 @@ struct ToolInfo {
 pub struct Translator {
     /// Turn ids in flight; the front one is the turn the CLI is currently running.
     turns: VecDeque<String>,
+    /// Stdin messages acknowledged as consumed since the previous result.
+    /// Steering can be absorbed into the current response, not a separate turn.
+    consumed_inputs: usize,
     tools: HashMap<String, ToolInfo>,
     /// `can_use_tool` request id -> original tool input (echoed back on approve).
     approvals: HashMap<String, Value>,
@@ -88,6 +91,7 @@ impl Translator {
                 status: TurnStatus::Failed,
             });
         self.turns.clear();
+        self.consumed_inputs = 0;
         self.approvals.clear();
         out.into_iter().collect()
     }
@@ -210,6 +214,9 @@ impl Translator {
     }
 
     fn user(&mut self, v: &Value) -> Vec<AgentEvent> {
+        if v["isReplay"] == true && v["parent_tool_use_id"].is_null() {
+            self.consumed_inputs = (self.consumed_inputs + 1).min(self.turns.len());
+        }
         let mut out = vec![];
         // Replayed plain-text user messages (`--replay-user-messages`) have string content.
         for block in v["message"]["content"].as_array().into_iter().flatten() {
@@ -309,7 +316,11 @@ impl Translator {
             turn_id: self.turn(),
             status,
         });
-        self.turns.pop_front();
+        // --replay-user-messages acknowledges inputs when the CLI consumes them.
+        // One result may cover both the original prompt and steering messages.
+        let consumed = self.consumed_inputs.max(1).min(self.turns.len());
+        self.turns.drain(..consumed);
+        self.consumed_inputs = 0;
         self.interrupting = false;
         self.tools.clear();
         if let Some(next) = self.turns.front() {

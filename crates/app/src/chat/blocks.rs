@@ -137,8 +137,8 @@ impl ChatView {
                     .child(crate::icons::path(icon).text_color(rgba(MUTED)))
                     .child(if live {
                         gpui_kit::component::shimmer::ShimmerText::new(label).id(("activity-live", ix))
-                            .highlight_color(rgb(STRONG)).into_any_element()
-                    } else { div().min_w_0().truncate().child(label).into_any_element() })
+                            .flex_1().min_w_0().truncate().highlight_color(rgb(STRONG)).into_any_element()
+                    } else { div().flex_1().min_w_0().truncate().child(label).into_any_element() })
                     .child(crate::icons::icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded_activity.remove(&ix) { this.expanded_activity.insert(ix); }
@@ -230,15 +230,12 @@ impl ChatView {
                     .text_color(rgba(MUTED))
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .when(open, |row| {
-                        row.child(crate::icons::spinner().color(rgba(MUTED).into()))
-                    })
-                    .child(if open { "Thinking" } else { "Thought" })
-                    .child(div().text_color(rgba(FAINT)).child(if expanded {
-                        "hide"
-                    } else {
-                        "show"
-                    })),
+                    .role(Role::Button)
+                    .aria_label(format!("{} {}", if expanded { "Collapse" } else { "Expand" }, if open { "thinking" } else { "thought" }))
+                    .child(if open {
+                        gpui_kit::component::shimmer::ShimmerText::new("Thinking")
+                            .id(("reasoning-live", ix)).highlight_color(rgb(STRONG)).into_any_element()
+                    } else { div().child("Thought").into_any_element() }),
             )
             .when(expanded, |col| {
                 col.child(
@@ -267,7 +264,7 @@ impl ChatView {
                 .hover(|row| row.bg(rgba(CARD)))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                 .child(crate::icons::path(kind.icon()).text_color(color))
-                .child(div().min_w_0().truncate().child(label))
+                .child(div().flex_1().min_w_0().truncate().child(label))
 
                 .child(crate::icons::icon(if tool.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(zpx(12.)).text_color(rgba(FAINT))))
             .when(tool.expanded, |card| card.child(

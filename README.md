@@ -201,6 +201,15 @@ sessions within their project or within the shared pinned group, including acros
 chat and terminal modes. Dragging never moves a session to a different project or
 changes its pin status. Manual order persists across restarts.
 
+Reasoning headers show a shimmering **Thinking** label while active and **Thought**
+after completion. Click the label to expand or collapse the details; there is no
+spinner or separate show/hide button. Reduce Motion keeps the label static.
+Stop requests remain pending while a provider is preparing a turn, so an early
+click still interrupts it when it starts. “Stopping…” acknowledges the request;
+automatic follow-ups pause until another prompt is explicitly submitted.
+The composer omits the token-usage line. For existing sessions, the folder label
+shows the project name; hover it to see the branch.
+
 ### Branches and managed worktrees
 
 Below the new-session composer, the directory, **Branch**, **New worktree** toggle,
@@ -297,7 +306,7 @@ conversation. Unloading a running session also stops its current work.
   keeps the initial composer visible; the terminal opens after submission.
 - A session's project folder is fixed after creation. Its folder label becomes
   informational rather than a clickable folder picker.
-- Chat renders streaming answers, reasoning, tool activity, diffs, usage, and
+- Chat renders streaming answers, reasoning, tool activity, diffs, and
   approval requests. The message rail appears after six user messages and provides
   jump-to-prompt navigation. Hover magnifies nearby ticks, but only the hovered
   tick is white; neighbors stay gray. Away from the rail, only the current-message
@@ -306,7 +315,9 @@ conversation. Unloading a running session also stops its current work.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
-  expanding it smoothly reveals indented calls with their full output and diffs.
+  summaries show only the first input line and truncate to the available width,
+  including while shimmering. Expanding smoothly reveals indented calls with their
+  full input, output, and diffs.
   Matching edit/file events share one row, and empty diff counts are omitted. See
   [Codex chat reference](docs/codex-chat-reference.md) for source research and scope.
 - A shimmering “Working for…” label sits beneath the latest user message and
@@ -466,7 +477,10 @@ While a reply runs, **Enter** queues the current draft. **⌘ + Enter** submits
 it as steering input; with an empty composer, it submits the top queued item.
 Completed turns advance remaining follow-ups in order. A busy provider leaves
 an undelivered message waiting instead of displaying a failed-send error or
-incorrectly changing the running status to Done.
+incorrectly changing the running status to Done. If completion arrives before
+the provider releases its send slot, Del retries the undelivered message
+automatically. Stop pauses pending retries too; steering preserves the remaining
+queue and its order.
 
 Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
 attachments to the composer; an existing draft is preserved as another queued item.
@@ -505,7 +519,9 @@ than automatic replay. Other delivery failures keep the item and its error.
 A stopped or failed turn does not automatically advance the queue.
 
 Steering differs by harness: Codex and OpenCode support active-turn steering; Claude's
-stream-json interface handles in-flight user input as a native queued follow-up.
+stream-json interface may absorb input into the current response or queue another
+response. Del follows Claude's input acknowledgements so either case releases
+the remaining follow-up queue when the response finishes.
 ACP steering is currently unsupported and leaves the message available to retry.
 Steering during streaming keeps the current assistant answer in one block.
 Sent steering messages use a small muted yellow queue icon beside the text,
