@@ -241,7 +241,7 @@ impl RenderOnce for ComposerCard {
             on_provider,
         } = self;
 
-        let agent = chip("agent").disabled(starting).child(
+        let agent = chip("agent").h(zpx(24.)).px(zpx(8.)).disabled(starting).child(
             h_flex()
                 .gap_1p5()
                 .items_center()

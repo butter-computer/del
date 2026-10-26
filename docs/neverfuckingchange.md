@@ -41,7 +41,10 @@ This records the final decisions, including corrections to earlier experiments.
 - Each single-line row contains the correct provider logo, a short fading title,
   and RAM on the right. Terminal providers must resolve correctly, including Codex.
 - Clicking the title opens that session.
-- Show delete and unload icons on hover, with consistent padding and usable targets.
+- At rest, RAM is at the far right; delete and unload reserve no empty space.
+  On row hover, reveal those controls to its right with usable padded targets.
+  Change their layout through render state, never paint-time group-hover display
+  changes: GPUI must lay out/prepaint the buttons before painting them.
 - Use one row hover background, not a second nested highlight on the title.
 - Fade long titles like the sidebar; do not allot most of a wide popup to the title.
 - Allow scrolling, hide the scrollbar, and fade content at the lower edge.
@@ -60,7 +63,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Keep a visible theme-aware vertical divider between the workspace and each sidebar,
   including the right Files/Terminal panel. Preserve its resize target.
 
-- Pinned chats keep their pin order, oldest first. A new pin goes after existing
+- Pinned sessions (chats and terminals together) keep their pin order, oldest first. A new pin goes after existing
   pins; activity must not reorder them. Unpinning and pinning again appends it.
 - Sidebar rows support drag-reordering like top tabs, with live row movement.
   Lock the preview horizontally inside the sidebar; use vertical movement for reordering.
@@ -70,10 +73,12 @@ This records the final decisions, including corrections to earlier experiments.
   destination position changes. Do not tick on every pointer event, on invalid
   cross-section drops, or for non-drag reorder operations.
 - Persist manual order across restarts. Reordering must preserve selection and history.
-- Restrict dragging to the same section and pin group: pinned chats, regular
-  chats, pinned terminals, and regular terminals remain separate. Dropping across
-  those boundaries must never pin, unpin, replace, or move a session into another group.
+- Restrict dragging to the same project or the shared pinned section. Chats and
+  terminals can reorder together. Cross-project or pinned/unpinned drops must not
+  change membership, pin status, history, or the selected session.
 - Preserve the visible order of old pins when migrating saved data without order metadata.
+- Pinned sidebar rows have no persistent pin glyph or reserved pin space. Keep
+  the hover Unpin action and working/unread indicators.
 
 ## Unread conversations
 
@@ -288,3 +293,72 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Offer only Codex, Claude, and OpenCode in the provider picker and Settings.
   Keep legacy ACP records readable, but do not offer ACP for new selections.
+
+## Projects and worktrees
+
+- The left sidebar groups chats and terminals together as sessions under **Pinned**
+  and **Projects**. Do not restore a separate Terminals section.
+- Automatically identify projects from directories; Git worktrees and subfolders
+  belong to their parent repository. Preserve existing histories and pins.
+- Keep project expansion state and identities across restarts. Each project offers
+  a new-session action, with Chat/Terminal chosen in the composer.
+- Below the new-session composer, keep the directory, starting branch, New worktree
+  toggle, and Chat/Terminal controls together on one row. Do not add a second row.
+  Hide Git controls for non-repositories; disable them while launch is in progress.
+- Create unique owned worktrees and branches asynchronously, retain their directory
+  on resume, and reuse the same worktree on a failed-start retry.
+- Never discard Git work when a session closes, unloads, archives, or is deleted.
+  Explicit unused-worktree cleanup must preserve referenced checkouts, dirty files,
+  ignored/untracked files, new commits, and all branches.
+- Every new-session action creates an independent draft. A project's plus uses
+  that project's directory; the general plus inherits the currently selected
+  session or draft directory. Use the remembered directory only without a selected
+  tab. The Projects heading offers a directory picker, and project
+  row plus buttons appear only on hover.
+- Terminal sessions use a terminal glyph with a small provider badge at its lower
+  right. Chat sessions retain their provider glyph.
+- Keep the New worktree switch thumb distinct from its enabled track, without
+  an outer focus outline.
+- Keep Projects close to the toolbar. Hide Pinned when empty. Project rows reveal a three-dot menu and plus on hover.
+  Project rename changes its display name only. Archive is reversible through the
+  archived list. Permanent deletion confirms removal of the project and all its
+  session histories; directory contents and Git worktrees remain untouched.
+- For directories without Git, show a gray Git icon with a red cross on the right of the
+  composer footer, with “No Git repository” in its tooltip; hide the branch picker and New worktree switch.
+- Dropdown menus ease in over 180ms and fade out over 120ms, respecting reduced
+  motion. Dismissed menu items must not activate twice during the exit.
+
+- Project actions use the same icons and moving hover highlight as session context
+  menus. Permanently delete uses red text, a red trash icon, and a red hover tint.
+- Show the selected model's effective effort on its pill immediately, using its
+  catalog default until the user explicitly changes it. Keep the panel and pill
+  labels consistent, including provider-supplied effort names.
+
+- Archive view shows only archived projects and sessions, never active sessions or
+  drafts. Keep the archive toggle available when this view becomes empty.
+
+- Label the archive sidebar “Archived” and hide its heading and project-row plus
+  buttons. Creation controls belong to the active Projects view.
+
+- Restoring one session makes its project visible in Projects without restoring
+  archived siblings. The project can appear in both views with disjoint sessions;
+  restoring the last archived session removes its archive group. A project with
+  only archived sessions stays out of Projects unless it has an active draft.
+- Deleting a project from Archived deletes only archived histories and preserves
+  its active sessions. Deleting from Projects still covers all project histories.
+- Project visibility comes only from its sessions (and active drafts), never saved
+  project archive/delete flags or empty remembered roots. Changing a draft's
+  directory moves it to that directory group and expands the destination without
+  restoring archived sibling sessions. Archive toggle has a selected background.
+
+- Project expand/collapse uses a reversible measured reveal with reduced-motion
+  support; repeated clicks reverse smoothly without snapping or losing rows.
+
+- Project rename/delete dialogs must have an opaque theme-aware surface, readable
+  copy, Cancel, and an explicit Save or red Permanently delete button. Setting
+  Dialog button props alone does not create a footer; render the buttons.
+- Archiving/deleting the final project leaves an empty usable new-session page.
+  Do not create a replacement `/` or home project from an automatic fallback draft.
+  Only explicit draft tabs and saved sessions determine project visibility.
+- Animated project contents must fill the sidebar width throughout expansion and
+  collapse; measuring content must not shrink or clip session titles.

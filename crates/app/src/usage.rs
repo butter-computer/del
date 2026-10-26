@@ -23,6 +23,7 @@ pub struct Usage {
     error: Option<String>,
     generation: u64,
     scroll: ScrollHandle,
+    hovered: Option<SessionId>,
 }
 impl Usage {
     pub fn new(state: Entity<AppState>) -> Self {
@@ -36,10 +37,12 @@ impl Usage {
             error: None,
             generation: 0,
             scroll: ScrollHandle::new(),
+            hovered: None,
         }
     }
     pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
+        self.hovered = None;
         self.generation += 1;
         if open {
             self.unloaded.clear();
@@ -184,6 +187,8 @@ impl Render for Usage {
                             })
                             .children(self.entries.iter().map(|entry| {
                                 let id = entry.id.clone();
+                                let hover_id = id.clone();
+                                let hovered = self.hovered.as_ref() == Some(&id);
                                 let unload_id = id.clone();
                                 let delete_id = id.clone();
                                 let terminal = entry.terminal;
@@ -201,7 +206,16 @@ impl Render for Usage {
                                     .unwrap_or_else(|| "—".into());
                                 h_flex()
                                     .id(SharedString::from(format!("memory-row-{}", id.0)))
-                                    .group("memory-row")
+                                    .debug_selector(|| "memory-row".into())
+                                    .on_hover(cx.listener(move |this, entered, _, cx| {
+                                        if *entered {
+                                            this.hovered = Some(hover_id.clone());
+                                        } else if this.hovered.as_ref() == Some(&hover_id) {
+                                            this.hovered = None;
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .pr(zpx(4.))
                                     .h(zpx(36.))
                                     .flex_none()
                                     .gap_2()
@@ -241,6 +255,7 @@ impl Render for Usage {
                                     )
                                     .child(
                                         div()
+                                            .flex_none()
                                             .text_size(zpx(12.))
                                             .text_color(crate::appearance::rgba(0xffffff99))
                                             .child(memory),
@@ -249,11 +264,8 @@ impl Render for Usage {
                                         h_flex()
                                             .flex_none()
                                             .gap(zpx(4.))
-                                            .pr(zpx(4.))
-                                            .opacity(0.)
-                                            .group_hover("memory-row", |actions| {
-                                                actions.opacity(1.)
-                                            })
+                                            // Display changes need a fresh layout, not paint-time hover styling.
+                                            .when(!hovered, |actions| actions.hidden())
                                             .child(
                                                 Button::new(SharedString::from(format!(
                                                     "memory-delete-{}",
@@ -343,6 +355,30 @@ impl Render for Usage {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+    #[::gpui::test]
+    fn memory_row_hover_lays_out_actions_before_paint(cx: &mut ::gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let (usage, cx) = cx.add_window_view(|_, _| {
+            let mut usage = Usage::new(state);
+            usage.entries.push(Entry {
+                id: SessionId::new("hover-test"),
+                terminal: false,
+                bytes: Some(146 * 1_048_576),
+            });
+            usage
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("memory-row").unwrap();
+        for _ in 0..4 {
+            cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+            assert!(usage.read_with(cx, |usage, _| usage.hovered.is_some()));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_mouse_move(point(row.right() + px(30.), row.bottom() + px(30.)), None, Modifiers::default());
+            assert!(usage.read_with(cx, |usage, _| usage.hovered.is_none()));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
     #[test]
     fn sums_only_root_and_descendants() {
         let rows = parse_processes("10 1 100\n11 10 30\n12 11 20\n20 1 900\ninvalid");

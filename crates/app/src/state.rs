@@ -64,6 +64,7 @@ impl Tab {
 
 /// Results coming back from the runtime.
 enum Msg {
+    ProjectInspected(PathBuf, crate::projects::GitInfo),
     TitleLoading(SessionId, bool),
     Refresh,
     PanelDeleted(String, u64),
@@ -105,6 +106,10 @@ pub struct ModelCatalog {
 }
 
 pub struct AppState {
+    pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
+    project_loading: std::collections::HashSet<PathBuf>,
+    pub project_preferences: crate::projects::ProjectPreferences,
+    pub launch_options: HashMap<u64, crate::projects::LaunchOptions>,
     catalogs: HashMap<(Provider, Option<String>, PathBuf), ModelCatalog>,
     pub accounts: Vec<crate::accounts::Account>,
     pub account_status: HashMap<String, String>,
@@ -148,9 +153,6 @@ pub struct AppState {
     /// Session being renamed in the sidebar.
     pub renaming: Option<SessionId>,
     pub show_archived: bool,
-    pub terminals_collapsed: bool,
-    pub terminals_motion: Option<(std::time::Instant, f32)>,
-    pub terminals_toggle: u64,
     /// Last problem worth telling the user about.
     pub error: Option<String>,
     /// The prompt that started each session opened this run, for its chat's
@@ -282,7 +284,7 @@ impl AppState {
         });
 
         let readiness = crate::readiness::Readiness::new(rt.handle(), manager.clone());
-        cx.observe_self(|state, _| state.refresh_readiness())
+        cx.observe_self(|state, _| { state.refresh_readiness(); state.inspect_projects(); })
             .detach();
 
         Self::pump(rx, cx);
@@ -293,6 +295,10 @@ impl AppState {
             .unwrap_or_default();
         overrides.initialize_pins(&records);
         Self {
+            project_info: HashMap::new(),
+            project_loading: Default::default(),
+            project_preferences: crate::projects::ProjectPreferences::load(),
+            launch_options: HashMap::new(),
             catalogs: HashMap::new(),
             accounts,
             account_status: HashMap::new(),
@@ -342,15 +348,12 @@ impl AppState {
             caffeine_enabled: false,
             renaming: None,
             show_archived: false,
-            terminals_collapsed: false,
-            terminals_motion: None,
-            terminals_toggle: 0,
             error,
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
             starting: Default::default(),
             switching_accounts: Default::default(),
-            tabs: vec![Tab::Draft(0)],
+            tabs: Vec::new(),
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             next_uid: 1,
@@ -387,6 +390,23 @@ impl AppState {
 
     fn apply(&mut self, msg: Msg, cx: &mut Context<Self>) {
         match msg {
+            Msg::ProjectInspected(path, info) => {
+                self.project_loading.remove(&path);
+                let mut info = info;
+                if !path.exists() && let Some(root) = self.project_preferences.directories.get(&path) { info.root = root.clone(); }
+                let has_active = self.unified_rows().iter().any(|row| row.cwd == path);
+                let reactivated = has_active && (self.project_preferences.archived.contains(&info.root) || self.project_preferences.deleted.contains(&info.root));
+                if reactivated {
+                    self.project_preferences.archived.remove(&info.root);
+                    self.project_preferences.deleted.remove(&info.root);
+                    self.project_preferences.collapsed.remove(&info.root);
+                }
+                let added = self.project_preferences.roots.insert(info.root.clone());
+                let previous = self.project_preferences.directories.insert(path.clone(), info.root.clone());
+                if (reactivated || added || previous.as_ref() != Some(&info.root)) && !cfg!(test)
+                    && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+                self.project_info.insert(path, info);
+            }
             Msg::AccountSwitched(id, result) => {
                 self.switching_accounts.remove(&id);
                 self.records = self.manager.list_sessions();
@@ -495,6 +515,7 @@ impl AppState {
                 self.providers = list;
             }
             Msg::Started(key, id, prompt) => {
+                self.launch_options.remove(&key);
                 let input = self
                     .pending_prompts
                     .remove(&key)
@@ -514,6 +535,7 @@ impl AppState {
                     None => self.add_tab(&id),
                 }
                 self.records = self.manager.list_sessions();
+                if let Some(record) = self.records.iter().find(|r| r.id == id) { self.project_info.remove(&record.cwd); }
                 if self.selection == Selection::Draft(key) {
                     self.selection = Selection::Session(id);
                 }
@@ -557,7 +579,8 @@ impl AppState {
         });
         // Wait for provider discovery/sign-in; never open an authentication UI
         // or prepare a chat for a terminal tab.
-        let config = config.filter(|c| self.selected_account().is_none() && self.status_of(c.provider).is_some_and(providers::ready));
+        let launch = self.draft_launch_options();
+        let config = config.filter(|c| !launch.worktree && launch.branch.is_none() && self.selected_account().is_none() && self.status_of(c.provider).is_some_and(providers::ready));
         readiness.set_config(config);
     }
 
@@ -757,15 +780,12 @@ impl AppState {
 
     /// Reorder only within the same visible section and pin group.
     pub fn reorder_sidebar(&mut self, dragged: &SessionId, target: &SessionId, terminal: bool, cx: &mut Context<Self>) {
-        let rows: Vec<_> = if terminal {
-            self.terminal_rows.iter().filter(|row| !self.terminal_archived(&row.id))
-                .map(|row| (row.id.clone(), row.pinned)).collect()
-        } else {
-            self.rows().into_iter().map(|row| (row.id, row.pinned)).collect()
-        };
-        let Some((_, pinned)) = rows.iter().find(|(id, _)| id == dragged) else { return };
-        if !rows.iter().any(|(id, pin)| id == target && pin == pinned) { return; }
-        let mut ids: Vec<_> = rows.iter().filter(|(_, pin)| pin == pinned).map(|(id, _)| id.clone()).collect();
+        let _ = terminal; // Session mode does not define sidebar membership.
+        let rows = self.unified_rows();
+        let Some(source) = rows.iter().find(|r| &r.id == dragged) else { return; };
+        let Some(destination) = rows.iter().find(|r| &r.id == target) else { return; };
+        if source.pinned != destination.pinned || (!source.pinned && self.project_root(&source.cwd) != self.project_root(&destination.cwd)) { return; }
+        let mut ids: Vec<_> = rows.iter().filter(|r| r.pinned == source.pinned && (r.pinned || self.project_root(&r.cwd) == self.project_root(&source.cwd))).map(|r| r.id.clone()).collect();
         let from = ids.iter().position(|id| id == dragged).unwrap();
         let to = ids.iter().position(|id| id == target).unwrap();
         if from == to { return; }
@@ -781,7 +801,7 @@ impl AppState {
             crate::haptics::tick();
         }
         self.overrides.set_order(&ids);
-        if terminal { self.sort_terminal_rows(); }
+        self.sort_terminal_rows();
         self.save_overrides();
         cx.notify();
     }
@@ -862,6 +882,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let id = row.id.clone();
+        self.project_info.remove(&row.cwd);
         if let Some(old) = self.terminal_rows.iter_mut().find(|r| r.id == id) {
             *old = row;
         } else {
@@ -876,6 +897,7 @@ impl AppState {
                 }
             }
             self.drafts.remove(&key);
+            self.launch_options.remove(&key);
             self.draft_modes.remove(&key);
             self.starting.remove(&key);
             self.pending_prompts.remove(&key);
@@ -1063,18 +1085,24 @@ impl AppState {
             || matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id))
     }
 
-    /// Open an independent draft, inheriting the current provider settings.
+    /// New drafts inherit the selected session directory; remembered directory is a fallback.
     pub fn new_session(&mut self, cx: &mut Context<Self>) {
+        self.show_archived = false;
         let (provider, model, cwd) = self.effective();
         let effort = self.effort();
         let tier = self.service_tier();
         let account = self.default_account(provider).map(str::to_owned);
+        let has_context = self.tabs.iter().any(|tab| tab.selection() == self.selection);
+        let cwd = if has_context { cwd } else { self.project_preferences.last_directory.clone().unwrap_or(cwd) };
+        self.project_preferences.last_directory = Some(cwd.clone());
+        self.project_info.remove(&cwd);
         self.open_draft(provider, model, cwd, cx);
         if let (Selection::Draft(key), Some(account)) = (&self.selection, account) { self.draft_accounts.insert(*key, account); }
         if let Some(draft) = self.draft_mut() {
             draft.reasoning_effort = effort;
             draft.service_tier = tier;
         }
+        self.save_projects(cx);
     }
 
     fn open_draft(
@@ -1084,6 +1112,16 @@ impl AppState {
         cwd: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        // Replace an automatic empty composer rather than retaining a hidden draft.
+        if let Selection::Draft(old) = self.selection
+            && !self.tabs.contains(&Tab::Draft(old)) && !self.starting.contains(&old)
+        {
+            self.drafts.remove(&old);
+            self.draft_modes.remove(&old);
+            self.draft_accounts.remove(&old);
+            self.launch_options.remove(&old);
+            self.uids.remove(&Tab::Draft(old));
+        }
         let key = self.next_draft;
         self.next_draft += 1;
         self.drafts.insert(
@@ -1217,6 +1255,7 @@ impl AppState {
         }
         if let Tab::Draft(k) = tab {
             self.drafts.remove(k);
+            if !self.starting.contains(k) { self.launch_options.remove(k); }
             self.draft_modes.remove(k);
             self.starting.remove(k);
             self.pending_prompts.remove(k);
@@ -1316,8 +1355,13 @@ impl AppState {
                     },
                 );
                 let account = self.draft_accounts.get(&key).cloned();
+                let options = self.launch_options.entry(key).or_insert_with(|| crate::projects::LaunchOptions { token: uuid::Uuid::new_v4().to_string(), ..Default::default() }).clone();
                 self.rt.spawn(async move {
                     let result = async {
+                        let mut config = config;
+                        let cwd = config.cwd.clone();
+                        config.cwd = tokio::task::spawn_blocking(move || crate::projects::prepare(&cwd, &options, &del_agent::data_dir().unwrap_or_else(std::env::temp_dir)))
+                            .await.map_err(|e| AgentError::Backend(e.to_string()))?.map_err(AgentError::Backend)?;
                         let handle = manager.start_account_session(config, account).await?;
                         let submitted = std::time::Instant::now();
                         manager.send_prompt(&handle.id, input.clone()).await?;
@@ -1420,6 +1464,16 @@ impl AppState {
     }
 
     pub fn restore(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        let root = self.records.iter().find(|row| row.id == id).map(|row| &row.cwd)
+            .or_else(|| self.terminal_rows.iter().find(|row| row.id == id).map(|row| &row.cwd))
+            .map(|cwd| self.project_root(cwd));
+        if let Some(root) = root {
+            self.project_preferences.archived.remove(&root);
+            self.project_preferences.deleted.remove(&root);
+            self.project_preferences.collapsed.remove(&root);
+            self.project_preferences.roots.insert(root);
+            self.save_projects(cx);
+        }
         self.overrides.set_archived(&id, false);
         self.save_overrides();
         if self.terminal_rows.iter().any(|row| row.id == id) {
@@ -1816,11 +1870,186 @@ impl AppState {
         cx.notify();
     }
 
-    /// Native folder dialog; the choice becomes the draft's working directory.
-    pub fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        if !self.is_draft() {
+    /// Stable project identity shared by chat and terminal sessions.
+    pub fn project_root(&self, cwd: &std::path::Path) -> PathBuf {
+        self.project_info.get(cwd).map(|info| info.root.clone())
+            .or_else(|| self.project_preferences.directories.get(cwd).cloned()).unwrap_or_else(|| cwd.to_path_buf())
+    }
+
+    fn inspect_projects(&mut self) {
+        let mut paths: Vec<_> = self.records.iter().map(|r| r.cwd.clone())
+            .chain(self.terminal_rows.iter().map(|r| r.cwd.clone()))
+            .chain(self.drafts.values().map(|d| d.cwd.clone())).collect();
+        paths.sort(); paths.dedup();
+        for path in paths {
+            if self.project_info.contains_key(&path) || !self.project_loading.insert(path.clone()) { continue; }
+            let tx = self.tx.clone();
+            self.rt.spawn(async move {
+                let dir = path.clone();
+                if let Ok(info) = tokio::task::spawn_blocking(move || crate::projects::inspect(&dir)).await {
+                    let _ = tx.send(Msg::ProjectInspected(path, info));
+                }
+            });
+        }
+    }
+
+    pub fn unified_rows(&self) -> Vec<Row> {
+        let mut rows = self.rows();
+        rows.extend(self.terminal_rows.iter().filter(|r| !self.terminal_archived(&r.id)).map(|r| Row {
+            id: r.id.clone(), provider: r.provider.unwrap_or(Provider::Claude), model: None,
+            cwd: r.cwd.clone(), title: self.current_title(&r.id), status: if self.session_working(&r.id) { SessionStatus::Running } else { SessionStatus::Idle },
+            updated_secs: 0, archived: false, pinned: r.pinned, unread: self.terminal_unread(&r.id),
+        }));
+        rows.sort_by_key(|r| (!r.pinned, self.overrides.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }), std::cmp::Reverse(r.updated_secs)));
+        rows
+    }
+
+    pub fn project_drafts(&self, path: &std::path::Path) -> Vec<u64> {
+        self.tabs.iter().filter_map(|tab| match tab {
+            Tab::Draft(key) if self.drafts.get(key).is_some_and(|d| self.project_root(&d.cwd) == path) => Some(*key),
+            _ => None,
+        }).collect()
+    }
+
+    pub fn project_paths(&self) -> Vec<PathBuf> {
+        // Projects are directory groups, not independent visibility gates.
+        let mut paths: Vec<_> = if self.show_archived {
+            self.archived_rows().iter().map(|row| self.project_root(&row.cwd))
+                .chain(self.terminal_rows.iter().filter(|row| self.terminal_archived(&row.id)).map(|row| self.project_root(&row.cwd))).collect()
+        } else {
+            self.unified_rows().iter().map(|row| self.project_root(&row.cwd))
+                .chain(self.tabs.iter().filter_map(|tab| match tab { Tab::Draft(key) => self.drafts.get(key), _ => None }).map(|draft| self.project_root(&draft.cwd))).collect()
+        };
+        paths.sort(); paths.dedup(); paths
+    }
+
+    pub fn project_name(&self, path: &std::path::Path) -> String {
+        self.project_preferences.names.get(path).cloned().unwrap_or_else(|| sessions::folder_name(path).to_string())
+    }
+
+    pub fn rename_project(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        if !name.trim().is_empty() { self.project_preferences.names.insert(path, name.trim().to_owned()); }
+        self.save_projects(cx);
+    }
+
+    fn save_projects(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(test) && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+        cx.notify();
+    }
+
+    pub fn archive_project(&mut self, path: PathBuf, delete: bool, cx: &mut Context<Self>) {
+        let archived_only = delete && self.show_archived;
+        let drafts = if archived_only { Vec::new() } else { self.project_drafts(&path) };
+        if drafts.iter().any(|key| self.starting.contains(key)) {
+            self.error = Some("Wait for this project's session to finish starting.".into());
+            cx.notify();
             return;
         }
+        let ids: Vec<_> = self.records.iter().map(|r| (&r.id, &r.cwd))
+            .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
+            .filter(|(id, cwd)| self.project_root(cwd) == path && (!archived_only || self.overrides.archived(id))).map(|(id, _)| id.clone()).collect();
+        let existing_tabs = self.tabs.clone();
+        for id in ids { if delete { self.permanently_delete(id, cx); } else { self.archive(id, cx); } }
+        for key in drafts { self.close_tab(&Tab::Draft(key), cx); }
+        // Closing the final tab prepares a composer, not a replacement project.
+        self.tabs.retain(|tab| existing_tabs.contains(tab));
+        if delete {
+            self.project_preferences.archived.remove(&path);
+            let remains = self.records.iter().any(|r| self.project_root(&r.cwd) == path)
+                || self.terminal_rows.iter().any(|r| self.project_root(&r.cwd) == path)
+                || !self.project_drafts(&path).is_empty();
+            if !remains {
+                self.project_preferences.deleted.insert(path.clone());
+                self.project_preferences.names.remove(&path);
+                self.project_preferences.roots.remove(&path);
+            }
+        } else { self.project_preferences.archived.insert(path.clone()); }
+        self.save_projects(cx);
+    }
+
+    pub fn restore_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.project_preferences.archived.remove(&path);
+        let ids: Vec<_> = self.records.iter().map(|r| (&r.id, &r.cwd)).chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
+            .filter(|(_, cwd)| self.project_root(cwd) == path).map(|(id, _)| id.clone()).collect();
+        for id in ids { self.overrides.set_archived(&id, false); }
+        self.save_overrides();
+        self.save_projects(cx);
+    }
+
+    pub fn cleanup_project_worktrees(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let mut used: Vec<_> = self.records.iter().map(|r| r.cwd.clone()).chain(self.terminal_rows.iter().map(|r| r.cwd.clone())).collect();
+        let storage = del_agent::data_dir().unwrap_or_else(std::env::temp_dir);
+        used.extend(self.launch_options.values().map(|o| storage.join("worktrees").join(&o.token).join("checkout")));
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || crate::projects::cleanup(&root, &used, &storage)).await;
+            if let Err(error) = result.map_err(|e| e.to_string()).and_then(|r| r) {
+                let _ = tx.send(Msg::Error(format!("Worktree cleanup: {error}")));
+            }
+        });
+        cx.notify();
+    }
+
+    pub fn toggle_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.project_preferences.collapsed.remove(&path) { self.project_preferences.collapsed.insert(path); }
+        if !cfg!(test) && let Err(e) = self.project_preferences.save() { self.error = Some(e.to_string()); }
+        cx.notify();
+    }
+
+    pub fn new_project_session(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.project_preferences.archived.remove(&path);
+        self.project_preferences.deleted.remove(&path);
+        self.project_preferences.roots.insert(path.clone());
+        self.new_session(cx);
+        if let Selection::Draft(key) = self.selection {
+            if let Some(draft) = self.drafts.get_mut(&key) {
+                if draft.cwd != path { self.launch_options.remove(&key); }
+                draft.cwd = path.clone();
+            }
+        }
+        self.project_preferences.last_directory = Some(path.clone());
+        self.project_preferences.collapsed.remove(&path);
+        if !cfg!(test) && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+        cx.notify();
+    }
+
+    pub fn add_project(&mut self, cx: &mut Context<Self>) {
+        let picker = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose project directory".into()) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = picker.await && let Some(path) = paths.pop() {
+                let _ = this.update(cx, |s, cx| s.new_project_session(path, cx));
+            }
+        }).detach();
+    }
+
+    pub fn draft_launch_options(&self) -> crate::projects::LaunchOptions {
+        match self.selection { Selection::Draft(key) => self.launch_options.get(&key).cloned().unwrap_or_default(), _ => Default::default() }
+    }
+
+    pub fn set_launch_options(&mut self, branch: Option<String>, worktree: bool, cx: &mut Context<Self>) {
+        let Selection::Draft(key) = self.selection else { return; };
+        if self.is_starting() { return; }
+        self.launch_options.insert(key, crate::projects::LaunchOptions { branch, worktree, token: uuid::Uuid::new_v4().to_string() });
+        cx.notify();
+    }
+
+    fn set_draft_directory(&mut self, key: u64, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.starting.contains(&key) { return; }
+        let Some(draft) = self.drafts.get_mut(&key) else { return; };
+        draft.cwd = dir.clone();
+        let root = self.project_root(&dir);
+        self.project_preferences.collapsed.remove(&root);
+        self.project_preferences.archived.remove(&root);
+        self.project_preferences.deleted.remove(&root);
+        self.project_preferences.last_directory = Some(dir);
+        self.launch_options.remove(&key);
+        self.show_archived = false;
+        self.save_projects(cx);
+    }
+
+    pub fn pick_folder(&mut self, cx: &mut Context<Self>) {
+        let Selection::Draft(key) = self.selection else { return; };
+        if self.is_starting() { return; }
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1832,10 +2061,7 @@ impl AppState {
                 && let Some(dir) = paths.pop()
             {
                 let _ = this.update(cx, |s, cx| {
-                    if let Some(d) = s.draft_mut() {
-                        d.cwd = dir;
-                    }
-                    cx.notify();
+                    s.set_draft_directory(key, dir, cx);
                 });
             }
         })
@@ -1843,22 +2069,6 @@ impl AppState {
     }
 
     // ---- providers ----
-
-    pub fn terminals_fraction(&self) -> f32 {
-        let target = if self.terminals_collapsed { 0.0 } else { 1.0 };
-        self.terminals_motion.map_or(target, |(start, from)| {
-            let t = (start.elapsed().as_secs_f32() / 0.24).min(1.0);
-            from + (target - from) * (1.0 - (1.0 - t).powi(4))
-        })
-    }
-
-    pub fn toggle_terminals(&mut self, cx: &mut Context<Self>) {
-        let from = self.terminals_fraction();
-        self.terminals_collapsed = !self.terminals_collapsed;
-        self.terminals_motion = Some((std::time::Instant::now(), from));
-        self.terminals_toggle += 1;
-        cx.notify();
-    }
 
     pub fn toggle_providers(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Providers {
@@ -1945,7 +2155,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         AppState, Arc, HashMap, Overrides, Panel, Provider, Selection, SessionConfig,
         SessionManager, Tab, unbounded_channel,
@@ -1974,7 +2184,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_settings_preserves_selection_and_terminal_toggle_keeps_sessions(
+    fn closing_settings_preserves_selection(
         cx: &mut gpui::TestAppContext,
     ) {
         let state = draft(cx);
@@ -1984,27 +2194,21 @@ mod tests {
             s.toggle_providers(cx);
             assert_eq!(s.panel, Panel::Chat);
             assert_eq!(s.selection, selection);
-            s.toggle_terminals(cx);
-            assert!(s.terminals_collapsed);
-            s.terminals_motion = Some((
-                std::time::Instant::now() - std::time::Duration::from_secs(1),
-                1.0,
-            ));
-            assert_eq!(s.terminals_fraction(), 0.0);
-            s.toggle_terminals(cx);
-            assert!(!s.terminals_collapsed);
-            assert!(s.terminals_fraction() < 0.1);
             assert_eq!(s.selection, selection);
         });
     }
 
     // A parked runtime makes startup deterministically slow: no provider work
     // can finish before we check the UI state after send().
-    fn draft(cx: &mut gpui::TestAppContext) -> Entity<AppState> {
+    pub(crate) fn draft(cx: &mut gpui::TestAppContext) -> Entity<AppState> {
         let dir = tempfile::tempdir().unwrap();
         let manager = SessionManager::new(dir.path().join("sessions.jsonl"), []).unwrap();
         let (tx, _rx) = unbounded_channel();
         cx.new(|_| AppState {
+            project_info: HashMap::new(),
+            project_loading: Default::default(),
+            project_preferences: Default::default(),
+            launch_options: HashMap::new(),
             catalogs: HashMap::new(),
             accounts: Vec::new(),
             account_status: HashMap::new(),
@@ -2061,9 +2265,6 @@ mod tests {
             caffeine_enabled: false,
             renaming: None,
             show_archived: false,
-            terminals_collapsed: false,
-            terminals_motion: None,
-            terminals_toggle: 0,
             error: None,
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
@@ -2615,26 +2816,74 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn repeated_new_session_creates_independent_tabs(cx: &mut gpui::TestAppContext) {
+    fn project_actions_preserve_directories_and_can_be_reopened(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
-            let config = s.draft().unwrap().clone();
-            for key in 1..=100 {
-                s.new_session(cx);
-                assert_eq!(s.selection, Selection::Draft(key));
-                assert_eq!(s.tabs.len(), key as usize + 1);
-                assert_eq!(s.draft().unwrap().cwd, config.cwd);
-                assert_eq!(s.draft().unwrap().provider, config.provider);
-            }
-            let ids: std::collections::HashSet<_> =
-                s.tabs.iter().map(|tab| s.uid_of(tab)).collect();
-            assert_eq!(ids.len(), 101);
-            s.select_tab(&Tab::Draft(0), cx);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_path_buf();
+            std::fs::write(path.join("keep.txt"), "keep").unwrap();
+            s.new_project_session(path.clone(), cx);
+            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("project-actions"), title: "Shell".into(), cwd: path.clone(),
+                provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+            s.rename_project(path.clone(), "Named project".into(), cx);
+            assert_eq!(s.project_name(&path), "Named project");
+            s.archive_project(path.clone(), false, cx);
+            assert!(!s.project_paths().contains(&path));
+            s.show_archived = true;
+            assert_eq!(s.project_paths(), vec![path.clone()]);
+            s.restore_project(path.clone(), cx);
+            s.show_archived = false;
+            assert!(s.project_paths().contains(&path));
+            s.archive_project(path.clone(), true, cx);
+            assert!(!s.project_paths().contains(&path));
+            assert_eq!(std::fs::read_to_string(path.join("keep.txt")).unwrap(), "keep");
+            s.new_project_session(path.clone(), cx);
+            assert!(s.project_paths().contains(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn new_session_follows_selected_context_instead_of_last_creation(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            s.new_project_session("/nihal".into(), cx);
+            let selected = s.tabs.last().unwrap().clone();
+            s.new_project_session("/del".into(), cx);
+            s.select_tab(&selected, cx);
+            s.new_session(cx);
+            assert_eq!(s.effective().2, std::path::PathBuf::from("/nihal"));
+            s.new_session(cx);
+            assert_eq!(s.effective().2, std::path::PathBuf::from("/nihal"));
+            let terminal = del_agent::SessionId::new("context-terminal");
+            s.terminal_rows.push(crate::sessions::TerminalRow { id: terminal.clone(), title: "Shell".into(), cwd: "/terminal-dir".into(),
+                provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+            s.select_terminal(terminal, cx);
+            s.new_session(cx);
+            assert_eq!(s.effective().2, std::path::PathBuf::from("/terminal-dir"));
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_new_sessions_are_independent_and_remember_project_directory(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            for _ in 0..100 { s.new_session(cx); }
+            assert_eq!(s.tabs.len(), 101);
+            s.new_project_session("/first".into(), cx);
+            s.set_launch_options(Some("main".into()), true, cx);
+            s.new_project_session("/second".into(), cx);
+            assert_eq!(s.tabs.len(), 103);
+            assert_eq!(s.effective().2, std::path::PathBuf::from("/second"));
+            assert!(!s.draft_launch_options().worktree);
+            s.new_session(cx);
+            assert_eq!(s.effective().2, std::path::PathBuf::from("/second"));
+            let Selection::Draft(submitted) = s.selection else { panic!("expected draft") };
             s.send("starting".into(), cx);
             s.new_session(cx);
-            assert_eq!(s.selection, Selection::Draft(101));
-            assert_eq!(s.pending_prompts.get(&0).unwrap().text, "starting");
-            assert!(!s.is_starting());
+            assert_eq!(s.pending_prompts.get(&submitted).unwrap().text, "starting");
+            assert_eq!(s.tabs.len(), 105);
+            s.new_session(cx);
+            assert_eq!(s.tabs.len(), 106);
         });
     }
     #[gpui::test]
@@ -2719,14 +2968,84 @@ mod tests {
             assert_eq!(s.terminal_rows[2].id, d);
             s.reorder_sidebar(&d, &a, true, cx);
             s.reorder_sidebar(&a, &d, true, cx);
-            s.reorder_sidebar(&a, &b, false, cx);
-            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b, &d, &c]);
+            // Mode no longer separates groups: reorder through either mode.
+            s.reorder_sidebar(&b, &a, false, cx);
+            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&b, &a, &d, &c]);
             assert_eq!(s.selection, selection);
             let saved = serde_json::to_string(&s.overrides).unwrap();
             s.overrides = serde_json::from_str(&saved).unwrap();
             s.terminal_rows.reverse();
             s.sort_terminal_rows();
-            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b, &d, &c]);
+            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&b, &a, &d, &c]);
+        });
+    }
+
+    #[gpui::test]
+    fn changing_draft_directory_moves_its_group_and_reopens_destination(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let home = std::path::PathBuf::from("/new-home");
+            let old = s.effective().2;
+            s.project_preferences.archived.insert(home.clone());
+            s.project_preferences.collapsed.insert(home.clone());
+            s.set_draft_directory(0, home.clone(), cx);
+            assert_eq!(s.project_drafts(&home), vec![0]);
+            assert!(s.project_drafts(&old).is_empty());
+            assert_eq!(s.project_paths(), vec![home.clone()]);
+            assert!(!s.project_preferences.collapsed.contains(&home));
+            assert_eq!(s.project_preferences.last_directory, Some(home));
+        });
+    }
+
+    #[gpui::test]
+    fn active_session_in_archived_directory_is_visible_in_its_own_project(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, _| {
+            let home = std::path::PathBuf::from("/chosen-home");
+            s.project_preferences.archived.insert(home.clone());
+            s.project_preferences.collapsed.insert(home.clone());
+            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("chosen-directory"),
+                title: "Greeting".into(), cwd: home.clone(), provider: None, account_id: None,
+                active: false, summary: String::new(), pinned: false });
+            assert!(s.project_paths().contains(&home), "active session must reveal its own directory project despite old archive metadata");
+        });
+    }
+
+    #[gpui::test]
+    fn restoring_one_session_reopens_project_without_restoring_siblings(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let path = std::path::PathBuf::from("/archived-project-test");
+            let first = del_agent::SessionId::new("restore-first");
+            let second = del_agent::SessionId::new("restore-second");
+            for id in [&first, &second] {
+                s.terminal_rows.push(crate::sessions::TerminalRow { id: id.clone(), title: "Shell".into(), cwd: path.clone(),
+                    provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+            }
+            s.project_preferences.roots.insert(path.clone());
+            s.archive(first.clone(), cx);
+            s.archive(second.clone(), cx);
+            assert!(!s.project_paths().contains(&path), "all individually archived sessions hide their project");
+            s.project_preferences.archived.insert(path.clone());
+            s.show_archived = true;
+            assert!(s.project_paths().contains(&path));
+            s.restore(first.clone(), cx);
+            assert!(!s.terminal_archived(&first));
+            assert!(s.terminal_archived(&second));
+            assert!(s.project_paths().contains(&path), "archived sibling keeps archive group visible");
+            s.show_archived = false;
+            assert!(s.project_paths().contains(&path), "restored session brings its project back");
+            assert_eq!(s.unified_rows().iter().filter(|r| r.cwd == path).map(|r| r.id.clone()).collect::<Vec<_>>(), vec![first.clone()]);
+            s.restore(second.clone(), cx);
+            s.show_archived = true;
+            assert!(!s.project_paths().contains(&path), "last restored session removes archive group");
+            s.archive(second.clone(), cx);
+            s.archive_project(path.clone(), true, cx);
+            assert!(s.terminal_rows.iter().any(|r| r.id == first), "archived deletion preserves active sibling");
+            assert!(!s.terminal_rows.iter().any(|r| r.id == second));
+            assert!(!s.project_paths().contains(&path));
+            s.show_archived = false;
+            assert!(s.project_paths().contains(&path));
         });
     }
 
@@ -2794,6 +3113,97 @@ mod tests {
             assert_eq!(s.selection, Selection::Terminal(id.clone()));
             s.permanently_delete(id.clone(), cx);
             assert!(!s.terminal_rows.iter().any(|row| row.id == id));
+        });
+    }
+
+    #[gpui::test]
+    fn projects_mix_modes_preserve_pins_and_prevent_cross_project_reorder(cx: &mut gpui::TestAppContext) {
+        use del_agent::{SessionId, SessionRecord, SessionStatus, PermissionMode};
+        use crate::sessions::TerminalRow;
+        use std::path::PathBuf;
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let chat = SessionId::new("chat");
+            s.records.push(SessionRecord { id: chat.clone(), provider: Provider::Codex, account_id: None, cwd: "/repo/worktree".into(), model: None, reasoning_effort: None, service_tier: None, permission_mode: PermissionMode::FullAuto, title: Some("Chat".into()), title_turns: 0, created_at_ms: 1, updated_at_ms: 1, status: SessionStatus::Idle });
+            for (name, cwd) in [("terminal", "/repo"), ("other", "/elsewhere")] {
+                s.terminal_rows.push(TerminalRow { id: SessionId::new(name), provider: None, account_id: None, cwd: cwd.into(), title: name.into(), summary: String::new(), active: false, pinned: false });
+            }
+            s.project_info.insert("/repo/worktree".into(), crate::projects::GitInfo { root: "/repo".into(), ..Default::default() });
+            let terminal = SessionId::new("terminal");
+            s.reorder_sidebar(&terminal, &chat, true, cx);
+            assert_eq!(s.unified_rows()[0].id, terminal);
+            let order = s.overrides.clone();
+            s.reorder_sidebar(&SessionId::new("other"), &chat, true, cx);
+            assert_eq!(s.overrides, order);
+            s.toggle_session_pin(&chat, cx);
+            s.toggle_session_pin(&terminal, cx);
+            let pins: Vec<_> = s.unified_rows().into_iter().filter(|r| r.pinned).map(|r| r.id).collect();
+            assert_eq!(pins, vec![chat.clone(), terminal.clone()]);
+            s.reorder_sidebar(&terminal, &chat, true, cx);
+            assert_eq!(s.unified_rows()[0].id, terminal);
+            let saved = serde_json::to_string(&s.overrides).unwrap();
+            s.overrides = serde_json::from_str(&saved).unwrap();
+            assert_eq!(s.unified_rows()[0].id, terminal);
+            s.new_project_session("/repo".into(), cx);
+            assert_eq!(s.effective().2, PathBuf::from("/repo"));
+            assert_eq!(s.project_drafts(std::path::Path::new("/repo")).len(), 1);
+            s.toggle_project("/repo".into(), cx);
+            assert!(s.project_preferences.collapsed.contains(std::path::Path::new("/repo")));
+            assert_eq!(s.records.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn archiving_last_project_leaves_only_an_empty_composer(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+            s.set_draft_directory(0, home.clone(), cx);
+            s.archive_project(home, false, cx);
+            assert!(s.tabs.is_empty());
+            assert!(s.project_paths().is_empty());
+            assert!(s.draft().is_some(), "empty page must remain usable");
+            s.new_session(cx);
+            assert_eq!(s.tabs.len(), 1);
+            assert_eq!(s.project_paths().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn project_sidebar_renders_with_drafts_and_terminal_sessions(cx: &mut gpui::TestAppContext) {
+        use gpui::{ParentElement, Styled, Render, IntoElement};
+        struct Fixture {
+            state: Entity<AppState>,
+            rename: Entity<gpui_kit::component::input::InputState>,
+            usage: Entity<crate::usage::Usage>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                gpui::div().w(gpui::px(240.)).h(gpui::px(700.))
+                    .child(crate::sidebar::render(&self.state, &self.rename, &self.usage, cx))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let state = draft(cx);
+        state.update(cx, |s, _| {
+            let cwd = s.effective().2;
+            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("terminal-render"), provider: None, account_id: None, cwd, title: "Terminal session".into(), summary: String::new(), active: false, pinned: false });
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let rename = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx));
+            let usage = cx.new(|_| crate::usage::Usage::new(state.clone()));
+            Fixture { state: state.clone(), rename, usage }
+        });
+        cx.update(|window, cx| { window.draw(cx).clear(cx); });
+        assert!(cx.debug_bounds("pinned-heading").is_none());
+        let projects = cx.debug_bounds("projects-heading").unwrap();
+
+        assert!(projects.size.width > gpui::px(100.));
+        let content = cx.debug_bounds("project-session-content").unwrap();
+        assert_eq!(content.size.width, projects.size.width, "animated project rows must fill the sidebar width");
+        cx.update(|window, cx| {
+            root.update(cx, |fixture, cx| { fixture.state.update(cx, |s, cx| { let path = s.effective().2; s.toggle_project(path, cx); }); cx.notify(); });
+            window.draw(cx).clear(cx);
         });
     }
 

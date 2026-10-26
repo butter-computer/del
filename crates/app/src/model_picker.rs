@@ -22,6 +22,12 @@ fn model_label(selected: Option<&str>, info: Option<&del_agent::ModelInfo>) -> S
     }
 }
 
+fn effort_label(explicit: Option<&str>, info: Option<&del_agent::ModelInfo>) -> Option<String> {
+    let id = explicit.or_else(|| info.and_then(|model| model.default_effort.as_deref()))?;
+    Some(info.and_then(|model| model.efforts.iter().find(|effort| effort.id == id))
+        .map(|effort| effort.name.clone()).unwrap_or_else(|| EffortOption::named(id).name))
+}
+
 #[derive(Clone)]
 struct EffortDrag;
 
@@ -70,7 +76,7 @@ impl Render for ModelPicker {
         let (_, model, _) = state.effective();
         let info = state.model_info();
         let label = model_label(model.as_deref(), info.as_ref());
-        let effort = state.effort().map(|e| EffortOption::named(e).name);
+        let effort = effort_label(state.effort().as_deref(), info.as_ref());
         let panel = self.panel.clone();
         let trigger_bottom = self.trigger_bottom.clone();
         div()
@@ -489,10 +495,7 @@ impl Render for ModelPanel {
             self.previous_effort_index = self.effort_index;
             self.effort_index = index;
         }
-        let effort_label = effective_effort
-            .as_ref()
-            .and_then(|id| self.levels.iter().find(|e| &e.id == id))
-            .map(|e| e.name.clone());
+        let effort_label = effort_label(effort.as_deref(), info.as_ref());
         let model_name = model_label(selected.as_deref(), info.as_ref());
         root.child(
             h_flex()
@@ -739,6 +742,21 @@ fn fuzzy_model_matches(query: &str, candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{fuzzy_model_matches, next_effort_index, next_model_index};
+
+    #[test]
+    fn model_effort_label_shows_default_before_any_explicit_change() {
+        let mut info = del_agent::ModelInfo {
+            id: "test".into(), name: "Test".into(), description: String::new(),
+            efforts: vec![del_agent::EffortOption::named("medium"), del_agent::EffortOption::named("high")],
+            default_effort: Some("medium".into()), fast_tier: None, is_default: false,
+        };
+        assert_eq!(super::effort_label(None, Some(&info)).as_deref(), Some("Medium"));
+        assert_eq!(super::effort_label(Some("high"), Some(&info)).as_deref(), Some("High"));
+        info.default_effort = Some("high".into());
+        assert_eq!(super::effort_label(None, Some(&info)).as_deref(), Some("High"));
+        info.default_effort = None;
+        assert_eq!(super::effort_label(None, Some(&info)), None);
+    }
 
     #[test]
     fn effort_arrows_step_once_and_stop_at_endpoints() {

@@ -37,6 +37,7 @@ mod mode_ui;
 mod model_picker;
 mod provider_updates;
 mod providers;
+mod projects;
 mod accounts;
 mod readiness;
 mod right_panel;
@@ -94,6 +95,7 @@ struct DraggedTab {
     uid: u64,
     title: String,
     provider: Option<Provider>,
+    terminal: bool,
     start_pointer_y: Pixels,
     cursor_offset_x: Pixels,
     strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
@@ -124,7 +126,7 @@ impl Render for DraggedTab {
                 .text_color(rgb(0xf5f5f5))
                 .text_size(zpx(TEXT_MD))
                 .shadow_md()
-                .child(mode_ui::tab_mark(self.provider))
+                .child(if self.terminal { mode_ui::terminal_mark(self.provider) } else { mode_ui::tab_mark(self.provider) })
                 .child(tab_title(self.title.clone())),
         )
     }
@@ -1156,7 +1158,7 @@ impl AppShell {
         let shell_paste = shell.clone();
         let shell_voice = shell.clone();
         let shell_goal = shell.clone();
-        let retry_state = self.state.clone();
+        let retry_shell = cx.entity();
         let owner = self.composer_owner(cx);
         let has_attachments = self
             .composer_attachments
@@ -1168,7 +1170,14 @@ impl AppShell {
             provider,
             ready,
             self.model_picker.clone(),
-            sessions::folder_name(&cwd),
+            if locked {
+                let state = self.state.read(cx);
+                let project = sessions::folder_name(&state.project_root(&cwd));
+                match state.project_info.get(&cwd).filter(|info| !info.current.is_empty()) {
+                    Some(info) => format!("{project} · {}", info.current),
+                    None => project,
+                }
+            } else { sessions::folder_name(&cwd) },
             locked,
             running,
         )
@@ -1207,16 +1216,20 @@ impl AppShell {
                 this.attach_paths(owner, paths.0.to_vec(), cx)
             }))
             .when(
-                self.state.read(cx).pending_error().is_some()
-                    && self.state.read(cx).mode() == SessionMode::Chat,
+                self.state.read(cx).pending_error().is_some(),
                 |column| {
                     column.child(
                         Button::new("retry-first-prompt")
                             .ghost()
                             .small()
                             .label("Retry message")
-                            .on_click(move |_, _, cx| {
-                                retry_state.update(cx, |state, cx| state.retry_pending(cx))
+                            .on_click(move |_, window, cx| {
+                                retry_shell.update(cx, |this, cx| {
+                                    if this.state.read(cx).mode() == SessionMode::Terminal {
+                                        let input = this.state.read(cx).pending_input().cloned();
+                                        if let Some(input) = input { this.submit_terminal_prompt(&input.text, &input.attachments, window, cx); }
+                                    } else { this.state.update(cx, |state, cx| state.retry_pending(cx)); }
+                                });
                             }),
                     )
                 },
@@ -1456,6 +1469,7 @@ impl AppShell {
                                     .children(tabs.into_iter().enumerate().map(
                                         |(index, (tab_key, uid, title, provider))| {
                                             let live = tab_key.is_some();
+                                            let terminal = matches!(&tab_key, Some(Tab::Terminal(_)));
                                             let preview = tab_key.as_ref().is_some_and(|tab| self.state.read(cx).preview_tab.as_ref() == Some(tab));
                                             let animate_open = !matches!(tab_key, Some(Tab::Session(_)));
 
@@ -1490,6 +1504,7 @@ impl AppShell {
                                                     uid,
                                                     title: title.clone(),
                                                     provider,
+                                                    terminal,
                                                     start_pointer_y: Pixels::ZERO,
                                                     cursor_offset_x: Pixels::ZERO,
                                                     strip_bounds: self.tab_strip_bounds.clone(),
@@ -1525,7 +1540,7 @@ impl AppShell {
                                                             if event.click_count() == 2 { s.keep_tab(&tab, cx); }
                                                         });
                                                     })
-                                                    .child(mode_ui::tab_mark(provider))
+                                                    .child(if terminal { mode_ui::terminal_mark(provider) } else { mode_ui::tab_mark(provider) })
                                                     .child(if title_loading {
                                                         div().flex_1().min_w_0().truncate().child(
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)

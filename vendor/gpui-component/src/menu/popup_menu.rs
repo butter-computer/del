@@ -14,7 +14,7 @@ use gpui::{
 use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Point, Subscription};
 use gpui_base::TestSupportExt as _;
 
-use std::rc::Rc;
+use std::{rc::Rc, time::{Duration, Instant}};
 
 const CONTEXT: &str = "PopupMenu";
 
@@ -282,6 +282,8 @@ impl PopupMenuItem {
 }
 
 pub struct PopupMenu {
+    opened_at: Option<Instant>,
+    closing_at: Option<(Instant, f32)>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) menu_items: Vec<PopupMenuItem>,
     /// The focus handle of Entity to handle actions.
@@ -335,6 +337,8 @@ pub struct PopupMenu {
 impl PopupMenu {
     pub(crate) fn new(cx: &mut App) -> Self {
         Self {
+            opened_at: None,
+            closing_at: None,
             focus_handle: cx.focus_handle(),
             action_context: None,
             previous_focus_handle: None,
@@ -880,6 +884,7 @@ impl PopupMenu {
     }
 
     fn activate(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing_at.is_some() { return; }
         match self.selected_index {
             Some(index) => {
                 let item = self.menu_items.get(index);
@@ -1083,12 +1088,32 @@ impl PopupMenu {
         }
     }
 
+    fn menu_opacity(&self, cx: &App) -> f32 {
+        if cx.reduce_motion() { return if self.closing_at.is_some() { 0. } else { 1. }; }
+        if let Some((start, from)) = self.closing_at {
+            let t = (start.elapsed().as_secs_f32() / 0.12).min(1.);
+            return from * (1. - t * t);
+        }
+        let t = self.opened_at.map_or(0., |start| (start.elapsed().as_secs_f32() / 0.18).min(1.));
+        1. - (1. - t).powi(4)
+    }
+
     /// Dismiss the menu and the entire parent chain.
     ///
     /// The submenu is closed together with its parent, same as macOS menus.
     fn dismiss(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_index = None;
-        cx.emit(DismissEvent);
+        if self.closing_at.is_some() { return; }
+        let opacity = self.menu_opacity(cx);
+        self.closing_at = Some((Instant::now(), opacity));
+        if cx.reduce_motion() {
+            cx.emit(DismissEvent);
+        } else {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(120)).await;
+                let _ = this.update(cx, |_, cx| { cx.emit(DismissEvent); cx.notify(); });
+            }).detach();
+            cx.notify();
+        }
 
         // Focus back to the previous focused handle, unless the item's click
         // handler has already moved focus elsewhere (e.g. opened a dialog and
@@ -1472,6 +1497,9 @@ struct RenderOptions {
 
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.opened_at.get_or_insert_with(Instant::now);
+        let opacity = self.menu_opacity(cx);
+        if !cx.reduce_motion() && ((self.closing_at.is_none() && opacity < 1.) || (self.closing_at.is_some() && opacity > 0.)) { window.request_animation_frame(); }
         self.update_submenu_menu_anchor(window);
 
         // Submenus attached via the public `item()` + `PopupMenuItem::submenu()`
@@ -1526,6 +1554,8 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
+            .opacity(opacity)
+            .shadow(crate::styled::popover_shadow(crate::styled::popover_ring(cx), opacity.powi(3)))
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()

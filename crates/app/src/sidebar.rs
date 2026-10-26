@@ -10,7 +10,7 @@ use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::assets::IconName as ActionIcon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -58,10 +58,7 @@ impl Render for SidebarDrag {
         div().relative().left(self.start_pointer_x - window.mouse_position().x).h(zpx(ROW_HEIGHT)).w(zpx(SIDEBAR_WIDTH - 12.)).px_2()
             .flex().items_center().gap_1p5().rounded_md().bg(crate::appearance::popup_surface(0x262626))
             .text_size(zpx(TEXT_MD)).text_color(rgb(TEXT))
-            .child(match self.provider {
-                Some(provider) => provider_logo(provider).into_any_element(),
-                None => crate::icons::path("icons/terminal.svg").text_color(rgba(MUTED)).into_any_element(),
-            })
+            .child(if self.terminal { crate::mode_ui::terminal_mark(self.provider) } else { crate::mode_ui::tab_mark(self.provider) })
             .child(div().truncate().child(self.title.clone())))
     }
 }
@@ -85,11 +82,9 @@ fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState
         .on_drag_move(move |event: &DragMoveEvent<SidebarDrag>, _, cx| {
             let drag = event.drag(cx).clone();
             if event.event.position.y < event.bounds.top() || event.event.position.y > event.bounds.bottom() || drag.id == moving_target.id
-                || drag.terminal != moving_target.terminal || drag.pinned != moving_target.pinned { return; }
+                || drag.pinned != moving_target.pinned { return; }
             let state = moving_state.read(cx);
-            let ids: Vec<_> = if drag.terminal {
-                state.terminal_rows.iter().map(|row| row.id.clone()).collect()
-            } else { state.rows().into_iter().map(|row| row.id).collect() };
+            let ids: Vec<_> = state.unified_rows().into_iter().map(|row| row.id).collect();
             let from = ids.iter().position(|id| id == &drag.id);
             let to = ids.iter().position(|id| id == &moving_target.id);
             let (Some(from), Some(to)) = (from, to) else { return; };
@@ -100,7 +95,7 @@ fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState
             moving_state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &moving_target.id, drag.terminal, cx));
         })
         .on_drop(move |drag: &SidebarDrag, _, cx| {
-            if drag.terminal == target.terminal && drag.pinned == target.pinned {
+            if drag.pinned == target.pinned {
                 state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &target.id, drag.terminal, cx));
             }
         })
@@ -305,17 +300,6 @@ fn coffee_icon(active: bool, cx: &App) -> AnyElement {
 }
 
 /// Compact hover actions retain spoken names without visible text labels.
-fn action_button(id: impl Into<ElementId>, icon: ActionIcon, label: &'static str) -> Button {
-    Button::new(id)
-        .size(crate::icons::button_size())
-        .p_0()
-        .ghost()
-        .child(crate::icons::icon(icon))
-        .tooltip(label)
-        .accessibility_label(label)
-        .text_color(rgba(MUTED))
-}
-
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
@@ -418,7 +402,7 @@ fn session_menu_item(
         .child(label)
 }
 
-fn pinned_mark(pinned: bool, working: bool, group: SharedString, right: f32) -> AnyElement {
+fn working_mark(working: bool, group: SharedString, right: f32) -> AnyElement {
     div()
         .absolute()
         .right(zpx(right))
@@ -430,9 +414,6 @@ fn pinned_mark(pinned: bool, working: bool, group: SharedString, right: f32) -> 
         .flex_none()
         .group_hover(group, |mark| mark.opacity(0.0))
         .when(working, |mark| mark.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
-        .when(pinned && !working, |mark| {
-            mark.child(crate::icons::path("icons/pin-filled.svg").text_color(rgba(MUTED)))
-        })
         .into_any_element()
 }
 
@@ -445,6 +426,9 @@ fn row_item(
     archived: bool,
     cx: &App,
 ) -> AnyElement {
+    let terminal = state.read(cx).terminal_rows.iter().find(|r| r.id == row.id);
+    let is_terminal = terminal.is_some();
+    let logo = terminal.map(|r| r.provider).unwrap_or(Some(row.provider));
     let working = state.read(cx).session_working(&row.id);
     let id = row.id.clone();
     let key = SharedString::from(id.0.clone());
@@ -484,10 +468,10 @@ fn row_item(
             rgba(0xffffff0a),
             Some(std::rc::Rc::new(std::cell::Cell::new(if state.read(cx).sidebar_drag.active.as_ref() == Some(&id) && cx.has_active_drag() { 0. } else { 1. }))),
         ))
-        .child(provider_logo(row.provider));
+        .child(if is_terminal { crate::mode_ui::terminal_mark(logo) } else { provider_logo(row.provider).into_any_element() });
 
     if !archived && !renaming {
-        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: Some(row.provider), terminal: false, pinned: row.pinned, start_pointer_x: Pixels::ZERO }, state);
+        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: logo, terminal: is_terminal, pinned: row.pinned, start_pointer_x: Pixels::ZERO }, state);
     }
     item = if renaming {
         item.child(
@@ -507,10 +491,10 @@ fn row_item(
                 if archived {
                     s.restore(id.clone(), cx);
                 } else {
-                    s.select(id.clone(), cx);
+                    if is_terminal { s.select_terminal(id.clone(), cx); } else { s.select(id.clone(), cx); }
                 }
                 if event.click_count() == 2 {
-                    s.keep_tab(&crate::state::Tab::Session(id), cx);
+                    s.keep_tab(&if is_terminal { crate::state::Tab::Terminal(id) } else { crate::state::Tab::Session(id) }, cx);
                 }
             });
         })
@@ -538,12 +522,12 @@ fn row_item(
         let (pin_id, archive_id) = (id.clone(), id.clone());
         let hover_group = group.clone();
         item = item
-            .child(pinned_mark(row.pinned, working, group.clone(), mark_right))
+            .child(working_mark(working, group.clone(), mark_right))
             .child(
                 // Reserve space so titles never overlap the hover actions.
                 div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
                     crate::icons::BUTTON_SIZE * 2.0 + 4.0
-                } else if row.pinned || working {
+                } else if working {
                     crate::icons::BUTTON_SIZE
                 } else {
                     0.0
@@ -654,6 +638,57 @@ fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool,
         ))
 }
 
+fn project_menu_content(motion: &crate::hover_motion::HoverMotion, archived: bool, cx: &App) -> Div {
+    let background: Rgba = cx.theme().popover.into();
+    v_flex().relative().flex_1().min_w(zpx(176.)).mx(gpui::px(-8.)).gap_0p5().bg(background)
+        .child(motion.layer(Some(background), cx.theme().border.into()))
+        .child(session_menu_item("Rename", crate::icons::icon(ActionIcon::Pencil), motion))
+        .child(session_menu_item(if archived { "Restore project" } else { "Archive" },
+            crate::icons::path(if archived { "icons/restore.svg" } else { "icons/archive.svg" }), motion))
+        .child(motion.divider())
+        .child(session_menu_item("Permanently delete", crate::icons::icon(ActionIcon::Trash), motion))
+}
+
+fn project_menu(menu: PopupMenu, state: &Entity<AppState>, path: &std::path::Path, cx: &mut App) -> PopupMenu {
+    let archived_only = state.read(cx).show_archived;
+    let archived = archived_only;
+    let motion = crate::hover_motion::HoverMotion::menu(cx);
+    let click_motion = motion.clone();
+    let state = state.clone();
+    let path = path.to_path_buf();
+    menu.item(PopupMenuItem::element(move |_, cx| project_menu_content(&motion, archived, cx))
+        .on_click(move |event, window, cx| {
+            let Some(action) = click_motion.clicked(event) else { return; };
+            if action == "Restore project" { state.update(cx, |s, cx| s.restore_project(path.clone(), cx)); return; }
+            if action == "Archive" { state.update(cx, |s, cx| s.archive_project(path.clone(), false, cx)); return; }
+            let rename = action == "Rename";
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(state.read(cx).project_name(&path)));
+            let state = state.clone(); let path = path.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let input_value = input.clone(); let state = state.clone(); let path = path.clone();
+                dialog.title(if rename { "Rename project" } else { "Permanently delete project?" })
+                    .bg(crate::appearance::popup_surface(0x0b0b0d))
+                    .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                    .footer(gpui_kit::component::dialog::DialogFooter::new()
+                        .child(Button::new("project-cancel").label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)))
+                        .child(Button::new("project-confirm").label(if rename { "Save" } else { "Permanently delete" })
+                            .when(!rename, |button| button.danger())
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::dialog::Confirm { secondary: false }), cx))))
+                    .button_props(gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true).ok_text(if rename { "Save" } else { "Delete" }))
+                    .child(if rename { Input::new(&input).into_any_element() } else { div().child(if archived_only { "Permanently delete this project’s archived session histories. Active sessions, your directory, and files will stay untouched." } else { "Permanently delete this project and all its session histories. Your directory and files will stay untouched." }).into_any_element() })
+                    .on_ok(move |_, _, cx| {
+                        if rename {
+                            let name = input_value.read(cx).value().to_string();
+                            if name.trim().is_empty() { return false; }
+                            state.update(cx, |s, cx| s.rename_project(path.clone(), name, cx));
+                        } else { state.update(cx, |s, cx| s.archive_project(path.clone(), true, cx)); }
+                        true
+                    })
+            });
+        }))
+}
+
 fn session_menu(
     menu: PopupMenu,
     state: &Entity<AppState>,
@@ -692,7 +727,7 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
-    let rows = s.rows();
+    let mut rows = s.unified_rows();
     let archived = s.archived_rows();
     let archived_terminals: Vec<_> = s
         .terminal_rows
@@ -700,21 +735,27 @@ pub fn render(
         .filter(|row| s.terminal_archived(&row.id))
         .collect();
     let active = match &s.selection {
-        Selection::Session(id) => Some(id.clone()),
-        Selection::Draft(_) | Selection::Terminal(_) => None,
+        Selection::Session(id) | Selection::Terminal(id) => Some(id.clone()),
+        Selection::Draft(_) => None,
     };
     let providers_open = s.panel == Panel::Providers;
     let show_archived = s.show_archived;
+    let archived_count = archived.len() + archived_terminals.len();
+    if show_archived {
+        rows.clear();
+        rows.extend(archived.iter().cloned());
+        rows.extend(archived_terminals.iter().map(|r| Row {
+            id: r.id.clone(), provider: r.provider.unwrap_or(del_agent::Provider::Claude), model: None,
+            cwd: r.cwd.clone(), title: s.current_title(&r.id), status: del_agent::SessionStatus::Idle,
+            updated_secs: 0, archived: true, pinned: false, unread: false,
+        }));
+    }
 
+    let add_project_state = state.clone();
     let new_state = state.clone();
     let prov_state = state.clone();
     let caffeine_state = state.clone();
     let arch_state = state.clone();
-    let terminal_state = state.clone();
-    // Shared with the highlight markers: the group canvas lives outside this
-    // animated section, so it needs the exact opacity sampled for this frame.
-    let terminal_opacity = std::rc::Rc::new(std::cell::Cell::new(1.0_f32));
-
     v_flex()
         .w_full()
         .min_w_0()
@@ -795,328 +836,57 @@ pub fn render(
                 .min_h_0()
                 .gap_0p5()
                 .overflow_y_scroll()
-                .children(rows.iter().map(|row| {
-                    let selected = active.as_ref() == Some(&row.id) && !providers_open;
-                    let renaming = s.renaming.as_ref() == Some(&row.id);
-                    let animation_id = SharedString::from(format!("session-row-{}", row.id.0));
-                    div()
-                        .flex_none()
-                        .overflow_hidden()
-                        .child(row_item(row, selected, renaming, rename, state, false, cx))
-                        .with_animation(
-                            animation_id,
-                            Animation::new(std::time::Duration::from_millis(140))
-                                .with_easing(ease_out_quint()),
-                            |row, t| row.h(zpx(ROW_HEIGHT * t)).opacity(t),
-                        )
-                }))
-                .child(
-                    div()
-                        .id("terminals-toggle")
-                        .flex_none()
-                        .min_h(zpx(ROW_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .role(gpui::Role::Button)
-                        .aria_label(if s.terminals_collapsed {
-                            "Expand terminals"
-                        } else {
-                            "Collapse terminals"
-                        })
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            terminal_state.update(cx, |s, cx| s.toggle_terminals(cx))
-                        })
-                        .mt_3()
-                        .px_2()
-                        .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(FAINT))
-                        .child("TERMINALS"),
-                )
-                .child(
-                    v_flex()
-                        .flex_none()
-                        .gap_0p5()
-                        .overflow_hidden()
-                        .children(
-                            s.terminal_rows
-                                .iter()
-                                .filter(|row| !s.terminal_archived(&row.id))
-                                .map(|row| {
-                                    let menu_state = state.clone();
-                                    let menu_id = row.id.clone();
-                                    let pinned = row.pinned;
-                                    let renaming = s.renaming.as_ref() == Some(&row.id);
-                                    let title = s.current_title(&row.id);
-                                    let title_loading = s.title_loading(&row.id);
-                                    let selected = s.selection
-                                        == Selection::Terminal(row.id.clone())
-                                        && !providers_open;
-                                    let state = state.clone();
-                                    let pin_state = state.clone();
-                                    let pin_motion_state = state.clone();
-                                    let working = s.session_working(&row.id);
-                                    let close_state = state.clone();
-                                    let id = row.id.clone();
-                                    let pin_id = row.id.clone();
-                                    let close_id = row.id.clone();
-                                    let group =
-                                        SharedString::from(format!("terminal-actions-{}", id.0));
-                                    let mark_right = if s.terminal_unread(&id) { 20.0 } else { 8.0 };
-                                    let action_right = 8.0;
-                                    let motion = s.sidebar_hover.clone();
-                                    let hover = motion.clone();
-                                    let hover_key = id.0.clone();
-                                    h_flex()
-                                        .id(SharedString::from(format!("terminal-row-{}", id.0)))
-                                        .when(!renaming, |item| draggable_row(item, SidebarDrag {
-                                            id: id.clone(), title: title.clone(), provider: row.provider, terminal: true, pinned, start_pointer_x: Pixels::ZERO,
-                                        }, &state))
-                                        .relative()
-                                        .group(group.clone())
-                                        .h(zpx(ROW_HEIGHT))
-                                        .min_h(zpx(ROW_HEIGHT))
-                                        .flex_none()
-                                        .px_2()
-                                        .gap_2()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .on_hover(move |entered, window, cx| {
-                                            hover.hover(&hover_key, *entered, window, cx)
-                                        })
-                                        .child(motion.marker_with_opacity(
-                                            row.id.0.clone(),
-                                            if selected {
-                                                rgba(0xffffff14)
-                                            } else {
-                                                rgba(0xffffff00)
-                                            },
-                                            rgba(0xffffff0a),
-                                            Some(if s.sidebar_drag.active.as_ref() == Some(&row.id) && cx.has_active_drag() { std::rc::Rc::new(std::cell::Cell::new(0.)) } else { terminal_opacity.clone() }),
-                                        ))
-                                        .on_click(move |event, _, cx| {
-                                            if !renaming {
-                                                state.update(cx, |s, cx| {
-                                                    s.select_terminal(id.clone(), cx);
-                                                    if event.click_count() == 2 {
-                                                        s.keep_tab(&crate::state::Tab::Terminal(id.clone()), cx);
-                                                    }
-                                                });
-                                            }
-                                        })
-                                        .child(match row.provider {
-                                            Some(provider) => {
-                                                provider_logo(provider).into_any_element()
-                                            }
-                                            None => crate::icons::path("icons/terminal.svg")
-                                                .text_color(rgba(MUTED))
-                                                .into_any_element(),
-                                        })
-                                        .child(if renaming {
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(
-                                                    Input::new(rename)
-                                                        .appearance(false)
-                                                        .bordered(false)
-                                                        .text_size(zpx(TEXT_MD)),
-                                                )
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_size(zpx(TEXT_MD))
-                                                .font_weight(FontWeight::NORMAL)
-                                                .child(if title_loading {
-                                                    loading_title(title, &row.id)
-                                                } else {
-                                                    fading_title(title).into_any_element()
-                                                })
-                                                .into_any_element()
-                                        })
-                                        .child(div().flex_none().w(zpx(
-                                            if motion.is_hovered(&row.id.0) {
-                                                crate::icons::BUTTON_SIZE * 2.0 + 4.0
-                                            } else if row.pinned || working {
-                                                crate::icons::BUTTON_SIZE
-                                            } else {
-                                                0.0
-                                            },
-                                        )))
-                                        .child(div().flex_none().group_hover(group.clone(), |dot| dot.opacity(0.))
-                                            .child(unread_dot(&row.id, s, cx)))
-                                        .child(pinned_mark(row.pinned, working, group.clone(), mark_right))
-                                        .child(
-                                            h_flex()
-                                                .absolute()
-                                                .right(zpx(action_right))
-                                                .top(zpx(
-                                                    (ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0
-                                                ))
-                                                .h(zpx(20.0))
-                                                .w(zpx(crate::icons::BUTTON_SIZE * 2.0 + 4.0))
-                                                .items_center()
-                                                .gap(zpx(4.0))
-                                                .rounded_sm()
-                                                .opacity(0.0)
-                                                .group_hover(group, |actions| actions.opacity(1.0))
-                                                .child(
-                                                    pin_button(
-                                                        SharedString::from(format!(
-                                                            "pin-terminal-{}",
-                                                            pin_id.0
-                                                        )),
-                                                        row.pinned,
-                                                    )
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                        cx.stop_propagation()
-                                                    })
-                                                    .on_click(move |_, _, cx| {
-                                                        cx.stop_propagation();
-                                                        pin_state.update(cx, |s, cx| {
-                                                            s.toggle_terminal_pin(&pin_id, cx)
-                                                        });
-                                                    }),
-                                                )
-                                                .child(
-                                                    action_button(
-                                                        SharedString::from(format!(
-                                                            "close-terminal-{}",
-                                                            close_id.0
-                                                        )),
-                                                        ActionIcon::Close,
-                                                        "Close terminal",
-                                                    )
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                        cx.stop_propagation()
-                                                    })
-                                                    .on_click(move |_, _, cx| {
-                                                        cx.stop_propagation();
-                                                        close_state.update(cx, |s, cx| {
-                                                            s.remove_terminal(&close_id, cx)
-                                                        });
-                                                    }),
-                                                ),
-                                        )
-                                        .context_menu(move |menu, _, cx| {
-                                            session_menu(menu, &menu_state, &menu_id, pinned, cx)
-                                        })
-                                        .map(|item| moving_row(item, &row.id, &pin_motion_state, cx))
-                                }),
-                        )
-                        .with_animation(
-                            ("terminal-section", s.terminals_toggle),
-                            Animation::new(std::time::Duration::from_millis(240)),
-                            {
-                                let opacity = terminal_opacity.clone();
-                                let motion = s.terminals_motion;
-                                let target = if s.terminals_collapsed { 0.0 } else { 1.0 };
-                                let reduced = cx.reduce_motion();
-                                let height = s
-                                    .terminal_rows
-                                    .iter()
-                                    .filter(|row| !s.terminal_archived(&row.id))
-                                    .count() as f32
-                                    * (ROW_HEIGHT + 2.0);
-                                move |list, _| {
-                                    let fraction = if reduced {
-                                        target
-                                    } else {
-                                        motion.map_or(target, |(start, from)| {
-                                            let t = (start.elapsed().as_secs_f32() / 0.24).min(1.0);
-                                            from + (target - from) * (1.0 - (1.0 - t).powi(4))
-                                        })
-                                    };
-                                    opacity.set(fraction);
-                                    list.h(zpx(height * fraction)).opacity(fraction)
-                                }
-                            },
-                        ),
-                )
-                .when(
-                    !archived.is_empty() || !archived_terminals.is_empty(),
-                    |list| {
-                        list.child(
-                            h_flex()
-                                .id("archived-toggle")
-                                .h(zpx(ROW_HEIGHT))
-                                .min_h(zpx(ROW_HEIGHT))
-                                .flex_none()
-                                .px_2()
-                                .mt_1()
-                                .items_center()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(rgba(FAINT))
-                                .hover(|r| r.bg(rgba(0xffffff0a)))
-                                .on_click(move |_, _, cx| {
-                                    arch_state.update(cx, |s, cx| {
-                                        s.show_archived = !s.show_archived;
-                                        cx.notify();
-                                    })
-                                })
-                                .child(format!(
-                                    "Archived ({})",
-                                    archived.len() + archived_terminals.len()
-                                )),
-                        )
-                        .when(show_archived, |list| {
-                            list.children(
-                                archived.iter().map(|row| {
-                                    row_item(row, false, false, rename, state, true, cx)
-                                }),
-                            )
-                            .children(archived_terminals.iter().map(|row| {
+                .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(div().debug_selector(|| "pinned-heading".into()).px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).child("Pinned")))
+                .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx)))
+                .child(h_flex().debug_selector(|| "projects-heading".into()).px_2().pt_0().pb_1().items_center().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT))
+                    .child(div().flex_1().child(if show_archived { "Archived" } else { "Projects" }))
+                    .when(!show_archived, |heading| heading.child(Button::new("add-project").ghost().compact().icon(IconName::Plus).tooltip("Add project directory").accessibility_label("Add project directory")
+                        .on_click(move |_, _, cx| add_project_state.update(cx, |s, cx| s.add_project(cx))))))
+                .children(s.project_paths().into_iter().map(|path| {
+                    let collapsed = s.project_preferences.collapsed.contains(&path);
+                    let toggle_state = state.clone();
+                    let toggle_path = path.clone();
+                    let new_state = state.clone();
+                    let new_path = path.clone();
+                    let menu_state = state.clone();
+                    let menu_path = path.clone();
+                    let cleanup_state = state.clone();
+                    let cleanup_path = path.clone();
+                    let group = SharedString::from(format!("project-{}", path.display()));
+                    gpui_kit::component::collapsible::Collapsible::new()
+                        .motion_id(SharedString::from(format!("project-reveal-{}", path.display())))
+                        .open(!collapsed).flex_none().gap_0p5()
+                        .child(h_flex().id(group.clone()).group(group.clone()).h(zpx(32.)).px_2().gap_2().items_center().rounded_md().cursor_pointer()
+                            .text_color(rgba(0xffffffcc)).text_size(zpx(TEXT_MD))
+                            .hover(|row| row.bg(rgba(0xffffff0a)))
+                            .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
+                            .on_click(move |_, _, cx| toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)))
+                            .context_menu(move |menu, _, _| {
+                                let state = cleanup_state.clone(); let path = cleanup_path.clone();
+                                menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
+                            })
+                            .child(crate::icons::icon(IconName::Folder))
+                            .child(div().flex_1().min_w_0().child(fading_title(s.project_name(&path))))
+                            .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
+                                .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                .dropdown_menu(move |menu, _, cx| project_menu(menu, &menu_state, &menu_path, cx)))
+                            .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact().icon(IconName::Plus)
+                                .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }))))
+                        .content(v_flex().w_full().debug_selector(|| "project-session-content".into()).gap_0p5()
+                            .children(s.project_drafts(&path).into_iter().filter(|_| !show_archived).map(|key| {
                                 let state = state.clone();
-                                let id = row.id.clone();
-                                let group =
-                                    SharedString::from(format!("archived-terminal-{}", id.0));
-                                let actions = archived_actions(&id, &state);
-                                h_flex()
-                                    .id(group.clone())
-                                    .group(group.clone())
-                                    .relative()
-                                    .items_center()
-                                    .h(zpx(ROW_HEIGHT))
-                                    .min_h(zpx(ROW_HEIGHT))
-                                    .flex_none()
-                                    .px_2()
-                                    .gap_2()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|row| row.bg(rgba(0xffffff0a)))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(fading_title(s.current_title(&id))),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .w(zpx(crate::icons::BUTTON_SIZE * 2.0 + 4.0)),
-                                    )
-                                    .child(
-                                        actions
-                                            .absolute()
-                                            .right(zpx(8.0))
-                                            .top(
-                                                zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0),
-                                            )
-                                            .opacity(0.0)
-                                            .group_hover(group, |a| a.opacity(1.0)),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        state.update(cx, |s, cx| s.restore(id.clone(), cx))
-                                    })
+                                div().id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
+                                    .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
+                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
+                                    .hover(|row| row.bg(rgba(0xffffff0a))).child("New session")
+                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
-                        })
-                    },
-                )
+                            .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|
+                                div().pl(zpx(18.)).opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx)))))
+                }))
                 .child(
                     div()
                         .id("sidebar-window-drag")
@@ -1161,7 +931,15 @@ pub fn render(
                         .gap_1p5()
                         .child(crate::icons::icon(IconName::Settings))
                         .child("Settings"),
-                ),
+                )
+                .when(show_archived || archived_count > 0, |footer| footer.child(
+                    Button::new("show-archived").ghost().compact().icon(ActionIcon::Archive)
+                        .selected(show_archived)
+                        .when(show_archived, |button| button.bg(rgba(0xffffff20)).text_color(rgb(0xffffff)))
+                        .tooltip(if show_archived { "Show active sessions" } else { "Show archived sessions and projects" })
+                        .accessibility_label("Toggle archived sessions")
+                        .on_click(move |_, _, cx| arch_state.update(cx, |s, cx| { s.show_archived = !s.show_archived; cx.notify(); }))
+                )),
         )
         .into_any_element()
 }
@@ -1348,8 +1126,20 @@ mod menu_tests {
         cx.run_until_parked();
         assert_eq!(&*clicked.borrow(), &["Pin"]);
         cx.simulate_mouse_move(point(px(900.), px(900.)), None, Modifiers::default());
-        let menu = root.read_with(cx, |root, _| root.0.clone());
-        cx.update(|window, cx| menu.read(cx).focus_handle(cx).focus(window, cx));
+        // A dismissed menu is inert during its exit; keyboard use opens a fresh menu.
+        cx.update(|window, cx| {
+            let motion = crate::hover_motion::HoverMotion::menu(cx);
+            let selection = motion.clone();
+            let recorded = clicked.clone();
+            let menu = PopupMenu::build(window, cx, move |menu, _, _| menu.item(
+                PopupMenuItem::element(move |_, cx| session_menu_content(&motion, false, cx))
+                    .on_click(move |event, _, _| {
+                        if let Some(action) = selection.clicked(event) { recorded.borrow_mut().push(action); }
+                    })));
+            menu.read(cx).focus_handle(cx).focus(window, cx);
+            root.update(cx, |root, cx| { root.0 = menu; cx.notify(); });
+            window.draw(cx).clear(cx);
+        });
         cx.simulate_keystrokes("down down down enter");
         cx.run_until_parked();
         assert_eq!(&*clicked.borrow(), &["Pin", "Mark as unread"]);

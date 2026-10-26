@@ -14,6 +14,8 @@ use del_agent::{Provider, SessionId};
 use del_mcp::{HostError, HostResult, SessionInfo, SessionMode, UserAnswer};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -34,6 +36,16 @@ pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
         Some(provider) => composer_ui::provider_logo(provider).into_any_element(),
         None => crate::icons::path("icons/terminal.svg").into_any_element(),
     }
+}
+
+pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
+    div().relative().size(zpx(18.)).flex_none()
+        .child(crate::icons::path("icons/terminal.svg").size(zpx(16.)).text_color(rgba(0xffffffcc)))
+        .when_some(provider, |icon, provider| icon.child(
+            div().absolute().right(zpx(-2.)).bottom(zpx(-2.)).size(zpx(11.)).rounded(zpx(3.))
+                .bg(crate::appearance::popup_surface(0x202020)).flex().items_center().justify_center()
+                .child(composer_ui::provider_logo(provider).size(zpx(9.)))
+        )).into_any_element()
 }
 
 impl AppShell {
@@ -181,21 +193,29 @@ impl AppShell {
         };
         spec.account_id = self.state.read(cx).selected_account();
         let prompt = crate::attachments::terminal_prompt(prompt, attachments);
+        let mut options = self.state.read(cx).draft_launch_options();
+        if options.token.is_empty() {
+            self.state.update(cx, |s, cx| s.set_launch_options(options.branch.clone(), options.worktree, cx));
+            options = self.state.read(cx).draft_launch_options();
+        }
         self.state.update(cx, |state, cx| {
             state.begin_terminal_prompt(key, prompt.to_owned(), cx)
         });
         self.composer_attachments.remove(&self.composer_owner(cx));
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.begin_terminal(
-            spec,
-            Some(key),
-            None,
-            Some(prompt.to_owned()),
-            None,
-            window,
-            cx,
-        );
+        let runtime = self.state.read(cx).backend().runtime;
+        let prepare = runtime.spawn_blocking(move || {
+            spec.cwd = crate::projects::prepare(&spec.cwd, &options, &del_agent::data_dir().unwrap_or_else(std::env::temp_dir))?;
+            Ok::<_, String>(spec)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = prepare.await.map_err(|e| e.to_string()).and_then(|r| r);
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(spec) => this.begin_terminal(spec, Some(key), None, Some(prompt), None, window, cx),
+                Err(error) => this.state.update(cx, |s, cx| s.terminal_start_failed(key, error, cx)),
+            });
+        }).detach();
         true
     }
 
@@ -843,31 +863,42 @@ impl AppShell {
     }
 
     pub(super) fn render_new_session_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cwd = self.state.read(cx).effective().2;
+        let s = self.state.read(cx);
+        let cwd = s.effective().2;
+        let info = s.project_info.get(&cwd).cloned().unwrap_or_default();
+        let options = s.draft_launch_options();
+        let enabled = !s.is_starting();
+        let git = !info.current.is_empty();
+        let selected = options.branch.clone().unwrap_or_else(|| info.current.clone());
+        let label = if git { selected.clone() } else if s.project_info.contains_key(&cwd) { "No Git repository".into() } else { "Checking Git…".into() };
         let state = self.state.clone();
-        h_flex()
-            .size_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .justify_between()
-            .child(
-                Button::new("new-workspace")
-                    .ghost()
-                    .h(zpx(24.0))
-                    .px_3()
-                    .text_size(zpx(14.0))
-                    .cursor_pointer()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .child(crate::icons::icon(IconName::Folder))
-                            .child(crate::sessions::folder_name(&cwd)),
-                    )
+        let branches_state = self.state.clone();
+        let toggle_state = self.state.clone();
+        let worktree = options.worktree;
+        let branch = options.branch.clone();
+        h_flex().size_full().px_2().gap_2().items_center()
+            .child(h_flex().flex_1().min_w_0().items_center().gap_1()
+                .child(Button::new("new-workspace").ghost().disabled(!enabled).h(zpx(24.)).px_2().min_w_0().max_w(zpx(150.)).text_size(zpx(13.))
+                    .tooltip(cwd.display().to_string())
+                    .child(h_flex().gap_1().items_center().child(crate::icons::icon(IconName::Folder))
+                        .child(div().min_w_0().truncate().child(crate::sessions::folder_name(&cwd))))
                     .text_color(rgba(0xffffff8c))
-                    .on_click(move |_, _, cx| state.update(cx, |state, cx| state.pick_folder(cx))),
-            )
+                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))))
+                .when(git, |row| row.child(Button::new("session-branch").ghost().disabled(!enabled || !git).h(zpx(24.)).px_2().min_w_0().max_w(zpx(180.)).text_size(zpx(12.))
+                    .child(div().min_w_0().truncate().child(format!("Branch: {selected}"))).tooltip("Starting branch. Enable New worktree to leave the current checkout unchanged.")
+                    .dropdown_menu(move |menu, _, _| {
+                        info.branches.iter().fold(menu, |menu, name| {
+                            let state = branches_state.clone(); let branch = name.clone();
+                            menu.item(PopupMenuItem::new(name.clone()).checked(*name == selected)
+                                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_launch_options(Some(branch.clone()), worktree, cx))))
+                        })
+                    }))))
+            .when(!git, |row| row.child(Button::new("no-git-repository").ghost().compact().child(div().relative().size(crate::icons::size())
+                .child(crate::icons::path("icons/git-unavailable.svg").size(crate::icons::size()))
+                .child(div().absolute().right_0().bottom_0().size(zpx(7.)).child(crate::icons::icon(IconName::Close).with_size(zpx(7.)).text_color(rgb(0xff646b))))).text_color(rgba(0xffffff70)).accessibility_label(label.clone()).tooltip(label)))
+            .when(git, |row| row.child(Switch::new("new-worktree").focus_ring(false).color(gpui_kit::rgb(0x579fff)).small().label("New worktree").checked(worktree).disabled(!enabled || !git)
+                    .tooltip("Create an isolated checkout and a new branch from the selected branch")
+                    .on_change(move |checked, _, cx| toggle_state.update(cx, |s, cx| s.set_launch_options(branch.clone(), *checked, cx)))))
             .child(self.render_mode_picker(cx))
     }
 

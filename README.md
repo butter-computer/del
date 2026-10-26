@@ -158,15 +158,60 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
-Pinned chats stay in pin order, oldest pin first; new pins append to that group.
-Drag sidebar rows to rearrange them, as with top tabs. Orders are saved across
-restarts. Dragging stays within chats or terminals and within the same pinned or
-unpinned group; it never pins, unpins, or replaces a row in another section.
-The source row hides while dragging; its floating preview retains the provider icon.
-Sidebar drag previews stay horizontally locked inside the sidebar.
-Neighboring rows slide with the top tabs’ easing and a small dead zone reduces jitter.
-Dragging top tabs or sidebar sessions into a new position emits a native haptic
-tick on supported macOS hardware; movement within the same slot stays silent.
+The sidebar has **Pinned** (hidden when empty) and smoothly collapsible **Projects**. Chats and
+terminals are sessions in the same project list; there is no separate terminal
+section. Projects are created automatically from session folders. Git subfolders
+and linked worktrees group under the parent repository, while non-Git folders use
+their canonical full paths. Existing histories, pins, titles, and unread state are
+preserved. Project membership is derived from the stored working directory, so no
+provider transcript migration is needed. The archive button beside Settings switches to **Archived**, showing only archived
+sessions grouped by project, with a selected background on the toggle. Creation
+buttons are hidden in this view. Project identities and collapsed state
+persist in `projects.json`. Hover a project for **+** and its three-dot menu;
+choose Chat or Terminal in the composer. Terminal rows show a terminal icon with
+a small provider badge. Each new-session action creates an independent draft in
+the selected session's directory, or the last directory when no tab is selected.
+The Projects heading's **+** opens a directory picker. Changing a draft's folder
+moves it to that project and expands the destination.
+
+Projects are directory groups, not separate containers: only sessions and explicit
+drafts make them visible. Rename changes the display name only. Archive hides the
+project's sessions from the active list. Restoring one session restores only that
+session; archived siblings stay in Archived, so a project can appear in both views.
+Restoring a project restores all its archived sessions. Deleting from Projects
+removes all its histories; deleting from Archived removes only archived histories.
+Deletion requires confirmation and never deletes directory contents or Git work.
+Rename and delete dialogs use opaque surfaces and explicit action/cancel buttons.
+Archiving or deleting the last project leaves an empty, usable new-session page,
+without inventing a replacement `/` project.
+
+Pinned sessions appear once, above projects, in pin order, without a persistent
+pin icon. Unpin remains available on hover and in the context menu. New pins append. Drag
+sessions within their project or within the shared pinned group, including across
+chat and terminal modes. Dragging never moves a session to a different project or
+changes its pin status. Manual order persists across restarts.
+
+### Branches and managed worktrees
+
+Below the new-session composer, the directory, **Branch**, **New worktree** toggle,
+and Chat/Terminal controls share one row. Choose a starting branch and optionally
+enable New worktree. Git discovery and checkout preparation run in the background.
+Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
+tooltip, with no branch picker or worktree toggle. Without a new worktree, selecting a different branch switches
+the existing checkout only when it is clean; Git also refuses branches checked out
+elsewhere. With New worktree, Del creates a unique `del/session-<UUID>` branch from
+the selected commit without changing the source checkout. Uncommitted source changes
+are not copied. An unborn repository needs its first commit before worktree creation.
+
+Del-owned worktrees live in `<Del data>/worktrees/<UUID>/checkout`, with an ownership
+manifest beside the checkout. Failed provider-start retries reuse that draft's
+worktree. Saved sessions reopen their exact directory and still appear under the
+original project. Closing, unloading, archiving, or deleting a session does not
+remove Git work. Right-click a project and choose **Remove unused clean worktrees**
+for explicit cleanup. Cleanup removes only Del-owned checkouts with no saved-session
+or pending-draft references, no changed/untracked/ignored files, and no commits since
+creation. Branches are always preserved. Worktrees containing work remain on disk
+for normal Git review and cleanup.
 
 The sidebar starts with four equal-sized buttons: **Search**, **New session (+)**,
 **Keep Mac awake**, and **Memory usage**. Keep-awake uses a neutral hover-colored
@@ -176,8 +221,9 @@ the last toolbar button clear of the sidebar divider.
 Memory usage opens a compact popover below its button, clear of the top tabs, with a pointer
 on the top. It lists loaded chats and terminals by process-tree RAM usage,
 refreshing every three seconds while open. Each row shows a fading session title
-and its RAM usage; click the title to open the session. Delete and unload icons
-appear on hover with evenly padded click targets. Unload releases the live session
+and its RAM usage at the far right; click the title to open the session. Delete and
+unload icons appear to its right only on hover, taking no space while hidden.
+Hover updates run layout before drawing the controls. Unload releases the live session
 while retaining its history; delete uses the existing permanent-delete action.
 Up to four rows are visible, with a bottom fade and scrolling without a scrollbar.
 
@@ -338,7 +384,8 @@ advertised effort levels, and the accent follows the selected provider (includin
 Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning controls to move one
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
-Reset clears explicit effort/fast settings and refreshes the catalog.
+The model pill immediately shows the effective effort, including the catalog
+default before any adjustment. Reset clears explicit effort/fast settings and refreshes the catalog.
 Changing effort by dragging, clicking a stop, or using arrow keys emits one native
 haptic tick per level transition on supported macOS hardware. Movement within the
 same level stays silent; devices without haptic support receive no feedback.
@@ -504,10 +551,6 @@ Expanded folders, selected file, dotfile preference, split height, and Markdown
 mode are saved per chat. Switching panes, opening Settings, or closing the sidebar
 hides native previews; closing the preview releases its document.
 
-Click **TERMINALS** in the left sidebar to collapse or expand the list, with a
-short transition and no disclosure-arrow icon. Row highlights fade and clip with
-the list. Reduce Motion makes the transition instant.
-
 Terminal content fills its pane without a title/status/Copy output header.
 
 The workspace terminal starts the shell selected by `$SHELL` as a login shell,
@@ -664,7 +707,9 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | Path within Del's data directory | Contents |
 | --- | --- |
 | `sessions.jsonl` | Chat session index and configuration |
-| `sidebar.json` | Local names, pins, archive/unread metadata |
+| `sidebar.json` | Local names, shared session order, pins, archive/unread metadata |
+| `projects.json` | Directory identities, display names, collapse state, and last directory |
+| `worktrees/` | Managed Git checkouts and ownership manifests |
 | `terminals.json` | Terminal launches and provider conversation identities |
 | `followups/` | Per-conversation queued messages and delivery state |
 | `attachments/` | Local file copies used by drafts and queued messages |
@@ -718,6 +763,8 @@ UI regression tests also cover preview tabs, unload/resume, hover clipping and
 collapse fading, incremental streamed Markdown, reasoning-step boundaries, and zoom shortcuts
 with composer or terminal focus. Permission tests cover new and resumed sessions,
 terminal bypass flags, and Codex permission changes on subsequent turns.
+Project regressions cover directory inheritance, archive/restore grouping, worktree
+ownership and cleanup, full-width animated rows, and memory-row hover rendering.
 Tests requiring installed/authenticated provider CLIs are ignored by default;
 run those explicitly when validating live-provider behavior. Signing continuity
 and installation while running have separate macOS regression scripts.
