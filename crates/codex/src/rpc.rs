@@ -187,7 +187,7 @@ impl CodexClient {
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
-        del_agent::environment::clear_worker_session_env(cmd.as_std_mut());
+        del_agent::environment::prepare_provider_command(cmd.as_std_mut());
         let mut child = cmd.spawn().map_err(|source| ClientError::Spawn {
             program: opts.program.display().to_string(),
             source,

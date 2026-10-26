@@ -60,9 +60,7 @@ impl Cache {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
-            for key in del_agent::environment::WORKER_SESSION_ENV {
-                command.env_remove(key);
-            }
+            del_agent::environment::prepare_provider_command(command.as_std_mut());
             #[cfg(unix)]
             command.process_group(0);
             let child = command.spawn()?;

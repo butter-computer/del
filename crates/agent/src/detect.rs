@@ -99,7 +99,7 @@ async fn find_working_in(name: &str, dirs: &[PathBuf]) -> Option<(PathBuf, Strin
     None
 }
 
-fn common_dirs() -> Vec<PathBuf> {
+pub(crate) fn common_dirs() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
         .map(PathBuf::from)
         .into();
@@ -152,7 +152,9 @@ struct Output {
 }
 
 async fn run(bin: &Path, args: &[&str]) -> Option<Output> {
-    let child = Command::new(bin)
+    let mut command = Command::new(bin);
+    crate::environment::prepare_provider_command(command.as_std_mut());
+    let child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -295,6 +297,21 @@ mod tests {
             LoginState::LoggedIn
         );
         assert!(find_in("claude", &[dir.path().to_path_buf()]).is_none());
+    }
+
+    #[tokio::test]
+    async fn detects_provider_with_runtime_in_its_install_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, script) in [
+            ("codex", "#!/usr/bin/env del-detection-fixture-runtime\n"),
+            ("del-detection-fixture-runtime", "#!/bin/sh\necho 'codex-cli 9.9.9'\n"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(find_working_in("codex", &[dir.path().to_owned()]).await,
+            Some((dir.path().join("codex"), "9.9.9".into())));
     }
 
     #[tokio::test]

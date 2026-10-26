@@ -36,9 +36,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        for key in del_agent::environment::WORKER_SESSION_ENV {
-            command.env_remove(key);
-        }
+        del_agent::environment::prepare_provider_command(command.as_std_mut());
         if let Some(tools) = tools {
             command.env(
                 "OPENCODE_CONFIG_CONTENT",

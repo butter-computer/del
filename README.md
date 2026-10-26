@@ -40,6 +40,34 @@ open target/release/del.app
 After rebuilding, reopen Del to run the new binary. Building does not replace
 an already-running process. Keep using the same bundle path for local upgrades.
 
+### Running on another Mac
+
+Each Mac needs its own provider CLI installation and authenticated account. Pulling
+this repository does not install providers or transfer logins, model access, or
+local settings. Build the app on the destination Mac using the commands above;
+do not copy another Mac's `target` directory or credentials.
+
+Del prepares a child-process PATH for provider probes, model discovery, chat,
+and history loading. It includes the selected executable's directory and common
+Homebrew (Apple Silicon and Intel), native installer, npm, Bun, Volta, and nvm
+locations, so Finder launches can resolve CLI runtimes such as Node. Existing
+launch environment settings remain inherited; Del does not source shell startup
+scripts or copy API keys from another machine. Custom installation locations
+must be included in the environment used to launch Del.
+
+If models or chat fail on a new Mac:
+
+1. Open **Settings → Providers** and check installation and sign-in status.
+2. In Terminal, run the chosen CLI's `--version` command and sign in using
+   `codex login`, `claude auth login`, or `opencode auth login`. Verify a normal
+   request works in that CLI with the same account and workspace.
+3. Reopen Del after installing or updating a provider, refresh the model list,
+   and try **Default** first. Model availability depends on that account/provider.
+4. If the CLI works but Del fails, report the provider/version, macOS version,
+   processor architecture, and the exact Del error. Never share API keys or
+   credential files. A successful local build alone does not verify live access
+   on every Mac or account.
+
 ### Isolated UI development
 
 The mock backend returns scripted responses without contacting a model. Use a

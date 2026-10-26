@@ -106,7 +106,7 @@ impl Rpc {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
-        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        del_agent::environment::prepare_provider_command(command.as_std_mut());
         let mut child = command.spawn()?;
         let pid = child.id();
         let mut stdin = child.stdin.take().expect("piped stdin");

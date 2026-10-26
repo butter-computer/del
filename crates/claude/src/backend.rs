@@ -195,7 +195,7 @@ impl ClaudeBackend {
             .kill_on_drop(true)
             // Own process group, so closing takes down the MCP servers and tools too.
             .process_group(0);
-        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        del_agent::environment::prepare_provider_command(command.as_std_mut());
         let mut child = command.spawn().map_err(|e| {
             AgentError::Backend(format!(
                 "failed to start `{}`: {e}",
@@ -393,7 +393,7 @@ impl AgentBackend for ClaudeBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        del_agent::environment::clear_worker_session_env(command.as_std_mut());
+        del_agent::environment::prepare_provider_command(command.as_std_mut());
         let mut child = command.spawn()?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         stdin.write_all(context.as_bytes()).await?;
@@ -610,7 +610,9 @@ pub struct AuthStatus {
 /// Ask the installed CLI whether it is logged in. Reads only the status the CLI
 /// prints; no credentials are touched.
 pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
-    let out = Command::new(&options.binary)
+    let mut command = Command::new(&options.binary);
+    del_agent::environment::prepare_provider_command(command.as_std_mut());
+    let out = command
         .args(["auth", "status"])
         .stdin(Stdio::null())
         .output()

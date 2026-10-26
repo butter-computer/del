@@ -193,3 +193,14 @@ This records the final decisions, including corrections to earlier experiments.
 - Build the native macOS app and relaunch when delivering UI changes.
 - When asked to commit and push, include the requested work and documentation,
   verify the push succeeded, and report the resulting commit and working-tree status.
+
+## Provider portability
+
+- Provider detection, model loading, chat, and history subprocesses must share
+  runtime PATH preparation. Finder's minimal PATH must not break an installed
+  CLI whose runtime is in its installation directory or a supported common location.
+- Preserve user authentication and explicit launch settings without inheriting
+  parent coding-agent session markers. Never embed developer-specific home paths,
+  credentials, or account-specific model assumptions as setup requirements.
+- A fresh Mac requires its own installed and authenticated provider. Document
+  this setup in README; pulling source does not transfer working provider access.

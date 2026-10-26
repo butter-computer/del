@@ -105,7 +105,7 @@ pub async fn discover_catalog(options: &ClaudeOptions, cwd: &Path) -> Result<Val
     if let Some(s) = &options.setting_sources {
         cmd.args(["--setting-sources", s]);
     }
-    del_agent::environment::clear_worker_session_env(cmd.as_std_mut());
+    del_agent::environment::prepare_provider_command(cmd.as_std_mut());
     let mut child = cmd.spawn()?;
     let pid = child.id();
     let mut stdin = child.stdin.take().unwrap();
