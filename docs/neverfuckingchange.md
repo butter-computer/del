@@ -32,6 +32,7 @@ This records the final decisions, including corrections to earlier experiments.
   Leave a small gap between the toolbar’s final button and the sidebar divider.
 - Cap control growth; empty space is fine. Do not stretch buttons to fill a wide sidebar.
 - Keep-awake uses a neutral hover-style background, never a yellow filled background.
+- When off, the keep-awake cup uses the same color as the other toolbar icons; never dim it.
 - While enabled, use the gold cup with subtle rising steam above it. Respect Reduce Motion.
 - Archive and pin controls use the shared SF Symbols (`archivebox`, `pin`, and
   `pin.fill`) like the search and activity icons, with SVG only as a platform fallback.
@@ -64,6 +65,11 @@ This records the final decisions, including corrections to earlier experiments.
   space up to the action slot; an absent unread dot must not reserve a gap.
   Reclaim the close-button space when idle and not hovered. Preserve descenders
   with enough line height, and use a smooth trailing fade.
+
+- Opening/closing the left sidebar slides it: contents keep their full width and
+  move with the divider, clipped at the edge. Never squeeze or reflow the contents.
+- The sidebar footer's Settings and Archived buttons share the row height, with
+  equal left and right insets; the archive button must not touch the divider.
 
 - Keep a visible theme-aware vertical divider between the workspace and each sidebar,
   including the right Files/Terminal panel. Preserve its resize target.
@@ -390,8 +396,8 @@ This records the final decisions, including corrections to earlier experiments.
   directory moves it to that directory group and expands the destination without
   restoring archived sibling sessions. Archive toggle has a selected background.
 
-- Project expand/collapse uses a reversible measured reveal with reduced-motion
-  support; repeated clicks reverse smoothly without snapping or losing rows.
+- Project expand/collapse is instant: no animation, transition, or delay when a
+  project group opens or closes. (Section headings keep their reveal.)
 
 - Rename projects inline in their sidebar row, using the same editor styling as
   sessions. Enter saves a nonempty display name; Escape or blur cancels. Clicking

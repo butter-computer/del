@@ -238,7 +238,7 @@ existing project boundary.
 
 Click either sidebar
 heading to smoothly collapse or expand its entire section; individual projects
-also expand independently. Section choices persist across restarts, with a separate
+also expand and collapse independently and instantly. Section choices persist across restarts, with a separate
 collapse state for Archived. The Spaces plus button opens its menu
 without toggling the section. Chats and
 terminals are sessions in the same project list; there is no separate terminal

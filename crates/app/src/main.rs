@@ -3073,13 +3073,23 @@ impl Render for AppShell {
                             .h_full()
                             .flex_none()
                             .overflow_hidden()
-                            .child(sidebar::render(
-                                &self.state,
-                                &self.rename,
-                                &self.usage,
-                                &self.updater,
-                                cx,
-                            ));
+                            // Contents keep their full width, pinned to the clipped edge, so
+                            // animating the width slides the sidebar instead of reflowing it.
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_0()
+                                    .w(zpx(left_width))
+                                    .child(sidebar::render(
+                                        &self.state,
+                                        &self.rename,
+                                        &self.usage,
+                                        &self.updater,
+                                        cx,
+                                    )),
+                            );
                         row.child(sidebar.w(zpx(left_width * left_progress)))
                     })
                     .child(

@@ -336,11 +336,13 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
 /// Keep the cup steady while two small wisps rise above it. The wisps only
 /// move while the window is active, so an idle background Del draws no frames.
 fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
-    let color = if active { rgb(0xf5a524) } else { rgba(MUTED) };
+    // Off inherits the toolbar foreground like its neighbours; only on is gold.
+    let color = rgb(0xf5a524);
+    let cup = crate::icons::path("icons/coffee-cup.svg");
     div()
         .relative()
         .size(crate::icons::size())
-        .child(crate::icons::path("icons/coffee-cup.svg").text_color(color))
+        .child(if active { cup.text_color(color) } else { cup })
         .when(active, |cup| {
             cup.children((0..2).map(|i| {
                 let steam = svg()
@@ -1085,8 +1087,8 @@ fn space_contents(
                     let cleanup_state = state.clone();
                     let cleanup_path = path.clone();
                     let group = SharedString::from(format!("project-{}", path.display()));
+                    // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
-                        .motion_id(SharedString::from(format!("project-reveal-{}", path.display())))
                         .open(!collapsed).flex_none().gap_0p5()
                         .child(h_flex().id(group.clone()).group(group.clone()).h(zpx(32.)).px_2().gap_2().items_center().rounded_md().cursor_pointer()
                             .text_color(rgba(0xffffffcc)).text_size(zpx(TEXT_MD))
@@ -1206,7 +1208,6 @@ pub fn render(
                         } else {
                             "Keep Mac awake: off"
                         })
-                        .text_color(rgba(MUTED))
                         .on_click(move |_, _, cx| {
                             caffeine_state.update(cx, |s, cx| s.toggle_caffeine(cx))
                         }),
@@ -1290,6 +1291,7 @@ pub fn render(
                 .min_h(zpx(ROW_HEIGHT))
                 .flex_none()
                 .gap_1()
+                .pr_2()
                 .items_center()
                 .child(
                     h_flex()
@@ -1323,6 +1325,8 @@ pub fn render(
                             .ghost()
                             .compact()
                             .icon(ActionIcon::Archive)
+                            .size(zpx(ROW_HEIGHT))
+                            .rounded_md()
                             .selected(show_archived)
                             .when(show_archived, |button| {
                                 button.bg(rgba(0xffffff20)).text_color(rgb(0xffffff))
