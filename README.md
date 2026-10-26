@@ -212,11 +212,11 @@ shows the project name; hover it to see the branch.
 
 ### Branches and managed worktrees
 
-Below the new-session composer, the directory, **Branch**, **New worktree** toggle,
+Below the new-session composer, the directory, **Branch**, **New worktree** checkbox,
 and Chat/Terminal controls share one row. Choose a starting branch and optionally
 enable New worktree. Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
-tooltip, with no branch picker or worktree toggle. Without a new worktree, selecting a different branch switches
+tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
 the existing checkout only when it is clean; Git also refuses branches checked out
 elsewhere. With New worktree, Del creates a unique `del/session-<UUID>` branch from
 the selected commit without changing the source checkout. Uncommitted source changes
@@ -570,11 +570,9 @@ Unsaved drafts survive file switches and app restarts. Saving detects external
 changes and keeps your draft instead of overwriting them. Markdown supports
 **Markdown / Preview** modes. Text files are capped at 512 KiB.
 
-**Changes** lists staged, unstaged, and untracked Git changes, with selectable
-diffs, Refresh, and an Edit file shortcut. **Ask about this** adds selected file
-text, diff text, or terminal output to the composer without sending it. File
-and diff references include their paths and selection line ranges; with no
-selection, the file or diff is included up to 64 KiB.
+**Changes** automatically refreshes staged, unstaged, and untracked Git changes
+every two seconds while visible, with selectable diffs and no action toolbar. Unchanged diffs retain
+their selection and scroll position during refreshes.
 
 On macOS, PDFs render with PDFKit in a continuous vertical scroll without floating
 page-arrow controls. Word documents (`.doc`/`.docx`) render inside the sidebar using

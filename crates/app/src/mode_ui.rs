@@ -15,7 +15,6 @@ use del_mcp::{HostError, HostResult, SessionInfo, SessionMode, UserAnswer};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -893,12 +892,12 @@ impl AppShell {
                                 .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_launch_options(Some(branch.clone()), worktree, cx))))
                         })
                     }))))
-            .when(!git, |row| row.child(Button::new("no-git-repository").ghost().compact().child(div().relative().size(crate::icons::size())
+            .when(!git, |row| row.child(Button::new("no-git-repository").ghost().compact().disabled(true).child(div().relative().size(crate::icons::size())
                 .child(crate::icons::path("icons/git-unavailable.svg").size(crate::icons::size()))
                 .child(div().absolute().right_0().bottom_0().size(zpx(7.)).child(crate::icons::icon(IconName::Close).with_size(zpx(7.)).text_color(rgb(0xff646b))))).text_color(rgba(0xffffff70)).accessibility_label(label.clone()).tooltip(label)))
-            .when(git, |row| row.child(Switch::new("new-worktree").focus_ring(false).color(gpui_kit::rgb(0x579fff)).small().label("New worktree").checked(worktree).disabled(!enabled || !git)
-                    .tooltip("Create an isolated checkout and a new branch from the selected branch")
-                    .on_change(move |checked, _, cx| toggle_state.update(cx, |s, cx| s.set_launch_options(branch.clone(), *checked, cx)))))
+            .when(git, |row| row.child(gpui_kit::component::checkbox::Checkbox::new("new-worktree").small().focus_ring(false)
+                .label("New worktree").checked(worktree).disabled(!enabled)
+                .on_change(move |checked, _, cx| toggle_state.update(cx, |s, cx| s.set_launch_options(branch.clone(), *checked, cx)))))
             .child(self.render_mode_picker(cx))
     }
 

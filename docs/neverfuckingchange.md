@@ -320,14 +320,14 @@ This records the final decisions, including corrections to earlier experiments.
   row plus buttons appear only on hover.
 - Terminal sessions use a terminal glyph with a small provider badge at its lower
   right. Chat sessions retain their provider glyph.
-- Keep the New worktree switch thumb distinct from its enabled track, without
-  an outer focus outline.
+- New worktree is a compact checkbox, not a switch. Keep keyboard activation
+  and disabled state, without an extra outer outline.
 - Keep Projects close to the toolbar. Hide Pinned when empty. Project rows reveal a three-dot menu and plus on hover.
   Project rename changes its display name only. Archive is reversible through the
   archived list. Permanent deletion confirms removal of the project and all its
   session histories; directory contents and Git worktrees remain untouched.
 - For directories without Git, show a gray Git icon with a red cross on the right of the
-  composer footer, with “No Git repository” in its tooltip; hide the branch picker and New worktree switch.
+  composer footer, with “No Git repository” in its tooltip; hide the branch picker and New worktree checkbox.
 - Dropdown menus ease in over 180ms and fade out over 120ms, respecting reduced
   motion. Dismissed menu items must not activate twice during the exit.
 
@@ -408,8 +408,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Sidebar file edits remain drafts until Save/Cmd-S. Preserve drafts across file
   switches and restarts, detect external changes before saving, and preserve
-  symlinks and file permissions. Ask about this appends context without submitting
-  or replacing existing composer text. Changes is a read-only Git review pane.
+  symlinks and file permissions. Changes is a read-only Git review pane that
+  refreshes automatically while visible. No Refresh, Edit file, or Ask about this
+  buttons; no Ask about this buttons in Files or Terminal either.
+- The no-Git indicator is informational and must not accept clicks.
 - Workspace terminal tabs own independent PTYs. Switching tabs keeps shells alive;
   closing one tab must not terminate another. Restore tab layout with fresh shells,
   never by replaying old commands.

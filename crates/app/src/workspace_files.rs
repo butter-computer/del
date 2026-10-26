@@ -163,40 +163,6 @@ pub fn diff(root: &Path, file: &ChangedFile) -> Result<String, String> {
     Ok(text)
 }
 
-pub fn selected_context(label: &str, text: &str, range: std::ops::Range<usize>) -> String {
-    let range = if range.is_empty() {
-        0..text.len()
-    } else {
-        range
-    };
-    let mut start = range.start.min(text.len());
-    while !text.is_char_boundary(start) {
-        start -= 1;
-    }
-    let mut end = range.end.min(text.len()).max(start);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let snippet = text.get(start..end).unwrap_or(text);
-    let first = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
-    let last = first
-        + snippet
-            .trim_end_matches('\n')
-            .bytes()
-            .filter(|b| *b == b'\n')
-            .count();
-    let fence = "`".repeat(
-        snippet
-            .split(|c| c != '`')
-            .map(str::len)
-            .max()
-            .unwrap_or(0)
-            .max(2)
-            + 1,
-    );
-    format!("{label} (lines {first}–{last}):\n{fence}\n{snippet}\n{fence}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,14 +237,5 @@ mod tests {
         assert_eq!(untracked.path, Path::new("new\nfile.txt"));
         assert!(diff(root, untracked).unwrap().contains("+new content"));
         assert!(changes(&tempfile::tempdir().unwrap().path()).is_err());
-    }
-    #[test]
-    fn context_keeps_exact_selection_and_source_line_numbers() {
-        let text = "first\n世界\n```\nlast\n";
-        let start = text.find("世界").unwrap();
-        let end = text.find("last").unwrap();
-        let context = selected_context("File /tmp/code", text, start..end);
-        assert!(context.contains("lines 2–3"));
-        assert!(context.contains("````\n世界\n```\n\n````"));
     }
 }

@@ -208,9 +208,6 @@ enum Viewer {
     },
 }
 
-pub struct ContextRequest(pub String);
-impl EventEmitter<ContextRequest> for RightPanel {}
-
 pub struct RightPanel {
     pane: Pane,
     root: PathBuf,
@@ -234,6 +231,7 @@ pub struct RightPanel {
     change_request: u64,
     diff_request: u64,
     changes_loading: bool,
+    changes_watch: Option<Task<()>>,
 
     browser: Option<crate::browser::Browser>,
     browser_profile: String,
@@ -268,6 +266,25 @@ impl RightPanel {
     }
 
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changes_watch.is_none() {
+            self.changes_watch = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(2))
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.preview_visible && this.pane == Pane::Changes {
+                                this.refresh_changes(cx);
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         if self.pane == Pane::Terminal {
             self.ensure_terminal(window, cx);
         } else if self.pane == Pane::Browser {
@@ -370,6 +387,7 @@ impl RightPanel {
             change_request: 0,
             diff_request: 0,
             changes_loading: false,
+            changes_watch: None,
             browser: None,
             browser_profile: uuid::Uuid::new_v4().to_string(),
             browser_tabs: vec![Default::default()],
@@ -1096,10 +1114,6 @@ impl RightPanel {
                         .child(
                             action("reload-file", "Reload")
                                 .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
-                        )
-                        .child(
-                            action("ask-file", "Ask about this")
-                                .on_click(cx.listener(|this, _, _, cx| this.ask_file(cx))),
                         ),
                 )
             })
@@ -1328,38 +1342,6 @@ impl RightPanel {
         self.file_drafts.remove(&path);
         self.open_file(path, cx);
     }
-    fn ask_file(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_path() else {
-            return;
-        };
-        let Some(editor) = self.editors.get(&path) else {
-            return;
-        };
-        let editor = editor.read(cx);
-        let text = editor.text().to_string();
-        let range = editor.selected_range();
-        let label = format!(
-            "File {}{}",
-            path.display(),
-            if self.selected_dirty() {
-                " (unsaved edits)"
-            } else {
-                ""
-            }
-        );
-        let context = crate::workspace_files::selected_context(&label, &text, range);
-        self.send_context(context, cx);
-    }
-    fn send_context(&mut self, context: String, cx: &mut Context<Self>) {
-        if context.len() > 64 * 1024 {
-            self.file_error =
-                Some("Select a smaller excerpt to add to chat (up to 64 KiB).".into());
-        } else {
-            cx.emit(ContextRequest(context));
-            self.file_error = None;
-        }
-        cx.notify();
-    }
     fn new_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
         self.terminal_active = self.terminal_tabs.len() - 1;
@@ -1384,33 +1366,6 @@ impl RightPanel {
         self.ensure_terminal(window, cx);
         self.focus_terminal(window, cx);
         cx.notify();
-    }
-    fn ask_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(terminal) = self
-            .terminals
-            .get(&self.terminal_tabs[self.terminal_active])
-        else {
-            return;
-        };
-        let view = terminal.read(cx).terminal_view();
-        let text = view
-            .read(cx)
-            .session()
-            .with_term(|term| term.selection_to_string());
-        if let Some(text) = text.filter(|s| !s.is_empty()) {
-            self.send_context(
-                crate::workspace_files::selected_context(
-                    &format!("Terminal selection in {}", self.root.display()),
-                    &text,
-                    0..text.len(),
-                ),
-                cx,
-            );
-        } else {
-            self.file_error =
-                Some("Select terminal output first, then choose Ask about this.".into());
-            cx.notify();
-        }
     }
     fn render_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
@@ -1485,12 +1440,6 @@ impl RightPanel {
                             ),
                     ),
             )
-            .child(
-                h_flex().px_2().py_1().flex_none().child(
-                    action("ask-terminal", "Ask about this")
-                        .on_click(cx.listener(|this, _, _, cx| this.ask_terminal(cx))),
-                ),
-            )
             .when_some(self.file_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -1532,10 +1481,10 @@ impl RightPanel {
                             .clone()
                             .filter(|path| this.change_files.iter().any(|file| &file.path == path))
                             .or_else(|| this.change_files.first().map(|file| file.path.clone()));
-                        this.change_selected = selected.clone();
                         if let Some(path) = selected {
                             this.load_diff(path, cx);
                         } else {
+                            this.change_selected = None;
                             this.diff_request += 1;
                             this.change_text = None;
                             this.change_editor = None;
@@ -1567,9 +1516,11 @@ impl RightPanel {
         };
         self.diff_request += 1;
         let request = self.diff_request;
+        if self.change_selected.as_ref() != Some(&path) {
+            self.change_text = None;
+            self.change_editor = None;
+        }
         self.change_selected = Some(path);
-        self.change_text = None;
-        self.change_editor = None;
         let root = self.change_root.clone();
         let work = cx
             .background_executor()
@@ -1581,7 +1532,12 @@ impl RightPanel {
                     return;
                 }
                 match result {
-                    Ok(text) => this.change_text = Some(text),
+                    Ok(text) => {
+                        if this.change_text.as_ref() != Some(&text) {
+                            this.change_text = Some(text);
+                            this.change_editor = None;
+                        }
+                    }
                     Err(error) => this.change_error = Some(error),
                 }
                 cx.notify();
@@ -1604,52 +1560,6 @@ impl RightPanel {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .flex_none()
-                    .child(
-                        action(
-                            "refresh-changes",
-                            if self.changes_loading {
-                                "Refreshing…"
-                            } else {
-                                "Refresh"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_changes(cx))),
-                    )
-                    .child(action("ask-diff", "Ask about this").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            if let (Some(editor), Some(path)) =
-                                (&this.change_editor, &this.change_selected)
-                            {
-                                let editor = editor.read(cx);
-                                let text = editor.text().to_string();
-                                let context = crate::workspace_files::selected_context(
-                                    &format!(
-                                        "Git diff for {}",
-                                        this.change_root.join(path).display()
-                                    ),
-                                    &text,
-                                    editor.selected_range(),
-                                );
-                                this.send_context(context, cx);
-                            }
-                        },
-                    )))
-                    .child(
-                        action("edit-changed-file", "Edit file").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(path) = &this.change_selected {
-                                    this.preview_file(this.change_root.join(path), cx);
-                                }
-                            },
-                        )),
-                    ),
-            )
             .when_some(self.file_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -2024,6 +1934,47 @@ mod tests {
     }
 
     #[::gpui::test]
+    fn changes_refresh_preserves_unchanged_editor_and_loads_external_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let path = dir.path().join("example.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.pane = Pane::Changes;
+            panel.prepare_to_show(window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        let editor = panel.read_with(cx, |panel, _| panel.change_editor.clone().unwrap());
+        panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.change_editor.as_ref(), Some(&editor))
+        });
+        std::fs::write(&path, "after\n").unwrap();
+        panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.change_selected.as_deref(),
+                Some(std::path::Path::new("example.txt"))
+            );
+            assert!(panel.change_text.as_ref().unwrap().contains("+after"));
+        });
+    }
+
+    #[::gpui::test]
     fn preparing_visible_changes_does_not_restart_completed_loads(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
@@ -2034,14 +1985,16 @@ mod tests {
             panel
         });
         cx.run_until_parked();
-        cx.update(|window, cx| panel.update(cx, |panel, cx| {
-            assert!(!panel.changes_loading);
-            let request = panel.change_request;
-            panel.prepare_to_show(window, cx);
-            panel.prepare_to_show(window, cx);
-            assert_eq!(panel.change_request, request);
-            assert!(!panel.changes_loading);
-        }));
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                assert!(!panel.changes_loading);
+                let request = panel.change_request;
+                panel.prepare_to_show(window, cx);
+                panel.prepare_to_show(window, cx);
+                assert_eq!(panel.change_request, request);
+                assert!(!panel.changes_loading);
+            })
+        });
     }
 
     #[::gpui::test]
@@ -2088,7 +2041,7 @@ mod tests {
     }
 
     #[::gpui::test]
-    fn editing_persists_drafts_and_emits_selected_context(cx: &mut gpui::TestAppContext) {
+    fn editing_persists_and_saves_drafts(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.md");
@@ -2099,31 +2052,21 @@ mod tests {
             panel
         });
         cx.run_until_parked();
-        let context = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         cx.update(|window, cx| {
-            let captured = context.clone();
-            cx.subscribe(&panel, move |_, event: &ContextRequest, _| {
-                *captured.borrow_mut() = event.0.clone()
-            })
-            .detach();
             let editor = panel.read(cx).editors[&path].clone();
             editor.update(cx, |editor, cx| {
                 editor.replace_all("changed\nsecond\n", window, cx)
             });
         });
         cx.run_until_parked();
-        panel.update(cx, |panel, cx| {
+        panel.update(cx, |panel, _| {
             assert!(panel.selected_dirty());
             assert_eq!(
                 panel.snapshot(true).file_drafts[&path].text,
                 "changed\nsecond\n"
             );
-            panel.editors[&path].update(cx, |editor, cx| editor.set_selected_range(8..14, cx));
-            panel.ask_file(cx);
         });
         cx.run_until_parked();
-        assert!(context.borrow().contains("lines 2–2"));
-        assert!(context.borrow().contains("second"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
         cx.update(|window, cx| {
             panel.update(cx, |panel, cx| {
