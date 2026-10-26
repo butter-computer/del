@@ -24,6 +24,13 @@ pub fn spinner() -> gpui_kit::component::spinner::Spinner {
     gpui_kit::component::spinner::Spinner::new().with_size(size())
 }
 
+/// Thin continuous ring with a fading tail for session activity.
+pub fn working_spinner() -> gpui_kit::component::spinner::Spinner {
+    gpui_kit::component::spinner::Spinner::new()
+        .icon(Icon::default().path("icons/working-ring.svg"))
+        .with_size(zpx(14.)).ease(|t| t)
+}
+
 // Source asset name -> public SF Symbols name. This also covers component
 // controls (menus, carets, inputs, loading states), not just the toolbar.
 pub const SYMBOLS: &[(&str, &str)] = &[
@@ -358,6 +365,7 @@ mod tests {
                                 "tab-fixture".into(),
                                 Some(1),
                                 gpui::white(),
+                                false,
                             )),
                     )
             }

@@ -751,6 +751,11 @@ impl AppShell {
                 state,
                 summary,
             } => {
+                self.state.update(cx, |s, cx| {
+                    if state == del_mcp::ReportedState::Working { s.terminal_working.insert(caller.clone()); }
+                    else { s.terminal_working.remove(&caller); }
+                    cx.notify();
+                });
                 if state == del_mcp::ReportedState::Done {
                     self.state.update(cx, |s, cx| s.reply_finished(&caller, cx));
                 }

@@ -187,6 +187,11 @@ conversation. Unloading a running session also stops its current work.
 - A shimmering “Working for…” label sits beneath the latest user message and
   scrolls with it. There is no duplicate Working/Done indicator above the composer.
   Reduce Motion keeps the label static.
+- Hover an assistant reply to reveal Copy and its measured response duration.
+  Historical replies without timing data show a dash beside Copy. The overlapping-squares Copy icon and adjacent time fade
+  in and out over 160 ms on hover, without shifting the transcript.
+- Local file links in replies open in Del’s file viewer; relative links resolve
+  against the conversation’s project folder. Web links use the system browser.
 - Assistant text appears as it arrives, without streaming fades or animation
   delays. Deltas append to a persistent Markdown view; already-received adjacent
   chunks coalesce without waiting or crossing tool/turn boundaries. Native Markdown
@@ -203,7 +208,8 @@ conversation. Unloading a running session also stops its current work.
   disabled. OpenCode uses its native transient generation API with the session's
   selected model, preserving conversation history. These requests use the existing provider login and do not
   change the conversation’s model. The tab and sidebar title shimmer while a
-  name is being generated. Titles persist across restarts, manual
+  name is being generated; sidebar titles use a muted base and bright sweep that
+  remains visible on selected rows. Titles persist across restarts, manual
   renames take precedence, and failed requests retain the first-message fallback.
   The shared title-generation prompt lives in
   [`crates/agent/src/titles.rs`](crates/agent/src/titles.rs) as `INSTRUCTIONS`, loading `title_prompt.txt` (OpenCode, MIT).
@@ -211,11 +217,14 @@ conversation. Unloading a running session also stops its current work.
   Empty drafts remain “New session.” Terminal titles follow provider metadata.
   Archived chat and terminal rows show Restore and Permanently delete icons on hover.
   The delete icon stays red, including when hovered.
+- Running chats show a thin rotating ring with a fading tail in their sidebar row and top tab. Terminal
+  sessions show it when their agent reports Working. Hover hides the spinner and
+  reveals the usual actions in the same slot.
 - A blue dot at the far right marks unread conversations, including background
   replies that finish before being opened. A selected chat also becomes unread
-  when its reply finishes while Del’s window is inactive. Opening the chat clears
-  the dot. Hover actions make room for it.
-- Sidebars resize from their panel boundaries. Empty left-sidebar space can drag
+  when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
+  the dot. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
+- Both sidebars have visible theme-aware vertical dividers and resize from their panel boundaries. Empty left-sidebar space can drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
 - Session titles use the available sidebar width and fade at the edge instead

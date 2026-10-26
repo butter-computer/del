@@ -142,7 +142,7 @@ fn tab_title(title: String) -> Div {
 
 /// The keyboard hint and hover close glyph share the reserved trailing slot.
 /// Keeping both inside it prevents the hint from covering the close button.
-fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla) -> Div {
+fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla, working: bool) -> Div {
     div()
         .relative()
         .size(crate::icons::button_size())
@@ -157,7 +157,12 @@ fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla)
                 .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
                 .child(crate::icons::icon(IconName::Close).with_size(zpx(14.)).text_color(color)),
         )
-        .when_some(shortcut, |slot, number| {
+        .when(working, |slot| slot.child(
+            div().absolute().inset_0().flex().items_center().justify_center()
+                .group_hover(group.clone(), |indicator| indicator.opacity(0.))
+                .child(crate::icons::working_spinner().color(color)),
+        ))
+        .when_some(shortcut.filter(|_| !working), |slot, number| {
             slot.child(
                 div()
                     .absolute()
@@ -735,11 +740,10 @@ impl AppShell {
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
-        shell.state.update(cx, |state, _| state.window_active = window.is_window_active());
+        shell.state.update(cx, |state, cx| state.window_activation_changed(window.is_window_active(), cx));
         cx.observe_window_activation(window, |this, window, cx| {
             this.state.update(cx, |state, cx| {
-                state.window_active = window.is_window_active();
-                cx.notify();
+                state.window_activation_changed(window.is_window_active(), cx);
             });
         }).detach();
         cx.on_app_quit(|this, cx| {
@@ -785,9 +789,21 @@ impl AppShell {
         cx.observe(&chat, |_, _, cx| cx.notify()).detach();
         let tab = Tab::Session(id.clone());
         cx.subscribe(&chat, move |this, _, _: &chat::PromptSubmitted, cx| {
-            this.state.update(cx, |state, cx| state.keep_tab(&tab, cx));
+            this.state.update(cx, |state, cx| {
+                state.keep_tab(&tab, cx);
+                state.mark_visible_chat_read(cx);
+            });
         })
         .detach();
+        cx.subscribe(&chat, |this, _, event: &chat::OpenLink, cx| {
+            let cwd = this.state.read(cx).effective().2;
+            if let Some(path) = chat::links::local_path(&event.0, &cwd) {
+                this.set_right(true, cx);
+                this.right.update(cx, |right, cx| right.preview_file(path, cx));
+            } else {
+                cx.open_url(&event.0);
+            }
+        }).detach();
         self.chats.insert(id, chat);
     }
 
@@ -1539,6 +1555,7 @@ impl AppShell {
                                                                     group.clone(),
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
+                                                                    indicator_id.as_ref().is_some_and(|id| self.state.read(cx).session_working(id)),
                                                                 ),
                                                             ),
                                                     );
@@ -2204,6 +2221,8 @@ impl Render for AppShell {
                                 .relative()
                                 .h_full()
                                 .flex_none()
+                                .border_l_1()
+                                .border_color(appearance::separator())
                                 .overflow_hidden()
                                 .child(
                                     // Fills whatever width the animation gives it: the panel

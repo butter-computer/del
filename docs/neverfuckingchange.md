@@ -51,6 +51,9 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Sidebar ordering
 
+- Keep a visible theme-aware vertical divider between the workspace and each sidebar,
+  including the right Files/Terminal panel. Preserve its resize target.
+
 - Pinned chats keep their pin order, oldest first. A new pin goes after existing
   pins; activity must not reorder them. Unpinning and pinning again appends it.
 - Sidebar rows support drag-reordering like top tabs, with live row movement.
@@ -68,8 +71,12 @@ This records the final decisions, including corrections to earlier experiments.
 ## Unread conversations
 
 - Show a blue dot for replies completed in chats the user is not viewing.
+- Completion in the currently viewed, active chat stays read and clears any stale dot.
 - The selected chat must also become unread when it finishes in an inactive Del window.
-- Clear the blue dot when the user opens the chat. Leave room for it beside hover actions.
+- Clear the blue dot when the user opens the chat, returns focus to its window,
+  or submits another prompt in it. Do not clear unread markers in other chats.
+  Hide the sidebar dot on hover so the action icons occupy its space; keep actions
+  at the same right inset regardless of unread state. Hovering alone does not mark it read.
 
 ## Model and effort controls
 
@@ -77,6 +84,13 @@ This records the final decisions, including corrections to earlier experiments.
   macOS hardware, for dragging, clicking stops, and arrow keys.
 - Repeated pointer movement within the same level stays silent. Opening the picker
   or synchronizing saved settings must not trigger feedback.
+
+## Working indicators
+
+- Show a thin rotating ring with a fading tail in sidebar rows and top tabs while a chat is running,
+  matching the supplied ChatGPT reference. Use smooth constant rotation, not a segmented spoke spinner.
+  Terminal sessions use their reported Working status. Hide the spinner on hover
+  to reveal the existing close, pin, or archive actions; keep the trailing slot stable.
 
 ## Tabs and session previews
 
@@ -112,6 +126,11 @@ This records the final decisions, including corrections to earlier experiments.
 ## Transcript layout
 
 - Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows with semantic SF icons.
+- Assistant replies show only an overlapping-rounded-squares Copy icon and measured
+  response duration beside it in a hover footer, with a 160 ms eased fade in and out.
+  Do not add audio, feedback, or overflow icons to this footer.
+  Keep space reserved so hovering does not shift the transcript. Never invent timings
+  for historical messages without duration data; show a dash when unavailable.
 - Tool rows use muted text and inline disclosure arrows; omit shell launch wrappers from summaries.
   Merge matching successful edit/file events into one row, keep output/diffs in disclosure, and omit zero-count diff badges.
 - Keep tool input/output available through disclosure. Group consecutive tools immediately, including while running.
@@ -119,6 +138,8 @@ This records the final decisions, including corrections to earlier experiments.
   output expandable. Messages and approval requests remain separate boundaries.
 - Tool group contents have a small indent and a reversible animated expand/collapse.
   Respect Reduce Motion and keep virtual-list heights synchronized throughout the reveal.
+- Local file links in chat open in Del’s file viewer, resolved against the conversation
+  folder. Do not send bare paths to the operating system as application URLs.
 - Keep search highlights, message navigation, and immediate streaming intact.
 - Message navigation highlights exactly one tick: the hovered tick while pointing,
   otherwise the current message. Nearby ticks may lengthen but stay gray. Emit a
@@ -156,6 +177,8 @@ This records the final decisions, including corrections to earlier experiments.
 ## Titles
 
 - Keep automatic conversation-title generation enabled.
+- Sidebar titles visibly shimmer during generation, including the selected row:
+  use a muted base and contrasting text-width sweep, static with Reduce Motion.
 - Use the checked-in OpenCode title prompt in `crates/agent/src/title_prompt.txt`,
   with its source attribution and MIT license. Do not silently substitute a new prompt.
 - Generate concise, natural, specific titles in the background; retain existing

@@ -90,6 +90,7 @@ fn coalesce_deltas(events: impl IntoIterator<Item = AgentEvent>) -> Vec<AgentEve
 }
 
 pub struct PromptSubmitted;
+pub struct OpenLink(pub String);
 
 pub struct ChatView {
     pub(super) model: ChatModel,
@@ -107,6 +108,8 @@ pub struct ChatView {
     completed_turns: u64,
     working_since: Option<std::time::Instant>,
     working_message: Option<usize>,
+    pub(super) response_hover: std::collections::HashMap<usize, bool>,
+    pub(super) response_times: std::collections::HashMap<usize, u64>,
     pub(super) expanded_activity: std::collections::HashSet<usize>,
     pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
@@ -115,6 +118,7 @@ pub struct ChatView {
 }
 
 impl EventEmitter<PromptSubmitted> for ChatView {}
+impl EventEmitter<OpenLink> for ChatView {}
 
 impl ChatView {
     pub fn goal(&self) -> Option<del_agent::Goal> {
@@ -161,6 +165,8 @@ impl ChatView {
             completed_turns: 0,
             working_since: None,
             working_message: None,
+            response_times: Default::default(),
+            response_hover: Default::default(),
             expanded_activity: Default::default(),
             assistant_text: Default::default(),
             pending_errors: Vec::new(),
@@ -264,8 +270,15 @@ impl ChatView {
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
-        if matches!(event, AgentEvent::TurnCompleted { .. }) {
+        if let AgentEvent::TurnCompleted { turn_id, .. } = event {
             self.completed_turns += 1;
+            if !self.loading && let Some(started) = self.working_since
+                && let Some(ix) = self.model.blocks.iter().rposition(|block|
+                    matches!(block, Block::Assistant { turn_id: id, .. } if id == turn_id))
+            {
+                self.response_times.insert(ix, started.elapsed().as_secs().max(1));
+                self.scroller.remeasure_items(ix..ix + 1);
+            }
         }
         if !self.loading
             && let AgentEvent::Error { message, .. } = event

@@ -114,6 +114,7 @@ pub struct AppState {
     pub browser_tools_ready: bool,
     unread_motion: HashMap<SessionId, (f32, std::time::Instant)>,
     chat_title_loading: std::collections::HashSet<SessionId>,
+    pub terminal_working: std::collections::HashSet<SessionId>,
     pub terminal_title_loading: std::collections::HashSet<SessionId>,
     pub closed_terminals: Vec<SessionId>,
     pub unloaded_chats: Vec<SessionId>,
@@ -315,6 +316,7 @@ impl AppState {
             next_draft: 1,
             draft_modes: HashMap::new(),
             terminal_rows: Vec::new(),
+            terminal_working: Default::default(),
             terminal_title_loading: Default::default(),
             chat_title_loading: Default::default(),
             unread_motion: HashMap::new(),
@@ -551,6 +553,11 @@ impl AppState {
         }
     }
 
+    pub fn session_working(&self, id: &SessionId) -> bool {
+        self.records.iter().any(|row| &row.id == id && row.status == SessionStatus::Running)
+            || self.terminal_working.contains(id)
+    }
+
     pub fn active_status(&self) -> SessionStatus {
         self.active_row().map_or(SessionStatus::Idle, |r| r.status)
     }
@@ -725,12 +732,35 @@ impl AppState {
     }
 
     pub fn reply_finished(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        self.terminal_working.remove(id);
+        cx.notify();
         let visible = self.window_active && self.panel == Panel::Chat
             && matches!(&self.selection,
             Selection::Session(current) | Selection::Terminal(current) if current == id);
-        if !visible {
+        if visible {
+            self.mark_visible_chat_read(cx);
+        } else {
             self.mark_session_unread(id, cx);
         }
+    }
+
+    pub fn mark_visible_chat_read(&mut self, cx: &mut Context<Self>) {
+        if self.panel != Panel::Chat { return; }
+        let id = match &self.selection {
+            Selection::Session(id) | Selection::Terminal(id) => id.clone(),
+            Selection::Draft(_) => return,
+        };
+        if self.overrides.unread(&id) {
+            self.set_unread(&id, false);
+            self.save_overrides();
+            cx.notify();
+        }
+    }
+
+    pub fn window_activation_changed(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.window_active = active;
+        if active { self.mark_visible_chat_read(cx); }
+        cx.notify();
     }
 
     pub fn mark_session_unread(&mut self, id: &SessionId, cx: &mut Context<Self>) {
@@ -1690,6 +1720,7 @@ mod tests {
             next_draft: 1,
             draft_modes: HashMap::new(),
             terminal_rows: vec![],
+            terminal_working: Default::default(),
             terminal_title_loading: Default::default(),
             chat_title_loading: Default::default(),
             unread_motion: HashMap::new(),
@@ -1836,6 +1867,30 @@ mod tests {
                 s.tabs,
                 vec![Tab::Draft(0), Tab::Session(a), Tab::Session(b)]
             );
+        });
+    }
+
+    #[gpui::test]
+    fn returning_to_chat_or_submitting_clears_stale_unread(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let id = del_agent::SessionId::new("visible-reply");
+            s.select(id.clone(), cx);
+            s.window_activation_changed(false, cx);
+            s.reply_finished(&id, cx);
+            assert!(s.terminal_unread(&id));
+            s.window_activation_changed(true, cx);
+            assert!(!s.terminal_unread(&id));
+            s.mark_session_unread(&id, cx);
+            s.reply_finished(&id, cx);
+            assert!(!s.terminal_unread(&id));
+            s.mark_session_unread(&id, cx);
+            s.mark_visible_chat_read(cx);
+            assert!(!s.terminal_unread(&id));
+            let other = del_agent::SessionId::new("background-reply");
+            s.reply_finished(&other, cx);
+            s.window_activation_changed(true, cx);
+            assert!(s.terminal_unread(&other));
         });
     }
 

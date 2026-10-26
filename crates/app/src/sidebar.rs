@@ -101,6 +101,16 @@ fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState
         })
 }
 
+fn loading_title(title: String, id: &del_agent::SessionId) -> AnyElement {
+    h_flex().min_w_0().overflow_hidden().child(
+        gpui_kit::component::shimmer::ShimmerText::new(title)
+            .id(SharedString::from(format!("sidebar-title-{}", id.0)))
+            .flex_none().text_color(rgba(0xffffff66))
+            .highlight_color(rgb(0xf5f5f5)).spread(0.22)
+            .duration(std::time::Duration::from_millis(1200)),
+    ).into_any_element()
+}
+
 fn toolbar_tint(alpha: u8) -> Rgba {
     let tint = if crate::appearance::light() { 0x00000000 } else { 0xffffff00 };
     gpui_kit::rgba(tint | u32::from(alpha))
@@ -403,7 +413,7 @@ fn session_menu_item(
         .child(label)
 }
 
-fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
+fn pinned_mark(pinned: bool, working: bool, group: SharedString, right: f32) -> AnyElement {
     div()
         .absolute()
         .right(zpx(right))
@@ -414,7 +424,8 @@ fn pinned_mark(pinned: bool, group: SharedString, right: f32) -> AnyElement {
         .justify_center()
         .flex_none()
         .group_hover(group, |mark| mark.opacity(0.0))
-        .when(pinned, |mark| {
+        .when(working, |mark| mark.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+        .when(pinned && !working, |mark| {
             mark.child(crate::icons::path("icons/pin-filled.svg").text_color(rgba(MUTED)))
         })
         .into_any_element()
@@ -429,15 +440,17 @@ fn row_item(
     archived: bool,
     cx: &App,
 ) -> AnyElement {
+    let working = state.read(cx).session_working(&row.id);
     let id = row.id.clone();
     let key = SharedString::from(id.0.clone());
     let group = SharedString::from(format!("row-{}", id.0));
 
-    let action_right = if state.read(cx).terminal_unread(&id) {
+    let mark_right = if state.read(cx).terminal_unread(&id) {
         20.0
     } else {
         8.0
     };
+    let action_right = 8.0;
     let motion = state.read(cx).sidebar_hover.clone();
     let hover = motion.clone();
     let hover_key = id.0.clone();
@@ -508,9 +521,7 @@ fn row_item(
                 })
                 .font_weight(FontWeight::NORMAL)
                 .child(if state.read(cx).title_loading(&id) {
-                    gpui_kit::component::shimmer::ShimmerText::new(row.title.clone())
-                        .id(SharedString::from(format!("sidebar-title-{}", id.0)))
-                        .into_any_element()
+                    loading_title(row.title.clone(), &id)
                 } else {
                     fading_title(row.title.clone()).into_any_element()
                 }),
@@ -522,18 +533,19 @@ fn row_item(
         let (pin_id, archive_id) = (id.clone(), id.clone());
         let hover_group = group.clone();
         item = item
-            .child(pinned_mark(row.pinned, group.clone(), action_right))
+            .child(pinned_mark(row.pinned, working, group.clone(), mark_right))
             .child(
                 // Reserve space so titles never overlap the hover actions.
                 div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
                     crate::icons::BUTTON_SIZE * 2.0 + 4.0
-                } else if row.pinned {
+                } else if row.pinned || working {
                     crate::icons::BUTTON_SIZE
                 } else {
                     0.0
                 })),
             )
-            .child(unread_dot(&row.id, state.read(cx), cx))
+            .child(div().flex_none().group_hover(group.clone(), |dot| dot.opacity(0.))
+                .child(unread_dot(&row.id, state.read(cx), cx)))
             .child(
                 // Always laid out and painted, only faded in on hover: toggling
                 // `display` under the pointer made GPUI paint children it had
@@ -838,14 +850,15 @@ pub fn render(
                                     let state = state.clone();
                                     let pin_state = state.clone();
                                     let pin_motion_state = state.clone();
+                                    let working = s.session_working(&row.id);
                                     let close_state = state.clone();
                                     let id = row.id.clone();
                                     let pin_id = row.id.clone();
                                     let close_id = row.id.clone();
                                     let group =
                                         SharedString::from(format!("terminal-actions-{}", id.0));
-                                    let action_right =
-                                        if s.terminal_unread(&id) { 20.0 } else { 8.0 };
+                                    let mark_right = if s.terminal_unread(&id) { 20.0 } else { 8.0 };
+                                    let action_right = 8.0;
                                     let motion = s.sidebar_hover.clone();
                                     let hover = motion.clone();
                                     let hover_key = id.0.clone();
@@ -913,14 +926,7 @@ pub fn render(
                                                 .text_size(zpx(TEXT_MD))
                                                 .font_weight(FontWeight::NORMAL)
                                                 .child(if title_loading {
-                                                    gpui_kit::component::shimmer::ShimmerText::new(
-                                                        title,
-                                                    )
-                                                    .id(SharedString::from(format!(
-                                                        "sidebar-title-{}",
-                                                        row.id.0
-                                                    )))
-                                                    .into_any_element()
+                                                    loading_title(title, &row.id)
                                                 } else {
                                                     fading_title(title).into_any_element()
                                                 })
@@ -929,14 +935,15 @@ pub fn render(
                                         .child(div().flex_none().w(zpx(
                                             if motion.is_hovered(&row.id.0) {
                                                 crate::icons::BUTTON_SIZE * 2.0 + 4.0
-                                            } else if row.pinned {
+                                            } else if row.pinned || working {
                                                 crate::icons::BUTTON_SIZE
                                             } else {
                                                 0.0
                                             },
                                         )))
-                                        .child(unread_dot(&row.id, s, cx))
-                                        .child(pinned_mark(row.pinned, group.clone(), action_right))
+                                        .child(div().flex_none().group_hover(group.clone(), |dot| dot.opacity(0.))
+                                            .child(unread_dot(&row.id, s, cx)))
+                                        .child(pinned_mark(row.pinned, working, group.clone(), mark_right))
                                         .child(
                                             h_flex()
                                                 .absolute()
