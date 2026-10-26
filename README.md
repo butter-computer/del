@@ -158,7 +158,11 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
-The sidebar has **Pinned** (hidden when empty) and smoothly collapsible **Projects**. Chats and
+The sidebar has **Pinned** (hidden when empty) and **Projects**. Click either
+heading to smoothly collapse or expand its entire section; individual projects
+also expand independently. Section choices persist across restarts, with a separate
+collapse state for Archived. The Projects plus button opens the directory picker
+without toggling the section. Chats and
 terminals are sessions in the same project list; there is no separate terminal
 section. Projects are created automatically from session folders. Git subfolders
 and linked worktrees group under the parent repository, while non-Git folders use

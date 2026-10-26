@@ -1990,6 +1990,13 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn toggle_sidebar_section(&mut self, section: &str, cx: &mut Context<Self>) {
+        if !self.project_preferences.collapsed_sections.remove(section) {
+            self.project_preferences.collapsed_sections.insert(section.to_owned());
+        }
+        self.save_projects(cx);
+    }
+
     pub fn toggle_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.project_preferences.collapsed.remove(&path) { self.project_preferences.collapsed.insert(path); }
         if !cfg!(test) && let Err(e) = self.project_preferences.save() { self.error = Some(e.to_string()); }

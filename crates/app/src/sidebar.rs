@@ -751,6 +751,11 @@ pub fn render(
         }));
     }
 
+    let pinned_state = state.clone();
+    let section_state = state.clone();
+    let section = if show_archived { "Archived" } else { "Projects" };
+    let pinned_open = !s.project_preferences.collapsed_sections.contains("Pinned");
+    let projects_open = !s.project_preferences.collapsed_sections.contains(section);
     let add_project_state = state.clone();
     let new_state = state.clone();
     let prov_state = state.clone();
@@ -836,12 +841,28 @@ pub fn render(
                 .min_h_0()
                 .gap_0p5()
                 .overflow_y_scroll()
-                .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(div().debug_selector(|| "pinned-heading".into()).px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).child("Pinned")))
-                .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx)))
-                .child(h_flex().debug_selector(|| "projects-heading".into()).px_2().pt_0().pb_1().items_center().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT))
-                    .child(div().flex_1().child(if show_archived { "Archived" } else { "Projects" }))
-                    .when(!show_archived, |heading| heading.child(Button::new("add-project").ghost().compact().icon(IconName::Plus).tooltip("Add project directory").accessibility_label("Add project directory")
-                        .on_click(move |_, _, cx| add_project_state.update(cx, |s, cx| s.add_project(cx))))))
+                .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(
+                    gpui_kit::component::collapsible::Collapsible::new()
+                        .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
+                        .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
+                            .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
+                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
+                            .hover(|heading| heading.text_color(rgba(MUTED))).child("Pinned")
+                            .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
+                        .content(v_flex().w_full().gap_0p5()
+                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
+                .child(gpui_kit::component::collapsible::Collapsible::new()
+                    .motion_id(SharedString::from(format!("{section}-section-reveal"))).open(projects_open).flex_none()
+                    .child(h_flex().id("projects-section-heading").debug_selector(|| "projects-heading".into())
+                        .role(Role::Button).aria_label(format!("{} {section}", if projects_open { "Collapse" } else { "Expand" }))
+                        .px_2().pt_0().pb_1().items_center().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
+                        .hover(|heading| heading.text_color(rgba(MUTED)))
+                        .on_click(move |_, _, cx| section_state.update(cx, |s, cx| s.toggle_sidebar_section(section, cx)))
+                        .child(div().flex_1().child(section))
+                        .when(!show_archived, |heading| heading.child(Button::new("add-project").ghost().compact().icon(IconName::Plus).tooltip("Add project directory").accessibility_label("Add project directory")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| { cx.stop_propagation(); add_project_state.update(cx, |s, cx| s.add_project(cx)); }))))
+                    .content(v_flex().w_full().gap_0p5()
                 .children(s.project_paths().into_iter().map(|path| {
                     let collapsed = s.project_preferences.collapsed.contains(&path);
                     let toggle_state = state.clone();
@@ -886,7 +907,7 @@ pub fn render(
                             }))
                             .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|
                                 div().pl(zpx(18.)).opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx)))))
-                }))
+                }))))
                 .child(
                     div()
                         .id("sidebar-window-drag")

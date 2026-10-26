@@ -366,3 +366,8 @@ This records the final decisions, including corrections to earlier experiments.
   Submission creates the real session; an explicit plus creates a draft tab.
 - Animated project contents must fill the sidebar width throughout expansion and
   collapse; measuring content must not shrink or clip session titles.
+
+- Clicking Projects, Archived, or the nonempty Pinned heading toggles that entire
+  section with a reversible reveal. Persist each section independently from the
+  individual projects' expansion states. Keep contents full-width, respect Reduce
+  Motion, and keep the Projects plus action independent of the heading toggle.

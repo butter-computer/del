@@ -181,6 +181,8 @@ pub struct ProjectPreferences {
     #[serde(default)]
     pub roots: std::collections::HashSet<PathBuf>,
     pub collapsed: std::collections::HashSet<PathBuf>,
+    #[serde(default)]
+    pub collapsed_sections: std::collections::HashSet<String>,
 }
 impl ProjectPreferences {
     pub fn load() -> Self {
