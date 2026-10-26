@@ -133,11 +133,17 @@ This records the final decisions, including corrections to earlier experiments.
 ## Transcript layout
 
 - Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows with semantic SF icons.
-- Assistant replies show only an overlapping-rounded-squares Copy icon and measured
+- Assistant replies show only an overlapping-rounded-squares Copy icon and
   local reply time in 24-hour **HH:MM** format beside it in a hover footer, with a 160 ms eased fade in and out.
   Do not add audio, feedback, or overflow icons to this footer.
   Keep space reserved so hovering does not shift the transcript. Never show response duration here or invent timestamps
-  for historical messages without a recorded reply time; show a dash when unavailable.
+  for historical messages without a recorded reply time; hide the time when unavailable.
+  Save new reply timestamps across reopening and recover old Codex/Claude timestamps
+  from their transcripts. Keep the copy glyph compact (13 px) and time text 11 px.
+  Use two equal rounded squares, preserve the icon’s aspect ratio, and align its
+  visible left edge with the reply text while retaining the 24 px click target.
+  Copy the full reply and replace the glyph with a same-sized checkmark for
+  1.5 seconds. Repeated clicks restart the confirmation for that reply only.
 - Tool rows use muted text and inline disclosure arrows; omit shell launch wrappers from summaries.
   Merge matching successful edit/file events into one row, keep output/diffs in disclosure, and omit zero-count diff badges.
 - Keep tool input/output available through disclosure. Group consecutive tools immediately, including while running.

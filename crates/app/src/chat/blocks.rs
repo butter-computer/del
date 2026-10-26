@@ -35,7 +35,7 @@ impl ChatView {
         {
             return h_flex().w_full().justify_center().px_3().pb(zpx(6.))
                 .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH))
-                    .child(assistant_message(ix, String::new(), Some(state), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), cx.reduce_motion())))
+                    .child(assistant_message(ix, String::new(), Some(state), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), cx.reduce_motion())))
                 .into_any_element();
         }
         let Some(block) = self.model.blocks.get(ix).cloned() else {
@@ -184,7 +184,7 @@ impl ChatView {
                             .flex_none().highlight_color(rgb(STRONG))
                             .spread(0.22).duration(std::time::Duration::from_millis(1200)))
                 )).into_any_element(),
-            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), cx.reduce_motion()).into_any_element(),
+            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), cx.reduce_motion()).into_any_element(),
             Block::Reasoning {
                 text,
                 open,
@@ -515,7 +515,7 @@ fn user_message(
         )
 }
 
-fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, replied_at: Option<chrono::DateTime<chrono::Local>>, hovered: Option<bool>, reduced: bool) -> impl IntoElement {
+fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>, chat: WeakEntity<ChatView>, replied_at: Option<chrono::DateTime<chrono::Local>>, hovered: Option<bool>, copied: bool, reduced: bool) -> impl IntoElement {
     let style = TextViewStyle::default().heading_font_size(|level, _| {
         if level <= 2 {
             zpx(TEXT_LG)
@@ -550,23 +550,24 @@ fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextVi
                 }),
         )
         .child(
-            h_flex().h(zpx(26.)).gap_2().items_center()
-                .text_size(zpx(TEXT_SM)).text_color(rgba(MUTED))
+            h_flex().h(zpx(26.)).ml(-zpx(6.)).gap(zpx(4.)).items_center().justify_start()
+                .text_size(zpx(11.)).text_color(rgba(MUTED))
 
                 .child(
-                    div().id(("copy-response", ix)).size(zpx(24.)).flex().items_center().justify_center()
-                        .rounded_md().cursor_pointer().role(Role::Button).aria_label("Copy response")
+                    div().id(("copy-response", ix)).size(zpx(24.)).flex_none().flex().items_center().justify_center()
+                        .rounded_md().cursor_pointer().role(Role::Button).aria_label(if copied { "Copied" } else { "Copy response" })
                         .hover(|button| button.bg(rgba(CARD_HOVER)))
-                        .child(svg().path("icons/copy-response.svg").size(zpx(19.)).text_color(rgba(MUTED)))
+                        .child(if copied {
+                            crate::icons::icon(IconName::Check).with_size(zpx(13.)).text_color(rgba(MUTED)).into_any_element()
+                        } else {
+                            svg().path("icons/copy-response.svg").size(zpx(13.)).flex_none().text_color(rgba(MUTED)).into_any_element()
+                        })
                         .on_click(move |_, _, cx| {
-                            if let Some(chat) = copy_chat.upgrade()
-                                && let Some(Block::Assistant { text, .. }) = chat.read(cx).model.blocks.get(ix)
-                            {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                            }
+                            cx.stop_propagation();
+                            let _ = copy_chat.update(cx, |chat, cx| chat.copy_response(ix, cx));
                         }),
                 )
-                .child(replied_at.map(|time| time.format("%H:%M").to_string()).unwrap_or_else(|| "—".into()))
+                .when_some(replied_at, |footer, time| footer.child(time.format("%H:%M").to_string()))
                 .with_animation(SharedString::from(format!("response-footer-{ix}-{hovered:?}")),
                     Animation::new(std::time::Duration::from_millis(160)).with_easing(ease_out_quint()),
                     move |footer, t| {

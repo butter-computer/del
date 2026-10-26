@@ -218,8 +218,13 @@ conversation. Unloading a running session also stops its current work.
   scrolls with it. There is no duplicate Working/Done indicator above the composer.
   Reduce Motion keeps the label static.
 - Hover an assistant reply to reveal Copy and its local reply time in 24-hour `HH:MM` format.
-  Historical replies without a recorded reply timestamp show a dash beside Copy. The overlapping-squares Copy icon and adjacent time fade
-  in and out over 160 ms on hover, without shifting the transcript.
+  Reply times are saved across reopening; older Codex and Claude replies recover their
+  timestamps from local transcripts. If no timestamp exists, only Copy is shown.
+  The 13 px overlapping-squares Copy icon and 11 px time text fade in and out over
+  160 ms on hover, without shifting the transcript. The square-proportioned glyph
+  aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
+  the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
+  again restarts that confirmation.
 - Local file links in replies open in Del’s file viewer; relative links resolve
   against the conversation’s project folder. Web links use the system browser.
 - Assistant text appears as it arrives, without streaming fades or animation

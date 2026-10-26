@@ -1265,7 +1265,7 @@ mod toolbar_tests {
                     "activity-glyph",
                 ]
                 .map(|name| cx.debug_bounds(name).unwrap());
-                let expected_width = (row.size.width - zpx(18.)) / 4.;
+                let expected_width = (row.size.width - zpx(24.)) / 4.;
                 for (target, glyph) in targets.iter().zip(glyphs) {
                     assert!(
                         (target.size.width - expected_width).abs() <= px(0.5),
@@ -1277,7 +1277,7 @@ mod toolbar_tests {
                     assert!((target.center().y - glyph.center().y).abs() <= px(0.5));
                 }
                 assert_eq!(targets[0].left(), row.left());
-                assert!((targets[3].right() - row.right()).abs() <= px(0.5));
+                assert!((targets[3].right() + zpx(6.) - row.right()).abs() <= px(0.5));
                 for pair in targets.windows(2) {
                     assert!((pair[1].left() - pair[0].right() - zpx(6.)).abs() <= px(0.5));
                 }

@@ -108,6 +108,7 @@ pub struct ChatView {
     completed_turns: u64,
     working_since: Option<std::time::Instant>,
     working_message: Option<usize>,
+    pub(super) copied_responses: std::collections::HashMap<usize, std::time::Instant>,
     pub(super) response_hover: std::collections::HashMap<usize, bool>,
     pub(super) response_times: std::collections::HashMap<usize, chrono::DateTime<chrono::Local>>,
     pub(super) expanded_activity: std::collections::HashSet<usize>,
@@ -167,6 +168,7 @@ impl ChatView {
             working_message: None,
             response_times: Default::default(),
             response_hover: Default::default(),
+            copied_responses: Default::default(),
             expanded_activity: Default::default(),
             assistant_text: Default::default(),
             pending_errors: Vec::new(),
@@ -269,6 +271,26 @@ impl ChatView {
         });
     }
 
+    pub(super) fn copy_response(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        let copied_at = std::time::Instant::now();
+        self.copied_responses.insert(ix, copied_at);
+        self.scroller.remeasure_items(ix..ix + 1);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                // A second click restarts the confirmation instead of being cleared by this timer.
+                if this.copied_responses.get(&ix) == Some(&copied_at) {
+                    this.copied_responses.remove(&ix);
+                    this.scroller.remeasure_items(ix..ix + 1);
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
         if let AgentEvent::TurnCompleted { turn_id, .. } = event {
             self.completed_turns += 1;
@@ -276,7 +298,13 @@ impl ChatView {
                 && let Some(ix) = self.model.blocks.iter().rposition(|block|
                     matches!(block, Block::Assistant { turn_id: id, .. } if id == turn_id))
             {
-                self.response_times.insert(ix, chrono::Local::now());
+                let time = chrono::Local::now();
+                self.response_times.insert(ix, time);
+                if let Some(id) = &self.session {
+                    if let Err(error) = super::reply_times::save(&id.0, &self.model, ix, time) {
+                        self.pending_errors.push(format!("Could not save reply time: {error}"));
+                    }
+                }
                 self.scroller.remeasure_items(ix..ix + 1);
             }
         }
@@ -531,10 +559,13 @@ impl ChatView {
         let backend = self.backend.clone();
         let attached = self.backend.runtime.spawn(async move {
             backend.resume(&id).await?;
-            backend.manager.subscribe_with_history(&id)
+            let attached = backend.manager.subscribe_with_history(&id)?;
+            let record = backend.manager.list_sessions().into_iter().find(|record| record.id == id);
+            let times = tokio::task::spawn_blocking(move || record.as_ref().map(super::reply_times::load).unwrap_or_default()).await.unwrap_or_default();
+            Ok::<_, AgentError>((attached, times))
         });
         cx.spawn(async move |this, cx| {
-            let (history, mut rx) = match attached.await {
+            let ((history, mut rx), times) = match attached.await {
                 Ok(Ok(attached)) => attached,
                 Ok(Err(err)) => return report(&this, cx, err.to_string()),
                 Err(err) => return report(&this, cx, err.to_string()),
@@ -555,6 +586,7 @@ impl ChatView {
                     }
                     this.on_event(event, cx);
                 }
+                this.response_times.extend(times.restore(&this.model));
                 this.scroller.set_follow_mode(FollowMode::Tail);
                 this.scroller.scroll_to_end();
                 this.loading = false;
@@ -897,6 +929,32 @@ mod tests {
         assert!(matches!(&events[2], AgentEvent::AssistantTextDelta { turn_id, text } if turn_id == "a" && text == "tail"));
         assert!(matches!(&events[3], AgentEvent::AssistantTextDelta { turn_id, text } if turn_id == "b" && text == "next"));
         assert_eq!(coalesce_deltas(vec![delta("a", "partial")]).len(), 1);
+    }
+
+    #[gpui::test]
+    fn copying_full_reply_confirms_then_resets(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>()).unwrap();
+        let view = cx.new(|cx| ChatView::new(Backend { runtime: runtime.handle().clone(), manager }, None, None, cx));
+        let reply = "**Full reply**\n\n```rust\nlet x = 1;\n```";
+        view.update(cx, |view, cx| {
+            view.on_event(&AgentEvent::AssistantMessage { turn_id: "copy".into(), text: reply.into() }, cx);
+            view.copy_response(0, cx);
+            assert!(view.copied_responses.contains_key(&0));
+        });
+        assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some(reply));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(1000));
+        view.update(cx, |view, cx| view.copy_response(0, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.copied_responses.contains_key(&0)));
+        cx.executor().advance_clock(std::time::Duration::from_millis(1000));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(!view.copied_responses.contains_key(&0)));
     }
 
     #[gpui::test]
