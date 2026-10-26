@@ -191,9 +191,17 @@ a running bundle, then checks that replacements preserve its macOS signing
 identity and retired bundles are cleaned up after exit. Neither script grants
 permissions or inspects the user's TCC database.
 
-The glass app icon uses three tapered strokes forming an angular D. Its editable
-source is `crates/app/assets/del.svg`; PNG and ICNS exports are checked in. `node scripts/generate-icon.cjs` regenerates them on macOS when the
-`sharp` Node package is available. Bundle builds use the checked-in exports.
+The app icon is a Nabla (∇) mark on a drafting-paper squircle with a faint
+grid: a thin, chamfered isometric ∇ with a concrete cap over a graphite body and
+a blind well with a dark ink floor, drawn in pencil outlines with hatching. It
+is a brush-rendered raster, not vector art. `crates/app/assets/del.png` is the
+1024px master; `del.svg` only wraps it as an embedded image so
+`node scripts/generate-icon.cjs` (macOS, needs the `sharp` Node package) can
+still rebuild `Del.icns` from it. To redraw the master, open the Nabla logo
+explorer (`nabla.html`) with the URL-encoded contents of
+`crates/app/assets/nabla-settings.json` as its `#` fragment (seed 451122), export
+the 1024px PNG over `del.png`, then run the script. Bundle builds use the
+checked-in exports.
 Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
