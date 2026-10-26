@@ -345,11 +345,11 @@ impl RenderOnce for ComposerCard {
                             .items_center()
                             .gap_1()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(rgb(0xf5f5f5))
+                            .text_color(rgb(0x579fff))
                             .child(
                                 crate::icons::path("icons/skill.svg")
                                     .flex_none()
-                                    .text_color(rgb(0xf5f5f5)),
+                                    .text_color(rgb(0x579fff)),
                             )
                             .child(token.token().label().clone())
                     })

@@ -120,7 +120,8 @@ the palette is open. The palette is centered over the conversation pane and
 stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
 entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
 shows and dismisses it immediately. Clicking outside also dismisses the palette.
-Command suggestions show navigation hints without argument-placeholder text.
+Inserted skill tokens use blue text and icons. Command suggestions show
+navigation hints without argument-placeholder text.
 The search footer places navigation, open, and close hints on the left and **/c /t Filter**
 on the right. Result type labels (Chat or Terminal) align with the Enter icon.
 
