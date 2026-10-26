@@ -61,6 +61,8 @@ pub struct ComposerCard {
     account_state: Option<Entity<crate::state::AppState>>,
     model_picker: Entity<crate::model_picker::ModelPicker>,
     folder: String,
+    /// Shown on hover over the folder, e.g. the session's branch.
+    folder_tooltip: Option<String>,
     /// The session exists, so its working folder can no longer change.
     folder_locked: bool,
     show_folder: bool,
@@ -101,6 +103,7 @@ impl ComposerCard {
             account_state: None,
             model_picker,
             folder,
+            folder_tooltip: None,
             folder_locked,
             show_folder: true,
             running,
@@ -149,6 +152,11 @@ impl ComposerCard {
         self.on_paste = Rc::new(handler);
         self
     }
+    pub fn folder_tooltip(mut self, tooltip: Option<String>) -> Self {
+        self.folder_tooltip = tooltip;
+        self
+    }
+
     pub fn show_folder(mut self, show: bool) -> Self {
         self.show_folder = show;
         self
@@ -223,6 +231,7 @@ impl RenderOnce for ComposerCard {
             account_state,
             model_picker,
             folder,
+            folder_tooltip,
             folder_locked,
             show_folder,
             running,
@@ -287,6 +296,7 @@ impl RenderOnce for ComposerCard {
         };
         let folder_el = if folder_locked {
             h_flex()
+                .id("folder")
                 .h(zpx(20.0))
                 .px_1()
                 .gap_1()
@@ -295,6 +305,11 @@ impl RenderOnce for ComposerCard {
                 .text_color(muted)
                 .child(crate::icons::icon(IconName::Folder))
                 .child(folder)
+                .when_some(folder_tooltip, |row, tip| {
+                    row.tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                })
                 .into_any_element()
         } else {
             chip("folder")
