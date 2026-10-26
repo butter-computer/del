@@ -34,6 +34,7 @@ fn toolbar_row() -> Div {
 fn toolbar_button(id: &'static str, cx: &App) -> Button {
     let background = toolbar_tint(TOOLBAR_BACKGROUND);
     Button::new(id)
+        .tooltip_placement(Placement::Bottom)
         .custom(
             ButtonCustomVariant::new(cx)
                 .color(background.into())
@@ -174,23 +175,39 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
         .into_any_element()
 }
 
-/// Genuine system cup symbol, with a fixed-size active-state pulse.
+/// Keep the cup steady while two small wisps rise above it.
 fn coffee_icon(active: bool, cx: &App) -> AnyElement {
-    let icon = crate::icons::path("icons/coffee-cup.svg").text_color(if active {
-        rgb(0xf5a524)
-    } else {
-        rgba(MUTED)
-    });
-    if active && !cx.reduce_motion() {
-        icon.with_animation(
-            "keep-awake-symbol",
-            Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-            |icon, t| icon.opacity(0.75 + 0.25 * (std::f32::consts::PI * t).sin()),
-        )
+    let color = if active { rgb(0xf5a524) } else { rgba(MUTED) };
+    div()
+        .relative()
+        .size(crate::icons::size())
+        .child(crate::icons::path("icons/coffee-cup.svg").text_color(color))
+        .when(active, |cup| {
+            cup.children((0..2).map(|i| {
+                let steam = svg()
+                    .path("icons/coffee-steam.svg")
+                    .absolute()
+                    .left(zpx(4. + i as f32 * 5.))
+                    .top(zpx(-5.))
+                    .w(zpx(3.))
+                    .h(zpx(7.))
+                    .text_color(color);
+                if cx.reduce_motion() {
+                    steam.opacity(0.6).into_any_element()
+                } else {
+                    steam.with_animation(
+                        ("coffee-steam", i as usize),
+                        Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                        move |steam, t| {
+                            let phase = (t + i as f32 * 0.5) % 1.;
+                            steam.top(zpx(-2. - phase * 6.))
+                                .opacity((std::f32::consts::PI * phase).sin() * 0.75)
+                        },
+                    ).into_any_element()
+                }
+            }))
+        })
         .into_any_element()
-    } else {
-        icon.into_any_element()
-    }
 }
 
 /// Compact hover actions retain spoken names without visible text labels.
@@ -575,9 +592,6 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
-    if s.panel == Panel::Providers {
-        return crate::signin::navigation(state, cx).into_any_element();
-    }
     let rows = s.rows();
     let archived = s.archived_rows();
     let archived_terminals: Vec<_> = s
@@ -775,10 +789,13 @@ pub fn render(
                                             rgba(0xffffff0a),
                                             Some(terminal_opacity.clone()),
                                         ))
-                                        .on_click(move |_, _, cx| {
+                                        .on_click(move |event, _, cx| {
                                             if !renaming {
                                                 state.update(cx, |s, cx| {
-                                                    s.select_terminal(id.clone(), cx)
+                                                    s.select_terminal(id.clone(), cx);
+                                                    if event.click_count() == 2 {
+                                                        s.keep_tab(&crate::state::Tab::Terminal(id.clone()), cx);
+                                                    }
                                                 });
                                             }
                                         })
@@ -1066,7 +1083,7 @@ mod toolbar_tests {
     }
 
     impl Render for ToolbarFixture {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let open = self.open.clone();
             let glyph = |name: &'static str, icon| {
                 div()

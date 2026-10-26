@@ -88,7 +88,7 @@ pub struct ChatView {
     loading: bool,
     first_prompt: Option<String>,
     completed_turns: u64,
-    pub(super) first_chunks: std::collections::HashMap<String, std::time::Instant>,
+    pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
     pub(super) search_pending: Option<crate::conversation_search::Hit>,
     pub(super) search_flash: Option<SearchFlash>,
@@ -139,7 +139,7 @@ impl ChatView {
             loading: session.is_some(),
             first_prompt: first_prompt.as_ref().map(|input| input.text.clone()),
             completed_turns: 0,
-            first_chunks: Default::default(),
+            assistant_text: Default::default(),
             pending_errors: Vec::new(),
             search_pending: None,
             search_flash: None,
@@ -249,16 +249,6 @@ impl ChatView {
         {
             self.pending_errors.push(message.clone());
         }
-        if !self.loading
-            && let AgentEvent::AssistantTextDelta { turn_id, text }
-                | AgentEvent::AssistantMessage { turn_id, text } = event
-            && !text.is_empty()
-            && !self.first_chunks.contains_key(turn_id)
-            && !self.model.blocks.iter().any(|block| matches!(block,
-                Block::Assistant { turn_id: existing, text, .. } if existing == turn_id && !text.is_empty()))
-        {
-            self.first_chunks.insert(turn_id.clone(), std::time::Instant::now());
-        }
         let change = self.model.apply(event);
         self.sync(change, cx);
     }
@@ -266,6 +256,20 @@ impl ChatView {
     /// Keep the virtual list's rows in step with the model.
     fn sync(&mut self, change: Option<Change>, cx: &mut Context<Self>) {
         if let Some(change) = change {
+            let ix = match change { Change::Pushed(ix) | Change::Updated(ix) => ix };
+            if let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) {
+                let text = text.clone();
+                if let Some(view) = self.assistant_text.get(&ix) {
+                    view.update(cx, |view, cx| view.set_text(&text, cx));
+                } else {
+                    let view = cx.new(|cx| text::TextViewState::markdown(&text, cx));
+                    cx.observe(&view, move |this, _, cx| {
+                        this.scroller.remeasure_items(ix..ix + 1);
+                        cx.notify();
+                    }).detach();
+                    self.assistant_text.insert(ix, view);
+                }
+            }
             match change {
                 Change::Pushed(_) => {
                     let count = self.scroller.item_count();
@@ -489,8 +493,10 @@ impl ChatView {
                                 // Claude emits completion and the next queued
                                 // turn's start together. Fold both before deciding
                                 // whether the provider is ready for another prompt.
-                                while let Ok(event) = rx.try_recv() {
-                                    this.on_event(&event, cx);
+                                for _ in 0..rx.len().min(128) {
+                                    if let Ok(event) = rx.try_recv() {
+                                        this.on_event(&event, cx);
+                                    }
                                 }
                                 if this.completed_turns > before
                                     && this.model.last_status
@@ -800,77 +806,25 @@ mod tests {
         assert_eq!(active_prompt(&[], 0, true), None);
     }
     #[gpui::test]
-    fn initial_stream_fade_starts_once_and_skips_history(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let manager = SessionManager::new(
-            directory.path().join("sessions.jsonl"),
-            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
-        )
-        .unwrap();
-        let backend = Backend {
-            runtime: runtime.handle().clone(),
-            manager,
-        };
-        let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
-        view.update(cx, |view, cx| {
-            view.loading = true;
-            view.on_event(
-                &AgentEvent::AssistantMessage {
-                    turn_id: "saved".into(),
-                    text: "Old response".into(),
-                },
-                cx,
-            );
-            assert!(view.first_chunks.is_empty());
-            view.loading = false;
-            view.on_event(
-                &AgentEvent::AssistantTextDelta {
-                    turn_id: "saved".into(),
-                    text: " continues".into(),
-                },
-                cx,
-            );
-            assert!(
-                view.first_chunks.is_empty(),
-                "restored streaming text must not fade again"
-            );
-            view.on_event(
-                &AgentEvent::AssistantTextDelta {
-                    turn_id: "live".into(),
-                    text: "".into(),
-                },
-                cx,
-            );
-            assert!(view.first_chunks.is_empty());
-            view.on_event(
-                &AgentEvent::AssistantTextDelta {
-                    turn_id: "live".into(),
-                    text: "First".into(),
-                },
-                cx,
-            );
-            let started = view.first_chunks["live"];
-            view.on_event(
-                &AgentEvent::AssistantTextDelta {
-                    turn_id: "live".into(),
-                    text: " later".into(),
-                },
-                cx,
-            );
-            view.on_event(
-                &AgentEvent::AssistantMessage {
-                    turn_id: "live".into(),
-                    text: "First later".into(),
-                },
-                cx,
-            );
-            assert_eq!(view.first_chunks.len(), 1);
-            assert_eq!(view.first_chunks["live"], started);
-        });
+    fn streamed_chunks_update_markdown_before_turn_completion(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>()).unwrap();
+        let view = cx.new(|cx| ChatView::new(Backend {
+            runtime: runtime.handle().clone(), manager,
+        }, None, None, cx));
+        for (chunk, expected) in [("First", "First"), (" second", "First second"), (" third", "First second third")] {
+            view.update(cx, |view, cx| view.on_event(&AgentEvent::AssistantTextDelta {
+                turn_id: "streaming".into(), text: chunk.into(),
+            }, cx));
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                let text = view.assistant_text.values().next().unwrap();
+                assert_eq!(text.read(cx).rendered_text().as_str().trim(), expected);
+                assert!(view.model.last_status.is_none());
+            });
+        }
     }
 
     #[gpui::test]

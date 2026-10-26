@@ -1,5 +1,5 @@
 //! Composer autocomplete driven by the selected harness's command catalog.
-use crate::{appearance::{rgb, rgba}, state::AppState, zoom::px as zpx};
+use crate::{appearance::rgba, state::AppState, zoom::px as zpx};
 use del_agent::{CommandKind, ComposerCommand, Provider};
 use gpui_kit::{
     component::{
@@ -521,7 +521,7 @@ impl Render for CommandMenu {
             .w_full()
             .p_1()
             .rounded_xl()
-            .bg(rgb(0x29292b))
+            .bg(crate::appearance::popup_surface(0x29292b))
             .shadow_lg()
             .when(self.matches.is_empty(), |menu| {
                 menu.child(
@@ -545,17 +545,11 @@ impl Render for CommandMenu {
             })
             .child(
                 h_flex()
-                    .justify_between()
+                    .justify_end()
                     .px_2()
                     .py_1()
                     .text_size(zpx(10.))
                     .text_color(rgba(0xffffff66))
-                    .child(
-                        self.matches
-                            .get(self.selected)
-                            .map(|i| self.commands[*i].argument_hint.clone())
-                            .unwrap_or_default(),
-                    )
                     .child("↑ ↓ Navigate   ↵ Select   esc Close"),
             )
             .into_any_element()

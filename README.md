@@ -104,11 +104,12 @@ that share a server can show the same process usage for several chats, and
 unloading one chat may not release that server's RAM. Unavailable measurements
 appear as a dash rather than zero.
 
-Opening a saved chat from the sidebar uses one temporary preview tab. Opening
+Opening a saved chat or terminal from the sidebar uses one temporary preview tab. Opening
 another replaces that preview in place. Double-click the sidebar session or its
-tab, send/queue a prompt, or move the tab to keep it open. Preview titles are
+tab, send/queue a prompt, type or paste into a terminal, or move the tab to keep it open. Preview titles are
 muted and italic. New chats remain open, and replaced previews retain their
-conversation history and composer drafts.
+conversation history and composer drafts. Double-clicking a chat or terminal
+entry in the sidebar keeps its preview tab open.
 
 **⌘K** opens conversation search. Search message text or titles across saved Codex,
 Claude, and OpenCode chats, including terminal conversations and archived sessions. Use
@@ -118,8 +119,10 @@ filter by itself to list its sessions. Tab shortcut badges stay hidden while
 the palette is open. The palette is centered over the conversation pane and
 stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
 entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
-shows and dismisses it immediately. The footer places **/c /t Filter** on the left
-and navigation, open, and close hints on the right.
+shows and dismisses it immediately. Clicking outside also dismisses the palette.
+Command suggestions show navigation hints without argument-placeholder text.
+The search footer places navigation, open, and close hints on the left and **/c /t Filter**
+on the right. Result type labels (Chat or Terminal) align with the Enter icon.
 
 Assistant previews render Markdown and highlight the matching words. Opening a
 result keeps its tab, scrolls to the matched text, and briefly highlights it,
@@ -149,7 +152,7 @@ conversation. Unloading a running session also stops its current work.
 - Each New Session action opens an independent draft tab; existing drafts are
   preserved. The tab bar scrolls when tabs overflow and reveals the selected tab.
   Dragged tabs stay inside the tab strip, beyond the left-sidebar toggle.
-- The project folder and Chat/Terminal controls sit in a darker footer beneath
+- The project folder and Chat/Terminal controls sit in a matching footer beneath
   the input, keeping workspace selection distinct from the message area.
 - **Chat / Terminal** selects how the first prompt will run. Choosing Terminal
   keeps the initial composer visible; the terminal opens after submission.
@@ -158,19 +161,16 @@ conversation. Unloading a running session also stops its current work.
 - Chat renders streaming answers, reasoning, tool activity, diffs, usage, and
   approval requests. The message rail appears after six user messages and provides
   jump-to-prompt navigation. Its ticks lengthen only on hover.
-- Assistant text uses [FlowToken](https://github.com/Ephibbs/flowtoken)'s default
-  streaming fade, tuned to 400 ms with ease-in-out timing. The first live chunk
-  also fades in smoothly; saved messages appear immediately when reopened.
-  This is implemented with GPUI's native Markdown motion, preserving selection
-  and honoring Reduce Motion; the React package is not embedded in Del.
+- Assistant text appears as it arrives, without streaming fades or animation
+  delays. Native Markdown rendering preserves text selection.
 - Opening a saved conversation shows a transcript shimmer while it loads,
-  with static placeholders when Reduce Motion is enabled.
+  without a loading text line, with static placeholders when Reduce Motion is enabled.
 - Sessions have tabs and sidebar entries, with rename, pin, unread, archive,
   restore, and permanent-delete actions. Terminal entries share the session
   context menu. Chat titles are generated in the background by the session’s
   provider as soon as the first message is sent, without waiting for the reply,
-  then refreshed every six user turns. The title prompt requests 1–3 words, ideally
-  under 24 characters, without conversational filler. Codex uses
+  then refreshed every six user turns. The title prompt uses OpenCode’s published instructions: a natural
+  three-to-five-word phrase with specific identifying details. Codex uses
   GPT-5.6 Luna with reasoning disabled; Claude uses Haiku 5.5 with thinking
   disabled. OpenCode uses its native transient generation API with the session's
   selected model, preserving conversation history. These requests use the existing provider login and do not
@@ -178,7 +178,7 @@ conversation. Unloading a running session also stops its current work.
   name is being generated. Titles persist across restarts, manual
   renames take precedence, and failed requests retain the first-message fallback.
   The shared title-generation prompt lives in
-  [`crates/agent/src/titles.rs`](crates/agent/src/titles.rs) as `INSTRUCTIONS`.
+  [`crates/agent/src/titles.rs`](crates/agent/src/titles.rs) as `INSTRUCTIONS`, loading `title_prompt.txt` (OpenCode, MIT).
   Title generation consumes provider usage, including OpenCode free-model quotas.
   Empty drafts remain “New session.” Terminal titles follow provider metadata.
   Archived chat and terminal rows show Restore and Permanently delete icons on hover.
@@ -500,12 +500,15 @@ in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to 
 session index and restored on launch. Keyboard shortcuts work while the composer
 or terminal has focus.
 
-Settings has **Preferences** (persisted Light/Dark appearance) and **Providers**
-(sign-in status, sign-in, and a refresh icon to re-check status). Light mode uses
-more opaque surfaces; dark mode keeps its translucent background. The sidebar
-entry includes a gear icon.
-The right sidebar is hidden in Settings; **Escape** closes Settings and returns
-to the selected conversation, terminal, or draft.
+Settings opens in a modal with **Appearance** and **Accounts** navigation,
+with icons aligned to the left of their labels. Appearance includes persisted
+Light/Dark appearance; Accounts shows sign-in status and provider controls.
+Light mode uses a white workspace, off-white chrome, and slightly darker `#F9F9F9`
+composer cards. Menus, model and effort pickers, command suggestions, search, and
+Settings share that light surface. The shell opacity setting is fixed at 85%;
+light surfaces remain opaque to preserve their colors. Settings uses the same
+fade-and-slide entrance as search, with a strongly blurred and dimmed backdrop.
+**Escape**, Done, or clicking outside closes Settings and returns to the workspace.
 Hold Command to see numeric hints on the top tabs. There are no numeric sidebar
 session shortcuts.
 
@@ -592,7 +595,7 @@ Tests cover provider transcript replay, queue ordering and busy recovery,
 steering without duplicate output, attachments, terminal resume identities,
 PTY lifecycle, updater ownership/failure handling, and persisted UI metadata.
 UI regression tests also cover preview tabs, unload/resume, hover clipping and
-collapse fading, first-chunk fading, reasoning-step boundaries, and zoom shortcuts
+collapse fading, incremental streamed Markdown, reasoning-step boundaries, and zoom shortcuts
 with composer or terminal focus. Permission tests cover new and resumed sessions,
 terminal bypass flags, and Codex permission changes on subsequent turns.
 Tests requiring installed/authenticated provider CLIs are ignored by default;

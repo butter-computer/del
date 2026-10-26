@@ -257,7 +257,6 @@ impl Palette {
         let Some(hit) = self.hits.get(ix).cloned() else {
             return div().into_any_element();
         };
-        let recent = self.input.read(cx).value().trim().is_empty();
         let action_count = self.actions(cx).len();
         let preview = if hit
             .message
@@ -282,7 +281,7 @@ impl Palette {
                     view.set_range_highlights(
                         [gpui_kit::base::text::RangeHighlight::new(
                             range,
-                            crate::appearance::rgba(0xffffff24),
+                            gpui_kit::rgba(0xe8b04a66),
                         )],
                         cx,
                     )
@@ -313,7 +312,7 @@ impl Palette {
                 .with_highlights([(
                     hit.snippet_range.clone(),
                     HighlightStyle {
-                        background_color: Some(crate::appearance::rgba(0xffffff24).into()),
+                        background_color: Some(gpui_kit::rgba(0xe8b04a66).into()),
                         color: Some(crate::appearance::rgb(0xffffff).into()),
                         ..Default::default()
                     },
@@ -326,15 +325,7 @@ impl Palette {
         } else {
             "Chat"
         };
-        let role = hit
-            .message
-            .map(|i| hit.document.messages[i].role)
-            .unwrap_or("Title");
-        let detail = if recent {
-            kind.to_owned()
-        } else {
-            format!("{kind} · {role}{}", if source.archived { " · Archived" } else { "" })
-        };
+        let detail = format!("{kind}{}", if source.archived { " · Archived" } else { "" });
         h_flex()
             .w_full()
             .id(("search-result", ix))
@@ -391,13 +382,6 @@ impl Palette {
                                     .text_size(zpx(12.))
                                     .text_color(rgb(0xeeeeef))
                                     .child(source.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(zpx(10.))
-                                    .text_color(rgba(0xffffff70))
-                                    .child(detail),
                             ),
                     )
                     .child(
@@ -408,6 +392,13 @@ impl Palette {
                             .text_color(rgba(0xffffff88))
                             .child(preview),
                     ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(zpx(10.))
+                    .text_color(rgba(0xffffff70))
+                    .child(detail),
             )
             .child(
                 div()
@@ -429,6 +420,7 @@ impl Render for Palette {
             +22. * (usize::from(actions>0)+usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
+            .rounded(zpx(11.))
             .w_full().h(panel_height).min_h_0().overflow_hidden()
             .text_color(rgb(0xeeeeef))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -537,7 +529,8 @@ impl Render for Palette {
                     .items_center()
                     .border_t_1()
                     .border_color(rgba(0xffffff0a))
-                    .bg(rgb(0x1b1b1d))
+                    .bg(crate::appearance::popup_surface(0x1b1b1d))
+                    .rounded_b(zpx(11.))
                     .text_size(zpx(12.))
                     .text_color(rgba(0xffffff80))
                     .child(
@@ -549,7 +542,9 @@ impl Render for Palette {
                             .child(div().ml(zpx(3.)).child("Navigate")),
                     )
                     .child(key_hint("Enter", "Select"))
-                    .child(key_hint("Esc", "Close")),
+                    .child(key_hint("Esc", "Close"))
+                    .child(div().flex_1())
+                    .child(key_hint("/c /t", "Filter")),
             )
     }
 }
@@ -791,7 +786,7 @@ impl AppShell {
             let width=zpx(500.).min((viewport.width-zpx(32.)).max(px(0.)));
             let height=content.read(cx).layout_height(window,cx).1+px(2.);
             dialog
-                .bg(rgb(0x18181a))
+                .bg(crate::appearance::popup_surface(0x18181a))
                 .p_0()
                 .rounded(zpx(12.))
                 .border_1()
@@ -807,7 +802,8 @@ impl AppShell {
                 })
                 .width(width)
                 .margin_top(((viewport.height-height)/2.).max(zpx(12.)))
-                .overlay(false)
+                .overlay(true)
+                .overlay_closable(true)
                 .keyboard(false)
                 .close_button(false)
                 .on_cancel(move |_, window, cx| {
@@ -1091,6 +1087,8 @@ mod tests {
                         text: "match second match".into(),
                     }]),
                 });
+                palette.documents = vec![document.clone()];
+                palette.input.update(cx, |input, cx| input.set_value("match", window, cx));
                 palette.hits = search::search(&[document], "match");
                 palette.scroll.reset(palette.hits.len());
                 palette.loading = false;

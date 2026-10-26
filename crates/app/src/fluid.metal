@@ -162,8 +162,8 @@ kernel void backdrop_horizontal(texture2d<float,access::sample> source [[texture
     float2 uv=(float2(id)+0.5f)/float2(output.get_width(),output.get_height());
     float2 offset=float2(4.0f*params.x/float(source.get_width()),0);
     float4 sum=0;float total=0;
-    for(int i=-6;i<=6;i++){
-        float weight=exp(-float(i*i)/12.5f);
+    for(int i=-20;i<=20;i++){
+        float weight=exp(-float(i*i)/98.0f);
         sum+=source.sample(sceneSampler,uv+offset*float(i))*weight;total+=weight;
     }
     output.write(sum/total,id);
@@ -174,8 +174,8 @@ kernel void backdrop_vertical(texture2d<float,access::sample> source [[texture(0
     float2 uv=(float2(id)+0.5f)/float2(output.get_width(),output.get_height());
     float2 offset=float2(0,params.x/float(source.get_height()));
     float4 sum=0;float total=0;
-    for(int i=-6;i<=6;i++){
-        float weight=exp(-float(i*i)/12.5f);
+    for(int i=-20;i<=20;i++){
+        float weight=exp(-float(i*i)/98.0f);
         sum+=source.sample(sceneSampler,uv+offset*float(i))*weight;total+=weight;
     }
     output.write(sum/total,id);

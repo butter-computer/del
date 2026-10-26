@@ -154,7 +154,7 @@ fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla)
                 .flex()
                 .opacity(0.0)
                 .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
-                .child(crate::icons::icon(IconName::Close).text_color(color)),
+                .child(crate::icons::icon(IconName::Close).with_size(zpx(14.)).text_color(color)),
         )
         .when_some(shortcut, |slot, number| {
             slot.child(
@@ -346,7 +346,6 @@ mod sidebar_width_tests {
 struct AppShell {
     shell_focus: FocusHandle,
     settings_focused: bool,
-    opacity_slider: Entity<gpui_kit::component::slider::SliderState>,
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
@@ -641,24 +640,9 @@ impl AppShell {
         .detach();
         let usage = cx.new(|_| usage::Usage::new(state.clone()));
         cx.observe(&usage, |_, _, cx| cx.notify()).detach();
-        let opacity_slider = cx.new(|_| {
-            gpui_kit::component::slider::SliderState::new()
-                .min(f32::from(appearance::MIN_OPACITY))
-                .max(f32::from(appearance::MAX_OPACITY))
-                .step(1.)
-                .default_value(f32::from(appearance::opacity()))
-        });
-        cx.subscribe(&opacity_slider, |_, _, event, cx| {
-            use gpui_kit::component::slider::SliderEvent;
-            if let SliderEvent::Change(value) = event {
-                appearance::set_opacity(value.end().round() as u8, cx);
-                cx.notify();
-            }
-        }).detach();
         let mut shell = Self {
             shell_focus: cx.focus_handle(),
             settings_focused: false,
-            opacity_slider,
             zoom_percent: del_core::zoom::percent(),
             state,
             composer,
@@ -1697,7 +1681,7 @@ impl AppShell {
         let radius = zpx(self.metrics.page_radius);
         let (panel, selection) = {
             let st = self.state.read(cx);
-            (st.panel, st.selection.clone())
+            (Panel::Chat, st.selection.clone())
         };
         let chat = self.open_chat(cx);
         let landing = panel == Panel::Chat
@@ -1725,7 +1709,7 @@ impl AppShell {
             .overflow_hidden()
             .bg(page_surface())
             .when(panel == Panel::Providers, |page| {
-                page.child(signin::render(&self.state, &self.opacity_slider, cx))
+                page.child(signin::render(&self.state, cx))
             })
             .when(panel == Panel::Chat, |page| match chat {
                 // Chat page: transcript above, the shared composer below.
@@ -1885,9 +1869,32 @@ impl Render for AppShell {
         }
         let settings_open = self.state.read(cx).panel == Panel::Providers;
         if settings_open && !self.settings_focused {
-            self.shell_focus.focus(window, cx);
+            let state = self.state.clone();
+            window.open_dialog(cx, move |dialog, window, cx| {
+                let close_state = state.clone();
+                let height = zpx(420.).min(window.viewport_size().height - zpx(48.));
+                dialog
+                    .width(zpx(720.).min(window.viewport_size().width - zpx(48.)))
+                    .margin_top(((window.viewport_size().height - height) / 2.).max(zpx(24.)))
+                    .p_0().close_button(false)
+                    .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                    .bg(appearance::popup_surface(0x0b0b0d))
+                    .rounded(zpx(14.)).overflow_hidden()
+                    .on_close(move |_, _, cx| {
+                        close_state.update(cx, |state, cx| {
+                            if state.panel == Panel::Providers { state.toggle_providers(cx); }
+                        });
+                    })
+                    .child(h_flex().h(height).min_h_0().items_start()
+                        .child(div().w(zpx(150.)).h_full().flex_none().p_3()
+                            .border_r_1().border_color(appearance::separator())
+                            .child(signin::navigation(&state, cx)))
+                        .child(div().flex_1().min_w_0().h_full()
+                            .child(signin::render(&state, cx))))
+            });
         }
         if !settings_open && self.settings_focused {
+            window.close_dialog(cx);
             self.focus_composer(window, cx);
         }
         self.settings_focused = settings_open;
@@ -1971,6 +1978,7 @@ impl Render for AppShell {
 
         v_flex()
             .size_full()
+            .when(appearance::light(), |shell| shell.bg(gpui_kit::rgb(0xfcfcfc)))
             .track_focus(&self.shell_focus)
             .key_context("Shell")
             .capture_action(
@@ -2228,10 +2236,10 @@ impl Render for AppShell {
                         )
                     }),
             )
-            .when(self.search_open, |shell| {
+            .when(self.search_open || settings_open, |shell| {
                 let shade = div().absolute().inset_0()
                     .child(backdrop::blur_layer())
-                    .bg(gpui_kit::rgba(0x00000020));
+                    .bg(gpui_kit::rgba(0x00000066));
                 if let Some(started) = self.search_closing {
                     shell.child(shade.opacity(search_ui::exit_opacity(started)))
                 } else if cx.reduce_motion() {

@@ -82,6 +82,7 @@ impl TerminalView {
                             }
                             TerminalEvent::TitleChanged(title) => this.title = title.clone(),
                             TerminalEvent::Bell => window.play_system_bell(),
+                            TerminalEvent::Input => {},
                             TerminalEvent::Exited { code } => this.exit = Some(*code),
                         }
                         cx.emit(event);
@@ -171,6 +172,9 @@ impl TerminalView {
         }
     }
     fn input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if !bytes.is_empty() {
+            cx.emit(TerminalEvent::Input);
+        }
         self.session.with_term(|term| {
             term.selection = None;
             term.scroll_display(Scroll::Bottom);

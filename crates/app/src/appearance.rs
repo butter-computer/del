@@ -2,12 +2,9 @@
 use crate::zoom::px as zpx;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Rgba};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 static LIGHT: AtomicBool = AtomicBool::new(false);
-static OPACITY: AtomicU8 = AtomicU8::new(DEFAULT_OPACITY);
-pub const MIN_OPACITY: u8 = 40;
-pub const MAX_OPACITY: u8 = 95;
-pub const DEFAULT_OPACITY: u8 = 85;
+const OPACITY: u8 = 85;
 
 // Shared neutral dark tones used by both custom chrome and component defaults.
 const DARK_SURFACE: u32 = 0x0a0a0a;
@@ -25,20 +22,9 @@ pub fn separator() -> Rgba {
 #[serde(default)]
 struct Preferences {
     light: bool,
-    opacity: u8,
 }
 impl Default for Preferences {
-    fn default() -> Self { Self { light: false, opacity: DEFAULT_OPACITY } }
-}
-
-pub fn opacity() -> u8 { OPACITY.load(Ordering::Relaxed) }
-
-pub fn set_opacity(percent: u8, cx: &mut App) {
-    let percent = percent.clamp(MIN_OPACITY, MAX_OPACITY);
-    if OPACITY.swap(percent, Ordering::Relaxed) != percent {
-        save();
-        cx.refresh_windows();
-    }
+    fn default() -> Self { Self { light: false } }
 }
 
 pub fn light() -> bool {
@@ -47,23 +33,28 @@ pub fn light() -> bool {
 
 /// A visible composer surface that still lets the page show through.
 pub fn composer_surface() -> Rgba {
-    gpui_kit::rgba(if light() { 0x00000012 } else { 0xffffff12 })
+    gpui_kit::rgba(if light() { 0xf9f9f9ff } else { 0xffffff12 })
+}
+
+/// Shared light surface for menus and dialogs, matching the composer.
+pub fn popup_surface(dark: u32) -> Rgba {
+    if light() { composer_surface() } else { rgb(dark) }
 }
 
 pub fn shell_surface() -> Rgba {
     let mut color = gpui_kit::rgba(if light() {
-        0xeeeef0d6
+        0xfcfcfcd6
     } else {
         del_core::SHELL_SURFACE_RGBA
     });
     // Quantize to the same RGBA8 alpha as the native shell token (85% -> 0xd9).
-    color.a = ((u32::from(opacity()) * 255 + 50) / 100) as f32 / 255.;
+    color.a = ((u32::from(OPACITY) * 255 + 50) / 100) as f32 / 255.;
     color
 }
 
 pub fn page_surface() -> Rgba {
     gpui_kit::rgba(if light() {
-        0xffffff08
+        0xffffffff
     } else {
         del_core::PAGE_SURFACE_RGBA
     })
@@ -78,12 +69,11 @@ pub fn load(cx: &mut App) {
     let preferences = std::fs::read(path()).ok().and_then(|bytes| {
         // Older preferences stored just the light/dark boolean.
         if let Ok(light) = serde_json::from_slice::<bool>(&bytes) {
-            Some(Preferences { light, ..Preferences::default() })
+            Some(Preferences { light })
         } else {
             serde_json::from_slice::<Preferences>(&bytes).ok()
         }
     }).unwrap_or_default();
-    OPACITY.store(preferences.opacity.clamp(MIN_OPACITY, MAX_OPACITY), Ordering::Relaxed);
     apply(preferences.light, cx);
 }
 fn save() {
@@ -91,7 +81,7 @@ fn save() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec(&Preferences { light: light(), opacity: opacity() }) {
+    if let Ok(bytes) = serde_json::to_vec(&Preferences { light: light() }) {
         let temporary = path.with_extension("json.tmp");
         if std::fs::write(&temporary, bytes).is_ok() {
             let _ = std::fs::rename(temporary, path);
@@ -117,7 +107,7 @@ fn apply(light: bool, cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.colors.background = gpui_kit::transparent_black();
         theme.font_size = zpx(del_core::typography::TEXT_MD);
-        theme.colors.popover = rgb(0x2b2b2e).into();
+        theme.colors.popover = popup_surface(0x2b2b2e).into();
         theme.colors.popover_foreground = rgb(0xf0f0f0).into();
         theme.colors.border = rgba(0xffffff14).into();
         theme.colors.accent = rgba(0xffffff14).into();

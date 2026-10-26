@@ -188,6 +188,13 @@ impl Render for Usage {
                                 let delete_id = id.clone();
                                 let terminal = entry.terminal;
                                 let title = self.state.read(cx).current_title(&id);
+                                let state = self.state.read(cx);
+                                let provider = if terminal {
+                                    state.terminal_rows.iter().find(|row| row.id == id)
+                                        .and_then(|row| row.provider)
+                                } else {
+                                    state.provider_of(&id)
+                                };
                                 let memory = entry
                                     .bytes
                                     .map(|n| format!("{:.0} MB", n as f64 / 1_048_576.))
@@ -213,6 +220,10 @@ impl Render for Usage {
                                             .flex_1()
                                             .min_w_0()
                                             .aria_label(format!("Open {title}"))
+                                            .gap_2()
+                                            .when_some(provider, |row, provider| {
+                                                row.child(crate::composer_ui::provider_logo(provider))
+                                            })
                                             .child(crate::sidebar::fading_title(title))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.state.update(cx, |s, cx| {

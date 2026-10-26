@@ -128,6 +128,7 @@ impl TerminalSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
+    Input,
     Wakeup,
     TitleChanged(Option<String>),
     Bell,

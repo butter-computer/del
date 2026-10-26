@@ -85,21 +85,12 @@ pub fn conversation_loading(message: SharedString, reduce_motion: bool) -> AnyEl
     v_flex()
         .id("conversation-loading")
         .role(Role::Status)
-        .aria_label(message.clone())
+        .aria_label(message)
         .size_full()
         .overflow_hidden()
         .items_center()
         .px_6()
         .pt_5()
-        .gap_5()
-        .child(
-            div()
-                .w_full()
-                .max_w(zpx(COLUMN_MAX_WIDTH))
-                .text_size(zpx(12.))
-                .text_color(rgba(0xffffff8c))
-                .child(message),
-        )
         .child(body)
         .into_any_element()
 }

@@ -651,11 +651,7 @@ impl AppState {
     pub fn select_terminal(&mut self, id: SessionId, cx: &mut Context<Self>) {
         self.set_unread(&id, false);
         self.save_overrides();
-        let tab = Tab::Terminal(id.clone());
-        if !self.tabs.contains(&tab) {
-            self.new_uid(tab.clone());
-            self.tabs.push(tab);
-        }
+        self.open_preview(Tab::Terminal(id.clone()));
         self.selection = Selection::Terminal(id);
         self.panel = Panel::Chat;
         cx.notify();
@@ -741,7 +737,8 @@ impl AppState {
             self.starting.remove(&key);
             self.pending_prompts.remove(&key);
         }
-        self.select_terminal(id, cx);
+        self.select_terminal(id.clone(), cx);
+        self.keep_tab(&Tab::Terminal(id), cx);
     }
 
     /// Restoring a background terminal must not change the selected tab or its pin.
@@ -1683,6 +1680,28 @@ mod tests {
             ghosts: vec![],
             starting: Default::default(),
         })
+    }
+
+    #[gpui::test]
+    fn terminal_previews_share_the_chat_slot_and_can_be_kept(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let a = del_agent::SessionId::new("terminal-preview-a");
+            let b = del_agent::SessionId::new("terminal-preview-b");
+            s.select_terminal(a.clone(), cx);
+            let uid = s.uid_of(&Tab::Terminal(a.clone()));
+            s.select_terminal(b.clone(), cx);
+            assert_eq!(s.tabs, vec![Tab::Draft(0), Tab::Terminal(b.clone())]);
+            assert_eq!(s.preview_tab, Some(Tab::Terminal(b.clone())));
+            assert!(s.closed_terminals.is_empty());
+            s.keep_tab(&Tab::Terminal(b.clone()), cx);
+            s.select_terminal(a.clone(), cx);
+            assert_eq!(s.uid_of(&Tab::Terminal(a.clone())), uid);
+            s.select(del_agent::SessionId::new("chat-preview"), cx);
+            assert!(s.tabs.contains(&Tab::Terminal(b)));
+            assert!(!s.tabs.contains(&Tab::Terminal(a)));
+            assert!(s.closed_terminals.is_empty());
+        });
     }
 
     #[gpui::test]

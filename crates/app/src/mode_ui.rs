@@ -336,6 +336,11 @@ impl AppShell {
                         .map_err(|e| e.to_string())?;
                     let event_id = id.clone();
                     cx.subscribe(&host, move |this, _, event, cx| {
+                        if matches!(event, TerminalHostEvent::Terminal(del_terminal::TerminalEvent::Input)) {
+                            this.state.update(cx, |state, cx| {
+                                state.keep_tab(&crate::state::Tab::Terminal(event_id.clone()), cx)
+                            });
+                        }
                         if let TerminalHostEvent::Changed(snapshot) = event {
                             this.terminal_changed(&event_id, snapshot, cx);
                         }
@@ -1071,7 +1076,7 @@ impl AppShell {
                     .p_3()
                     .gap_3()
                     .rounded(zpx(12.))
-                    .bg(rgb(0x262629))
+                    .bg(crate::appearance::popup_surface(0x262629))
                     .child(
                         div()
                             .text_size(zpx(14.))

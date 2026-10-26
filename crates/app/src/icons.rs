@@ -151,7 +151,6 @@ pub const SYMBOLS: &[(&str, &str)] = &[
     ("pin-outline", "pin"),
     ("pin-filled", "pin.fill"),
     ("coffee-cup", "cup.and.saucer"),
-    ("coffee-steam", "wind"),
     ("steer", "arrow.turn.up.right"),
     ("grip", "line.3.horizontal"),
     ("queue", "list.bullet"),

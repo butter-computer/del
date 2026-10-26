@@ -9,8 +9,7 @@ use crate::appearance::{rgb, rgba};
 use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
-use gpui_kit::base::Easing;
-use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -108,14 +107,7 @@ impl ChatView {
                 goal,
                 attachments,
             } => user_message(text, steer, goal, attachments).into_any_element(),
-            Block::Assistant { text, turn_id, .. } => {
-                let started = self
-                    .first_chunks
-                    .get(&turn_id)
-                    .copied()
-                    .filter(|start| !cx.reduce_motion() && start.elapsed() < STREAM_FADE);
-                assistant_message(ix, text, started).into_any_element()
-            }
+            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix)).into_any_element(),
             Block::Reasoning {
                 text,
                 open,
@@ -495,18 +487,7 @@ fn user_message(
         )
 }
 
-const STREAM_FADE: std::time::Duration = std::time::Duration::from_millis(400);
-
-fn first_chunk_opacity(elapsed: std::time::Duration) -> f32 {
-    let t = (elapsed.as_secs_f32() / STREAM_FADE.as_secs_f32()).clamp(0., 1.);
-    t * t * (3. - 2. * t)
-}
-
-fn assistant_message(
-    ix: usize,
-    text: String,
-    started: Option<std::time::Instant>,
-) -> impl IntoElement {
+fn assistant_message(ix: usize, text: String, state: Option<&Entity<text::TextViewState>>) -> impl IntoElement {
     let style = TextViewStyle::default().heading_font_size(|level, _| {
         if level <= 2 {
             zpx(TEXT_LG)
@@ -514,35 +495,16 @@ fn assistant_message(
             zpx(TEXT_MD)
         }
     });
-    // FlowToken's fadeIn/diff effect, shortened to 400 ms for a quicker response.
-    // https://github.com/Ephibbs/flowtoken/tree/a966002ca6fbbe1c78f4605a3849d14edd90260b
-    // Native text motion fades appended glyphs, preserves Markdown selection,
-    // and honors Reduce Motion. Keep it enabled after completion so the tail settles.
-    let motion = TextViewMotion::default()
-        .with_stream_fade(STREAM_FADE)
-        .with_stream_fade_easing(Easing::EaseInOut);
-    let view = div()
+    div()
         .px_2()
         .text_size(zpx(TEXT_MD))
         .text_color(rgb(TEXT))
         .child(
-            TextView::markdown(("markdown", ix), text)
+            state.map(TextView::new).unwrap_or_else(|| TextView::markdown(("markdown", ix), text))
                 .style(style)
-                .motion(motion)
+                .stream_fade(false)
                 .selectable(true),
-        );
-    // TextView fades appended glyphs but treats its initial text as settled.
-    // Arrival time prevents re-renders or scrolling from replaying this fade.
-    if let Some(start) = started {
-        view.with_animation(
-            ("first-stream-chunk", ix),
-            Animation::new(STREAM_FADE),
-            move |view, _| view.opacity(first_chunk_opacity(start.elapsed())),
         )
-        .into_any_element()
-    } else {
-        view.into_any_element()
-    }
 }
 
 fn turn_end(status: TurnStatus) -> impl IntoElement {
@@ -607,16 +569,4 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                     }),
             ),
         )
-}
-
-#[cfg(test)]
-mod stream_tests {
-    #[test]
-    fn first_chunk_starts_transparent_and_settles_smoothly() {
-        use std::time::Duration;
-        assert_eq!(super::first_chunk_opacity(Duration::ZERO), 0.);
-        assert!((super::first_chunk_opacity(Duration::from_millis(200)) - 0.5).abs() < 0.001);
-        assert_eq!(super::first_chunk_opacity(Duration::from_millis(400)), 1.);
-        assert_eq!(super::first_chunk_opacity(Duration::from_secs(1)), 1.);
-    }
 }
