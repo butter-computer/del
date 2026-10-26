@@ -338,7 +338,8 @@ This records the final decisions, including corrections to earlier experiments.
   drafts. Keep the archive toggle available when this view becomes empty.
 
 - Label the archive sidebar “Archived” and hide its heading and project-row plus
-  buttons. Creation controls belong to the active Projects view.
+  buttons. The global New Session action remains available and returns to the
+  active Projects view.
 
 - Restoring one session makes its project visible in Projects without restoring
   archived siblings. The project can appear in both views with disjoint sessions;
@@ -360,5 +361,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Archiving/deleting the final project leaves an empty usable new-session page.
   Do not create a replacement `/` or home project from an automatic fallback draft.
   Only explicit draft tabs and saved sessions determine project visibility.
+  Startup also uses an unlisted empty composer. It must support provider/model,
+  directory, Chat/Terminal selection, and submission without requiring a plus click.
+  Submission creates the real session; an explicit plus creates a draft tab.
 - Animated project contents must fill the sidebar width throughout expansion and
   collapse; measuring content must not shrink or clip session titles.

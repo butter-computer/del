@@ -165,8 +165,9 @@ and linked worktrees group under the parent repository, while non-Git folders us
 their canonical full paths. Existing histories, pins, titles, and unread state are
 preserved. Project membership is derived from the stored working directory, so no
 provider transcript migration is needed. The archive button beside Settings switches to **Archived**, showing only archived
-sessions grouped by project, with a selected background on the toggle. Creation
-buttons are hidden in this view. Project identities and collapsed state
+sessions grouped by project, with a selected background on the toggle. The heading
+and project-row plus buttons are hidden in this view; the global New Session
+action returns to active Projects. Project identities and collapsed state
 persist in `projects.json`. Hover a project for **+** and its three-dot menu;
 choose Chat or Terminal in the composer. Terminal rows show a terminal icon with
 a small provider badge. Each new-session action creates an independent draft in
@@ -183,7 +184,10 @@ removes all its histories; deleting from Archived removes only archived historie
 Deletion requires confirmation and never deletes directory contents or Git work.
 Rename and delete dialogs use opaque surfaces and explicit action/cancel buttons.
 Archiving or deleting the last project leaves an empty, usable new-session page,
-without inventing a replacement `/` project.
+without inventing a replacement `/` project. App startup also shows an empty
+composer without creating a draft tab or project. You can submit directly from
+that page; starting a conversation creates its session and directory group.
+Explicit New Session actions still create separate draft tabs immediately.
 
 Pinned sessions appear once, above projects, in pin order, without a persistent
 pin icon. Unpin remains available on hover and in the context menu. New pins append. Drag
