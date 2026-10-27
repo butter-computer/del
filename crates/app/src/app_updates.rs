@@ -699,7 +699,56 @@ mod tests {
             !destination.exists(),
             "staging must not install before consent"
         );
-        verify_bundle(&staged.directory.path().join("Del.app"), &staged.version).unwrap();
+        let bundle = staged.directory.path().join("Del.app");
+        verify_bundle(&bundle, &staged.version).unwrap();
+        assert!(
+            verify_bundle(&bundle, "0.0.0").is_err(),
+            "wrong bundle version must fail"
+        );
+        let plist = bundle.join("Contents/Info.plist");
+        let original = std::fs::read(&plist).unwrap();
+        output(
+            std::process::Command::new("/usr/bin/plutil")
+                .args([
+                    "-replace",
+                    "CFBundleIdentifier",
+                    "-string",
+                    "unexpected.app",
+                ])
+                .arg(&plist),
+        )
+        .unwrap();
+        assert!(
+            verify_bundle(&bundle, &staged.version).is_err(),
+            "wrong bundle identity must fail"
+        );
+        std::fs::write(&plist, original).unwrap();
+        verify_bundle(&bundle, &staged.version).unwrap();
+        output(
+            std::process::Command::new("/usr/bin/ditto")
+                .arg(&bundle)
+                .arg(&destination),
+        )
+        .unwrap();
+        assert!(
+            super::validate_installation(&staged, "0.0.0").is_err(),
+            "changed installation must not be overwritten"
+        );
+        assert!(
+            super::validate_installation(&staged, &staged.version).is_err(),
+            "identical release must not be installed"
+        );
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(bundle.join("Contents/MacOS/del"))
+            .unwrap()
+            .write_all(b"tampered")
+            .unwrap();
+        assert!(
+            verify_bundle(&bundle, &staged.version).is_err(),
+            "tampered signed binary must fail"
+        );
         assert!(rx.try_iter().any(|event| matches!(event, Event::Verifying)));
     }
 
@@ -855,6 +904,68 @@ mod tests {
             empty.assets[index].size = 0;
             assert!(select_release(empty, "0.1.0").is_err());
         }
+    }
+
+    #[gpui::test]
+    fn ready_click_opens_restart_dialog_and_later_preserves_download(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{
+            Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement, Render, Styled,
+            Window,
+        };
+        use gpui_kit::component::WindowExt;
+        struct Fixture(Entity<AppUpdater>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                gpui::div()
+                    .w(gpui::px(240.))
+                    .h(gpui::px(700.))
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .child(super::render(&self.0, cx))
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let updater = cx.new(AppUpdater::new);
+        updater.update(cx, |updater, _| {
+            updater.status = Status::Ready(super::Staged {
+                directory: tempfile::tempdir().unwrap(),
+                destination: PathBuf::from("/fake/Del.app"),
+                version: "0.2.0".into(),
+            })
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| Fixture(updater.clone()));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("del-update").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        cx.update(|window, cx| {
+            assert!(
+                window.has_active_dialog(cx),
+                "restart confirmation disappeared"
+            )
+        });
+        assert!(
+            cx.debug_bounds("dialog-layer").is_some(),
+            "confirmation must be visible"
+        );
+        cx.update(|window, cx| window.close_dialog(cx));
+        updater.update(cx, |updater, _| {
+            assert!(matches!(updater.status, Status::Ready(_)))
+        });
     }
 
     #[test]
