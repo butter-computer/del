@@ -1856,6 +1856,14 @@ impl AppShell {
                                         .child(div().relative().child(self.render_composer(cx))),
                                 ),
                         ),
+                ).child(
+                    div()
+                        .absolute()
+                        .bottom(zpx(16.0))
+                        .right(zpx(20.0))
+                        .text_size(zpx(12.0))
+                        .text_color(rgb(0x737373))
+                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
                 ),
             })
             .into_any_element()
