@@ -19,8 +19,14 @@ open it, and drag **Del.app** to **Applications**. The release includes a `.sha2
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
 
-Like Alpha, this release is ad-hoc signed and **not notarized**. macOS may require
-right-clicking Del.app → Open, or allowing it in System Settings → Privacy & Security.
+This release is ad-hoc signed and **not notarized**. A browser-downloaded copy
+can be blocked by macOS even though a locally built copy opens normally.
+If macOS says “Apple could not verify Del,” dismiss the alert with **Done**,
+then open **System Settings → Privacy & Security → Open Anyway** for Del.
+Confirm **Open** (and authenticate if prompted), then launch `/Applications/Del.app`.
+Only approve a copy you downloaded from the release linked above and trust.
+This creates an exception for Del; it does not disable Gatekeeper globally.
+See [Apple’s instructions](https://support.apple.com/en-gb/102445).
 The release uses `computer.butter.del`; local development builds keep their
 separate signing identity. macOS may ask for permissions again when switching.
 
