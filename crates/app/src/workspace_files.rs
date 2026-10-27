@@ -163,9 +163,109 @@ pub fn diff(root: &Path, file: &ChangedFile) -> Result<String, String> {
     Ok(text)
 }
 
+/// Display rows omit Git's file headers, which must not count as edits.
+pub struct ReviewLine {
+    pub kind: char,
+    pub text: String,
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
+pub fn review_lines(text: &str) -> Vec<ReviewLine> {
+    let mut old = 0;
+    let mut new = 0;
+    let mut in_hunk = text.starts_with("New file: ");
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("@@ ") {
+            let mut parts = line.split_whitespace();
+            parts.next();
+            old = parts
+                .next()
+                .and_then(|s| s.trim_start_matches('-').split(',').next()?.parse().ok())
+                .unwrap_or(0);
+            new = parts
+                .next()
+                .and_then(|s| s.trim_start_matches('+').split(',').next()?.parse().ok())
+                .unwrap_or(0);
+            in_hunk = true;
+            rows.push(ReviewLine {
+                kind: ' ',
+                text: line.into(),
+                old: None,
+                new: None,
+            });
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        }
+        if line.starts_with("New file: ") {
+            new = 1;
+            continue;
+        }
+        if !in_hunk
+            && (line.starts_with("diff --git ")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ "))
+        {
+            continue;
+        }
+        let kind = if in_hunk {
+            line.chars().next().unwrap_or(' ')
+        } else {
+            ' '
+        };
+        let (old_number, new_number) = match kind {
+            '+' => {
+                let n = new;
+                new += 1;
+                (None, Some(n))
+            }
+            '-' => {
+                let n = old;
+                old += 1;
+                (Some(n), None)
+            }
+            ' ' if in_hunk => {
+                let pair = (Some(old), Some(new));
+                old += 1;
+                new += 1;
+                pair
+            }
+            _ => (None, None),
+        };
+        rows.push(ReviewLine {
+            kind,
+            text: if in_hunk && matches!(kind, '+' | '-' | ' ') {
+                line.get(1..).unwrap_or("").into()
+            } else {
+                line.into()
+            },
+            old: old_number,
+            new: new_number,
+        });
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_tracks_hunk_numbers_and_does_not_count_file_headers() {
+        let rows = review_lines(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -8,2 +8,2 @@\n keep\n-old\n+new\n",
+        );
+        assert_eq!(rows.iter().filter(|r| r.kind == '+').count(), 1);
+        assert_eq!(rows.iter().filter(|r| r.kind == '-').count(), 1);
+        assert_eq!(rows[2].old, Some(9));
+        assert_eq!(rows[3].new, Some(9));
+        let rows = review_lines("New file: a\n+first\n+second\n");
+        assert_eq!(rows[1].new, Some(2));
+    }
+
     #[test]
     fn saves_preserve_exact_bytes_and_reject_external_edits() {
         let dir = tempfile::tempdir().unwrap();

@@ -75,6 +75,10 @@ pub struct SavedPanel {
 }
 
 impl SavedPanel {
+    pub fn restore_open(&self) -> bool {
+        self.open && self.pane != Pane::Changes
+    }
+
     pub fn browser_profile(&self) -> &str {
         &self.browser_profile
     }
@@ -224,12 +228,10 @@ pub struct RightPanel {
     file_error: Option<String>,
     change_files: Vec<crate::workspace_files::ChangedFile>,
     change_root: PathBuf,
-    change_selected: Option<PathBuf>,
-    change_text: Option<String>,
-    change_editor: Option<Entity<EditorState>>,
+    change_diffs: HashMap<PathBuf, String>,
+    change_expanded: HashSet<PathBuf>,
     change_error: Option<String>,
     change_request: u64,
-    diff_request: u64,
     changes_loading: bool,
     changes_watch: Option<Task<()>>,
 
@@ -252,6 +254,8 @@ pub struct RightPanel {
 }
 
 impl RightPanel {
+    pub fn is_changes(&self) -> bool { self.pane == Pane::Changes }
+
     pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if !visible && let Some(preview) = &self.document_preview {
             preview.hide();
@@ -260,6 +264,9 @@ impl RightPanel {
             browser.hide();
         }
         if self.preview_visible != visible {
+            if !visible {
+                self.change_expanded.clear();
+            }
             self.preview_visible = visible;
             cx.notify();
         }
@@ -323,7 +330,11 @@ impl RightPanel {
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane = saved.pane;
+        self.pane = if saved.pane == Pane::Changes {
+            Pane::Files
+        } else {
+            saved.pane
+        };
         self.terminal_tabs = if saved.terminal_tabs.is_empty() {
             vec![uuid::Uuid::new_v4().to_string()]
         } else {
@@ -358,7 +369,7 @@ impl RightPanel {
         if let Some(path) = saved.selected {
             self.open_file(path, cx);
         }
-        if saved.open {
+        if saved.open && saved.pane != Pane::Changes {
             self.prepare_to_show(window, cx);
         }
     }
@@ -380,12 +391,10 @@ impl RightPanel {
             file_error: None,
             change_files: Vec::new(),
             change_root: PathBuf::new(),
-            change_selected: None,
-            change_text: None,
-            change_editor: None,
+            change_diffs: HashMap::new(),
+            change_expanded: HashSet::new(),
             change_error: None,
             change_request: 0,
-            diff_request: 0,
             changes_loading: false,
             changes_watch: None,
             browser: None,
@@ -418,11 +427,9 @@ impl RightPanel {
             self.terminal_tabs = vec![uuid::Uuid::new_v4().to_string()];
             self.terminal_active = 0;
             self.change_request += 1;
-            self.diff_request += 1;
             self.change_files.clear();
-            self.change_selected = None;
-            self.change_text = None;
-            self.change_editor = None;
+            self.change_diffs.clear();
+            self.change_expanded.clear();
             self.changes_loading = false;
             self.root = root;
             self.directory_entries.clear();
@@ -828,6 +835,9 @@ impl RightPanel {
             .when(active, |t| t.bg(rgba(0xffffff14)))
             .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
             .on_click(cx.listener(move |this, _, window, cx| {
+                if this.pane != pane {
+                    this.change_expanded.clear();
+                }
                 this.pane = pane;
                 if pane == Pane::Terminal {
                     this.ensure_terminal(window, cx);
@@ -1461,9 +1471,20 @@ impl RightPanel {
         self.change_request += 1;
         let request = self.change_request;
         let root = self.root.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { crate::workspace_files::changes(&root) });
+        let work = cx.background_executor().spawn(async move {
+            let (root, files) = crate::workspace_files::changes(&root)?;
+            let diffs = files
+                .iter()
+                .map(|file| {
+                    (
+                        file.path.clone(),
+                        crate::workspace_files::diff(&root, file)
+                            .unwrap_or_else(|error| format!("Unable to read diff: {error}")),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            Ok::<_, String>((root, files, diffs))
+        });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
@@ -1472,31 +1493,18 @@ impl RightPanel {
                 }
                 this.changes_loading = false;
                 match result {
-                    Ok((root, files)) => {
+                    Ok((root, files, diffs)) => {
                         this.change_root = root;
                         this.change_error = None;
+                        this.change_expanded.retain(|path| diffs.contains_key(path));
                         this.change_files = files;
-                        let selected = this
-                            .change_selected
-                            .clone()
-                            .filter(|path| this.change_files.iter().any(|file| &file.path == path))
-                            .or_else(|| this.change_files.first().map(|file| file.path.clone()));
-                        if let Some(path) = selected {
-                            this.load_diff(path, cx);
-                        } else {
-                            this.change_selected = None;
-                            this.diff_request += 1;
-                            this.change_text = None;
-                            this.change_editor = None;
-                        }
+                        this.change_diffs = diffs;
                     }
                     Err(error) => {
                         this.change_error = Some(error);
                         this.change_files.clear();
-                        this.change_selected = None;
-                        this.diff_request += 1;
-                        this.change_text = None;
-                        this.change_editor = None;
+                        this.change_diffs.clear();
+                        this.change_expanded.clear();
                     }
                 }
                 cx.notify();
@@ -1505,70 +1513,18 @@ impl RightPanel {
         .detach();
         cx.notify();
     }
-    fn load_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let Some(file) = self
-            .change_files
-            .iter()
-            .find(|file| file.path == path)
-            .cloned()
-        else {
-            return;
-        };
-        self.diff_request += 1;
-        let request = self.diff_request;
-        if self.change_selected.as_ref() != Some(&path) {
-            self.change_text = None;
-            self.change_editor = None;
-        }
-        self.change_selected = Some(path);
-        let root = self.change_root.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { crate::workspace_files::diff(&root, &file) });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.diff_request != request {
-                    return;
-                }
-                match result {
-                    Ok(text) => {
-                        if this.change_text.as_ref() != Some(&text) {
-                            this.change_text = Some(text);
-                            this.change_editor = None;
-                        }
-                    }
-                    Err(error) => this.change_error = Some(error),
-                }
-                cx.notify();
+    fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (total_added, total_removed) = self.change_diffs.values()
+            .flat_map(|text| crate::workspace_files::review_lines(text))
+            .fold((0usize, 0usize), |(added, removed), line| {
+                (added + usize::from(line.kind == '+'), removed + usize::from(line.kind == '-'))
             });
-        })
-        .detach();
-        cx.notify();
-    }
-    fn render_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.change_editor.is_none()
-            && let Some(text) = &self.change_text
-        {
-            self.change_editor = Some(cx.new(|cx| {
-                EditorState::new(window, cx)
-                    .language("diff")
-                    .default_value(text.clone())
-            }));
-        }
         v_flex()
+            .id("changes-review")
             .size_full()
             .min_h_0()
             .min_w_0()
-            .when_some(self.file_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .p_2()
-                        .whitespace_normal()
-                        .text_size(zpx(TEXT_SM))
-                        .child(error),
-                )
-            })
+            .overflow_y_scroll()
             .when_some(self.change_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -1593,45 +1549,135 @@ impl RightPanel {
                     )
                 },
             )
-            .child(
-                v_flex()
-                    .id("changed-files")
-                    .max_h(zpx(160.))
-                    .flex_none()
-                    .overflow_y_scroll()
-                    .children(self.change_files.iter().enumerate().map(|(index, file)| {
-                        let path = file.path.clone();
-                        h_flex()
-                            .id(("changed-file", index))
-                            .px_2()
-                            .py_1()
-                            .gap_2()
-                            .cursor_pointer()
-                            .text_size(zpx(TEXT_SM))
-                            .when(self.change_selected.as_ref() == Some(&path), |row| {
-                                row.bg(rgba(0xffffff14))
-                            })
-                            .child(div().text_color(rgb(0x90cba0)).child(file.status.clone()))
-                            .child(div().min_w_0().truncate().child(path.display().to_string()))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.load_diff(path.clone(), cx)),
-                            )
-                    })),
-            )
-            .when_some(self.change_editor.clone(), |view, editor| {
+            .when(!self.change_files.is_empty(), |view| {
                 view.child(
-                    div().flex_1().min_h_0().child(
-                        Editor::new(&editor)
-                            .readonly(true)
-                            .h(relative(1.))
-                            .appearance(false)
-                            .bordered(false)
-                            .font_family(MONO)
-                            .text_size(zpx(TEXT_SM))
-                            .aria_label("Git diff"),
-                    ),
+                    h_flex()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .text_size(zpx(11.))
+                        .text_color(rgba(0xffffff8c))
+                        .child(format!("{} {}", self.change_files.len(), if self.change_files.len() == 1 { "file" } else { "files" }))
+                        .child(div().text_color(rgb(0x5fc27e)).child(format!("+{total_added}")))
+                        .child(div().text_color(rgb(0xf0716b)).child(format!("−{total_removed}"))),
                 )
             })
+            .children(self.change_files.iter().enumerate().map(|(index, file)| {
+                let path = file.path.clone();
+                let expanded = self.change_expanded.contains(&path);
+                let text = self.change_diffs.get(&path).cloned().unwrap_or_default();
+                let lines = crate::workspace_files::review_lines(&text);
+                let added = lines.iter().filter(|line| line.kind == '+').count();
+                let removed = lines.iter().filter(|line| line.kind == '-').count();
+                v_flex()
+                    .w_full()
+                    .flex_none()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .id(("changed-file", index))
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(rgba(0xffffff14))
+                            .cursor_pointer()
+                            .text_size(zpx(TEXT_SM))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!(
+                                "{} {} +{} -{}",
+                                if expanded { "Collapse" } else { "Expand" },
+                                path.display(),
+                                added,
+                                removed
+                            ))
+                            .hover(|row| row.bg(rgba(0xffffff0a)))
+                            .child(
+                                crate::icons::icon(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .with_size(zpx(12.)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(path.display().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(rgb(0x5fc27e))
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(rgb(0xf0716b))
+                                    .child(format!("-{removed}")),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.change_expanded.remove(&path) {
+                                    this.change_expanded.insert(path.clone());
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(expanded, |view| {
+                        view.child(
+                            v_flex()
+                                .id(("file-diff", index))
+                                .overflow_x_scroll()
+                                .max_h(zpx(600.))
+                                .overflow_y_scroll()
+                                .children(lines.into_iter().map(|line| {
+                                    let fill = match line.kind {
+                                        '+' => 0x45cf7845,
+                                        '-' => 0xff6b6b45,
+                                        _ => 0x00000000,
+                                    };
+                                    h_flex()
+                                        .px_2()
+                                        .gap_2()
+                                        .flex_none()
+                                        .bg(rgba(fill))
+                                        .font_family(MONO)
+                                        .text_size(zpx(11.))
+                                        .line_height(relative(1.6))
+                                        .child(
+                                            div()
+                                                .w(zpx(32.))
+                                                .flex_none()
+                                                .text_color(rgba(0xffffff70))
+                                                .child(
+                                                    line.old
+                                                        .map(|n| n.to_string())
+                                                        .unwrap_or_default(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(zpx(32.))
+                                                .flex_none()
+                                                .text_color(rgba(0xffffff70))
+                                                .child(
+                                                    line.new
+                                                        .map(|n| n.to_string())
+                                                        .unwrap_or_default(),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .child(format!("{} {}", line.kind, line.text)),
+                                        )
+                                })),
+                        )
+                    })
+            }))
             .into_any_element()
     }
 
@@ -1823,6 +1869,16 @@ fn read_viewer(path: PathBuf) -> Viewer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_changes_requires_an_explicit_click() {
+        let mut saved = SavedPanel::default();
+        saved.open = true;
+        saved.pane = Pane::Changes;
+        assert!(!saved.restore_open());
+        saved.pane = Pane::Files;
+        assert!(saved.restore_open());
+    }
+
     use super::*;
 
     #[cfg(target_os = "macos")]
@@ -1934,7 +1990,7 @@ mod tests {
     }
 
     #[::gpui::test]
-    fn changes_refresh_preserves_unchanged_editor_and_loads_external_edits(
+    fn changes_refresh_preserves_disclosures_and_loads_external_edits(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_kit::init);
@@ -1949,6 +2005,7 @@ mod tests {
         );
         let path = dir.path().join("example.txt");
         std::fs::write(&path, "before\n").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "another file\n").unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
             let mut panel = RightPanel::new(dir.path().into(), window, cx);
             panel.pane = Pane::Changes;
@@ -1956,21 +2013,28 @@ mod tests {
             panel
         });
         cx.run_until_parked();
-        let editor = panel.read_with(cx, |panel, _| panel.change_editor.clone().unwrap());
+        panel.update(cx, |panel, _| {
+            assert!(panel.change_expanded.is_empty());
+            assert_eq!(panel.change_diffs.len(), 2);
+            panel.change_expanded.insert(PathBuf::from("example.txt"));
+        });
         panel.update(cx, |panel, cx| panel.refresh_changes(cx));
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
-            assert_eq!(panel.change_editor.as_ref(), Some(&editor))
+            assert!(panel.change_expanded.contains(Path::new("example.txt")));
         });
         std::fs::write(&path, "after\n").unwrap();
         panel.update(cx, |panel, cx| panel.refresh_changes(cx));
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
-            assert_eq!(
-                panel.change_selected.as_deref(),
-                Some(std::path::Path::new("example.txt"))
-            );
-            assert!(panel.change_text.as_ref().unwrap().contains("+after"));
+            assert!(panel.change_diffs[Path::new("example.txt")].contains("+after"));
+        });
+        std::fs::remove_file(&path).unwrap();
+        panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.change_expanded.contains(Path::new("example.txt")));
+            assert_eq!(panel.change_diffs.len(), 1);
         });
     }
 

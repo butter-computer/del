@@ -994,13 +994,13 @@ impl AppShell {
             self.remember_right(cx);
             let newly_created = !self.right_cache.contains_key(&owner);
             let (panel, open) = if let Some(cached) = self.right_cache.get(&owner) {
-                cached.clone()
+                (cached.0.clone(), cached.1 && !cached.0.read(cx).is_changes())
             } else {
                 let saved = key
                     .as_deref()
                     .map(|key| self.right_store.get(key))
                     .unwrap_or_default();
-                let open = saved.open;
+                let open = saved.restore_open();
                 let panel = cx.new(|cx| {
                     let mut panel = RightPanel::new(root.clone(), window, cx);
                     panel.restore(saved, window, cx);
