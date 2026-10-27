@@ -720,6 +720,7 @@ pub fn render(
     state: &Entity<AppState>,
     rename: &Entity<InputState>,
     usage: &Entity<crate::usage::Usage>,
+    updater: &Entity<crate::app_updates::AppUpdater>,
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
@@ -919,6 +920,7 @@ pub fn render(
                         }),
                 ),
         )
+        .child(crate::app_updates::render(updater, cx))
         .child(
             h_flex()
                 .h(zpx(ROW_HEIGHT))

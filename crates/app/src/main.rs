@@ -36,6 +36,7 @@ mod mcp_bridge;
 mod mode_ui;
 mod model_picker;
 mod provider_updates;
+mod app_updates;
 mod providers;
 mod projects;
 mod accounts;
@@ -354,6 +355,7 @@ mod sidebar_width_tests {
 }
 
 struct AppShell {
+    updater: Entity<app_updates::AppUpdater>,
     shell_focus: FocusHandle,
     settings_focused: bool,
     zoom_percent: u16,
@@ -586,7 +588,18 @@ impl AppShell {
         composer.update(cx, |state, cx| state.focus(window, cx));
 
         let state = cx.new(AppState::new);
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let updater = cx.new(app_updates::AppUpdater::new);
+        cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+        let mut selected = state.read(cx).selection.clone();
+        cx.observe(&state, move |this, state, cx| {
+            let selection = state.read(cx).selection.clone();
+            if selection != selected {
+                selected = selection;
+                this.updater.update(cx, |updater, cx| updater.check(false, cx));
+            }
+            cx.notify();
+        }).detach();
+        updater.update(cx, |updater, cx| updater.check(false, cx));
 
         // Kill every child process when the app quits.
         let quit_state = state.clone();
@@ -654,6 +667,7 @@ impl AppShell {
         let usage = cx.new(|_| usage::Usage::new(state.clone()));
         cx.observe(&usage, |_, _, cx| cx.notify()).detach();
         let mut shell = Self {
+            updater,
             shell_focus: cx.focus_handle(),
             settings_focused: false,
             zoom_percent: del_core::zoom::percent(),
@@ -749,6 +763,9 @@ impl AppShell {
         shell.watch_right(cx);
         shell.state.update(cx, |state, cx| state.window_activation_changed(window.is_window_active(), cx));
         cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.updater.update(cx, |updater, cx| updater.check(false, cx));
+            }
             this.state.update(cx, |state, cx| {
                 state.window_activation_changed(window.is_window_active(), cx);
             });
@@ -2204,7 +2221,7 @@ impl Render for AppShell {
                             .border_r_1()
                             .border_color(appearance::separator())
                             .overflow_hidden()
-                            .child(sidebar::render(&self.state, &self.rename, &self.usage, cx));
+                            .child(sidebar::render(&self.state, &self.rename, &self.usage, &self.updater, cx));
                         if settings_open || self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {

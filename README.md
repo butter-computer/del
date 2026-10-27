@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.0` is available for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.1` is available for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,7 +14,7 @@ when making future changes.
 
 ## Download and install
 
-Download **Del-0.1.0-arm64.dmg** from the [0.1.0 release](https://github.com/butter-computer/del/releases/tag/v0.1.0),
+Download **Del-0.1.1-arm64.dmg** from the [0.1.1 release](https://github.com/butter-computer/del/releases/tag/v0.1.1),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -34,7 +34,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.0-arm64.dmg and its .sha256 sidecar
+# target/release/Del-0.1.1-arm64.dmg and its .sha256 sidecar
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -683,6 +683,30 @@ Agents can choose any saved session's browser with its session/tab ID; chat
 credentials expose only browser operations.
 Page content is treated as untrusted data. ACP browser-tool injection is not yet
 implemented.
+
+## App updates
+
+Public Apple Silicon builds check GitHub's latest stable release at startup,
+when the selected session/tab changes, and when the window becomes active.
+Automatic checks are limited to once every 15 minutes and never block sessions.
+The control above **Settings** also lets you check manually and retry failures.
+Failed restarts keep the staged download so you can retry without downloading again.
+
+Click **Update to …** to download the existing release DMG. The control shows
+percentage progress, then verifies its SHA-256 sidecar, bundle identity, version,
+and code signature before staging the app beside the current installation.
+**Restart to update** offers **Restart now** and **Later**. Later keeps the staged
+update ready for this run; quitting without applying it discards the staged copy.
+Restart stops running agents/terminals through the normal quit flow and preserves
+saved sessions. A failed replacement restores the previous app; its bundle is
+retained in `.del-retired` so a running process never loses its signed resources.
+
+Updates require a writable installation directory. Move a read-only or
+translocated app to Applications first. Local development bundles and raw Cargo
+runs do not self-update or replace their development signing identity. Releases
+continue to use the existing DMG/checksum publishing mechanism and its documented
+ad-hoc signing status. This feature becomes available after installing a build
+that includes it; older builds need that first upgrade manually.
 
 ## Harness updates
 

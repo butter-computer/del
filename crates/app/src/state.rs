@@ -3198,11 +3198,12 @@ pub(crate) mod tests {
             state: Entity<AppState>,
             rename: Entity<gpui_kit::component::input::InputState>,
             usage: Entity<crate::usage::Usage>,
+            updater: Entity<crate::app_updates::AppUpdater>,
         }
         impl Render for Fixture {
             fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
                 gpui::div().w(gpui::px(240.)).h(gpui::px(700.))
-                    .child(crate::sidebar::render(&self.state, &self.rename, &self.usage, cx))
+                    .child(crate::sidebar::render(&self.state, &self.rename, &self.usage, &self.updater, cx))
             }
         }
         cx.update(gpui_kit::init);
@@ -3214,7 +3215,7 @@ pub(crate) mod tests {
         let (root, cx) = cx.add_window_view(|window, cx| {
             let rename = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx));
             let usage = cx.new(|_| crate::usage::Usage::new(state.clone()));
-            Fixture { state: state.clone(), rename, usage }
+            Fixture { state: state.clone(), rename, usage, updater: cx.new(crate::app_updates::AppUpdater::new) }
         });
         cx.update(|window, cx| { window.draw(cx).clear(cx); });
         assert!(cx.debug_bounds("pinned-heading").is_none());
