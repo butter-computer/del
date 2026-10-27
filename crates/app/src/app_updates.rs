@@ -64,6 +64,8 @@ pub struct AppUpdater {
     last_check: Option<Instant>,
     receiver: Option<mpsc::Receiver<Event>>,
     restart_error: Option<String>,
+    #[cfg(test)]
+    release_check: Option<std::sync::Arc<dyn Fn() -> Result<Option<Update>> + Send + Sync>>,
 }
 
 impl AppUpdater {
@@ -80,7 +82,26 @@ impl AppUpdater {
             last_check: None,
             receiver: None,
             restart_error: None,
+            #[cfg(test)]
+            release_check: None,
         }
+    }
+
+    /// Observe the same selection used by session creation, sidebar rows and tabs.
+    pub fn watch_sessions(
+        &mut self,
+        state: &Entity<crate::state::AppState>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut selected = state.read(cx).selection.clone();
+        cx.observe(state, move |updater, state, cx| {
+            let selection = state.read(cx).selection.clone();
+            if selection != selected {
+                selected = selection;
+                updater.check(false, cx);
+            }
+        })
+        .detach();
     }
 
     // Poll only while a worker is active; idle tab switches do not add a timer.
@@ -161,8 +182,14 @@ impl AppUpdater {
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         Self::watch(cx);
+        #[cfg(test)]
+        let source = self.release_check.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Event::Checked(check_release()));
+            #[cfg(test)]
+            let result = source.map_or_else(check_release, |source| source());
+            #[cfg(not(test))]
+            let result = check_release();
+            let _ = tx.send(Event::Checked(result));
         });
         cx.notify();
     }
@@ -966,6 +993,89 @@ mod tests {
         updater.update(cx, |updater, _| {
             assert!(matches!(updater.status, Status::Ready(_)))
         });
+    }
+
+    fn automatic_selection_check(cx: &mut gpui::TestAppContext, switch_tab: bool) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+        let state = crate::state::tests::draft(cx);
+        if switch_tab {
+            state.update(cx, |state, cx| state.new_session(cx));
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let updater = cx.new(AppUpdater::new);
+        updater.update(cx, |updater, cx| {
+            updater.bundle = Some(PathBuf::from("/fixture/Del.app"));
+            updater.status = Status::Current;
+            updater.last_check = Some(Instant::now());
+            let calls = calls.clone();
+            updater.release_check = Some(Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                select_release(release("v0.2.0"), "0.1.1")
+            }));
+            updater.watch_sessions(&state, cx);
+        });
+        // Mere redraws and unrelated changes cannot check.
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Selection changes within the cache must also stay quiet.
+        state.update(cx, |state, cx| {
+            if switch_tab {
+                state.select_nth(0, cx);
+            } else {
+                state.new_session(cx);
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        updater.update(cx, |updater, _| {
+            updater.last_check =
+                Some(Instant::now() - super::CHECK_INTERVAL - Duration::from_secs(1));
+        });
+        // Only the real AppState action triggers this check. No manual check,
+        // startup call or window activation is present in this fixture.
+        state.update(cx, |state, cx| {
+            if switch_tab {
+                state.select_nth(1, cx);
+            } else {
+                state.new_session(cx);
+            }
+        });
+        cx.run_until_parked();
+        for _ in 0..100 {
+            updater.update(cx, |updater, cx| updater.drain(cx));
+            if updater.read_with(cx, |updater, _| {
+                matches!(updater.status, Status::Available(_))
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        updater.read_with(cx, |updater, _| {
+            assert!(matches!(&updater.status,
+            Status::Available(update) if update.version == "0.2.0"))
+        });
+        // Once announced, further tab/session changes preserve the offer.
+        state.update(cx, |state, cx| state.new_session(cx));
+        cx.run_until_parked();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn opening_session_detects_release_without_manual_or_focus_check(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        automatic_selection_check(cx, false);
+    }
+
+    #[gpui::test]
+    fn switching_tabs_detects_release_without_manual_or_focus_check(cx: &mut gpui::TestAppContext) {
+        automatic_selection_check(cx, true);
     }
 
     #[test]

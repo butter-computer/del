@@ -590,15 +590,8 @@ impl AppShell {
         let state = cx.new(AppState::new);
         let updater = cx.new(app_updates::AppUpdater::new);
         cx.observe(&updater, |_, _, cx| cx.notify()).detach();
-        let mut selected = state.read(cx).selection.clone();
-        cx.observe(&state, move |this, state, cx| {
-            let selection = state.read(cx).selection.clone();
-            if selection != selected {
-                selected = selection;
-                this.updater.update(cx, |updater, cx| updater.check(false, cx));
-            }
-            cx.notify();
-        }).detach();
+        updater.update(cx, |updater, cx| updater.watch_sessions(&state, cx));
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
         updater.update(cx, |updater, cx| updater.check(false, cx));
 
         // Kill every child process when the app quits.

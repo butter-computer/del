@@ -4,7 +4,7 @@ exclude = ["vendor/gpui-pre-apple"]
 members = ["crates/core", "crates/agent", "crates/codex", "crates/claude", "crates/acp", "crates/app", "crates/terminal", "crates/mcp", "crates/opencode"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 publish = false
 
