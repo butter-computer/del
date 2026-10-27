@@ -244,11 +244,7 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
             "Checking GitHub releases".into(),
             true,
         ),
-        Status::Current => (
-            "Del is up to date".into(),
-            "Click to check again".into(),
-            false,
-        ),
+        Status::Current => return div().into_any_element(),
         Status::Available(update) => (
             format!("Update to {}", update.version),
             "Download the latest version of Del".into(),
@@ -296,6 +292,7 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                     window.open_dialog(cx, move |dialog, _, _| {
                         let updater = updater.clone();
                         dialog.title("Restart to update Del?")
+                            .bg(crate::appearance::popup_surface(0x0b0b0d))
                             .child(div().child("Your saved sessions will remain available. Running agents and terminals will stop when Del restarts."))
                             .footer(gpui_kit::component::dialog::DialogFooter::new()
                                 .child(Button::new("update-later").label("Later").on_click(|_, window, cx| window.close_dialog(cx)))
@@ -831,6 +828,7 @@ mod tests {
             }),
             Status::Failed("Network unavailable".into()),
         ] {
+            let visible = !matches!(status, Status::Current);
             cx.update(|window, cx| {
                 view.update(cx, |fixture, cx| {
                     fixture.0.update(cx, |updater, cx| {
@@ -841,7 +839,7 @@ mod tests {
                 });
                 window.draw(cx).clear(cx);
             });
-            assert!(cx.debug_bounds("del-update").is_some());
+            assert_eq!(cx.debug_bounds("del-update").is_some(), visible);
         }
     }
 
