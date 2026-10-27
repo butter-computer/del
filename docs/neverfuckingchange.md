@@ -415,3 +415,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Workspace terminal tabs own independent PTYs. Switching tabs keeps shells alive;
   closing one tab must not terminate another. Restore tab layout with fresh shells,
   never by replaying old commands.
+
+- Public releases follow Alpha's Apple Silicon DMG plus SHA-256 format, with an
+  Applications shortcut and explicit signing/notarization status. Public bundles
+  use computer.butter.del; never replace the local development signing identity
+  or include user data, credentials, or provider account profiles in a release.
