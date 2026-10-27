@@ -11,8 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RELEASES: &str = "https://api.github.com/repos/butter-computer/del/releases/latest";
-const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const RELEASES: &str =
+    "https://github.com/butter-computer/del/releases/latest/download/latest.json";
+const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const BUNDLE_ID: &str = "computer.butter.del";
 type Result<T> = std::result::Result<T, String>;
 
@@ -995,7 +996,11 @@ mod tests {
         });
     }
 
-    fn automatic_selection_check(cx: &mut gpui::TestAppContext, switch_tab: bool) {
+    fn automatic_selection_check(
+        cx: &mut gpui::TestAppContext,
+        switch_tab: bool,
+        from_error: bool,
+    ) {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1009,7 +1014,11 @@ mod tests {
         let updater = cx.new(AppUpdater::new);
         updater.update(cx, |updater, cx| {
             updater.bundle = Some(PathBuf::from("/fixture/Del.app"));
-            updater.status = Status::Current;
+            updater.status = if from_error {
+                Status::Failed("Network unavailable".into())
+            } else {
+                Status::Current
+            };
             updater.last_check = Some(Instant::now());
             let calls = calls.clone();
             updater.release_check = Some(Arc::new(move || {
@@ -1070,12 +1079,17 @@ mod tests {
     fn opening_session_detects_release_without_manual_or_focus_check(
         cx: &mut gpui::TestAppContext,
     ) {
-        automatic_selection_check(cx, false);
+        automatic_selection_check(cx, false, false);
     }
 
     #[gpui::test]
     fn switching_tabs_detects_release_without_manual_or_focus_check(cx: &mut gpui::TestAppContext) {
-        automatic_selection_check(cx, true);
+        automatic_selection_check(cx, true, false);
+    }
+
+    #[gpui::test]
+    fn session_change_retries_failed_check_after_cooldown(cx: &mut gpui::TestAppContext) {
+        automatic_selection_check(cx, false, true);
     }
 
     #[test]

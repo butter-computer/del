@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.2` is available for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.3` is available for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,7 +14,7 @@ when making future changes.
 
 ## Download and install
 
-Download **Del-0.1.2-arm64.dmg** from the [0.1.2 release](https://github.com/butter-computer/del/releases/tag/v0.1.2),
+Download **Del-0.1.3-arm64.dmg** from the [0.1.3 release](https://github.com/butter-computer/del/releases/tag/v0.1.3),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -34,12 +34,14 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.2-arm64.dmg and its .sha256 sidecar
+# target/release/Del-0.1.3-arm64.dmg and its .sha256 sidecar
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
 and verifies the app signature and DMG before producing the checksum. It does not
-publish a GitHub release or modify the local development signing keychain.
+publish a GitHub release or modify the local development signing keychain. Upload
+the DMG, `.sha256` sidecar, and `target/release/latest.json` together to a draft
+GitHub release, then publish it only after all three assets are uploaded.
 
 ## Multiple provider accounts
 
@@ -688,7 +690,8 @@ implemented.
 
 Public Apple Silicon builds check GitHub's latest stable release at startup,
 when the selected session/tab changes, and when the window becomes active.
-Automatic checks are limited to once every 15 minutes and never block sessions.
+Automatic checks are limited to once every 60 seconds and never block sessions.
+Discovery reads the release-hosted `latest.json` manifest, avoiding GitHub API quotas.
 The control above **Settings** also lets you check manually and retry failures.
 Failed restarts keep the staged download so you can retry without downloading again.
 

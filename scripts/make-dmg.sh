@@ -42,3 +42,17 @@ hdiutil verify -quiet "$stage/Del.dmg"
 mv "$stage/Del.dmg" "$dmg"
 (cd target/release && shasum -a 256 "Del-$version-$arch.dmg" > "Del-$version-$arch.dmg.sha256")
 printf 'Built %s\n' "$dmg"
+
+# Public updater discovery must not depend on GitHub's shared unauthenticated
+# API quota. Upload this manifest with the DMG and checksum before publishing.
+/usr/bin/python3 - "$version" "$dmg" <<'MANIFEST'
+import json, pathlib, sys
+version, dmg = sys.argv[1], pathlib.Path(sys.argv[2])
+assets = []
+for path in (dmg, pathlib.Path(str(dmg) + '.sha256')):
+    assets.append(dict(name=path.name, size=path.stat().st_size,
+        browser_download_url=f'https://github.com/butter-computer/del/releases/download/v{version}/{path.name}'))
+manifest = dict(tag_name=f'v{version}', draft=False, prerelease=False, assets=assets)
+(dmg.parent / 'latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+MANIFEST
+printf 'Upload %s, its .sha256 sidecar, and target/release/latest.json together.\n' "$dmg"
