@@ -214,17 +214,29 @@ impl AppState {
 
         let accounts = match crate::accounts::load() {
             Ok(accounts) => accounts,
-            Err(e) => { error = Some(format!("Could not read accounts: {e}")); vec![] }
+            Err(e) => {
+                error = Some(format!("Could not read accounts: {e}"));
+                vec![]
+            }
         };
-        for account in &accounts { manager.register_account(account.id.clone(), account.backend()); }
-        let initial_account = accounts.iter().find(|a| a.provider == Provider::Claude && a.is_default).map(|a| a.id.clone());
+        for account in &accounts {
+            manager.register_account(account.id.clone(), account.backend());
+        }
+        let initial_account = accounts
+            .iter()
+            .find(|a| a.provider == Provider::Claude && a.is_default)
+            .map(|a| a.id.clone());
 
         let identity_accounts = accounts.clone();
         let identity_tx = tx.clone();
         rt.spawn(async move {
             for provider in [Provider::Codex, Provider::Claude] {
-                let Ok(binary) = crate::accounts::login_binary(provider).await else { continue; };
-                if let Ok(Some(identity)) = crate::accounts::provider_identity(provider, None, &binary).await {
+                let Ok(binary) = crate::accounts::login_binary(provider).await else {
+                    continue;
+                };
+                if let Ok(Some(identity)) =
+                    crate::accounts::provider_identity(provider, None, &binary).await
+                {
                     let _ = identity_tx.send(Msg::AccountIdentity(provider, None, identity));
                 }
                 for account in identity_accounts.iter().filter(|a| a.provider == provider) {
@@ -295,8 +307,11 @@ impl AppState {
         });
 
         let readiness = crate::readiness::Readiness::new(rt.handle(), manager.clone());
-        cx.observe_self(|state, _| { state.refresh_readiness(); state.inspect_projects(); })
-            .detach();
+        cx.observe_self(|state, _| {
+            state.refresh_readiness();
+            state.inspect_projects();
+        })
+        .detach();
 
         Self::pump(rx, cx);
 
@@ -309,8 +324,15 @@ impl AppState {
         error = error.or(overrides_error).or(projects_error);
 
         // Removed account profiles keep their credentials only for the recovery window.
-        if !cfg!(test) && let Some(removed) = del_agent::data_dir().map(|d| d.join("removed-accounts")) {
-            rt.spawn_blocking(move || crate::accounts::purge_removed_profiles(&removed, crate::accounts::REMOVED_RETENTION));
+        if !cfg!(test)
+            && let Some(removed) = del_agent::data_dir().map(|d| d.join("removed-accounts"))
+        {
+            rt.spawn_blocking(move || {
+                crate::accounts::purge_removed_profiles(
+                    &removed,
+                    crate::accounts::REMOVED_RETENTION,
+                )
+            });
         }
         Self {
             project_info: HashMap::new(),
@@ -323,7 +345,9 @@ impl AppState {
             default_identities: HashMap::new(),
             account_usage: HashMap::new(),
             usage_loading: false,
-            draft_accounts: initial_account.map(|id| HashMap::from([(0, id)])).unwrap_or_default(),
+            draft_accounts: initial_account
+                .map(|id| HashMap::from([(0, id)]))
+                .unwrap_or_default(),
             rt,
             manager,
             tx,
@@ -414,52 +438,86 @@ impl AppState {
             Msg::ProjectInspected(path, info) => {
                 self.project_loading.remove(&path);
                 let mut info = info;
-                if !path.exists() && let Some(root) = self.project_preferences.directories.get(&path) { info.root = root.clone(); }
+                if !path.exists()
+                    && let Some(root) = self.project_preferences.directories.get(&path)
+                {
+                    info.root = root.clone();
+                }
                 let has_active = self.unified_rows().iter().any(|row| row.cwd == path);
-                let reactivated = has_active && (self.project_preferences.archived.contains(&info.root) || self.project_preferences.deleted.contains(&info.root));
+                let reactivated = has_active
+                    && (self.project_preferences.archived.contains(&info.root)
+                        || self.project_preferences.deleted.contains(&info.root));
                 if reactivated {
                     self.project_preferences.archived.remove(&info.root);
                     self.project_preferences.deleted.remove(&info.root);
                     self.project_preferences.collapsed.remove(&info.root);
                 }
                 let added = self.project_preferences.roots.insert(info.root.clone());
-                let previous = self.project_preferences.directories.insert(path.clone(), info.root.clone());
-                if (reactivated || added || previous.as_ref() != Some(&info.root)) && !cfg!(test)
-                    && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+                let previous = self
+                    .project_preferences
+                    .directories
+                    .insert(path.clone(), info.root.clone());
+                if (reactivated || added || previous.as_ref() != Some(&info.root))
+                    && !cfg!(test)
+                    && let Err(error) = self.project_preferences.save()
+                {
+                    self.error = Some(error.to_string());
+                }
                 self.project_info.insert(path, info);
             }
             Msg::AccountSwitched(id, result) => {
                 self.switching_accounts.remove(&id);
                 self.set_records(self.manager.list_sessions());
-                if let Err(error) = result { self.error = Some(format!("Could not switch account: {error}")); }
+                if let Err(error) = result {
+                    self.error = Some(format!("Could not switch account: {error}"));
+                }
                 self.load_models(true, cx);
             }
-            Msg::AccountUsage(provider, id, usage) => { self.account_usage.insert((provider, id), usage); }
-            Msg::AccountUsageFinished => { self.usage_loading = false; }
+            Msg::AccountUsage(provider, id, usage) => {
+                self.account_usage.insert((provider, id), usage);
+            }
+            Msg::AccountUsageFinished => {
+                self.usage_loading = false;
+            }
             Msg::AccountIdentity(provider, id, identity) => {
                 if let Some(id) = id {
-                    if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) { account.identity = Some(identity); }
-                    if let Err(e) = crate::accounts::save(&self.accounts) { self.error = Some(format!("Could not save account: {e}")); }
-                } else { self.default_identities.insert(provider, identity); }
+                    if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
+                        account.identity = Some(identity);
+                    }
+                    if let Err(e) = crate::accounts::save(&self.accounts) {
+                        self.error = Some(format!("Could not save account: {e}"));
+                    }
+                } else {
+                    self.default_identities.insert(provider, identity);
+                }
             }
             Msg::AccountChecked(id, result) => {
                 match result {
                     Ok(identity) => {
                         if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
-                            if let Some(identity) = identity { account.identity = Some(identity); }
+                            if let Some(identity) = identity {
+                                account.identity = Some(identity);
+                            }
                             account.requires_login = false;
                         }
-                        self.catalogs.retain(|(_, account, _), _| account.as_ref() != Some(&id));
+                        self.catalogs
+                            .retain(|(_, account, _), _| account.as_ref() != Some(&id));
                         self.account_status.insert(id, "Connected".into());
                         self.refresh_account_usage(cx);
-                        if let Err(e) = crate::accounts::save(&self.accounts) { self.error = Some(format!("Could not save account: {e}")); }
+                        if let Err(e) = crate::accounts::save(&self.accounts) {
+                            self.error = Some(format!("Could not save account: {e}"));
+                        }
                     }
                     // A slow check (e.g. at startup) says nothing about the login; keep the saved state.
                     Err(error) if crate::accounts::identity_check_inconclusive(&error) => {}
                     Err(error) => {
-                        if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) { account.requires_login = true; }
+                        if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
+                            account.requires_login = true;
+                        }
                         self.account_status.insert(id, error);
-                        if !cfg!(test) { let _ = crate::accounts::save(&self.accounts); }
+                        if !cfg!(test) {
+                            let _ = crate::accounts::save(&self.accounts);
+                        }
                     }
                 }
             }
@@ -522,7 +580,9 @@ impl AppState {
                 // Default the draft to a usable provider once we know.
                 if let Some(ready) = list.iter().find(|s| providers::ready(s)) {
                     for (key, draft) in self.drafts.iter_mut() {
-                        if self.draft_accounts.contains_key(key) { continue; }
+                        if self.draft_accounts.contains_key(key) {
+                            continue;
+                        }
                         let draft_ready = list
                             .iter()
                             .any(|s| s.provider == draft.provider && providers::ready(s));
@@ -558,7 +618,9 @@ impl AppState {
                     None => self.add_tab(&id),
                 }
                 self.set_records(self.manager.list_sessions());
-                if let Some(record) = self.records.iter().find(|r| r.id == id) { self.project_info.remove(&record.cwd); }
+                if let Some(record) = self.records.iter().find(|r| r.id == id) {
+                    self.project_info.remove(&record.cwd);
+                }
                 if self.selection == Selection::Draft(key) {
                     self.selection = Selection::Session(id);
                 }
@@ -603,7 +665,12 @@ impl AppState {
         // Wait for provider discovery/sign-in; never open an authentication UI
         // or prepare a chat for a terminal tab.
         let launch = self.draft_launch_options();
-        let config = config.filter(|c| !launch.worktree && launch.branch.is_none() && self.selected_account().is_none() && self.status_of(c.provider).is_some_and(providers::ready));
+        let config = config.filter(|c| {
+            !launch.worktree
+                && launch.branch.is_none()
+                && self.selected_account().is_none()
+                && self.status_of(c.provider).is_some_and(providers::ready)
+        });
         readiness.set_config(config);
     }
 
@@ -623,11 +690,21 @@ impl AppState {
 
     /// Rows for the sidebar (not archived), most recent first.
     pub fn rows(&self) -> Vec<Row> {
-        self.all_rows().rows.iter().filter(|r| !r.archived).cloned().collect()
+        self.all_rows()
+            .rows
+            .iter()
+            .filter(|r| !r.archived)
+            .cloned()
+            .collect()
     }
 
     pub fn archived_rows(&self) -> Vec<Row> {
-        self.all_rows().rows.iter().filter(|r| r.archived).cloned().collect()
+        self.all_rows()
+            .rows
+            .iter()
+            .filter(|r| r.archived)
+            .cloned()
+            .collect()
     }
 
     pub fn has_archived_chats(&self) -> bool {
@@ -651,7 +728,11 @@ impl AppState {
             return cache.clone();
         }
         let rows = self.overrides.rows(&self.records);
-        let index = rows.iter().enumerate().map(|(at, row)| (row.id.clone(), at)).collect();
+        let index = rows
+            .iter()
+            .enumerate()
+            .map(|(at, row)| (row.id.clone(), at))
+            .collect();
         let cache = std::rc::Rc::new(RowsCache { rows, index });
         *self.rows_cache.borrow_mut() = Some(cache.clone());
         cache
@@ -692,7 +773,9 @@ impl AppState {
     }
 
     pub fn session_working(&self, id: &SessionId) -> bool {
-        self.records.iter().any(|row| &row.id == id && row.status == SessionStatus::Running)
+        self.records
+            .iter()
+            .any(|row| &row.id == id && row.status == SessionStatus::Running)
             || self.terminal_working.contains(id)
     }
 
@@ -824,29 +907,63 @@ impl AppState {
     }
 
     pub fn sort_terminal_rows(&mut self) {
-        self.terminal_rows.sort_by_key(|row| (!row.pinned,
-            self.overrides.order(&row.id).unwrap_or(if row.pinned { 0 } else { u64::MAX })));
+        self.terminal_rows.sort_by_key(|row| {
+            (
+                !row.pinned,
+                self.overrides
+                    .order(&row.id)
+                    .unwrap_or(if row.pinned { 0 } else { u64::MAX }),
+            )
+        });
     }
 
     /// Reorder only within the same visible section and pin group.
-    pub fn reorder_sidebar(&mut self, dragged: &SessionId, target: &SessionId, terminal: bool, cx: &mut Context<Self>) {
+    pub fn reorder_sidebar(
+        &mut self,
+        dragged: &SessionId,
+        target: &SessionId,
+        terminal: bool,
+        cx: &mut Context<Self>,
+    ) {
         let _ = terminal; // Session mode does not define sidebar membership.
         let rows = self.unified_rows();
-        let Some(source) = rows.iter().find(|r| &r.id == dragged) else { return; };
-        let Some(destination) = rows.iter().find(|r| &r.id == target) else { return; };
-        if source.pinned != destination.pinned || (!source.pinned && self.project_root(&source.cwd) != self.project_root(&destination.cwd)) { return; }
-        let mut ids: Vec<_> = rows.iter().filter(|r| r.pinned == source.pinned && (r.pinned || self.project_root(&r.cwd) == self.project_root(&source.cwd))).map(|r| r.id.clone()).collect();
+        let Some(source) = rows.iter().find(|r| &r.id == dragged) else {
+            return;
+        };
+        let Some(destination) = rows.iter().find(|r| &r.id == target) else {
+            return;
+        };
+        if source.pinned != destination.pinned
+            || (!source.pinned
+                && self.project_root(&source.cwd) != self.project_root(&destination.cwd))
+        {
+            return;
+        }
+        let mut ids: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.pinned == source.pinned
+                    && (r.pinned || self.project_root(&r.cwd) == self.project_root(&source.cwd))
+            })
+            .map(|r| r.id.clone())
+            .collect();
         let from = ids.iter().position(|id| id == dragged).unwrap();
         let to = ids.iter().position(|id| id == target).unwrap();
-        if from == to { return; }
+        if from == to {
+            return;
+        }
         let previous = ids.clone();
         let id = ids.remove(from);
         ids.insert(to, id);
         if self.sidebar_drag.active.is_some() {
-            self.sidebar_drag.shifts = ids.iter().enumerate().map(|(at, id)| {
-                let before = previous.iter().position(|old| old == id).unwrap();
-                (id.0.clone(), (before as f32 - at as f32) * 30.)
-            }).collect();
+            self.sidebar_drag.shifts = ids
+                .iter()
+                .enumerate()
+                .map(|(at, id)| {
+                    let before = previous.iter().position(|old| old == id).unwrap();
+                    (id.0.clone(), (before as f32 - at as f32) * 30.)
+                })
+                .collect();
             self.sidebar_drag.generation += 1;
             crate::haptics::tick();
         }
@@ -874,7 +991,8 @@ impl AppState {
     pub fn reply_finished(&mut self, id: &SessionId, cx: &mut Context<Self>) {
         self.terminal_working.remove(id);
         cx.notify();
-        let visible = self.window_active && self.panel == Panel::Chat
+        let visible = self.window_active
+            && self.panel == Panel::Chat
             && matches!(&self.selection,
             Selection::Session(current) | Selection::Terminal(current) if current == id);
         if visible {
@@ -885,7 +1003,9 @@ impl AppState {
     }
 
     pub fn mark_visible_chat_read(&mut self, cx: &mut Context<Self>) {
-        if self.panel != Panel::Chat { return; }
+        if self.panel != Panel::Chat {
+            return;
+        }
         let id = match &self.selection {
             Selection::Session(id) | Selection::Terminal(id) => id.clone(),
             Selection::Draft(_) => return,
@@ -899,7 +1019,9 @@ impl AppState {
 
     pub fn window_activation_changed(&mut self, active: bool, cx: &mut Context<Self>) {
         self.window_active = active;
-        if active { self.mark_visible_chat_read(cx); }
+        if active {
+            self.mark_visible_chat_read(cx);
+        }
         cx.notify();
     }
 
@@ -1010,7 +1132,10 @@ impl AppState {
     pub fn load_models(&mut self, refresh: bool, cx: &mut Context<Self>) {
         let (provider, _, cwd) = self.effective();
         let account = self.selected_account();
-        let catalog = self.catalogs.entry((provider, account.clone(), cwd.clone())).or_default();
+        let catalog = self
+            .catalogs
+            .entry((provider, account.clone(), cwd.clone()))
+            .or_default();
         if catalog.loading || (catalog.loaded && !refresh) {
             return;
         }
@@ -1144,12 +1269,24 @@ impl AppState {
         let effort = self.effort();
         let tier = self.service_tier();
         let account = self.default_account(provider).map(str::to_owned);
-        let has_context = self.tabs.iter().any(|tab| tab.selection() == self.selection);
-        let cwd = if has_context { cwd } else { self.project_preferences.last_directory.clone().unwrap_or(cwd) };
+        let has_context = self
+            .tabs
+            .iter()
+            .any(|tab| tab.selection() == self.selection);
+        let cwd = if has_context {
+            cwd
+        } else {
+            self.project_preferences
+                .last_directory
+                .clone()
+                .unwrap_or(cwd)
+        };
         self.project_preferences.last_directory = Some(cwd.clone());
         self.project_info.remove(&cwd);
         self.open_draft(provider, model, cwd, cx);
-        if let (Selection::Draft(key), Some(account)) = (&self.selection, account) { self.draft_accounts.insert(*key, account); }
+        if let (Selection::Draft(key), Some(account)) = (&self.selection, account) {
+            self.draft_accounts.insert(*key, account);
+        }
         if let Some(draft) = self.draft_mut() {
             draft.reasoning_effort = effort;
             draft.service_tier = tier;
@@ -1166,7 +1303,8 @@ impl AppState {
     ) {
         // Replace an automatic empty composer rather than retaining a hidden draft.
         if let Selection::Draft(old) = self.selection
-            && !self.tabs.contains(&Tab::Draft(old)) && !self.starting.contains(&old)
+            && !self.tabs.contains(&Tab::Draft(old))
+            && !self.starting.contains(&old)
         {
             self.drafts.remove(&old);
             self.draft_modes.remove(&old);
@@ -1187,7 +1325,9 @@ impl AppState {
                 permission_mode: providers::permission_mode(provider),
             },
         );
-        if let Some(account) = self.default_account(provider).map(str::to_owned) { self.draft_accounts.insert(key, account); }
+        if let Some(account) = self.default_account(provider).map(str::to_owned) {
+            self.draft_accounts.insert(key, account);
+        }
         self.new_uid(Tab::Draft(key));
         self.tabs.push(Tab::Draft(key));
         self.selection = Selection::Draft(key);
@@ -1307,7 +1447,9 @@ impl AppState {
         }
         if let Tab::Draft(k) = tab {
             self.drafts.remove(k);
-            if !self.starting.contains(k) { self.launch_options.remove(k); }
+            if !self.starting.contains(k) {
+                self.launch_options.remove(k);
+            }
             self.draft_modes.remove(k);
             self.starting.remove(k);
             self.pending_prompts.remove(k);
@@ -1386,7 +1528,10 @@ impl AppState {
     }
 
     pub fn send_input(&mut self, input: UserInput, cx: &mut Context<Self>) {
-        if matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id)) { return; }
+        if matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id))
+        {
+            return;
+        }
         let text = input.text.clone();
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
@@ -1408,13 +1553,28 @@ impl AppState {
                     },
                 );
                 let account = self.draft_accounts.get(&key).cloned();
-                let options = self.launch_options.entry(key).or_insert_with(|| crate::projects::LaunchOptions { token: uuid::Uuid::new_v4().to_string(), ..Default::default() }).clone();
+                let options = self
+                    .launch_options
+                    .entry(key)
+                    .or_insert_with(|| crate::projects::LaunchOptions {
+                        token: uuid::Uuid::new_v4().to_string(),
+                        ..Default::default()
+                    })
+                    .clone();
                 self.rt.spawn(async move {
                     let result = async {
                         let mut config = config;
                         let cwd = config.cwd.clone();
-                        config.cwd = tokio::task::spawn_blocking(move || crate::projects::prepare(&cwd, &options, &del_agent::data_dir().unwrap_or_else(std::env::temp_dir)))
-                            .await.map_err(|e| AgentError::Backend(e.to_string()))?.map_err(AgentError::Backend)?;
+                        config.cwd = tokio::task::spawn_blocking(move || {
+                            crate::projects::prepare(
+                                &cwd,
+                                &options,
+                                &del_agent::data_dir().unwrap_or_else(std::env::temp_dir),
+                            )
+                        })
+                        .await
+                        .map_err(|e| AgentError::Backend(e.to_string()))?
+                        .map_err(AgentError::Backend)?;
                         let handle = manager.start_account_session(config, account).await?;
                         let submitted = std::time::Instant::now();
                         manager.send_prompt(&handle.id, input.clone()).await?;
@@ -1517,8 +1677,17 @@ impl AppState {
     }
 
     pub fn restore(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        let root = self.records.iter().find(|row| row.id == id).map(|row| &row.cwd)
-            .or_else(|| self.terminal_rows.iter().find(|row| row.id == id).map(|row| &row.cwd))
+        let root = self
+            .records
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| &row.cwd)
+            .or_else(|| {
+                self.terminal_rows
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| &row.cwd)
+            })
             .map(|cwd| self.project_root(cwd));
         if let Some(root) = root {
             self.project_preferences.archived.remove(&root);
@@ -1563,7 +1732,10 @@ impl AppState {
                 // The durable follow-up queue and its imported attachments belong to this session.
                 if !cfg!(test) {
                     let queue_id = id.clone();
-                    let _ = tokio::task::spawn_blocking(move || crate::followups::Queue::remove_session(&queue_id)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::followups::Queue::remove_session(&queue_id)
+                    })
+                    .await;
                 }
                 let _ = tx.send(Msg::PanelDeleted(format!("chat:{}", id.as_str()), uid));
             }
@@ -1587,7 +1759,9 @@ impl AppState {
     /// `None` cancels.
     pub fn finish_rename(&mut self, title: Option<String>, cx: &mut Context<Self>) {
         if let Some(path) = self.project_renaming.take() {
-            if let Some(name) = title { self.rename_project(path, name, cx); }
+            if let Some(name) = title {
+                self.rename_project(path, name, cx);
+            }
             cx.notify();
             return;
         }
@@ -1631,7 +1805,11 @@ impl AppState {
             return self.overrides.title(id).unwrap_or(&row.title).to_owned();
         }
         let cache = self.all_rows();
-        cache.index.get(id).map(|&at| cache.rows[at].title.clone()).unwrap_or_default()
+        cache
+            .index
+            .get(id)
+            .map(|&at| cache.rows[at].title.clone())
+            .unwrap_or_default()
     }
 
     /// Persist sidebar metadata off the UI thread; rapid changes coalesce.
@@ -1643,7 +1821,11 @@ impl AppState {
             return;
         };
         let generation = self.overrides_writer.request();
-        let (writer, snapshot, tx) = (self.overrides_writer.clone(), self.overrides.clone(), self.tx.clone());
+        let (writer, snapshot, tx) = (
+            self.overrides_writer.clone(),
+            self.overrides.clone(),
+            self.tx.clone(),
+        );
         self.rt.spawn_blocking(move || {
             if let Err(e) = writer.write(generation, &snapshot, &path) {
                 let _ = tx.send(Msg::Error(format!("Could not save sidebar changes: {e}")));
@@ -1665,8 +1847,16 @@ impl AppState {
     pub fn selected_account(&self) -> Option<String> {
         match &self.selection {
             Selection::Draft(key) => self.draft_accounts.get(key).cloned(),
-            Selection::Session(id) => self.records.iter().find(|r| &r.id == id).and_then(|r| r.account_id.clone()),
-            Selection::Terminal(id) => self.terminal_rows.iter().find(|r| &r.id == id).and_then(|r| r.account_id.clone()),
+            Selection::Session(id) => self
+                .records
+                .iter()
+                .find(|r| &r.id == id)
+                .and_then(|r| r.account_id.clone()),
+            Selection::Terminal(id) => self
+                .terminal_rows
+                .iter()
+                .find(|r| &r.id == id)
+                .and_then(|r| r.account_id.clone()),
         }
     }
 
@@ -1675,60 +1865,127 @@ impl AppState {
         self.select_account(provider, account, cx);
     }
 
-    pub fn select_account(&mut self, provider: Provider, account: Option<String>, cx: &mut Context<Self>) {
-        if self.is_starting() { return; }
-        if account.as_ref().is_some_and(|id| !self.accounts.iter().any(|a| &a.id == id && a.provider == provider)) { return; }
-        if account.as_ref().is_some_and(|id| self.account_status.get(id).is_some_and(|status| status == "Waiting for sign-in…")) {
-            self.error = Some("Finish signing in before selecting this account.".into()); cx.notify(); return;
+    pub fn select_account(
+        &mut self,
+        provider: Provider,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_starting() {
+            return;
         }
-        if self.effective().0 == provider && self.selected_account() == account { return; }
-        if let Selection::Session(id) = self.selection.clone() {
-            if self.effective().0 == provider {
-                if matches!(self.manager.status(&id), Some(SessionStatus::Running | SessionStatus::WaitingApproval)) {
-                    self.error = Some("Wait for the response to finish before switching accounts.".into()); cx.notify(); return;
-                }
-                let target = account.as_ref().and_then(|id| self.accounts.iter().find(|a| &a.id == id)).cloned();
-                self.switching_accounts.insert(id.clone());
-                let (manager, tx) = (self.manager.clone(), self.tx.clone());
-                self.rt.spawn(async move {
-                    let result = manager.switch_account(&id, account, |record| crate::accounts::transfer_conversation(record, target)).await;
-                    let _ = tx.send(Msg::AccountSwitched(id, result.map_err(|e| e.to_string())));
-                });
-                cx.notify(); return;
+        if account.as_ref().is_some_and(|id| {
+            !self
+                .accounts
+                .iter()
+                .any(|a| &a.id == id && a.provider == provider)
+        }) {
+            return;
+        }
+        if account.as_ref().is_some_and(|id| {
+            self.account_status
+                .get(id)
+                .is_some_and(|status| status == "Waiting for sign-in…")
+        }) {
+            self.error = Some("Finish signing in before selecting this account.".into());
+            cx.notify();
+            return;
+        }
+        if self.effective().0 == provider && self.selected_account() == account {
+            return;
+        }
+        if let Selection::Session(id) = self.selection.clone()
+            && self.effective().0 == provider
+        {
+            if matches!(
+                self.manager.status(&id),
+                Some(SessionStatus::Running | SessionStatus::WaitingApproval)
+            ) {
+                self.error =
+                    Some("Wait for the response to finish before switching accounts.".into());
+                cx.notify();
+                return;
             }
+            let target = account
+                .as_ref()
+                .and_then(|id| self.accounts.iter().find(|a| &a.id == id))
+                .cloned();
+            self.switching_accounts.insert(id.clone());
+            let (manager, tx) = (self.manager.clone(), self.tx.clone());
+            self.rt.spawn(async move {
+                let result = manager
+                    .switch_account(&id, account, |record| {
+                        crate::accounts::transfer_conversation(record, target)
+                    })
+                    .await;
+                let _ = tx.send(Msg::AccountSwitched(id, result.map_err(|e| e.to_string())));
+            });
+            cx.notify();
+            return;
         }
-        if !self.is_draft() { self.fork_with(provider, None, cx); }
+        if !self.is_draft() {
+            self.fork_with(provider, None, cx);
+        }
         self.set_provider(provider, cx);
         if let Selection::Draft(key) = self.selection {
             self.draft_accounts.remove(&key);
-            if let Some(account) = account { self.draft_accounts.insert(key, account); }
+            if let Some(account) = account {
+                self.draft_accounts.insert(key, account);
+            }
         }
-        if let Some(draft) = self.draft_mut() { draft.model = None; draft.reasoning_effort = None; draft.service_tier = None; }
+        if let Some(draft) = self.draft_mut() {
+            draft.model = None;
+            draft.reasoning_effort = None;
+            draft.service_tier = None;
+        }
         self.load_models(false, cx);
         cx.notify();
     }
 
     pub fn visible_accounts(&self, provider: Provider) -> Vec<&crate::accounts::Account> {
         let mut seen = std::collections::HashSet::new();
-        if let Some(identity) = self.default_identities.get(&provider).and_then(|s| crate::accounts::identity_key(s)) {
+        if let Some(identity) = self
+            .default_identities
+            .get(&provider)
+            .and_then(|s| crate::accounts::identity_key(s))
+        {
             seen.insert(identity);
         }
-        self.accounts.iter().filter(|account| account.provider == provider)
-            .filter(|account| account.identity.as_deref().and_then(crate::accounts::identity_key)
-                .is_none_or(|identity| seen.insert(identity))).collect()
+        self.accounts
+            .iter()
+            .filter(|account| account.provider == provider)
+            .filter(|account| {
+                account
+                    .identity
+                    .as_deref()
+                    .and_then(crate::accounts::identity_key)
+                    .is_none_or(|identity| seen.insert(identity))
+            })
+            .collect()
     }
 
     pub fn account_usage_remaining(&self, provider: Provider, id: Option<&str>) -> Option<f64> {
-        self.account_usage.get(&(provider, id.map(str::to_owned))).copied().flatten()
+        self.account_usage
+            .get(&(provider, id.map(str::to_owned)))
+            .copied()
+            .flatten()
     }
 
     pub fn account_is_selected(&self, provider: Provider, candidate: Option<&str>) -> bool {
-        if self.effective().0 != provider { return false; }
+        if self.effective().0 != provider {
+            return false;
+        }
         let selected = self.selected_account();
-        if selected.as_deref() == candidate { return true; }
+        if selected.as_deref() == candidate {
+            return true;
+        }
         let identity = |id: Option<&str>| {
             let value = match id {
-                Some(id) => self.accounts.iter().find(|a| a.id == id && a.provider == provider).and_then(|a| a.identity.as_deref()),
+                Some(id) => self
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == id && a.provider == provider)
+                    .and_then(|a| a.identity.as_deref()),
                 None => self.default_identities.get(&provider).map(String::as_str),
             };
             value.and_then(crate::accounts::identity_key)
@@ -1737,10 +1994,21 @@ impl AppState {
     }
 
     fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
-        if self.usage_loading || cfg!(test) { return; }
+        if self.usage_loading || cfg!(test) {
+            return;
+        }
         self.usage_loading = true;
-        let accounts = [Provider::Codex, Provider::Claude].into_iter()
-            .map(|provider| (provider, self.visible_accounts(provider).into_iter().cloned().collect::<Vec<_>>()))
+        let accounts = [Provider::Codex, Provider::Claude]
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider,
+                    self.visible_accounts(provider)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
             .collect::<Vec<_>>();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
@@ -1758,39 +2026,101 @@ impl AppState {
     }
 
     pub fn default_account(&self, provider: Provider) -> Option<&str> {
-        self.accounts.iter().find(|a| a.provider == provider && a.is_default).map(|a| a.id.as_str())
+        self.accounts
+            .iter()
+            .find(|a| a.provider == provider && a.is_default)
+            .map(|a| a.id.as_str())
     }
 
     pub fn account_needs_login(&self, id: &str) -> bool {
-        self.account_status.get(id).map(|status| status != "Connected" && status != "Waiting for sign-in…")
-            .unwrap_or_else(|| self.accounts.iter().find(|a| a.id == id).is_some_and(|a| a.requires_login))
+        self.account_status
+            .get(id)
+            .map(|status| status != "Connected" && status != "Waiting for sign-in…")
+            .unwrap_or_else(|| {
+                self.accounts
+                    .iter()
+                    .find(|a| a.id == id)
+                    .is_some_and(|a| a.requires_login)
+            })
     }
 
-    pub fn make_default_account(&mut self, provider: Provider, id: Option<String>, cx: &mut Context<Self>) {
-        if self.account_login_pending(provider) { return; }
-        if id.as_ref().is_some_and(|id| self.account_needs_login(id) || !self.accounts.iter().any(|a| &a.id == id && a.provider == provider)) { return; }
+    pub fn make_default_account(
+        &mut self,
+        provider: Provider,
+        id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account_login_pending(provider) {
+            return;
+        }
+        if id.as_ref().is_some_and(|id| {
+            self.account_needs_login(id)
+                || !self
+                    .accounts
+                    .iter()
+                    .any(|a| &a.id == id && a.provider == provider)
+        }) {
+            return;
+        }
         let mut accounts = self.accounts.clone();
-        for account in accounts.iter_mut().filter(|a| a.provider == provider) { account.is_default = id.as_ref() == Some(&account.id); }
-        if !cfg!(test) && let Err(error) = crate::accounts::save(&accounts) {
+        for account in accounts.iter_mut().filter(|a| a.provider == provider) {
+            account.is_default = id.as_ref() == Some(&account.id);
+        }
+        if !cfg!(test)
+            && let Err(error) = crate::accounts::save(&accounts)
+        {
             self.error = Some(format!("Could not save default account: {error}"));
-        } else { self.accounts = accounts; }
+        } else {
+            self.accounts = accounts;
+        }
         cx.notify();
     }
 
     pub fn delete_account(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else { return; };
-        if self.account_login_pending(account.provider) { return; }
-        if !self.switching_accounts.is_empty() || self.starting.iter().any(|key| self.draft_accounts.get(key).is_some_and(|account| account == id)) {
-            self.error = Some("Wait for account switching or chat startup to finish before deleting an account.".into()); cx.notify(); return;
+        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else {
+            return;
+        };
+        if self.account_login_pending(account.provider) {
+            return;
         }
-        if self.manager.list_sessions().iter().any(|r| r.account_id.as_deref() == Some(id))
-            || self.terminal_rows.iter().any(|r| r.account_id.as_deref() == Some(id)) {
+        if !self.switching_accounts.is_empty()
+            || self.starting.iter().any(|key| {
+                self.draft_accounts
+                    .get(key)
+                    .is_some_and(|account| account == id)
+            })
+        {
+            self.error = Some(
+                "Wait for account switching or chat startup to finish before deleting an account."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if self
+            .manager
+            .list_sessions()
+            .iter()
+            .any(|r| r.account_id.as_deref() == Some(id))
+            || self
+                .terminal_rows
+                .iter()
+                .any(|r| r.account_id.as_deref() == Some(id))
+        {
             self.error = Some("This account is used by existing chats. Switch those chats to another account before deleting it.".into());
-            cx.notify(); return;
+            cx.notify();
+            return;
         }
-        let accounts: Vec<_> = self.accounts.iter().filter(|a| a.id != id).cloned().collect();
+        let accounts: Vec<_> = self
+            .accounts
+            .iter()
+            .filter(|a| a.id != id)
+            .cloned()
+            .collect();
         let result = (|| -> std::io::Result<()> {
-            if cfg!(test) { return Ok(()); }
+            if cfg!(test) {
+                return Ok(());
+            }
             let source = account.root();
             let removed = del_agent::data_dir().unwrap().join("removed-accounts");
             let moved = crate::accounts::retire_profile(&source, &removed, id)?;
@@ -1808,10 +2138,14 @@ impl AppState {
                 self.accounts = accounts;
                 self.draft_accounts.retain(|_, account| account != id);
                 self.account_status.remove(id);
-                self.account_usage.retain(|(_, account_id), _| account_id.as_deref() != Some(id));
-                self.catalogs.retain(|(_, account, _), _| account.as_deref() != Some(id));
+                self.account_usage
+                    .retain(|(_, account_id), _| account_id.as_deref() != Some(id));
+                self.catalogs
+                    .retain(|(_, account, _), _| account.as_deref() != Some(id));
                 if let Some(backend) = self.manager.unregister_account(account.provider, id) {
-                    self.rt.spawn(async move { let _ = backend.shutdown().await; });
+                    self.rt.spawn(async move {
+                        let _ = backend.shutdown().await;
+                    });
                 }
             }
             Err(error) => self.error = Some(format!("Could not delete account: {error}")),
@@ -1820,24 +2154,40 @@ impl AppState {
     }
 
     pub fn default_account_label(&self, provider: Provider) -> String {
-        if provider == Provider::OpenCode { return "System".into(); }
-        self.default_identities.get(&provider).map(|identity| crate::accounts::display_identity(identity)).unwrap_or_else(|| "Account 1".into())
+        if provider == Provider::OpenCode {
+            return "System".into();
+        }
+        self.default_identities
+            .get(&provider)
+            .map(|identity| crate::accounts::display_identity(identity))
+            .unwrap_or_else(|| "Account 1".into())
     }
 
     pub fn account_login_pending(&self, provider: Provider) -> bool {
-        self.signin == Some(provider) || self.accounts.iter().any(|a| a.provider == provider
-            && self.account_status.get(&a.id).is_some_and(|status| status == "Waiting for sign-in…"))
+        self.signin == Some(provider)
+            || self.accounts.iter().any(|a| {
+                a.provider == provider
+                    && self
+                        .account_status
+                        .get(&a.id)
+                        .is_some_and(|status| status == "Waiting for sign-in…")
+            })
     }
 
     pub fn add_account(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        if self.account_login_pending(provider) { return; }
-        if provider == Provider::Acp { return; }
+        if self.account_login_pending(provider) {
+            return;
+        }
+        if provider == Provider::Acp {
+            return;
+        }
         match crate::accounts::create(provider, &self.accounts) {
             Ok(account) => {
                 let id = account.id.clone();
                 self.accounts.push(account.clone());
                 if let Err(e) = crate::accounts::save(&self.accounts) {
-                    self.accounts.pop(); self.error = Some(format!("Could not save account: {e}"));
+                    self.accounts.pop();
+                    self.error = Some(format!("Could not save account: {e}"));
                 } else {
                     self.manager.register_account(id.clone(), account.backend());
                     self.login_account(&id, cx);
@@ -1849,29 +2199,60 @@ impl AppState {
     }
 
     pub fn login_account(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.account_status.get(id).is_some_and(|status| status == "Waiting for sign-in…") { return; }
-        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else { return; };
-        if self.account_login_pending(account.provider) { return; }
-        self.account_status.insert(id.to_owned(), "Waiting for sign-in…".into());
+        if self
+            .account_status
+            .get(id)
+            .is_some_and(|status| status == "Waiting for sign-in…")
+        {
+            return;
+        }
+        let Some(account) = self.accounts.iter().find(|a| a.id == id).cloned() else {
+            return;
+        };
+        if self.account_login_pending(account.provider) {
+            return;
+        }
+        self.account_status
+            .insert(id.to_owned(), "Waiting for sign-in…".into());
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             let binary = match crate::accounts::login_binary(account.provider).await {
                 Ok(binary) => binary,
-                Err(error) => { let _ = tx.send(Msg::AccountChecked(account.id, Err(error))); return; }
+                Err(error) => {
+                    let _ = tx.send(Msg::AccountChecked(account.id, Err(error)));
+                    return;
+                }
             };
             let login_account = account.clone();
             let login_binary = binary.clone();
-            let marker = match tokio::task::spawn_blocking(move || crate::accounts::launch_login(&login_account, &login_binary)).await {
+            let marker = match tokio::task::spawn_blocking(move || {
+                crate::accounts::launch_login(&login_account, &login_binary)
+            })
+            .await
+            {
                 Ok(Ok(marker)) => marker,
-                result => { let _ = tx.send(Msg::AccountChecked(account.id, Err(format!("Could not open sign-in: {result:?}")))); return; }
+                result => {
+                    let _ = tx.send(Msg::AccountChecked(
+                        account.id,
+                        Err(format!("Could not open sign-in: {result:?}")),
+                    ));
+                    return;
+                }
             };
             let mut outcome = None;
             for _ in 0..100 {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
-                if status.is_empty() { continue; }
+                let Ok(status) = std::fs::read_to_string(&marker) else {
+                    continue;
+                };
+                if status.is_empty() {
+                    continue;
+                }
                 if status.trim() != "0" {
-                    outcome = Some(Err("Sign-in failed or was cancelled. Check Terminal, then try Sign in again.".to_string()));
+                    outcome = Some(Err(
+                        "Sign-in failed or was cancelled. Check Terminal, then try Sign in again."
+                            .to_string(),
+                    ));
                     break;
                 }
                 if let Ok(identity) = crate::accounts::identity(&account, &binary).await {
@@ -1882,24 +2263,32 @@ impl AppState {
             // A slow but successful sign-in may finish right at the deadline: check once more.
             let outcome = match outcome {
                 Some(outcome) => outcome,
-                None => crate::accounts::identity(&account, &binary).await
+                None => crate::accounts::identity(&account, &binary)
+                    .await
                     .map_err(|_| "Sign-in not confirmed. Try reconnecting.".to_string()),
             };
             let close_marker = marker.clone();
             let succeeded = outcome.is_ok();
             let _ = tokio::task::spawn_blocking(move || {
-                if succeeded { crate::accounts::close_login_terminal(&close_marker); }
+                if succeeded {
+                    crate::accounts::close_login_terminal(&close_marker);
+                }
                 crate::accounts::cleanup_login(&close_marker);
-            }).await;
+            })
+            .await;
             let _ = tx.send(Msg::AccountChecked(account.id, outcome));
         });
         cx.notify();
     }
 
     pub fn set_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        if self.effective().0 != provider && let Selection::Draft(key) = self.selection {
+        if self.effective().0 != provider
+            && let Selection::Draft(key) = self.selection
+        {
             self.draft_accounts.remove(&key);
-            if let Some(account) = self.default_account(provider).map(str::to_owned) { self.draft_accounts.insert(key, account); }
+            if let Some(account) = self.default_account(provider).map(str::to_owned) {
+                self.draft_accounts.insert(key, account);
+            }
         }
         if let Some(d) = self.draft_mut() {
             if d.provider != provider {
@@ -1957,23 +2346,36 @@ impl AppState {
 
     /// Stable project identity shared by chat and terminal sessions.
     pub fn project_root(&self, cwd: &std::path::Path) -> PathBuf {
-        self.project_info.get(cwd).map(|info| info.root.clone())
-            .or_else(|| self.project_preferences.directories.get(cwd).cloned()).unwrap_or_else(|| cwd.to_path_buf())
+        self.project_info
+            .get(cwd)
+            .map(|info| info.root.clone())
+            .or_else(|| self.project_preferences.directories.get(cwd).cloned())
+            .unwrap_or_else(|| cwd.to_path_buf())
     }
 
     fn inspect_projects(&mut self) {
         // Runs on every state notification: clone only directories not yet inspected.
-        let paths: Vec<PathBuf> = self.records.iter().map(|r| &r.cwd)
+        let paths: Vec<PathBuf> = self
+            .records
+            .iter()
+            .map(|r| &r.cwd)
             .chain(self.terminal_rows.iter().map(|r| &r.cwd))
             .chain(self.drafts.values().map(|d| &d.cwd))
-            .filter(|path| !self.project_info.contains_key(*path) && !self.project_loading.contains(*path))
-            .cloned().collect();
+            .filter(|path| {
+                !self.project_info.contains_key(*path) && !self.project_loading.contains(*path)
+            })
+            .cloned()
+            .collect();
         for path in paths {
-            if !self.project_loading.insert(path.clone()) { continue; }
+            if !self.project_loading.insert(path.clone()) {
+                continue;
+            }
             let tx = self.tx.clone();
             self.rt.spawn(async move {
                 let dir = path.clone();
-                if let Ok(info) = tokio::task::spawn_blocking(move || crate::projects::inspect(&dir)).await {
+                if let Ok(info) =
+                    tokio::task::spawn_blocking(move || crate::projects::inspect(&dir)).await
+                {
                     let _ = tx.send(Msg::ProjectInspected(path, info));
                 }
             });
@@ -1982,28 +2384,68 @@ impl AppState {
 
     pub fn unified_rows(&self) -> Vec<Row> {
         let mut rows = self.rows();
-        rows.extend(self.terminal_rows.iter().filter(|r| !self.terminal_archived(&r.id)).map(|r| Row {
-            id: r.id.clone(), provider: r.provider.unwrap_or(Provider::Claude), model: None,
-            cwd: r.cwd.clone(), title: self.current_title(&r.id), status: if self.session_working(&r.id) { SessionStatus::Running } else { SessionStatus::Idle },
-            updated_secs: 0, archived: false, pinned: r.pinned, unread: self.terminal_unread(&r.id),
-        }));
-        rows.sort_by_cached_key(|r| (!r.pinned, self.overrides.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }), std::cmp::Reverse(r.updated_secs)));
+        rows.extend(
+            self.terminal_rows
+                .iter()
+                .filter(|r| !self.terminal_archived(&r.id))
+                .map(|r| Row {
+                    id: r.id.clone(),
+                    provider: r.provider.unwrap_or(Provider::Claude),
+                    model: None,
+                    cwd: r.cwd.clone(),
+                    title: self.current_title(&r.id),
+                    status: if self.session_working(&r.id) {
+                        SessionStatus::Running
+                    } else {
+                        SessionStatus::Idle
+                    },
+                    updated_secs: 0,
+                    archived: false,
+                    pinned: r.pinned,
+                    unread: self.terminal_unread(&r.id),
+                }),
+        );
+        rows.sort_by_cached_key(|r| {
+            (
+                !r.pinned,
+                self.overrides
+                    .order(&r.id)
+                    .unwrap_or(if r.pinned { 0 } else { u64::MAX }),
+                std::cmp::Reverse(r.updated_secs),
+            )
+        });
         rows
     }
 
     pub fn project_drafts(&self, path: &std::path::Path) -> Vec<u64> {
-        self.tabs.iter().filter_map(|tab| match tab {
-            Tab::Draft(key) if self.drafts.get(key).is_some_and(|d| self.project_root(&d.cwd) == path) => Some(*key),
-            _ => None,
-        }).collect()
+        self.tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                Tab::Draft(key)
+                    if self
+                        .drafts
+                        .get(key)
+                        .is_some_and(|d| self.project_root(&d.cwd) == path) =>
+                {
+                    Some(*key)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[cfg(test)]
     pub fn project_paths(&self) -> Vec<PathBuf> {
         if self.show_archived {
             let rows = self.archived_rows();
-            self.project_paths_for(rows.iter().map(|row| row.cwd.as_path())
-                .chain(self.terminal_rows.iter().filter(|row| self.terminal_archived(&row.id)).map(|row| row.cwd.as_path())))
+            self.project_paths_for(
+                rows.iter().map(|row| row.cwd.as_path()).chain(
+                    self.terminal_rows
+                        .iter()
+                        .filter(|row| self.terminal_archived(&row.id))
+                        .map(|row| row.cwd.as_path()),
+                ),
+            )
         } else {
             let rows = self.unified_rows();
             self.project_paths_for(rows.iter().map(|row| row.cwd.as_path()))
@@ -2014,75 +2456,146 @@ impl AppState {
     /// pass over every session per frame. `cwds` are the visible rows' folders:
     /// active sessions, or archived ones while the archive is shown.
     /// Projects are directory groups, not independent visibility gates.
-    pub fn project_paths_for<'a>(&self, cwds: impl IntoIterator<Item = &'a std::path::Path>) -> Vec<PathBuf> {
+    pub fn project_paths_for<'a>(
+        &self,
+        cwds: impl IntoIterator<Item = &'a std::path::Path>,
+    ) -> Vec<PathBuf> {
         let mut paths: Vec<_> = cwds.into_iter().map(|cwd| self.project_root(cwd)).collect();
         if !self.show_archived {
-            paths.extend(self.tabs.iter().filter_map(|tab| match tab { Tab::Draft(key) => self.drafts.get(key), _ => None })
-                .map(|draft| self.project_root(&draft.cwd)));
+            paths.extend(
+                self.tabs
+                    .iter()
+                    .filter_map(|tab| match tab {
+                        Tab::Draft(key) => self.drafts.get(key),
+                        _ => None,
+                    })
+                    .map(|draft| self.project_root(&draft.cwd)),
+            );
         }
-        paths.sort(); paths.dedup(); paths
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     pub fn project_name(&self, path: &std::path::Path) -> String {
-        self.project_preferences.names.get(path).cloned().unwrap_or_else(|| sessions::folder_name(path).to_string())
+        self.project_preferences
+            .names
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| sessions::folder_name(path).to_string())
     }
 
     pub fn rename_project(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
-        if !name.trim().is_empty() { self.project_preferences.names.insert(path, name.trim().to_owned()); }
+        if !name.trim().is_empty() {
+            self.project_preferences
+                .names
+                .insert(path, name.trim().to_owned());
+        }
         self.save_projects(cx);
     }
 
     fn save_projects(&mut self, cx: &mut Context<Self>) {
-        if !cfg!(test) && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+        if !cfg!(test)
+            && let Err(error) = self.project_preferences.save()
+        {
+            self.error = Some(error.to_string());
+        }
         cx.notify();
     }
 
     pub fn archive_project(&mut self, path: PathBuf, delete: bool, cx: &mut Context<Self>) {
         let archived_only = delete && self.show_archived;
-        let drafts = if archived_only { Vec::new() } else { self.project_drafts(&path) };
+        let drafts = if archived_only {
+            Vec::new()
+        } else {
+            self.project_drafts(&path)
+        };
         if drafts.iter().any(|key| self.starting.contains(key)) {
             self.error = Some("Wait for this project's session to finish starting.".into());
             cx.notify();
             return;
         }
-        let ids: Vec<_> = self.records.iter().map(|r| (&r.id, &r.cwd))
+        let ids: Vec<_> = self
+            .records
+            .iter()
+            .map(|r| (&r.id, &r.cwd))
             .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
-            .filter(|(id, cwd)| self.project_root(cwd) == path && (!archived_only || self.overrides.archived(id))).map(|(id, _)| id.clone()).collect();
+            .filter(|(id, cwd)| {
+                self.project_root(cwd) == path && (!archived_only || self.overrides.archived(id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
         let existing_tabs = self.tabs.clone();
-        for id in ids { if delete { self.permanently_delete(id, cx); } else { self.archive(id, cx); } }
-        for key in drafts { self.close_tab(&Tab::Draft(key), cx); }
+        for id in ids {
+            if delete {
+                self.permanently_delete(id, cx);
+            } else {
+                self.archive(id, cx);
+            }
+        }
+        for key in drafts {
+            self.close_tab(&Tab::Draft(key), cx);
+        }
         // Closing the final tab prepares a composer, not a replacement project.
         self.tabs.retain(|tab| existing_tabs.contains(tab));
         if delete {
             self.project_preferences.archived.remove(&path);
-            let remains = self.records.iter().any(|r| self.project_root(&r.cwd) == path)
-                || self.terminal_rows.iter().any(|r| self.project_root(&r.cwd) == path)
+            let remains = self
+                .records
+                .iter()
+                .any(|r| self.project_root(&r.cwd) == path)
+                || self
+                    .terminal_rows
+                    .iter()
+                    .any(|r| self.project_root(&r.cwd) == path)
                 || !self.project_drafts(&path).is_empty();
             if !remains {
                 self.project_preferences.deleted.insert(path.clone());
                 self.project_preferences.names.remove(&path);
                 self.project_preferences.roots.remove(&path);
             }
-        } else { self.project_preferences.archived.insert(path.clone()); }
+        } else {
+            self.project_preferences.archived.insert(path.clone());
+        }
         self.save_projects(cx);
     }
 
     pub fn restore_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.project_preferences.archived.remove(&path);
-        let ids: Vec<_> = self.records.iter().map(|r| (&r.id, &r.cwd)).chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
-            .filter(|(_, cwd)| self.project_root(cwd) == path).map(|(id, _)| id.clone()).collect();
-        for id in ids { self.overrides_mut().set_archived(&id, false); }
+        let ids: Vec<_> = self
+            .records
+            .iter()
+            .map(|r| (&r.id, &r.cwd))
+            .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
+            .filter(|(_, cwd)| self.project_root(cwd) == path)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.overrides_mut().set_archived(&id, false);
+        }
         self.save_overrides();
         self.save_projects(cx);
     }
 
     pub fn cleanup_project_worktrees(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        let mut used: Vec<_> = self.records.iter().map(|r| r.cwd.clone()).chain(self.terminal_rows.iter().map(|r| r.cwd.clone())).collect();
+        let mut used: Vec<_> = self
+            .records
+            .iter()
+            .map(|r| r.cwd.clone())
+            .chain(self.terminal_rows.iter().map(|r| r.cwd.clone()))
+            .collect();
         let storage = del_agent::data_dir().unwrap_or_else(std::env::temp_dir);
-        used.extend(self.launch_options.values().map(|o| storage.join("worktrees").join(&o.token).join("checkout")));
+        used.extend(
+            self.launch_options
+                .values()
+                .map(|o| storage.join("worktrees").join(&o.token).join("checkout")),
+        );
         let tx = self.tx.clone();
         self.rt.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || crate::projects::cleanup(&root, &used, &storage)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::projects::cleanup(&root, &used, &storage)
+            })
+            .await;
             if let Err(error) = result.map_err(|e| e.to_string()).and_then(|r| r) {
                 let _ = tx.send(Msg::Error(format!("Worktree cleanup: {error}")));
             }
@@ -2092,14 +2605,22 @@ impl AppState {
 
     pub fn toggle_sidebar_section(&mut self, section: &str, cx: &mut Context<Self>) {
         if !self.project_preferences.collapsed_sections.remove(section) {
-            self.project_preferences.collapsed_sections.insert(section.to_owned());
+            self.project_preferences
+                .collapsed_sections
+                .insert(section.to_owned());
         }
         self.save_projects(cx);
     }
 
     pub fn toggle_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !self.project_preferences.collapsed.remove(&path) { self.project_preferences.collapsed.insert(path); }
-        if !cfg!(test) && let Err(e) = self.project_preferences.save() { self.error = Some(e.to_string()); }
+        if !self.project_preferences.collapsed.remove(&path) {
+            self.project_preferences.collapsed.insert(path);
+        }
+        if !cfg!(test)
+            && let Err(e) = self.project_preferences.save()
+        {
+            self.error = Some(e.to_string());
+        }
         cx.notify();
     }
 
@@ -2108,41 +2629,78 @@ impl AppState {
         self.project_preferences.deleted.remove(&path);
         self.project_preferences.roots.insert(path.clone());
         self.new_session(cx);
-        if let Selection::Draft(key) = self.selection {
-            if let Some(draft) = self.drafts.get_mut(&key) {
-                if draft.cwd != path { self.launch_options.remove(&key); }
-                draft.cwd = path.clone();
+        if let Selection::Draft(key) = self.selection
+            && let Some(draft) = self.drafts.get_mut(&key)
+        {
+            if draft.cwd != path {
+                self.launch_options.remove(&key);
             }
+            draft.cwd = path.clone();
         }
         self.project_preferences.last_directory = Some(path.clone());
         self.project_preferences.collapsed.remove(&path);
-        if !cfg!(test) && let Err(error) = self.project_preferences.save() { self.error = Some(error.to_string()); }
+        if !cfg!(test)
+            && let Err(error) = self.project_preferences.save()
+        {
+            self.error = Some(error.to_string());
+        }
         cx.notify();
     }
 
     pub fn add_project(&mut self, cx: &mut Context<Self>) {
-        let picker = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose project directory".into()) });
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose project directory".into()),
+        });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = picker.await && let Some(path) = paths.pop() {
+            if let Ok(Ok(Some(mut paths))) = picker.await
+                && let Some(path) = paths.pop()
+            {
                 let _ = this.update(cx, |s, cx| s.new_project_session(path, cx));
             }
-        }).detach();
+        })
+        .detach();
     }
 
     pub fn draft_launch_options(&self) -> crate::projects::LaunchOptions {
-        match self.selection { Selection::Draft(key) => self.launch_options.get(&key).cloned().unwrap_or_default(), _ => Default::default() }
+        match self.selection {
+            Selection::Draft(key) => self.launch_options.get(&key).cloned().unwrap_or_default(),
+            _ => Default::default(),
+        }
     }
 
-    pub fn set_launch_options(&mut self, branch: Option<String>, worktree: bool, cx: &mut Context<Self>) {
-        let Selection::Draft(key) = self.selection else { return; };
-        if self.is_starting() { return; }
-        self.launch_options.insert(key, crate::projects::LaunchOptions { branch, worktree, token: uuid::Uuid::new_v4().to_string() });
+    pub fn set_launch_options(
+        &mut self,
+        branch: Option<String>,
+        worktree: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Selection::Draft(key) = self.selection else {
+            return;
+        };
+        if self.is_starting() {
+            return;
+        }
+        self.launch_options.insert(
+            key,
+            crate::projects::LaunchOptions {
+                branch,
+                worktree,
+                token: uuid::Uuid::new_v4().to_string(),
+            },
+        );
         cx.notify();
     }
 
     fn set_draft_directory(&mut self, key: u64, dir: PathBuf, cx: &mut Context<Self>) {
-        if self.starting.contains(&key) { return; }
-        let Some(draft) = self.drafts.get_mut(&key) else { return; };
+        if self.starting.contains(&key) {
+            return;
+        }
+        let Some(draft) = self.drafts.get_mut(&key) else {
+            return;
+        };
         draft.cwd = dir.clone();
         let root = self.project_root(&dir);
         self.project_preferences.collapsed.remove(&root);
@@ -2155,8 +2713,12 @@ impl AppState {
     }
 
     pub fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        let Selection::Draft(key) = self.selection else { return; };
-        if self.is_starting() { return; }
+        let Selection::Draft(key) = self.selection else {
+            return;
+        };
+        if self.is_starting() {
+            return;
+        }
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -2201,7 +2763,9 @@ impl AppState {
     }
 
     pub fn recheck_provider(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        if matches!(provider, Provider::Codex | Provider::Claude) { self.refresh_account_usage(cx); }
+        if matches!(provider, Provider::Codex | Provider::Claude) {
+            self.refresh_account_usage(cx);
+        }
         if !self.checking.insert(provider) {
             return;
         }
@@ -2224,30 +2788,48 @@ impl AppState {
             let result = async {
                 let binary = crate::accounts::login_binary(provider).await?;
                 let launch_binary = binary.clone();
-                let marker = tokio::task::spawn_blocking(move || crate::accounts::launch_provider_login(provider, None, &launch_binary))
-                    .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+                let marker = tokio::task::spawn_blocking(move || {
+                    crate::accounts::launch_provider_login(provider, None, &launch_binary)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
                 let mut finished = None;
                 for _ in 0..100 {
                     tokio::time::sleep(Duration::from_secs(3)).await;
-                    let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
-                    if status.is_empty() { continue; }
+                    let Ok(status) = std::fs::read_to_string(&marker) else {
+                        continue;
+                    };
+                    if status.is_empty() {
+                        continue;
+                    }
                     finished = Some(status.trim() == "0");
                     break;
                 }
                 let identity = match finished {
                     Some(false) => None,
-                    _ => crate::accounts::provider_identity(provider, None, &binary).await.ok().flatten(),
+                    _ => crate::accounts::provider_identity(provider, None, &binary)
+                        .await
+                        .ok()
+                        .flatten(),
                 };
                 // After the deadline, a confirmed identity still means the slow sign-in worked.
                 let succeeded = finished == Some(true) || identity.is_some();
                 let closing = marker.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if succeeded { crate::accounts::close_login_terminal(&closing); }
+                    if succeeded {
+                        crate::accounts::close_login_terminal(&closing);
+                    }
                     crate::accounts::cleanup_login(&closing);
-                }).await;
+                })
+                .await;
                 match finished {
-                    Some(false) => return Err("Sign-in cancelled or failed. Try Sign in again.".to_string()),
-                    None if !succeeded => return Err("Sign-in timed out. Try Sign in again.".into()),
+                    Some(false) => {
+                        return Err("Sign-in cancelled or failed. Try Sign in again.".to_string());
+                    }
+                    None if !succeeded => {
+                        return Err("Sign-in timed out. Try Sign in again.".into());
+                    }
                     _ => {}
                 }
                 if let Some(identity) = identity {
@@ -2255,8 +2837,11 @@ impl AppState {
                 }
                 let _ = tx.send(Msg::Checked(providers::detect(provider).await));
                 Ok(())
-            }.await;
-            if let Err(error) = result { let _ = tx.send(Msg::Error(error)); }
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = tx.send(Msg::Error(error));
+            }
             let _ = tx.send(Msg::SigninFinished(provider));
         });
         cx.notify();
@@ -2269,9 +2854,12 @@ impl AppState {
             readiness.stop();
         }
         // Background sidebar writes may still be queued; write the final state now.
-        if !cfg!(test) && self.overrides_writer.pending()
+        if !cfg!(test)
+            && self.overrides_writer.pending()
             && let Some(path) = sessions::overrides_path()
-            && let Err(error) = self.overrides_writer.write(self.overrides_writer.request(), &self.overrides, &path)
+            && let Err(error) =
+                self.overrides_writer
+                    .write(self.overrides_writer.request(), &self.overrides, &path)
         {
             eprintln!("Could not save sidebar changes: {error}");
         }
@@ -2312,9 +2900,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn closing_settings_preserves_selection(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn closing_settings_preserves_selection(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let selection = s.selection.clone();
@@ -2707,14 +3293,40 @@ pub(crate) mod tests {
         });
     }
     #[gpui::test]
-    fn account_lists_deduplicate_full_identity_without_losing_profiles(cx: &mut gpui::TestAppContext) {
+    fn account_lists_deduplicate_full_identity_without_losing_profiles(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, _| {
-            s.default_identities.insert(Provider::Codex, "user@gmail.com".into());
-            for (i, identity) in ["USER@gmail.com", "other@gmail.com", "other@gmail.com", "user@work.com", "API key", "API key"].into_iter().enumerate() {
-                s.accounts.push(crate::accounts::Account { id: i.to_string(), provider: Provider::Codex, number: i + 2, identity: Some(identity.into()), is_default: false, requires_login: false });
+            s.default_identities
+                .insert(Provider::Codex, "user@gmail.com".into());
+            for (i, identity) in [
+                "USER@gmail.com",
+                "other@gmail.com",
+                "other@gmail.com",
+                "user@work.com",
+                "API key",
+                "API key",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                s.accounts.push(crate::accounts::Account {
+                    id: i.to_string(),
+                    provider: Provider::Codex,
+                    number: i + 2,
+                    identity: Some(identity.into()),
+                    is_default: false,
+                    requires_login: false,
+                });
             }
-            assert_eq!(s.visible_accounts(Provider::Codex).iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["1", "3", "4", "5"]);
+            assert_eq!(
+                s.visible_accounts(Provider::Codex)
+                    .iter()
+                    .map(|a| a.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["1", "3", "4", "5"]
+            );
             assert_eq!(s.accounts.len(), 6); // Existing chats retain their credential profiles.
             assert!(s.visible_accounts(Provider::Claude).is_empty());
         });
@@ -2726,8 +3338,16 @@ pub(crate) mod tests {
         state.update(cx, |s, cx| {
             let provider = s.effective().0;
             let id = uuid::Uuid::new_v4().to_string();
-            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 2, identity: None, is_default: false, requires_login: false });
-            s.account_status.insert(id.clone(), "Waiting for sign-in…".into());
+            s.accounts.push(crate::accounts::Account {
+                id: id.clone(),
+                provider,
+                number: 2,
+                identity: None,
+                is_default: false,
+                requires_login: false,
+            });
+            s.account_status
+                .insert(id.clone(), "Waiting for sign-in…".into());
             assert!(s.account_login_pending(provider));
             s.add_account(provider, cx);
             assert_eq!(s.accounts.len(), 1);
@@ -2736,7 +3356,8 @@ pub(crate) mod tests {
             s.account_status.insert(id, "Sign-in cancelled".into());
             assert!(!s.account_login_pending(provider));
             assert_eq!(s.default_account_label(provider), "Account 1");
-            s.default_identities.insert(provider, "user@example.com".into());
+            s.default_identities
+                .insert(provider, "user@example.com".into());
             assert_eq!(s.default_account_label(provider), "user");
         });
     }
@@ -2747,7 +3368,14 @@ pub(crate) mod tests {
         state.update(cx, |s, cx| {
             let provider = s.effective().0;
             let id = uuid::Uuid::new_v4().to_string();
-            let account = crate::accounts::Account { id: id.clone(), provider, number: 2, identity: Some("user@example.com".into()), is_default: false, requires_login: false };
+            let account = crate::accounts::Account {
+                id: id.clone(),
+                provider,
+                number: 2,
+                identity: Some("user@example.com".into()),
+                is_default: false,
+                requires_login: false,
+            };
             s.accounts.push(account);
             assert!(!s.account_needs_login(&id));
             s.make_default_account(provider, Some(id.clone()), cx);
@@ -2756,7 +3384,8 @@ pub(crate) mod tests {
             assert!(restored[0].is_default);
             s.new_session(cx);
             assert_eq!(s.selected_account().as_deref(), Some(id.as_str()));
-            s.account_status.insert(id.clone(), "Authentication expired".into());
+            s.account_status
+                .insert(id.clone(), "Authentication expired".into());
             assert!(s.account_needs_login(&id));
             s.delete_account(&id, cx);
             assert!(s.accounts.is_empty());
@@ -2771,7 +3400,14 @@ pub(crate) mod tests {
         state.update(cx, |s, cx| {
             let provider = s.effective().0;
             let id = uuid::Uuid::new_v4().to_string();
-            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 2, identity: None, is_default: true, requires_login: false });
+            s.accounts.push(crate::accounts::Account {
+                id: id.clone(),
+                provider,
+                number: 2,
+                identity: None,
+                is_default: true,
+                requires_login: false,
+            });
             s.select_default_account(provider, cx);
             assert_eq!(s.selected_account().as_deref(), Some(id.as_str()));
             assert!(s.account_is_selected(provider, Some(&id)));
@@ -2780,7 +3416,10 @@ pub(crate) mod tests {
             assert!(s.account_is_selected(provider, None));
             s.select_default_account(provider, cx);
             assert!(s.account_is_selected(provider, Some(&id)));
-            assert_eq!(s.default_account_label(del_agent::Provider::OpenCode), "System");
+            assert_eq!(
+                s.default_account_label(del_agent::Provider::OpenCode),
+                "System"
+            );
         });
     }
 
@@ -2790,13 +3429,23 @@ pub(crate) mod tests {
         state.update(cx, |s, cx| {
             let provider = s.effective().0;
             let id = uuid::Uuid::new_v4().to_string();
-            s.accounts.push(crate::accounts::Account { id: id.clone(), provider, number: 1, identity: None, is_default: false, requires_login: false });
+            s.accounts.push(crate::accounts::Account {
+                id: id.clone(),
+                provider,
+                number: 1,
+                identity: None,
+                is_default: false,
+                requires_login: false,
+            });
             s.select_account(provider, Some(id.clone()), cx);
             assert_eq!(s.selected_account(), Some(id.clone()));
             assert!(s.account_is_selected(provider, Some(&id)));
             assert!(!s.account_is_selected(provider, None));
             let cwd = s.effective().2;
-            s.apply(super::Msg::Models(provider, Some(id.clone()), cwd, Ok(vec![])), cx);
+            s.apply(
+                super::Msg::Models(provider, Some(id.clone()), cwd, Ok(vec![])),
+                cx,
+            );
             assert!(s.model_catalog().loaded);
             s.set_mode(del_mcp::SessionMode::Terminal, cx);
             assert_eq!(s.mode(), del_mcp::SessionMode::Terminal);
@@ -2954,8 +3603,16 @@ pub(crate) mod tests {
             let path = dir.path().to_path_buf();
             std::fs::write(path.join("keep.txt"), "keep").unwrap();
             s.new_project_session(path.clone(), cx);
-            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("project-actions"), title: "Shell".into(), cwd: path.clone(),
-                provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: del_agent::SessionId::new("project-actions"),
+                title: "Shell".into(),
+                cwd: path.clone(),
+                provider: None,
+                account_id: None,
+                active: false,
+                summary: String::new(),
+                pinned: false,
+            });
             s.rename_project(path.clone(), "Named project".into(), cx);
             assert_eq!(s.project_name(&path), "Named project");
             s.archive_project(path.clone(), false, cx);
@@ -2967,14 +3624,19 @@ pub(crate) mod tests {
             assert!(s.project_paths().contains(&path));
             s.archive_project(path.clone(), true, cx);
             assert!(!s.project_paths().contains(&path));
-            assert_eq!(std::fs::read_to_string(path.join("keep.txt")).unwrap(), "keep");
+            assert_eq!(
+                std::fs::read_to_string(path.join("keep.txt")).unwrap(),
+                "keep"
+            );
             s.new_project_session(path.clone(), cx);
             assert!(s.project_paths().contains(&path));
         });
     }
 
     #[gpui::test]
-    fn new_session_follows_selected_context_instead_of_last_creation(cx: &mut gpui::TestAppContext) {
+    fn new_session_follows_selected_context_instead_of_last_creation(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             s.new_project_session("/nihal".into(), cx);
@@ -2986,8 +3648,16 @@ pub(crate) mod tests {
             s.new_session(cx);
             assert_eq!(s.effective().2, std::path::PathBuf::from("/nihal"));
             let terminal = del_agent::SessionId::new("context-terminal");
-            s.terminal_rows.push(crate::sessions::TerminalRow { id: terminal.clone(), title: "Shell".into(), cwd: "/terminal-dir".into(),
-                provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: terminal.clone(),
+                title: "Shell".into(),
+                cwd: "/terminal-dir".into(),
+                provider: None,
+                account_id: None,
+                active: false,
+                summary: String::new(),
+                pinned: false,
+            });
             s.select_terminal(terminal, cx);
             s.new_session(cx);
             assert_eq!(s.effective().2, std::path::PathBuf::from("/terminal-dir"));
@@ -2995,10 +3665,14 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn repeated_new_sessions_are_independent_and_remember_project_directory(cx: &mut gpui::TestAppContext) {
+    fn repeated_new_sessions_are_independent_and_remember_project_directory(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
-            for _ in 0..100 { s.new_session(cx); }
+            for _ in 0..100 {
+                s.new_session(cx);
+            }
             assert_eq!(s.tabs.len(), 101);
             s.new_project_session("/first".into(), cx);
             s.set_launch_options(Some("main".into()), true, cx);
@@ -3008,7 +3682,9 @@ pub(crate) mod tests {
             assert!(!s.draft_launch_options().worktree);
             s.new_session(cx);
             assert_eq!(s.effective().2, std::path::PathBuf::from("/second"));
-            let Selection::Draft(submitted) = s.selection else { panic!("expected draft") };
+            let Selection::Draft(submitted) = s.selection else {
+                panic!("expected draft")
+            };
             s.send("starting".into(), cx);
             s.new_session(cx);
             assert_eq!(s.pending_prompts.get(&submitted).unwrap().text, "starting");
@@ -3082,12 +3758,19 @@ pub(crate) mod tests {
             for name in ["a", "b", "c", "d"] {
                 s.terminal_rows.push(crate::sessions::TerminalRow {
                     account_id: None,
-                    id: SessionId::new(name), title: name.into(), cwd: "/tmp".into(),
-                    provider: None, active: false, summary: String::new(), pinned: false,
+                    id: SessionId::new(name),
+                    title: name.into(),
+                    cwd: "/tmp".into(),
+                    provider: None,
+                    active: false,
+                    summary: String::new(),
+                    pinned: false,
                 });
             }
-            let a = SessionId::new("a"); let b = SessionId::new("b");
-            let c = SessionId::new("c"); let d = SessionId::new("d");
+            let a = SessionId::new("a");
+            let b = SessionId::new("b");
+            let c = SessionId::new("c");
+            let d = SessionId::new("d");
             s.toggle_terminal_pin(&b, cx);
             s.toggle_terminal_pin(&a, cx);
             assert_eq!(s.terminal_rows[0].id, b);
@@ -3101,18 +3784,26 @@ pub(crate) mod tests {
             s.reorder_sidebar(&a, &d, true, cx);
             // Mode no longer separates groups: reorder through either mode.
             s.reorder_sidebar(&b, &a, false, cx);
-            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&b, &a, &d, &c]);
+            assert_eq!(
+                s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                vec![&b, &a, &d, &c]
+            );
             assert_eq!(s.selection, selection);
             let saved = serde_json::to_string(&s.overrides).unwrap();
             s.overrides = serde_json::from_str(&saved).unwrap();
             s.terminal_rows.reverse();
             s.sort_terminal_rows();
-            assert_eq!(s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&b, &a, &d, &c]);
+            assert_eq!(
+                s.terminal_rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                vec![&b, &a, &d, &c]
+            );
         });
     }
 
     #[gpui::test]
-    fn changing_draft_directory_moves_its_group_and_reopens_destination(cx: &mut gpui::TestAppContext) {
+    fn changing_draft_directory_moves_its_group_and_reopens_destination(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let home = std::path::PathBuf::from("/new-home");
@@ -3129,50 +3820,94 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn active_session_in_archived_directory_is_visible_in_its_own_project(cx: &mut gpui::TestAppContext) {
+    fn active_session_in_archived_directory_is_visible_in_its_own_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, _| {
             let home = std::path::PathBuf::from("/chosen-home");
             s.project_preferences.archived.insert(home.clone());
             s.project_preferences.collapsed.insert(home.clone());
-            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("chosen-directory"),
-                title: "Greeting".into(), cwd: home.clone(), provider: None, account_id: None,
-                active: false, summary: String::new(), pinned: false });
-            assert!(s.project_paths().contains(&home), "active session must reveal its own directory project despite old archive metadata");
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: del_agent::SessionId::new("chosen-directory"),
+                title: "Greeting".into(),
+                cwd: home.clone(),
+                provider: None,
+                account_id: None,
+                active: false,
+                summary: String::new(),
+                pinned: false,
+            });
+            assert!(
+                s.project_paths().contains(&home),
+                "active session must reveal its own directory project despite old archive metadata"
+            );
         });
     }
 
     #[gpui::test]
-    fn restoring_one_session_reopens_project_without_restoring_siblings(cx: &mut gpui::TestAppContext) {
+    fn restoring_one_session_reopens_project_without_restoring_siblings(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let path = std::path::PathBuf::from("/archived-project-test");
             let first = del_agent::SessionId::new("restore-first");
             let second = del_agent::SessionId::new("restore-second");
             for id in [&first, &second] {
-                s.terminal_rows.push(crate::sessions::TerminalRow { id: id.clone(), title: "Shell".into(), cwd: path.clone(),
-                    provider: None, account_id: None, active: false, summary: String::new(), pinned: false });
+                s.terminal_rows.push(crate::sessions::TerminalRow {
+                    id: id.clone(),
+                    title: "Shell".into(),
+                    cwd: path.clone(),
+                    provider: None,
+                    account_id: None,
+                    active: false,
+                    summary: String::new(),
+                    pinned: false,
+                });
             }
             s.project_preferences.roots.insert(path.clone());
             s.archive(first.clone(), cx);
             s.archive(second.clone(), cx);
-            assert!(!s.project_paths().contains(&path), "all individually archived sessions hide their project");
+            assert!(
+                !s.project_paths().contains(&path),
+                "all individually archived sessions hide their project"
+            );
             s.project_preferences.archived.insert(path.clone());
             s.show_archived = true;
             assert!(s.project_paths().contains(&path));
             s.restore(first.clone(), cx);
             assert!(!s.terminal_archived(&first));
             assert!(s.terminal_archived(&second));
-            assert!(s.project_paths().contains(&path), "archived sibling keeps archive group visible");
+            assert!(
+                s.project_paths().contains(&path),
+                "archived sibling keeps archive group visible"
+            );
             s.show_archived = false;
-            assert!(s.project_paths().contains(&path), "restored session brings its project back");
-            assert_eq!(s.unified_rows().iter().filter(|r| r.cwd == path).map(|r| r.id.clone()).collect::<Vec<_>>(), vec![first.clone()]);
+            assert!(
+                s.project_paths().contains(&path),
+                "restored session brings its project back"
+            );
+            assert_eq!(
+                s.unified_rows()
+                    .iter()
+                    .filter(|r| r.cwd == path)
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>(),
+                vec![first.clone()]
+            );
             s.restore(second.clone(), cx);
             s.show_archived = true;
-            assert!(!s.project_paths().contains(&path), "last restored session removes archive group");
+            assert!(
+                !s.project_paths().contains(&path),
+                "last restored session removes archive group"
+            );
             s.archive(second.clone(), cx);
             s.archive_project(path.clone(), true, cx);
-            assert!(s.terminal_rows.iter().any(|r| r.id == first), "archived deletion preserves active sibling");
+            assert!(
+                s.terminal_rows.iter().any(|r| r.id == first),
+                "archived deletion preserves active sibling"
+            );
             assert!(!s.terminal_rows.iter().any(|r| r.id == second));
             assert!(!s.project_paths().contains(&path));
             s.show_archived = false;
@@ -3248,19 +3983,50 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn projects_mix_modes_preserve_pins_and_prevent_cross_project_reorder(cx: &mut gpui::TestAppContext) {
-        use del_agent::{SessionId, SessionRecord, SessionStatus, PermissionMode};
+    fn projects_mix_modes_preserve_pins_and_prevent_cross_project_reorder(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use crate::sessions::TerminalRow;
+        use del_agent::{PermissionMode, SessionId, SessionRecord, SessionStatus};
         use std::path::PathBuf;
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let chat = SessionId::new("chat");
             s.invalidate_rows();
-            s.records.push(SessionRecord { id: chat.clone(), provider: Provider::Codex, account_id: None, cwd: "/repo/worktree".into(), model: None, reasoning_effort: None, service_tier: None, permission_mode: PermissionMode::FullAuto, title: Some("Chat".into()), title_turns: 0, created_at_ms: 1, updated_at_ms: 1, status: SessionStatus::Idle });
+            s.records.push(SessionRecord {
+                id: chat.clone(),
+                provider: Provider::Codex,
+                account_id: None,
+                cwd: "/repo/worktree".into(),
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: PermissionMode::FullAuto,
+                title: Some("Chat".into()),
+                title_turns: 0,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                status: SessionStatus::Idle,
+            });
             for (name, cwd) in [("terminal", "/repo"), ("other", "/elsewhere")] {
-                s.terminal_rows.push(TerminalRow { id: SessionId::new(name), provider: None, account_id: None, cwd: cwd.into(), title: name.into(), summary: String::new(), active: false, pinned: false });
+                s.terminal_rows.push(TerminalRow {
+                    id: SessionId::new(name),
+                    provider: None,
+                    account_id: None,
+                    cwd: cwd.into(),
+                    title: name.into(),
+                    summary: String::new(),
+                    active: false,
+                    pinned: false,
+                });
             }
-            s.project_info.insert("/repo/worktree".into(), crate::projects::GitInfo { root: "/repo".into(), ..Default::default() });
+            s.project_info.insert(
+                "/repo/worktree".into(),
+                crate::projects::GitInfo {
+                    root: "/repo".into(),
+                    ..Default::default()
+                },
+            );
             let terminal = SessionId::new("terminal");
             s.reorder_sidebar(&terminal, &chat, true, cx);
             assert_eq!(s.unified_rows()[0].id, terminal);
@@ -3269,7 +4035,12 @@ pub(crate) mod tests {
             assert_eq!(s.overrides, order);
             s.toggle_session_pin(&chat, cx);
             s.toggle_session_pin(&terminal, cx);
-            let pins: Vec<_> = s.unified_rows().into_iter().filter(|r| r.pinned).map(|r| r.id).collect();
+            let pins: Vec<_> = s
+                .unified_rows()
+                .into_iter()
+                .filter(|r| r.pinned)
+                .map(|r| r.id)
+                .collect();
             assert_eq!(pins, vec![chat.clone(), terminal.clone()]);
             s.reorder_sidebar(&terminal, &chat, true, cx);
             assert_eq!(s.unified_rows()[0].id, terminal);
@@ -3280,7 +4051,11 @@ pub(crate) mod tests {
             assert_eq!(s.effective().2, PathBuf::from("/repo"));
             assert_eq!(s.project_drafts(std::path::Path::new("/repo")).len(), 1);
             s.toggle_project("/repo".into(), cx);
-            assert!(s.project_preferences.collapsed.contains(std::path::Path::new("/repo")));
+            assert!(
+                s.project_preferences
+                    .collapsed
+                    .contains(std::path::Path::new("/repo"))
+            );
             assert_eq!(s.records.len(), 1);
         });
     }
@@ -3303,7 +4078,7 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn project_sidebar_renders_with_drafts_and_terminal_sessions(cx: &mut gpui::TestAppContext) {
-        use gpui::{ParentElement, Styled, Render, IntoElement};
+        use gpui::{IntoElement, ParentElement, Render, Styled};
         struct Fixture {
             state: Entity<AppState>,
             rename: Entity<gpui_kit::component::input::InputState>,
@@ -3311,31 +4086,68 @@ pub(crate) mod tests {
             updater: Entity<crate::app_updates::AppUpdater>,
         }
         impl Render for Fixture {
-            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-                gpui::div().w(gpui::px(240.)).h(gpui::px(700.))
-                    .child(crate::sidebar::render(&self.state, &self.rename, &self.usage, &self.updater, cx))
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                gpui::div()
+                    .w(gpui::px(240.))
+                    .h(gpui::px(700.))
+                    .child(crate::sidebar::render(
+                        &self.state,
+                        &self.rename,
+                        &self.usage,
+                        &self.updater,
+                        cx,
+                    ))
             }
         }
         cx.update(gpui_kit::init);
         let state = draft(cx);
         state.update(cx, |s, _| {
             let cwd = s.effective().2;
-            s.terminal_rows.push(crate::sessions::TerminalRow { id: del_agent::SessionId::new("terminal-render"), provider: None, account_id: None, cwd, title: "Terminal session".into(), summary: String::new(), active: false, pinned: false });
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: del_agent::SessionId::new("terminal-render"),
+                provider: None,
+                account_id: None,
+                cwd,
+                title: "Terminal session".into(),
+                summary: String::new(),
+                active: false,
+                pinned: false,
+            });
         });
         let (root, cx) = cx.add_window_view(|window, cx| {
             let rename = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx));
             let usage = cx.new(|_| crate::usage::Usage::new(state.clone()));
-            Fixture { state: state.clone(), rename, usage, updater: cx.new(crate::app_updates::AppUpdater::new) }
+            Fixture {
+                state: state.clone(),
+                rename,
+                usage,
+                updater: cx.new(crate::app_updates::AppUpdater::new),
+            }
         });
-        cx.update(|window, cx| { window.draw(cx).clear(cx); });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
         assert!(cx.debug_bounds("pinned-heading").is_none());
         let projects = cx.debug_bounds("projects-heading").unwrap();
 
         assert!(projects.size.width > gpui::px(100.));
         let content = cx.debug_bounds("project-session-content").unwrap();
-        assert_eq!(content.size.width, projects.size.width, "animated project rows must fill the sidebar width");
+        assert_eq!(
+            content.size.width, projects.size.width,
+            "animated project rows must fill the sidebar width"
+        );
         cx.update(|window, cx| {
-            root.update(cx, |fixture, cx| { fixture.state.update(cx, |s, cx| { let path = s.effective().2; s.toggle_project(path, cx); }); cx.notify(); });
+            root.update(cx, |fixture, cx| {
+                fixture.state.update(cx, |s, cx| {
+                    let path = s.effective().2;
+                    s.toggle_project(path, cx);
+                });
+                cx.notify();
+            });
             window.draw(cx).clear(cx);
         });
     }

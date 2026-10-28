@@ -635,7 +635,9 @@ fn text_spans(cells: &[PaintCell], block: Option<(usize, usize)>) -> Vec<TextSpa
     let finish = |spans: &mut Vec<TextSpan>, open: &mut bool| {
         if std::mem::take(open)
             && let Some(span) = spans.last_mut()
-            && !span.flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+            && !span
+                .flags
+                .intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
         {
             // Plain trailing spaces paint nothing.
             span.text.truncate(span.text.trim_end_matches(' ').len());
@@ -1005,7 +1007,11 @@ mod tests {
         cells[5].flags = Flags::BOLD;
         assert_eq!(
             spans(&cells[..7], None),
-            [(0, 0, "ls  -".into()), (5, 0, "l".into()), (6, 0, "a".into())]
+            [
+                (0, 0, "ls  -".into()),
+                (5, 0, "l".into()),
+                (6, 0, "a".into())
+            ]
         );
     }
 

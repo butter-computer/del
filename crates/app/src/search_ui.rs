@@ -1,6 +1,10 @@
 //! Cmd-K actions, recent conversations, and navigation into chat/terminal transcripts.
 use crate::{
-    AppShell, appearance::{rgb, rgba}, conversation_search as search, state::Tab, zoom::px as zpx,
+    AppShell,
+    appearance::{rgb, rgba},
+    conversation_search as search,
+    state::Tab,
+    zoom::px as zpx,
 };
 use gpui_kit::{
     component::{
@@ -41,7 +45,12 @@ enum PaletteAction {
     Terminal,
 }
 impl PaletteAction {
-    const ALL: [Self; 4] = [Self::NewConversation, Self::Settings, Self::Files, Self::Terminal];
+    const ALL: [Self; 4] = [
+        Self::NewConversation,
+        Self::Settings,
+        Self::Files,
+        Self::Terminal,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -90,8 +99,9 @@ impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
     fn new(runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands and conversations…"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search commands and conversations…")
+        });
         cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search(cx);
@@ -125,7 +135,8 @@ impl Palette {
         self.generation += 1;
         let generation = self.generation;
         // Older keystrokes' searches see this and stop instead of finishing.
-        self.latest_search.store(generation, std::sync::atomic::Ordering::Relaxed);
+        self.latest_search
+            .store(generation, std::sync::atomic::Ordering::Relaxed);
         let latest = self.latest_search.clone();
         let query = self.input.read(cx).value().to_string();
         let documents = self.documents.clone();
@@ -138,7 +149,9 @@ impl Palette {
         let debounce = !query.trim().is_empty();
         cx.spawn(async move |this, cx| {
             if debounce {
-                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
                 if latest.load(std::sync::atomic::Ordering::Relaxed) != generation {
                     return;
                 }
@@ -184,14 +197,21 @@ impl Palette {
         let query = self.input.read(cx).value().trim().to_lowercase();
         PaletteAction::ALL
             .into_iter()
-            .filter(|action| query.split_whitespace().all(|word| action.keywords().contains(word)))
+            .filter(|action| {
+                query
+                    .split_whitespace()
+                    .all(|word| action.keywords().contains(word))
+            })
             .collect()
     }
 
     fn reset_scroll(&mut self, cx: &App) {
         let actions = self.actions(cx).len();
         self.scroll.reset(
-            actions + self.hits.len() + usize::from(actions > 0) + usize::from(!self.hits.is_empty()),
+            actions
+                + self.hits.len()
+                + usize::from(actions > 0)
+                + usize::from(!self.hits.is_empty()),
         );
     }
 
@@ -210,15 +230,17 @@ impl Palette {
         }
     }
 
-    fn layout_height(&self,window:&Window,cx:&App)->(Pixels,Pixels) {
-        let actions=self.actions(cx).len();
-        let groups=usize::from(actions>0)+usize::from(!self.hits.is_empty());
-        let content=zpx(30. * actions as f32+36. * self.hits.len() as f32+22. * groups as f32);
-        let extra=zpx(if self.hits.is_empty(){24.}else{0.}+if self.errors.is_empty(){0.}else{20.});
-        let chrome=zpx(42.+30.+4.)+extra;
-        let available=(window.viewport_size().height-zpx(40.)-chrome).max(px(0.));
-        let results=content.min(zpx(300.)).min(available);
-        (results,chrome+results)
+    fn layout_height(&self, window: &Window, cx: &App) -> (Pixels, Pixels) {
+        let actions = self.actions(cx).len();
+        let groups = usize::from(actions > 0) + usize::from(!self.hits.is_empty());
+        let content =
+            zpx(30. * actions as f32 + 36. * self.hits.len() as f32 + 22. * groups as f32);
+        let extra = zpx(if self.hits.is_empty() { 24. } else { 0. }
+            + if self.errors.is_empty() { 0. } else { 20. });
+        let chrome = zpx(42. + 30. + 4.) + extra;
+        let available = (window.viewport_size().height - zpx(40.) - chrome).max(px(0.));
+        let results = content.min(zpx(300.)).min(available);
+        (results, chrome + results)
     }
 
     fn action_row(&self, action: PaletteAction, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -233,7 +255,11 @@ impl Palette {
             .items_center()
             .rounded(zpx(5.))
             .cursor_pointer()
-            .bg(if ix == self.selected { rgba(0xffffff0c) } else { rgba(0xffffff00) })
+            .bg(if ix == self.selected {
+                rgba(0xffffff0c)
+            } else {
+                rgba(0xffffff00)
+            })
             .hover(|row| row.bg(rgba(0xffffff09)))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
@@ -243,8 +269,20 @@ impl Palette {
                 this.selected = ix;
                 this.open(cx);
             }))
-            .child(div().flex_none().text_color(rgba(0xffffff80)).child(crate::icons::path(action.icon())))
-            .child(div().flex_1().min_w_0().truncate().text_size(zpx(12.)).child(action.label()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgba(0xffffff80))
+                    .child(crate::icons::path(action.icon())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(zpx(12.))
+                    .child(action.label()),
+            )
             .child(key_badge(action.shortcut()))
             .into_any_element()
     }
@@ -266,7 +304,8 @@ impl Palette {
                 "Recent conversations"
             } else {
                 "Conversations"
-            }).into_any_element();
+            })
+            .into_any_element();
         }
         self.result(ix - 1, cx)
     }
@@ -375,12 +414,15 @@ impl Palette {
                     .flex_none()
                     .text_color(rgba(0xffffff80))
                     .child(match source.provider {
-                        Some(provider) => crate::composer_ui::provider_logo(provider).into_any_element(),
+                        Some(provider) => {
+                            crate::composer_ui::provider_logo(provider).into_any_element()
+                        }
                         None => crate::icons::path(if matches!(source.tab, Tab::Terminal(_)) {
                             "icons/square-terminal.svg"
                         } else {
                             "icons/file-text.svg"
-                        }).into_any_element(),
+                        })
+                        .into_any_element(),
                     }),
             )
             .child(
@@ -389,18 +431,15 @@ impl Palette {
                     .min_w_0()
                     .gap(zpx(0.))
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap(zpx(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(zpx(12.))
-                                    .text_color(rgb(0xeeeeef))
-                                    .child(source.title.clone()),
-                            ),
+                        h_flex().items_center().gap(zpx(8.)).child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(zpx(12.))
+                                .text_color(rgb(0xeeeeef))
+                                .child(source.title.clone()),
+                        ),
                     )
                     .child(
                         div()
@@ -433,13 +472,17 @@ impl Render for Palette {
         let entity = cx.entity();
         let empty = self.input.read(cx).value().trim().is_empty();
         let actions = self.actions(cx).len();
-        let (results_height,panel_height)=self.layout_height(window,cx);
-        let content_height=30. * actions as f32+36. * self.hits.len() as f32
-            +22. * (usize::from(actions>0)+usize::from(!self.hits.is_empty())) as f32;
+        let (results_height, panel_height) = self.layout_height(window, cx);
+        let content_height = 30. * actions as f32
+            + 36. * self.hits.len() as f32
+            + 22. * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
             .rounded(zpx(11.))
-            .w_full().h(panel_height).min_h_0().overflow_hidden()
+            .w_full()
+            .h(panel_height)
+            .min_h_0()
+            .overflow_hidden()
             .text_color(rgb(0xeeeeef))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke;
@@ -455,7 +498,8 @@ impl Render for Palette {
                             } else {
                                 (this.selected + count - 1) % count
                             };
-                            this.scroll.scroll_to_reveal_item(this.selected_list_index(cx));
+                            this.scroll
+                                .scroll_to_reveal_item(this.selected_list_index(cx));
                             cx.notify();
                         }
                         "enter" => this.open(cx),
@@ -494,7 +538,9 @@ impl Render for Palette {
             )
             .child(
                 v_flex()
-                    .flex_1().min_h_0().overflow_hidden()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
                     .px(zpx(4.))
                     .pb(zpx(4.))
                     .when(content_height > 0., |body| {
@@ -510,11 +556,17 @@ impl Render for Palette {
                         body.child(
                             div()
                                 .px(zpx(8.))
-                                .h(zpx(24.)).flex().items_center()
+                                .h(zpx(24.))
+                                .flex()
+                                .items_center()
                                 .text_size(zpx(12.))
                                 .text_color(rgba(0xffffff70))
                                 .child(if self.loading {
-                                    if empty { "Loading recent conversations…" } else { "Searching conversations…" }
+                                    if empty {
+                                        "Loading recent conversations…"
+                                    } else {
+                                        "Searching conversations…"
+                                    }
                                 } else if empty {
                                     "Your recent conversations will appear here."
                                 } else if actions > 0 {
@@ -661,7 +713,12 @@ impl AppShell {
         .detach();
     }
 
-    fn run_palette_action(&mut self, action: PaletteAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_palette_action(
+        &mut self,
+        action: PaletteAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             PaletteAction::NewConversation => {
                 self.state.update(cx, |state, cx| state.new_session(cx));
@@ -687,7 +744,8 @@ impl AppShell {
                     if !self.right_open {
                         self.set_right(true, cx);
                     }
-                    self.right.update(cx, |right, cx| right.show_terminal(window, cx));
+                    self.right
+                        .update(cx, |right, cx| right.show_terminal(window, cx));
                 }
             }
         }
@@ -802,9 +860,9 @@ impl AppShell {
             }
             let cancel_shell = shell.clone();
             let shell = shell.clone();
-            let viewport=window.viewport_size();
-            let width=zpx(500.).min((viewport.width-zpx(32.)).max(px(0.)));
-            let height=content.read(cx).layout_height(window,cx).1+px(2.);
+            let viewport = window.viewport_size();
+            let width = zpx(500.).min((viewport.width - zpx(32.)).max(px(0.)));
+            let height = content.read(cx).layout_height(window, cx).1 + px(2.);
             dialog
                 .bg(crate::appearance::popup_surface(0x18181a))
                 .p_0()
@@ -821,7 +879,7 @@ impl AppShell {
                     dialog.opacity(exit_opacity(started))
                 })
                 .width(width)
-                .margin_top(((viewport.height-height)/2.).max(zpx(12.)))
+                .margin_top(((viewport.height - height) / 2.).max(zpx(12.)))
                 .overlay(true)
                 .overlay_closable(true)
                 .keyboard(false)
@@ -1042,7 +1100,7 @@ mod tests {
             palette.update(cx, |palette, _| {
                 let document = Arc::new(search::Document {
                     source: search::Source {
-                    account: None,
+                        account: None,
                         tab: Tab::Session(del_agent::SessionId::new("markdown")),
                         title: "Preview".into(),
                         provider: Some(del_agent::Provider::Claude),
@@ -1102,7 +1160,7 @@ mod tests {
             palette.update(cx, |palette, cx| {
                 let document = Arc::new(search::Document {
                     source: search::Source {
-                    account: None,
+                        account: None,
                         tab: Tab::Terminal(del_agent::SessionId::new("terminal")),
                         title: "Test task".into(),
                         provider: Some(del_agent::Provider::Claude),
@@ -1118,7 +1176,9 @@ mod tests {
                     }]),
                 });
                 palette.documents = vec![document.clone()];
-                palette.input.update(cx, |input, cx| input.set_value("match", window, cx));
+                palette
+                    .input
+                    .update(cx, |input, cx| input.set_value("match", window, cx));
                 palette.hits = search::search(&[document], "match");
                 palette.scroll.reset(palette.hits.len());
                 palette.loading = false;

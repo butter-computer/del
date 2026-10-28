@@ -17,7 +17,9 @@ pub fn load(cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
 }
 
 pub fn load_from(root: &Path, cwd: &Path, id: &str) -> std::io::Result<Vec<AgentEvent>> {
-    let Some(path) = crate::titles::transcript_path(root, cwd, id) else { return Ok(vec![]) };
+    let Some(path) = crate::titles::transcript_path(root, cwd, id) else {
+        return Ok(vec![]);
+    };
     read(BufReader::new(std::fs::File::open(path)?), id)
 }
 

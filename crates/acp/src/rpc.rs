@@ -199,7 +199,9 @@ impl Rpc {
             while let Ok(Some(line)) = read_line_capped(&mut stdout, MAX_LINE_BYTES).await {
                 match line {
                     Ok(line) => r.dispatch(&line, &handler),
-                    Err(len) => eprintln!("acp: skipped a {len}-byte agent line over the size limit"),
+                    Err(len) => {
+                        eprintln!("acp: skipped a {len}-byte agent line over the size limit")
+                    }
                 }
             }
             r.closed.store(true, Ordering::SeqCst);

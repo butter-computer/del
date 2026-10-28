@@ -5,8 +5,8 @@
 
 use crate::types::Provider;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -268,7 +268,12 @@ pub(crate) fn parse_version(text: &str) -> Option<String> {
 }
 
 /// `stdout` alone carries Claude's JSON; `text` is stdout followed by stderr.
-pub(crate) fn parse_login(provider: Provider, exit_ok: bool, stdout: &str, text: &str) -> LoginState {
+pub(crate) fn parse_login(
+    provider: Provider,
+    exit_ok: bool,
+    stdout: &str,
+    text: &str,
+) -> LoginState {
     let lower = text.to_lowercase();
     if provider == Provider::Claude {
         // Only the boolean is read from the first JSON value; everything else is discarded.
@@ -324,9 +329,15 @@ mod tests {
         use LoginState::*;
         let stdout = "{\"loggedIn\": false}\n{\"extra\": 1}\n";
         let text = format!("{stdout}Warning: {{noise}} logged in elsewhere\n");
-        assert_eq!(parse_login(Provider::Claude, true, stdout, &text), LoggedOut);
+        assert_eq!(
+            parse_login(Provider::Claude, true, stdout, &text),
+            LoggedOut
+        );
         // No JSON and no explicit text: exit 0 alone is not proof of a login.
-        assert_eq!(parse_login(Provider::Claude, true, "", "{bad json"), Unknown);
+        assert_eq!(
+            parse_login(Provider::Claude, true, "", "{bad json"),
+            Unknown
+        );
     }
 
     #[test]
@@ -342,14 +353,8 @@ mod tests {
             login(Provider::Codex, true, "Logged in using ChatGPT"),
             LoggedIn
         );
-        assert_eq!(
-            login(Provider::Codex, false, "Not logged in"),
-            LoggedOut
-        );
-        assert_eq!(
-            login(Provider::Codex, true, "Not logged in"),
-            LoggedOut
-        );
+        assert_eq!(login(Provider::Codex, false, "Not logged in"), LoggedOut);
+        assert_eq!(login(Provider::Codex, true, "Not logged in"), LoggedOut);
         assert_eq!(login(Provider::Codex, false, "boom"), LoggedOut);
         assert_eq!(login(Provider::Codex, true, ""), Unknown);
         assert_eq!(
@@ -364,10 +369,7 @@ mod tests {
             login(Provider::Claude, false, "{\"loggedIn\": false}"),
             LoggedOut
         );
-        assert_eq!(
-            login(Provider::Claude, true, "{\"other\": 1}"),
-            Unknown
-        );
+        assert_eq!(login(Provider::Claude, true, "{\"other\": 1}"), Unknown);
     }
 
     #[tokio::test]
@@ -395,14 +397,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (name, script) in [
             ("codex", "#!/usr/bin/env del-detection-fixture-runtime\n"),
-            ("del-detection-fixture-runtime", "#!/bin/sh\necho 'codex-cli 9.9.9'\n"),
+            (
+                "del-detection-fixture-runtime",
+                "#!/bin/sh\necho 'codex-cli 9.9.9'\n",
+            ),
         ] {
             let path = dir.path().join(name);
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(find_working_in("codex", &[dir.path().to_owned()]).await,
-            Some((dir.path().join("codex"), "9.9.9".into())));
+        assert_eq!(
+            find_working_in("codex", &[dir.path().to_owned()]).await,
+            Some((dir.path().join("codex"), "9.9.9".into()))
+        );
     }
 
     #[tokio::test]

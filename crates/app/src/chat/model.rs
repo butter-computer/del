@@ -150,7 +150,11 @@ impl ChatModel {
     /// Discard the optimistic running state of a rejected prompt, retaining
     /// only a turn actually announced by the provider.
     pub fn reject_input(&mut self) {
-        self.phase = if self.current_turn.is_some() { Phase::Running } else { Phase::Idle };
+        self.phase = if self.current_turn.is_some() {
+            Phase::Running
+        } else {
+            Phase::Idle
+        };
     }
 
     pub fn has_pending_approval(&self) -> bool {
@@ -441,9 +445,13 @@ impl ChatModel {
                 self.current_turn = None;
                 self.last_status = Some(*status);
                 if *status == TurnStatus::Completed {
-                    let ix = self.blocks.iter().rposition(|block| matches!(block,
-                        Block::Assistant { turn_id: id, .. } if id == turn_id));
-                    if let Some(ix) = ix { self.completed_responses.insert(ix); }
+                    let ix = self.blocks.iter().rposition(|block| {
+                        matches!(block,
+                        Block::Assistant { turn_id: id, .. } if id == turn_id)
+                    });
+                    if let Some(ix) = ix {
+                        self.completed_responses.insert(ix);
+                    }
                     ix.map(Change::Updated)
                 } else {
                     Some(self.push(Block::TurnEnd { status: *status }))
@@ -515,7 +523,9 @@ mod tests {
     fn removing_a_row_shifts_completed_responses_with_it() {
         let mut model = ChatModel::default();
         model.push_user("first".into(), false);
-        model.apply(&AgentEvent::TurnStarted { turn_id: "t1".into() });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "t1".into(),
+        });
         model.apply(&delta("one"));
         model.apply(&AgentEvent::TurnCompleted {
             turn_id: "t1".into(),
@@ -523,7 +533,9 @@ mod tests {
         });
         model.push_user("rejected".into(), false);
         model.push_user("second".into(), false);
-        model.apply(&AgentEvent::TurnStarted { turn_id: "t2".into() });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "t2".into(),
+        });
         model.apply(&AgentEvent::AssistantTextDelta {
             turn_id: "t2".into(),
             text: "two".into(),
@@ -544,18 +556,35 @@ mod tests {
     fn copy_footer_only_belongs_to_final_completed_reply() {
         let mut model = ChatModel::default();
         for text in ["Checking files…", "Here is the result."] {
-            model.apply(&AgentEvent::AssistantMessage { turn_id: "one".into(), text: text.into() });
+            model.apply(&AgentEvent::AssistantMessage {
+                turn_id: "one".into(),
+                text: text.into(),
+            });
         }
         assert!(!model.is_completed_response(0));
         assert!(!model.is_completed_response(1));
-        assert_eq!(model.apply(&AgentEvent::TurnCompleted { turn_id: "one".into(), status: TurnStatus::Completed }), Some(Change::Updated(1)));
+        assert_eq!(
+            model.apply(&AgentEvent::TurnCompleted {
+                turn_id: "one".into(),
+                status: TurnStatus::Completed
+            }),
+            Some(Change::Updated(1))
+        );
         assert!(!model.is_completed_response(0));
         assert!(model.is_completed_response(1));
-        model.apply(&AgentEvent::TurnStarted { turn_id: "two".into() });
-        model.apply(&AgentEvent::AssistantMessage { turn_id: "two".into(), text: "Working…".into() });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "two".into(),
+        });
+        model.apply(&AgentEvent::AssistantMessage {
+            turn_id: "two".into(),
+            text: "Working…".into(),
+        });
         assert!(model.is_completed_response(1));
         assert!(!model.is_completed_response(2));
-        model.apply(&AgentEvent::TurnCompleted { turn_id: "two".into(), status: TurnStatus::Interrupted });
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "two".into(),
+            status: TurnStatus::Interrupted,
+        });
         assert!(!model.is_completed_response(2));
     }
 
@@ -885,7 +914,10 @@ mod tests {
             detail: "ls".into(),
         });
         m.resolve_approval("a3", ApprovalResponse::Approve);
-        assert_eq!(m.apply(&AgentEvent::ApprovalResolved { id: "a3".into() }), None);
+        assert_eq!(
+            m.apply(&AgentEvent::ApprovalResolved { id: "a3".into() }),
+            None
+        );
     }
 
     #[test]

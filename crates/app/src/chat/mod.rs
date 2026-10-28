@@ -2,16 +2,16 @@
 //! `AgentEvent` stream into a `ChatModel`, and renders the transcript plus the
 //! composer.
 
-pub(crate) mod attachments;
 mod activity;
-pub(crate) mod links;
+pub(crate) mod attachments;
 mod blocks;
-mod reply_times;
+pub(crate) mod links;
 mod loading;
 pub mod model;
+mod reply_times;
 mod view;
 
-pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView, PromptSubmitted, OpenLink};
+pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView, OpenLink, PromptSubmitted};
 
 pub use blocks::pending_prompt;
 pub use loading::conversation_loading;

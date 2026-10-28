@@ -1,8 +1,8 @@
 use crate::zoom::px as zpx;
 use crate::{
     AppShell,
-    composer_ui::QUEUE_SURFACE_RGBA,
     appearance::{rgb, rgba},
+    composer_ui::QUEUE_SURFACE_RGBA,
     state::{Selection, Tab},
 };
 use del_agent::{Attachment, UserInput};

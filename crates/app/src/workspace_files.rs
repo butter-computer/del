@@ -75,7 +75,11 @@ const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Run Git, keeping at most `limit` bytes of stdout. Returns the output and
 /// whether it was cut off (the process is then stopped).
-fn git_bounded(root: &Path, args: &[&std::ffi::OsStr], limit: usize) -> Result<(Vec<u8>, bool), String> {
+fn git_bounded(
+    root: &Path,
+    args: &[&std::ffi::OsStr],
+    limit: usize,
+) -> Result<(Vec<u8>, bool), String> {
     let mut child = git_command(root)?
         .args(args)
         .stdin(Stdio::null())
@@ -224,12 +228,13 @@ pub fn diff(root: &Path, file: &ChangedFile, head: bool) -> Result<String, Strin
         ));
     }
     fn diff_args<'a>(file: &'a ChangedFile, base: Option<&'a str>) -> Vec<&'a std::ffi::OsStr> {
-        let mut args: Vec<&std::ffi::OsStr> = ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
-            .into_iter()
-            .chain(base)
-            .chain(["--"])
-            .map(std::ffi::OsStr::new)
-            .collect();
+        let mut args: Vec<&std::ffi::OsStr> =
+            ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+                .into_iter()
+                .chain(base)
+                .chain(["--"])
+                .map(std::ffi::OsStr::new)
+                .collect();
         args.push(file.path.as_os_str());
         if base.is_some()
             && let Some(previous) = &file.previous
@@ -244,8 +249,11 @@ pub fn diff(root: &Path, file: &ChangedFile, head: bool) -> Result<String, Strin
         MAX_PREVIEW_BYTES,
     )?;
     if !head && !truncated {
-        let (extra, cut) =
-            git_bounded(root, &diff_args(file, None), MAX_PREVIEW_BYTES - bytes.len())?;
+        let (extra, cut) = git_bounded(
+            root,
+            &diff_args(file, None),
+            MAX_PREVIEW_BYTES - bytes.len(),
+        )?;
         bytes.extend(extra);
         truncated = cut;
     }
@@ -437,8 +445,12 @@ mod tests {
         assert!(diff(root, renamed, true).unwrap().contains("+new"));
         let untracked = files.iter().find(|file| file.status == "??").unwrap();
         assert_eq!(untracked.path, Path::new("new\nfile.txt"));
-        assert!(diff(root, untracked, true).unwrap().contains("+new content"));
-        assert!(changes(&tempfile::tempdir().unwrap().path()).is_err());
+        assert!(
+            diff(root, untracked, true)
+                .unwrap()
+                .contains("+new content")
+        );
+        assert!(changes(tempfile::tempdir().unwrap().path()).is_err());
     }
 
     #[test]
@@ -455,9 +467,15 @@ mod tests {
         std::fs::write(root.join("big.txt"), "x\n".repeat(400_000)).unwrap();
         git(root, &["add", "big.txt"]).unwrap();
         let (_, files) = changes(root).unwrap();
-        assert!(!marker.exists(), "repository fsmonitor command must not run");
+        assert!(
+            !marker.exists(),
+            "repository fsmonitor command must not run"
+        );
         assert!(!root.join(".git/index.lock").exists());
-        let big = files.iter().find(|f| f.path == Path::new("big.txt")).unwrap();
+        let big = files
+            .iter()
+            .find(|f| f.path == Path::new("big.txt"))
+            .unwrap();
         let text = diff(root, big, false).unwrap();
         assert!(text.len() <= MAX_PREVIEW_BYTES + 64);
         assert!(text.ends_with("… Diff preview truncated.\n"));

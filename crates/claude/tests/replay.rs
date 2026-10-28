@@ -97,7 +97,11 @@ fn edit_transcript_maps_tools_approvals_and_file_changes() {
     // The replay never answers the prompts, so the result retires both.
     let n = evs.len();
     assert!(matches!(evs[n - 4], E::TokenUsage { output, .. } if output > 0));
-    assert!(evs[n - 3..n - 1].iter().all(|e| matches!(e, E::ApprovalResolved { .. })));
+    assert!(
+        evs[n - 3..n - 1]
+            .iter()
+            .all(|e| matches!(e, E::ApprovalResolved { .. }))
+    );
     assert_eq!(
         evs[n - 1],
         E::TurnCompleted {
@@ -239,12 +243,18 @@ fn steering_consumed_in_current_response_does_not_leave_phantom_turn() {
     translator.enqueue_turn("first".into());
     translator.enqueue_turn("steering".into());
     for text in ["first", "steering"] {
-        translator.handle_line(&serde_json::json!({
-            "type": "user", "isReplay": true,
-            "message": {"role": "user", "content": text}
-        }).to_string());
+        translator.handle_line(
+            &serde_json::json!({
+                "type": "user", "isReplay": true,
+                "message": {"role": "user", "content": text}
+            })
+            .to_string(),
+        );
     }
     let events = translator.handle_line(r#"{"type":"result","is_error":false}"#);
-    assert!(!translator.is_busy(), "both inputs were consumed by the completed response");
+    assert!(
+        !translator.is_busy(),
+        "both inputs were consumed by the completed response"
+    );
     assert!(!events.iter().any(|e| matches!(e, E::TurnStarted { .. })));
 }

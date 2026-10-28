@@ -42,13 +42,31 @@ pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
 }
 
 pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
-    div().relative().size(zpx(18.)).flex_none()
-        .child(crate::icons::path("icons/terminal.svg").size(zpx(16.)).text_color(rgba(0xffffffcc)))
-        .when_some(provider, |icon, provider| icon.child(
-            div().absolute().right(zpx(-2.)).bottom(zpx(-2.)).size(zpx(11.)).rounded(zpx(3.))
-                .bg(crate::appearance::popup_surface(0x202020)).flex().items_center().justify_center()
-                .child(composer_ui::provider_logo(provider).size(zpx(9.)))
-        )).into_any_element()
+    div()
+        .relative()
+        .size(zpx(18.))
+        .flex_none()
+        .child(
+            crate::icons::path("icons/terminal.svg")
+                .size(zpx(16.))
+                .text_color(rgba(0xffffffcc)),
+        )
+        .when_some(provider, |icon, provider| {
+            icon.child(
+                div()
+                    .absolute()
+                    .right(zpx(-2.))
+                    .bottom(zpx(-2.))
+                    .size(zpx(11.))
+                    .rounded(zpx(3.))
+                    .bg(crate::appearance::popup_surface(0x202020))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(composer_ui::provider_logo(provider).size(zpx(9.))),
+            )
+        })
+        .into_any_element()
 }
 
 impl AppShell {
@@ -198,7 +216,9 @@ impl AppShell {
         let prompt = crate::attachments::terminal_prompt(prompt, attachments);
         let mut options = self.state.read(cx).draft_launch_options();
         if options.token.is_empty() {
-            self.state.update(cx, |s, cx| s.set_launch_options(options.branch.clone(), options.worktree, cx));
+            self.state.update(cx, |s, cx| {
+                s.set_launch_options(options.branch.clone(), options.worktree, cx)
+            });
             options = self.state.read(cx).draft_launch_options();
         }
         self.state.update(cx, |state, cx| {
@@ -209,16 +229,25 @@ impl AppShell {
             .update(cx, |input, cx| input.set_value("", window, cx));
         let runtime = self.state.read(cx).backend().runtime;
         let prepare = runtime.spawn_blocking(move || {
-            spec.cwd = crate::projects::prepare(&spec.cwd, &options, &del_agent::data_dir().unwrap_or_else(std::env::temp_dir))?;
+            spec.cwd = crate::projects::prepare(
+                &spec.cwd,
+                &options,
+                &del_agent::data_dir().unwrap_or_else(std::env::temp_dir),
+            )?;
             Ok::<_, String>(spec)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = prepare.await.map_err(|e| e.to_string()).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(spec) => this.begin_terminal(spec, Some(key), None, Some(prompt), None, window, cx),
-                Err(error) => this.state.update(cx, |s, cx| s.terminal_start_failed(key, error, cx)),
+                Ok(spec) => {
+                    this.begin_terminal(spec, Some(key), None, Some(prompt), None, window, cx)
+                }
+                Err(error) => this
+                    .state
+                    .update(cx, |s, cx| s.terminal_start_failed(key, error, cx)),
             });
-        }).detach();
+        })
+        .detach();
         true
     }
 
@@ -306,8 +335,13 @@ impl AppShell {
             Ok(account) => account.map(|a| a.environment()).unwrap_or_default(),
             Err(error) => {
                 self.terminal_opening.remove(&id);
-                if let Some(key) = draft { self.state.update(cx, |s, cx| s.terminal_start_failed(key, error.to_string(), cx)); }
-                else { self.set_mode_error(error.to_string(), cx); }
+                if let Some(key) = draft {
+                    self.state.update(cx, |s, cx| {
+                        s.terminal_start_failed(key, error.to_string(), cx)
+                    });
+                } else {
+                    self.set_mode_error(error.to_string(), cx);
+                }
                 return;
             }
         };
@@ -375,7 +409,10 @@ impl AppShell {
                         .map_err(|e| e.to_string())?;
                     let event_id = id.clone();
                     cx.subscribe(&host, move |this, _, event, cx| {
-                        if matches!(event, TerminalHostEvent::Terminal(del_terminal::TerminalEvent::Input)) {
+                        if matches!(
+                            event,
+                            TerminalHostEvent::Terminal(del_terminal::TerminalEvent::Input)
+                        ) {
                             this.state.update(cx, |state, cx| {
                                 state.keep_tab(&crate::state::Tab::Terminal(event_id.clone()), cx)
                             });
@@ -390,7 +427,10 @@ impl AppShell {
                         host.update(cx, |host, cx| host.focus(window, cx));
                     }
                     if let Some(provider) = spec.provider() {
-                        crate::provider_updates::terminal_started(provider, host.read(cx).snapshot().pid);
+                        crate::provider_updates::terminal_started(
+                            provider,
+                            host.read(cx).snapshot().pid,
+                        );
                     }
                     this.terminals.insert(id.clone(), host);
                     this.terminal_store.upsert(TerminalRecord {
@@ -498,7 +538,8 @@ impl AppShell {
                             tokio::time::timeout(
                                 Duration::from_secs(3),
                                 backend.manager.account_session_display_title(
-                                    provider, record.launch.account_id.as_deref(),
+                                    provider,
+                                    record.launch.account_id.as_deref(),
                                     &SessionId::new(identity.clone()),
                                     &record.launch.cwd,
                                 ),
@@ -515,49 +556,49 @@ impl AppShell {
                     titles
                 });
                 let titles = lookup.await.unwrap_or_default();
-                let outcome = this
-                    .update(cx, |this, cx| {
-                        let mut changed = false;
-                        for (id, identity, title) in titles {
-                            if !this
-                                .terminal_store
-                                .records
-                                .iter()
-                                .any(|r| r.id == id && r.conversation_id == identity)
-                            {
-                                continue;
-                            }
-                            if let Some(host) = this.terminals.get(&id) {
-                                host.update(cx, |host, cx| host.refresh_title(title.clone(), cx));
-                            }
-                            if let Some(title) = title
-                                && this.terminal_store.set_title(&id, &title)
-                            {
-                                changed = true;
-                                this.state.update(cx, |s, cx| {
-                                    if let Some(row) =
-                                        s.terminal_rows.iter_mut().find(|r| r.id == id)
-                                    {
-                                        row.title = title;
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }
-                        if changed
-                            && let Err(error) = this.terminal_store.save(&TerminalStore::path())
+                let outcome = this.update(cx, |this, cx| {
+                    let mut changed = false;
+                    for (id, identity, title) in titles {
+                        if !this
+                            .terminal_store
+                            .records
+                            .iter()
+                            .any(|r| r.id == id && r.conversation_id == identity)
                         {
-                            this.set_mode_error(
-                                format!("Could not save conversation title: {error}"),
-                                cx,
-                            );
+                            continue;
                         }
-                        changed
-                    });
+                        if let Some(host) = this.terminals.get(&id) {
+                            host.update(cx, |host, cx| host.refresh_title(title.clone(), cx));
+                        }
+                        if let Some(title) = title
+                            && this.terminal_store.set_title(&id, &title)
+                        {
+                            changed = true;
+                            this.state.update(cx, |s, cx| {
+                                if let Some(row) = s.terminal_rows.iter_mut().find(|r| r.id == id) {
+                                    row.title = title;
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }
+                    if changed && let Err(error) = this.terminal_store.save(&TerminalStore::path())
+                    {
+                        this.set_mode_error(
+                            format!("Could not save conversation title: {error}"),
+                            cx,
+                        );
+                    }
+                    changed
+                });
                 let Ok(changed) = outcome else {
                     break;
                 };
-                interval = if changed { INITIAL } else { (interval * 2).min(MAX_BACKOFF) };
+                interval = if changed {
+                    INITIAL
+                } else {
+                    (interval * 2).min(MAX_BACKOFF)
+                };
                 cx.background_executor().timer(interval).await;
             }
         })
@@ -608,17 +649,20 @@ impl AppShell {
             let id = id.clone();
             let pid = snapshot.pid;
             let runtime = self.state.read(cx).backend().runtime;
-            let codex_root = self.terminal_store.records.iter().find(|r| r.id == id).map(|r| r.launch.codex_root()).unwrap_or_else(crate::terminal_conversation::codex_root);
+            let codex_root = self
+                .terminal_store
+                .records
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.launch.codex_root())
+                .unwrap_or_else(crate::terminal_conversation::codex_root);
             let lookup_hint = hint.clone();
             let lookup = runtime.spawn(async move {
                 for _ in 0..20 {
                     let hint = lookup_hint.clone();
                     let codex_root = codex_root.clone();
                     let found = tokio::task::spawn_blocking(move || {
-                        crate::terminal_conversation::resolve_codex_prefix(
-                            &codex_root,
-                            &hint,
-                        )
+                        crate::terminal_conversation::resolve_codex_prefix(&codex_root, &hint)
                     })
                     .await
                     .ok()
@@ -802,14 +846,25 @@ impl AppShell {
                 let mut sessions = Vec::new();
                 let mut places = Vec::new();
                 for id in &allowed {
-                    let (title, terminal, cwd) = if let Some(record) = records.iter().find(|r| &r.id == id) {
-                        (record.title.clone(), false, record.cwd.clone())
-                    } else if let Some(row) = self.state.read(cx).terminal_rows.iter().find(|r| &r.id == id) {
-                        (Some(row.title.clone()), true, row.cwd.clone())
-                    } else {
-                        continue;
-                    };
-                    let key = format!("{}:{}", if terminal { "terminal" } else { "chat" }, id.as_str());
+                    let (title, terminal, cwd) =
+                        if let Some(record) = records.iter().find(|r| &r.id == id) {
+                            (record.title.clone(), false, record.cwd.clone())
+                        } else if let Some(row) = self
+                            .state
+                            .read(cx)
+                            .terminal_rows
+                            .iter()
+                            .find(|r| &r.id == id)
+                        {
+                            (Some(row.title.clone()), true, row.cwd.clone())
+                        } else {
+                            continue;
+                        };
+                    let key = format!(
+                        "{}:{}",
+                        if terminal { "terminal" } else { "chat" },
+                        id.as_str()
+                    );
                     sessions.push(serde_json::json!({"session_id":id.as_str(),"title":title,"mode":if terminal { "terminal" } else { "chat" },"tabs":self.right_store.browser_tabs(&key)}));
                     let tab = if terminal {
                         crate::state::Tab::Terminal(id.clone())
@@ -839,7 +894,11 @@ impl AppShell {
                         })
                     })
                 });
-                let position = |id: &str| sessions.iter().position(|s| s["session_id"].as_str() == Some(id));
+                let position = |id: &str| {
+                    sessions
+                        .iter()
+                        .position(|s| s["session_id"].as_str() == Some(id))
+                };
                 let target = match &request.session_id {
                     Some(id) => position(id),
                     None => by_tab
@@ -870,7 +929,10 @@ impl AppShell {
                 // show the browser. Reading it, or any action in a background
                 // session, never moves the user's selection or layout.
                 let reveal = foreground
-                    && !matches!(request.action.as_str(), "list_tabs" | "snapshot" | "screenshot");
+                    && !matches!(
+                        request.action.as_str(),
+                        "list_tabs" | "snapshot" | "screenshot"
+                    );
                 if reveal {
                     self.set_right(true, cx);
                 }
@@ -939,8 +1001,11 @@ impl AppShell {
                 summary,
             } => {
                 self.state.update(cx, |s, cx| {
-                    if state == del_mcp::ReportedState::Working { s.terminal_working.insert(caller.clone()); }
-                    else { s.terminal_working.remove(&caller); }
+                    if state == del_mcp::ReportedState::Working {
+                        s.terminal_working.insert(caller.clone());
+                    } else {
+                        s.terminal_working.remove(&caller);
+                    }
                     cx.notify();
                 });
                 if state == del_mcp::ReportedState::Done {
@@ -1022,8 +1087,17 @@ impl AppShell {
         let options = s.draft_launch_options();
         let enabled = !s.is_starting();
         let git = !info.current.is_empty();
-        let selected = options.branch.clone().unwrap_or_else(|| info.current.clone());
-        let label = if git { selected.clone() } else if s.project_info.contains_key(&cwd) { "No Git repository".into() } else { "Checking Git…".into() };
+        let selected = options
+            .branch
+            .clone()
+            .unwrap_or_else(|| info.current.clone());
+        let label = if git {
+            selected.clone()
+        } else if s.project_info.contains_key(&cwd) {
+            "No Git repository".into()
+        } else {
+            "Checking Git…".into()
+        };
         let state = self.state.clone();
         let branches_state = self.state.clone();
         let toggle_state = self.state.clone();

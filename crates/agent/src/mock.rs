@@ -98,7 +98,13 @@ fn emit(state: &SessionState, ev: AgentEvent) {
     let _ = state.tx.send(ev);
 }
 
-async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, delay: Duration, completion_delay: Duration) {
+async fn run_turn(
+    state: Arc<SessionState>,
+    turn_id: String,
+    prompt: String,
+    delay: Duration,
+    completion_delay: Duration,
+) {
     let pause = || async {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -294,7 +300,9 @@ async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, del
     );
     state.inner.lock().unwrap().current_turn = None;
     emit(&state, AgentEvent::TurnCompleted { turn_id, status });
-    if !completion_delay.is_zero() { tokio::time::sleep(completion_delay).await; }
+    if !completion_delay.is_zero() {
+        tokio::time::sleep(completion_delay).await;
+    }
     let mut inner = state.inner.lock().unwrap();
     inner.task = None;
 }
@@ -317,7 +325,10 @@ impl AgentBackend for MockBackend {
         session: &SessionId,
         _cwd: &std::path::Path,
     ) -> Result<Option<String>> {
-        self.session_title_reads.lock().unwrap().push(session.clone());
+        self.session_title_reads
+            .lock()
+            .unwrap()
+            .push(session.clone());
         Ok(self.session_title.clone())
     }
 

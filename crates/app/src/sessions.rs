@@ -75,7 +75,13 @@ impl Overrides {
     }
 
     pub fn set_pinned(&mut self, id: &SessionId, pinned: bool) {
-        let next = self.0.values().filter_map(|meta| meta.order).max().unwrap_or(0) + 1;
+        let next = self
+            .0
+            .values()
+            .filter_map(|meta| meta.order)
+            .max()
+            .unwrap_or(0)
+            + 1;
         let meta = self.meta(id);
         if meta.pinned != pinned {
             meta.pinned = pinned;
@@ -94,7 +100,12 @@ impl Overrides {
     }
 
     pub fn initialize_pins(&mut self, records: &[SessionRecord]) {
-        let ids: Vec<_> = self.rows(records).into_iter().filter(|row| row.pinned).map(|row| row.id).collect();
+        let ids: Vec<_> = self
+            .rows(records)
+            .into_iter()
+            .filter(|row| row.pinned)
+            .map(|row| row.id)
+            .collect();
         if ids.iter().any(|id| self.order(id).is_none()) {
             self.set_order(&ids);
         }
@@ -142,9 +153,14 @@ impl Overrides {
                 }
             })
             .collect();
-        rows.sort_by_cached_key(|r| (!r.pinned,
-            self.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }),
-            std::cmp::Reverse(r.updated_secs)));
+        rows.sort_by_cached_key(|r| {
+            (
+                !r.pinned,
+                self.order(&r.id)
+                    .unwrap_or(if r.pinned { 0 } else { u64::MAX }),
+                std::cmp::Reverse(r.updated_secs),
+            )
+        });
         rows
     }
 
@@ -156,7 +172,11 @@ impl Overrides {
 
     /// Write atomically (temp file, fsync, then rename).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        write_atomic(path, serde_json::to_string_pretty(self)?.as_bytes(), PRIVATE)
+        write_atomic(
+            path,
+            serde_json::to_string_pretty(self)?.as_bytes(),
+            PRIVATE,
+        )
     }
 }
 
@@ -172,11 +192,18 @@ pub struct OverridesWriter {
 impl OverridesWriter {
     /// Record a new snapshot; returns its generation for [`Self::write`].
     pub fn request(&self) -> u64 {
-        self.requested.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+        self.requested
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
     }
 
     /// Write `overrides` unless a newer request has already been written or queued.
-    pub fn write(&self, generation: u64, overrides: &Overrides, path: &Path) -> std::io::Result<()> {
+    pub fn write(
+        &self,
+        generation: u64,
+        overrides: &Overrides,
+        path: &Path,
+    ) -> std::io::Result<()> {
         let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
         if generation <= *written
             || generation < self.requested.load(std::sync::atomic::Ordering::SeqCst)
@@ -211,7 +238,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()>
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), uuid::Uuid::new_v4().simple()));
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -281,7 +312,10 @@ pub fn load_or_set_aside<T: Default + serde::de::DeserializeOwned>(
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (T::default(), None),
-        Err(error) => (T::default(), Some(format!("Could not read {what}: {error}"))),
+        Err(error) => (
+            T::default(),
+            Some(format!("Could not read {what}: {error}")),
+        ),
     }
 }
 
@@ -379,25 +413,46 @@ mod tests {
         overrides.set_pinned(&a, true);
         overrides.set_pinned(&b, true);
         let records = [record("b", None, 9000), record("a", None, 1000)];
-        assert_eq!(overrides.rows(&records).iter().map(|r| &r.id).collect::<Vec<_>>(), vec![&a, &b]);
+        assert_eq!(
+            overrides
+                .rows(&records)
+                .iter()
+                .map(|r| &r.id)
+                .collect::<Vec<_>>(),
+            vec![&a, &b]
+        );
         overrides.set_pinned(&a, false);
         overrides.set_pinned(&a, true);
         assert_eq!(overrides.rows(&records)[0].id, b);
         overrides.set_order(&[a.clone(), b.clone()]);
-        let restored: Overrides = serde_json::from_str(&serde_json::to_string(&overrides).unwrap()).unwrap();
+        let restored: Overrides =
+            serde_json::from_str(&serde_json::to_string(&overrides).unwrap()).unwrap();
         assert_eq!(restored.rows(&records)[0].id, a);
     }
 
     #[test]
     fn manual_regular_order_survives_activity_and_legacy_pins_are_initialized() {
-        let mut overrides: Overrides = serde_json::from_str(r#"{"a":{"pinned":true},"b":{"pinned":true}}"#).unwrap();
-        let records = [record("a", None, 1000), record("b", None, 2000), record("c", None, 3000), record("d", None, 4000)];
+        let mut overrides: Overrides =
+            serde_json::from_str(r#"{"a":{"pinned":true},"b":{"pinned":true}}"#).unwrap();
+        let records = [
+            record("a", None, 1000),
+            record("b", None, 2000),
+            record("c", None, 3000),
+            record("d", None, 4000),
+        ];
         overrides.initialize_pins(&records);
         overrides.set_order(&[SessionId::new("c"), SessionId::new("d")]);
         let mut changed = records.clone();
         changed[0].updated_at_ms = 90000;
         changed[3].updated_at_ms = 99000;
-        assert_eq!(overrides.rows(&changed).iter().map(|r| r.id.0.as_str()).collect::<Vec<_>>(), vec!["b", "a", "c", "d"]);
+        assert_eq!(
+            overrides
+                .rows(&changed)
+                .iter()
+                .map(|r| r.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a", "c", "d"]
+        );
     }
 
     #[test]
@@ -408,7 +463,10 @@ mod tests {
         let mut o = Overrides::default();
         o.rename(&SessionId::new("a"), "Mine");
         o.save(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(Overrides::load(&path), (o.clone(), None));
         std::fs::write(&path, "garbage").unwrap();
         let (loaded, error) = Overrides::load(&path);
@@ -416,13 +474,22 @@ mod tests {
         assert!(error.unwrap().contains("preserved"));
         // The unreadable file is kept beside the original, so saving defaults loses nothing.
         assert!(!path.exists());
-        let aside: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("sidebar.json.corrupt-")).collect();
+            .filter(|n| n.starts_with("sidebar.json.corrupt-"))
+            .collect();
         assert_eq!(aside.len(), 1);
-        assert_eq!(std::fs::read(dir.path().join(&aside[0])).unwrap(), b"garbage");
+        assert_eq!(
+            std::fs::read(dir.path().join(&aside[0])).unwrap(),
+            b"garbage"
+        );
         o.save(&path).unwrap();
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "no temporary files remain");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "no temporary files remain"
+        );
     }
 
     #[test]

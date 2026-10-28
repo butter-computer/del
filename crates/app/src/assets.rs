@@ -38,8 +38,12 @@ impl AssetSource for AppAssets {
             return Ok(Some(bytes));
         }
         let bytes: Option<&'static [u8]> = match path {
-            "icons/more-horizontal.svg" => Some(include_bytes!("../assets/icons/more-horizontal.svg")),
-            "icons/git-unavailable.svg" => Some(include_bytes!("../assets/icons/git-unavailable.svg")),
+            "icons/more-horizontal.svg" => {
+                Some(include_bytes!("../assets/icons/more-horizontal.svg"))
+            }
+            "icons/git-unavailable.svg" => {
+                Some(include_bytes!("../assets/icons/git-unavailable.svg"))
+            }
             "icons/working-ring.svg" => Some(include_bytes!("../assets/icons/working-ring.svg")),
             "icons/copy-response.svg" => Some(include_bytes!("../assets/icons/copy-response.svg")),
             "icons/skill.svg" => Some(include_bytes!("../assets/icons/skill.svg")),

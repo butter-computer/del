@@ -463,7 +463,9 @@ impl AgentBackend for AcpBackend {
         // never delays opening a chat.
         let mut probes = tokio::task::JoinSet::new();
         for agent in agents {
-            let Some(program) = agent.resolve() else { continue };
+            let Some(program) = agent.resolve() else {
+                continue;
+            };
             let key = format!(
                 "{}\0{}",
                 serde_json::to_string(&agent).unwrap_or_default(),
@@ -480,7 +482,8 @@ impl AgentBackend for AcpBackend {
             }
         }
         while let Some(joined) = probes.join_next().await {
-            let (index, key, agent, result) = joined.map_err(|e| AgentError::Backend(e.to_string()))?;
+            let (index, key, agent, result) =
+                joined.map_err(|e| AgentError::Backend(e.to_string()))?;
             slots[index] = Some(match result {
                 Ok(models) => {
                     self.model_cache.lock().unwrap().insert(key, models.clone());

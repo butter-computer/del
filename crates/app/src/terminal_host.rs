@@ -76,13 +76,22 @@ impl TerminalLaunchSpec {
         }
     }
     pub fn account(&self) -> io::Result<Option<crate::accounts::Account>> {
-        let Some(id) = &self.account_id else { return Ok(None); };
-        crate::accounts::load().map_err(io::Error::other)?.into_iter()
+        let Some(id) = &self.account_id else {
+            return Ok(None);
+        };
+        crate::accounts::load()
+            .map_err(io::Error::other)?
+            .into_iter()
             .find(|a| &a.id == id && Some(a.provider) == self.provider())
-            .map(Some).ok_or_else(|| io::Error::other("This terminal's saved account is unavailable"))
+            .map(Some)
+            .ok_or_else(|| io::Error::other("This terminal's saved account is unavailable"))
     }
     pub fn codex_root(&self) -> PathBuf {
-        self.account().ok().flatten().map(|a| a.root()).unwrap_or_else(crate::terminal_conversation::codex_root)
+        self.account()
+            .ok()
+            .flatten()
+            .map(|a| a.root())
+            .unwrap_or_else(crate::terminal_conversation::codex_root)
     }
     pub fn label(&self) -> String {
         self.title.clone()
@@ -219,11 +228,26 @@ impl TerminalLaunchSpec {
         // Apply profile variables after the login shell, so shell startup
         // cannot redirect authentication to another account.
         let mut profile_args = Vec::new();
-        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ACCESS_TOKEN", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_IDENTITY_PROVIDER_ID"] {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "OPENAI_ACCESS_TOKEN",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+            "OPENAI_IDENTITY_PROVIDER_ID",
+        ] {
             profile_args.extend(["-u".into(), key.into()]);
         }
-        for (key, value) in account.environment() { profile_args.push(format!("{key}={value}")); }
-        profile_args.push(self.program.clone().ok_or_else(|| io::Error::other("Missing provider command"))?);
+        for (key, value) in account.environment() {
+            profile_args.push(format!("{key}={value}"));
+        }
+        profile_args.push(
+            self.program
+                .clone()
+                .ok_or_else(|| io::Error::other("Missing provider command"))?,
+        );
         let mut isolated = self.clone();
         isolated.account_id = None;
         isolated.program = Some("/usr/bin/env".into());
@@ -1000,24 +1024,66 @@ mod tests {
     #[test]
     fn saved_terminal_account_survives_restore_and_isolates_authentication() {
         for (provider, kind, key) in [
-            (del_agent::Provider::Codex, TerminalLaunchKind::Codex, "CODEX_HOME"),
-            (del_agent::Provider::Claude, TerminalLaunchKind::Claude, "CLAUDE_CONFIG_DIR"),
-            (del_agent::Provider::OpenCode, TerminalLaunchKind::OpenCode, "OPENCODE_DB"),
+            (
+                del_agent::Provider::Codex,
+                TerminalLaunchKind::Codex,
+                "CODEX_HOME",
+            ),
+            (
+                del_agent::Provider::Claude,
+                TerminalLaunchKind::Claude,
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                del_agent::Provider::OpenCode,
+                TerminalLaunchKind::OpenCode,
+                "OPENCODE_DB",
+            ),
         ] {
-            let account = crate::accounts::Account { id: uuid::Uuid::new_v4().to_string(), provider, number: 2, identity: None, is_default: false, requires_login: false };
+            let account = crate::accounts::Account {
+                id: uuid::Uuid::new_v4().to_string(),
+                provider,
+                number: 2,
+                identity: None,
+                is_default: false,
+                requires_login: false,
+            };
             let mut spec = TerminalLaunchSpec::shell(std::env::temp_dir());
             spec.kind = kind;
             spec.program = Some("/bin/echo".into());
             spec.account_id = Some(account.id.clone());
-            let restored: TerminalLaunchSpec = serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
+            let restored: TerminalLaunchSpec =
+                serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
             assert_eq!(restored.account_id, spec.account_id);
-            let prepared = restored.isolate_account(&account).unwrap().prepare(vec![], vec![]).unwrap();
+            let prepared = restored
+                .isolate_account(&account)
+                .unwrap()
+                .prepare(vec![], vec![])
+                .unwrap();
             assert_eq!(prepared.program.as_deref(), Some("/usr/bin/env"));
             let binary = prepared.args.iter().position(|a| a == "/bin/echo").unwrap();
-            assert!(prepared.args[..binary].iter().any(|a| a.starts_with(&format!("{key}=")) && a.contains(&account.id)));
-            assert!(prepared.args[..binary].windows(2).any(|a| a == ["-u", "OPENAI_API_KEY"]));
-            assert!(prepared.args[..binary].windows(2).any(|a| a == ["-u", "CLAUDE_CODE_OAUTH_TOKEN"]));
-            if provider == del_agent::Provider::Codex { assert!(prepared.args.contains(&"cli_auth_credentials_store=\"file\"".into())); }
+            assert!(
+                prepared.args[..binary]
+                    .iter()
+                    .any(|a| a.starts_with(&format!("{key}=")) && a.contains(&account.id))
+            );
+            assert!(
+                prepared.args[..binary]
+                    .windows(2)
+                    .any(|a| a == ["-u", "OPENAI_API_KEY"])
+            );
+            assert!(
+                prepared.args[..binary]
+                    .windows(2)
+                    .any(|a| a == ["-u", "CLAUDE_CODE_OAUTH_TOKEN"])
+            );
+            if provider == del_agent::Provider::Codex {
+                assert!(
+                    prepared
+                        .args
+                        .contains(&"cli_auth_credentials_store=\"file\"".into())
+                );
+            }
         }
     }
 
@@ -1058,10 +1124,22 @@ mod tests {
     #[test]
     fn trust_polling_backs_off_after_startup() {
         use std::time::Duration;
-        assert_eq!(super::trust_poll_interval(Duration::ZERO), Duration::from_millis(100));
-        assert_eq!(super::trust_poll_interval(Duration::from_secs(4)), Duration::from_millis(100));
-        assert_eq!(super::trust_poll_interval(Duration::from_secs(6)), Duration::from_millis(250));
-        assert_eq!(super::trust_poll_interval(Duration::from_secs(30)), Duration::from_secs(1));
+        assert_eq!(
+            super::trust_poll_interval(Duration::ZERO),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            super::trust_poll_interval(Duration::from_secs(4)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            super::trust_poll_interval(Duration::from_secs(6)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            super::trust_poll_interval(Duration::from_secs(30)),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -1501,9 +1579,13 @@ mod opencode_tests {
             }
         })
         .await;
+        let screen = super::screen_tail(&terminal);
         terminal.close(std::time::Duration::from_millis(300));
         server.shutdown();
-        result.expect("OpenCode terminal MCP did not complete status/question round-trip");
+        assert!(
+            result.is_ok(),
+            "OpenCode terminal MCP did not complete status/question round-trip: {screen}"
+        );
     }
 
     #[tokio::test]

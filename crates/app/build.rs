@@ -18,16 +18,33 @@ fn main() {
         // `xcrun` honors DEVELOPER_DIR from the environment, which cargo passes through.
         let metal_available = std::process::Command::new("xcrun")
             .args(["-sdk", "macosx", "-f", "metal"])
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().map(|status| status.success()).unwrap_or(false);
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
         if metal_available {
             let status = std::process::Command::new("xcrun")
-                .args(["-sdk", "macosx", "metal", "-mmacosx-version-min=11.0", "-c", "src/fluid.metal", "-o"])
-                .arg(&air).status().expect("Metal shader compiler");
+                .args([
+                    "-sdk",
+                    "macosx",
+                    "metal",
+                    "-mmacosx-version-min=11.0",
+                    "-c",
+                    "src/fluid.metal",
+                    "-o",
+                ])
+                .arg(&air)
+                .status()
+                .expect("Metal shader compiler");
             assert!(status.success(), "Metal fluid shader compilation failed");
             let status = std::process::Command::new("xcrun")
-                .args(["-sdk", "macosx", "metallib"]).arg(&air).arg("-o").arg(&library)
-                .status().expect("Metal library linker");
+                .args(["-sdk", "macosx", "metallib"])
+                .arg(&air)
+                .arg("-o")
+                .arg(&library)
+                .status()
+                .expect("Metal library linker");
             assert!(status.success(), "Metal fluid library linking failed");
         } else {
             // Shipped bundles always carry the precompiled library; only debug
@@ -38,8 +55,10 @@ fn main() {
                 "Release builds need the Metal compiler (`xcrun metal`). Install Xcode or set \
                  DEVELOPER_DIR; set DEL_ALLOW_RUNTIME_SHADERS=1 to compile shaders at runtime instead."
             );
-            println!("cargo:warning=`xcrun metal` is unavailable (Command Line Tools only?); \
-                del-fluid.metallib will be compiled from source at runtime. Install Xcode or set DEVELOPER_DIR for the precompiled path.");
+            println!(
+                "cargo:warning=`xcrun metal` is unavailable (Command Line Tools only?); \
+                del-fluid.metallib will be compiled from source at runtime. Install Xcode or set DEVELOPER_DIR for the precompiled path."
+            );
             // An empty marker keeps include_bytes! compiling; fluid.m/backdrop.m detect
             // the zero length and compile the embedded src/fluid.metal source instead.
             std::fs::write(&library, []).expect("write placeholder metallib");

@@ -11,12 +11,13 @@ use crate::zoom::px as zpx;
 #[allow(dead_code)]
 mod wallpaper;
 
+mod accounts;
 mod ambient;
-mod backdrop;
+mod app_updates;
 mod appearance;
-mod haptics;
 mod assets;
 mod attachments;
+mod backdrop;
 mod browser;
 mod chat;
 mod command_menu;
@@ -29,17 +30,16 @@ mod followups;
 #[cfg(test)]
 mod goal_integration;
 mod goal_ui;
+mod haptics;
 mod hover_motion;
 mod icons;
 #[allow(dead_code)]
 mod mcp_bridge;
 mod mode_ui;
 mod model_picker;
-mod provider_updates;
-mod app_updates;
-mod providers;
 mod projects;
-mod accounts;
+mod provider_updates;
+mod providers;
 mod readiness;
 mod right_panel;
 mod search_ui;
@@ -112,25 +112,32 @@ impl Render for DraggedTab {
         let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
         // GPUI places drag previews at the pointer. Cancel its vertical movement
         // inside a fixed-size wrapper, keeping the original grab offset intact.
-        div().w(zpx(TAB_WIDTH)).h(crate::icons::button_size()).child(
-            h_flex()
-                .relative()
-                .top(self.start_pointer_y - window.mouse_position().y)
-                .left(left - natural_left)
-                .w(width)
-                .overflow_hidden()
-                .h(crate::icons::button_size())
-                .px_2()
-                .gap_2()
-                .items_center()
-                .rounded_md()
-                .bg(rgb(0x303033))
-                .text_color(rgb(0xf5f5f5))
-                .text_size(zpx(TEXT_MD))
-                .shadow_md()
-                .child(if self.terminal { mode_ui::terminal_mark(self.provider) } else { mode_ui::tab_mark(self.provider) })
-                .child(tab_title(self.title.clone())),
-        )
+        div()
+            .w(zpx(TAB_WIDTH))
+            .h(crate::icons::button_size())
+            .child(
+                h_flex()
+                    .relative()
+                    .top(self.start_pointer_y - window.mouse_position().y)
+                    .left(left - natural_left)
+                    .w(width)
+                    .overflow_hidden()
+                    .h(crate::icons::button_size())
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .rounded_md()
+                    .bg(rgb(0x303033))
+                    .text_color(rgb(0xf5f5f5))
+                    .text_size(zpx(TEXT_MD))
+                    .shadow_md()
+                    .child(if self.terminal {
+                        mode_ui::terminal_mark(self.provider)
+                    } else {
+                        mode_ui::tab_mark(self.provider)
+                    })
+                    .child(tab_title(self.title.clone())),
+            )
     }
 }
 
@@ -147,7 +154,12 @@ fn tab_title(title: String) -> Div {
 
 /// The keyboard hint and hover close glyph share the reserved trailing slot.
 /// Keeping both inside it prevents the hint from covering the close button.
-fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla, working: bool) -> Div {
+fn tab_action_content(
+    group: SharedString,
+    shortcut: Option<usize>,
+    color: Hsla,
+    working: bool,
+) -> Div {
     div()
         .relative()
         .size(crate::icons::button_size())
@@ -160,13 +172,24 @@ fn tab_action_content(group: SharedString, shortcut: Option<usize>, color: Hsla,
                 .flex()
                 .opacity(0.0)
                 .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
-                .child(crate::icons::icon(IconName::Close).with_size(zpx(14.)).text_color(color)),
+                .child(
+                    crate::icons::icon(IconName::Close)
+                        .with_size(zpx(14.))
+                        .text_color(color),
+                ),
         )
-        .when(working, |slot| slot.child(
-            div().absolute().inset_0().flex().items_center().justify_center()
-                .group_hover(group.clone(), |indicator| indicator.opacity(0.))
-                .child(crate::icons::working_spinner().color(color)),
-        ))
+        .when(working, |slot| {
+            slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .group_hover(group.clone(), |indicator| indicator.opacity(0.))
+                    .child(crate::icons::working_spinner().color(color)),
+            )
+        })
         .when_some(shortcut.filter(|_| !working), |slot, number| {
             slot.child(
                 div()
@@ -314,38 +337,6 @@ fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 
     let min = if right { 220.0 } else { LEFT_SIDEBAR_MIN };
     let max = if right { 800.0_f32 } else { LEFT_SIDEBAR_MAX };
     requested.clamp(min, max.min(viewport - other - 260.0 - 20.0).max(min))
-}
-
-#[cfg(test)]
-mod sidebar_width_tests {
-    use super::{SidebarWidths, sidebar_width};
-
-    #[test]
-    fn left_cap_preserves_default_minimum_and_right_widths() {
-        assert_eq!(SidebarWidths::default().left, 180.);
-        assert_eq!(sidebar_width(360., false, 1600., 0.), 234.);
-        assert_eq!(sidebar_width(170., false, 1600., 0.), 170.);
-        assert_eq!(sidebar_width(-100., false, 1600., 0.), 162.);
-        assert_eq!(sidebar_width(400., false, 450., 100.), 162.);
-        assert_eq!(sidebar_width(180., false, 550., 100.), 170.);
-        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 234.);
-        assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
-        assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
-    }
-
-    #[test]
-    fn persisted_left_width_is_clamped_and_right_width_is_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sidebar-widths.json");
-        for (saved, expected) in [(360., 234.), (216., 216.), (170., 170.), (20., 162.)] {
-            std::fs::write(&path, format!("{{\"left\":{saved},\"right\":725}}")).unwrap();
-            let loaded = SidebarWidths::read(&path);
-            assert_eq!(loaded.left, expected);
-            assert_eq!(loaded.right, 725.);
-        }
-        std::fs::write(&path, b"invalid").unwrap();
-        assert_eq!(SidebarWidths::read(&path).left, 180.);
-    }
 }
 
 /// A right panel kept alive for an open tab that is not currently selected.
@@ -742,15 +733,19 @@ impl AppShell {
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
-        shell.state.update(cx, |state, cx| state.window_activation_changed(window.is_window_active(), cx));
+        shell.state.update(cx, |state, cx| {
+            state.window_activation_changed(window.is_window_active(), cx)
+        });
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.updater.update(cx, |updater, cx| updater.check(false, cx));
+                this.updater
+                    .update(cx, |updater, cx| updater.check(false, cx));
             }
             this.state.update(cx, |state, cx| {
                 state.window_activation_changed(window.is_window_active(), cx);
             });
-        }).detach();
+        })
+        .detach();
         cx.on_app_quit(|this, cx| {
             this.cancel_dictation(cx);
             this.remember_right(cx);
@@ -979,7 +974,9 @@ impl AppShell {
             return;
         };
         if let Some(key) = cached.key
-            && self.right_store.set(key, cached.panel.read(cx).snapshot(cached.open))
+            && self
+                .right_store
+                .set(key, cached.panel.read(cx).snapshot(cached.open))
         {
             self.persist_right(cx);
         }
@@ -1074,7 +1071,10 @@ impl AppShell {
             self.remember_right(cx);
             let newly_created = !self.right_cache.contains_key(&owner);
             let (panel, open) = if let Some(cached) = self.right_cache.get(&owner) {
-                (cached.panel.clone(), cached.open && !cached.panel.read(cx).is_changes())
+                (
+                    cached.panel.clone(),
+                    cached.open && !cached.panel.read(cx).is_changes(),
+                )
             } else {
                 let saved = key
                     .as_deref()
@@ -1254,7 +1254,8 @@ impl AppShell {
                 provider,
                 cwd,
                 !st.is_draft(),
-                st.selected_account().is_some() || st.status_of(provider).is_some_and(providers::ready),
+                st.selected_account().is_some()
+                    || st.status_of(provider).is_some_and(providers::ready),
             )
         };
         let (shell, state_p, state_f) = (cx.entity(), self.state.clone(), self.state.clone());
@@ -1269,10 +1270,16 @@ impl AppShell {
             .composer_attachments
             .get(&owner)
             .is_some_and(|images| !images.is_empty());
-        let folder_branch = locked.then(|| {
-            let state = self.state.read(cx);
-            state.project_info.get(&cwd).map(|info| info.current.clone()).filter(|b| !b.is_empty())
-        }).flatten();
+        let folder_branch = locked
+            .then(|| {
+                let state = self.state.read(cx);
+                state
+                    .project_info
+                    .get(&cwd)
+                    .map(|info| info.current.clone())
+                    .filter(|b| !b.is_empty())
+            })
+            .flatten();
         let composer = ComposerCard::new(
             &self.composer,
             COMPOSER_MAX_WIDTH,
@@ -1281,7 +1288,9 @@ impl AppShell {
             self.model_picker.clone(),
             if locked {
                 sessions::folder_name(&self.state.read(cx).project_root(&cwd))
-            } else { sessions::folder_name(&cwd) },
+            } else {
+                sessions::folder_name(&cwd)
+            },
             locked,
             running,
         )
@@ -1320,43 +1329,51 @@ impl AppShell {
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.attach_paths(owner, paths.0.to_vec(), cx)
             }))
-            .when(
-                self.state.read(cx).pending_error().is_some(),
-                |column| {
-                    column.child(
-                        Button::new("retry-first-prompt")
-                            .ghost()
-                            .small()
-                            .label("Retry message")
-                            .on_click(move |_, window, cx| {
-                                retry_shell.update(cx, |this, cx| {
-                                    if this.state.read(cx).mode() == SessionMode::Terminal {
-                                        let input = this.state.read(cx).pending_input().cloned();
-                                        if let Some(input) = input { this.submit_terminal_prompt(&input.text, &input.attachments, window, cx); }
-                                    } else { this.state.update(cx, |state, cx| state.retry_pending(cx)); }
-                                });
-                            }),
-                    )
-                },
-            )
+            .when(self.state.read(cx).pending_error().is_some(), |column| {
+                column.child(
+                    Button::new("retry-first-prompt")
+                        .ghost()
+                        .small()
+                        .label("Retry message")
+                        .on_click(move |_, window, cx| {
+                            retry_shell.update(cx, |this, cx| {
+                                if this.state.read(cx).mode() == SessionMode::Terminal {
+                                    let input = this.state.read(cx).pending_input().cloned();
+                                    if let Some(input) = input {
+                                        this.submit_terminal_prompt(
+                                            &input.text,
+                                            &input.attachments,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                } else {
+                                    this.state.update(cx, |state, cx| state.retry_pending(cx));
+                                }
+                            });
+                        }),
+                )
+            })
             .child(self.render_followups(cx))
             .child(self.render_goal_bar(cx))
             .children(self.render_agent_messages(cx))
             .child(
-                div().relative().child(composer)
+                div()
+                    .relative()
+                    .child(composer)
                     .child(self.ambient.read(cx).region_probe(0, zpx(14.0)))
                     .child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .bottom_full()
-                            .mb_2()
-                            .left_0()
-                            .w_full()
-                            .child(self.command_menu.clone()),
-                    )
-                    .with_priority(10),
-                ),
+                        deferred(
+                            div()
+                                .absolute()
+                                .bottom_full()
+                                .mb_2()
+                                .left_0()
+                                .w_full()
+                                .child(self.command_menu.clone()),
+                        )
+                        .with_priority(10),
+                    ),
             )
     }
 
@@ -1914,59 +1931,68 @@ impl AppShell {
                     )
                 }
                 // New-chat page: heading and the same composer, centred.
-                None => page.child(self.ambient.clone()).child(
-                    v_flex()
-                        .absolute()
-                        .inset_0()
-                        .items_center()
-                        .justify_center()
-                        .px_3()
-                        .child(
-                            v_flex()
-                                .w_full()
-                                .max_w(zpx(COMPOSER_MAX_WIDTH))
-                                .items_start()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        // The composer's padding plus the input's own
-                                        // inset, so the heading and the input text
-                                        // share a left edge.
-                                        .pl(zpx(17.5))
-                                        .text_size(zpx(TEXT_LG))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(0xf5f5f5))
-                                        .child(HEADING),
-                                )
-                                .child(
-                                    div()
-                                        .relative()
-                                        .w_full()
-                                        .pb(zpx(40.0))
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .bottom_0()
-                                                .left(zpx(16.0))
-                                                .right(zpx(16.0))
-                                                .h(zpx(40.0))
-                                                .rounded_b(zpx(14.0))
-                                                .bg(crate::appearance::composer_surface())
-                                                .child(self.render_new_session_options(cx))
-                                                .child(self.ambient.read(cx).region_probe(1, zpx(14.0))),
-                                        )
-                                        .child(div().relative().child(self.render_composer(cx))),
-                                ),
-                        ),
-                ).child(
-                    div()
-                        .absolute()
-                        .bottom(zpx(16.0))
-                        .right(zpx(20.0))
-                        .text_size(zpx(12.0))
-                        .text_color(rgb(0x737373))
-                        .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-                ),
+                None => page
+                    .child(self.ambient.clone())
+                    .child(
+                        v_flex()
+                            .absolute()
+                            .inset_0()
+                            .items_center()
+                            .justify_center()
+                            .px_3()
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .max_w(zpx(COMPOSER_MAX_WIDTH))
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            // The composer's padding plus the input's own
+                                            // inset, so the heading and the input text
+                                            // share a left edge.
+                                            .pl(zpx(17.5))
+                                            .text_size(zpx(TEXT_LG))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(0xf5f5f5))
+                                            .child(HEADING),
+                                    )
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w_full()
+                                            .pb(zpx(40.0))
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .bottom_0()
+                                                    .left(zpx(16.0))
+                                                    .right(zpx(16.0))
+                                                    .h(zpx(40.0))
+                                                    .rounded_b(zpx(14.0))
+                                                    .bg(crate::appearance::composer_surface())
+                                                    .child(self.render_new_session_options(cx))
+                                                    .child(
+                                                        self.ambient
+                                                            .read(cx)
+                                                            .region_probe(1, zpx(14.0)),
+                                                    ),
+                                            )
+                                            .child(
+                                                div().relative().child(self.render_composer(cx)),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(zpx(16.0))
+                            .right(zpx(20.0))
+                            .text_size(zpx(12.0))
+                            .text_color(rgb(0x737373))
+                            .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    ),
             })
             .into_any_element()
     }
@@ -1992,7 +2018,8 @@ impl Render for AppShell {
             }
         }
         if self.state.read(cx).sidebar_drag.active.is_some() && !cx.has_active_drag() {
-            self.state.update(cx, |state, _| state.sidebar_drag = Default::default());
+            self.state
+                .update(cx, |state, _| state.sidebar_drag = Default::default());
         }
         if self.dragging_tab.is_some() && !cx.has_active_drag() {
             self.dragging_tab = None;
@@ -2040,21 +2067,42 @@ impl Render for AppShell {
                 dialog
                     .width(zpx(720.).min(window.viewport_size().width - zpx(48.)))
                     .margin_top(((window.viewport_size().height - height) / 2.).max(zpx(24.)))
-                    .p_0().close_button(false)
+                    .p_0()
+                    .close_button(false)
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                     .bg(appearance::popup_surface(0x0b0b0d))
-                    .rounded(zpx(14.)).overflow_hidden()
+                    .rounded(zpx(14.))
+                    .overflow_hidden()
                     .on_close(move |_, _, cx| {
                         close_state.update(cx, |state, cx| {
-                            if state.panel == Panel::Providers { state.toggle_providers(cx); }
+                            if state.panel == Panel::Providers {
+                                state.toggle_providers(cx);
+                            }
                         });
                     })
-                    .child(h_flex().h(height).min_h_0().items_start()
-                        .child(div().w(zpx(150.)).h_full().flex_none().p_3()
-                            .border_r_1().border_color(appearance::separator())
-                            .child(signin::navigation(&state, cx)))
-                        .child(div().flex_1().min_w_0().h_full()
-                            .child(signin::render(&state, cx))))
+                    .child(
+                        h_flex()
+                            .h(height)
+                            .min_h_0()
+                            .items_start()
+                            .child(
+                                div()
+                                    .w(zpx(150.))
+                                    .h_full()
+                                    .flex_none()
+                                    .p_3()
+                                    .border_r_1()
+                                    .border_color(appearance::separator())
+                                    .child(signin::navigation(&state, cx)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(signin::render(&state, cx)),
+                            ),
+                    )
             });
         }
         if !settings_open && self.settings_focused {
@@ -2090,11 +2138,7 @@ impl Render for AppShell {
             self.sidebar_widths.right,
             true,
             viewport,
-            if sidebar_visible {
-                left_width
-            } else {
-                0.0
-            },
+            if sidebar_visible { left_width } else { 0.0 },
         );
         if self
             .mode_slide_started
@@ -2133,8 +2177,14 @@ impl Render for AppShell {
         let renaming = self.state.read(cx).renaming.clone();
         let project_renaming = self.state.read(cx).project_renaming.clone();
         if renaming != self.renaming_loaded || project_renaming != self.project_renaming_loaded {
-            let title = project_renaming.as_ref().map(|path| self.state.read(cx).project_name(path))
-                .or_else(|| renaming.as_ref().map(|id| self.state.read(cx).current_title(id)));
+            let title = project_renaming
+                .as_ref()
+                .map(|path| self.state.read(cx).project_name(path))
+                .or_else(|| {
+                    renaming
+                        .as_ref()
+                        .map(|id| self.state.read(cx).current_title(id))
+                });
             if let Some(title) = title {
                 self.rename.update(cx, |input, cx| {
                     input.set_value(title, window, cx);
@@ -2147,7 +2197,9 @@ impl Render for AppShell {
 
         v_flex()
             .size_full()
-            .when(appearance::light(), |shell| shell.bg(gpui_kit::rgb(0xfcfcfc)))
+            .when(appearance::light(), |shell| {
+                shell.bg(gpui_kit::rgb(0xfcfcfc))
+            })
             .track_focus(&self.shell_focus)
             .key_context("Shell")
             .capture_action(
@@ -2194,7 +2246,9 @@ impl Render for AppShell {
             ))
             .capture_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
-                    if this.state.read(cx).project_renaming.is_some() || this.state.read(cx).renaming.is_some() {
+                    if this.state.read(cx).project_renaming.is_some()
+                        || this.state.read(cx).renaming.is_some()
+                    {
                         this.state.update(cx, |s, cx| s.finish_rename(None, cx));
                         cx.stop_propagation();
                     } else if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
@@ -2240,8 +2294,11 @@ impl Render for AppShell {
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 this.state.update(cx, |state, cx| {
-                    if state.panel == Panel::Providers { state.toggle_providers(cx); }
-                    else { state.close_active_tab(cx); }
+                    if state.panel == Panel::Providers {
+                        state.toggle_providers(cx);
+                    } else {
+                        state.close_active_tab(cx);
+                    }
                 });
                 this.focus_composer(window, cx);
             }))
@@ -2310,7 +2367,13 @@ impl Render for AppShell {
                             .border_r_1()
                             .border_color(appearance::separator())
                             .overflow_hidden()
-                            .child(sidebar::render(&self.state, &self.rename, &self.usage, &self.updater, cx));
+                            .child(sidebar::render(
+                                &self.state,
+                                &self.rename,
+                                &self.usage,
+                                &self.updater,
+                                cx,
+                            ));
                         if settings_open || self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {
@@ -2385,11 +2448,7 @@ impl Render for AppShell {
                                     self.resize_handle(
                                         true,
                                         right_width,
-                                        if sidebar_visible {
-                                            left_width
-                                        } else {
-                                            0.0
-                                        },
+                                        if sidebar_visible { left_width } else { 0.0 },
                                     )
                                     .left_0()
                                     .bottom(inset),
@@ -2412,7 +2471,9 @@ impl Render for AppShell {
                     }),
             )
             .when(self.search_open || settings_open, |shell| {
-                let shade = div().absolute().inset_0()
+                let shade = div()
+                    .absolute()
+                    .inset_0()
                     .child(backdrop::blur_layer())
                     .bg(gpui_kit::rgba(0x00000066));
                 if let Some(started) = self.search_closing {
@@ -2515,4 +2576,36 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod sidebar_width_tests {
+    use super::{SidebarWidths, sidebar_width};
+
+    #[test]
+    fn left_cap_preserves_default_minimum_and_right_widths() {
+        assert_eq!(SidebarWidths::default().left, 180.);
+        assert_eq!(sidebar_width(360., false, 1600., 0.), 234.);
+        assert_eq!(sidebar_width(170., false, 1600., 0.), 170.);
+        assert_eq!(sidebar_width(-100., false, 1600., 0.), 162.);
+        assert_eq!(sidebar_width(400., false, 450., 100.), 162.);
+        assert_eq!(sidebar_width(180., false, 550., 100.), 170.);
+        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 234.);
+        assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
+        assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
+    }
+
+    #[test]
+    fn persisted_left_width_is_clamped_and_right_width_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-widths.json");
+        for (saved, expected) in [(360., 234.), (216., 216.), (170., 170.), (20., 162.)] {
+            std::fs::write(&path, format!("{{\"left\":{saved},\"right\":725}}")).unwrap();
+            let loaded = SidebarWidths::read(&path);
+            assert_eq!(loaded.left, expected);
+            assert_eq!(loaded.right, 725.);
+        }
+        std::fs::write(&path, b"invalid").unwrap();
+        assert_eq!(SidebarWidths::read(&path).left, 180.);
+    }
 }

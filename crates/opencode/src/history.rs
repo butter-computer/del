@@ -24,7 +24,10 @@ struct CachedHistory {
     used: u64,
 }
 fn stamp(environment: &[(String, String)]) -> Stamp {
-    let directory = environment.iter().find(|(key, _)| key == "XDG_DATA_HOME").map(|(_, value)| PathBuf::from(value))
+    let directory = environment
+        .iter()
+        .find(|(key, _)| key == "XDG_DATA_HOME")
+        .map(|(_, value)| PathBuf::from(value))
         .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
@@ -47,7 +50,12 @@ impl Cache {
     pub fn read(&mut self, cwd: &Path, id: &str) -> std::io::Result<Arc<Vec<AgentEvent>>> {
         self.read_with_environment(cwd, id, &[])
     }
-    pub fn read_with_environment(&mut self, cwd: &Path, id: &str, environment: &[(String, String)]) -> std::io::Result<Arc<Vec<AgentEvent>>> {
+    pub fn read_with_environment(
+        &mut self,
+        cwd: &Path,
+        id: &str,
+        environment: &[(String, String)],
+    ) -> std::io::Result<Arc<Vec<AgentEvent>>> {
         let stamp = stamp(environment);
         let key = (cwd.to_owned(), id.to_owned(), environment.to_vec());
         self.tick += 1;
@@ -65,7 +73,8 @@ impl Cache {
             .build()?;
         let output = runtime.block_on(async {
             let mut command = tokio::process::Command::new(binary);
-            command.envs(environment.iter().cloned())
+            command
+                .envs(environment.iter().cloned())
                 .args(["session", "export", "--standalone", "--", id])
                 .current_dir(cwd)
                 .stdin(std::process::Stdio::null())
@@ -108,12 +117,7 @@ impl Cache {
         self.insert(key, stamp, events.clone());
         Ok(events)
     }
-    fn insert(
-        &mut self,
-        key: Key,
-        stamp: Stamp,
-        events: Arc<Vec<AgentEvent>>,
-    ) {
+    fn insert(&mut self, key: Key, stamp: Stamp, events: Arc<Vec<AgentEvent>>) {
         if !self.entries.contains_key(&key)
             && self.entries.len() >= CAPACITY
             && let Some(oldest) = self

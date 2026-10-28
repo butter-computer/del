@@ -288,7 +288,8 @@ impl del_agent::backend::BrowserCredentials for ChatBrowserCredentials {
     }
 
     fn set_shared_member(&self, group: &SessionId, session: &SessionId, member: bool) {
-        let _ = self.with_server(|_, server| server.set_shared_browser_member(group, session, member));
+        let _ =
+            self.with_server(|_, server| server.set_shared_browser_member(group, session, member));
     }
 }
 
@@ -663,9 +664,7 @@ impl McpHost for AppHost {
                 .collect(),
         };
         if allowed.is_empty() {
-            return Err(failed(
-                "No running chat can use this browser credential",
-            ));
+            return Err(failed("No running chat can use this browser credential"));
         }
         let (reply, rx) = oneshot::channel();
         self.emit(BridgeEvent::Browser {

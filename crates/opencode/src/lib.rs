@@ -94,7 +94,13 @@ async fn canonicalize(path: &Path) -> Result<PathBuf> {
         .map_err(|e| err(format!("canonicalize task failed: {e}")))??)
 }
 impl OpenCodeBackend {
-    pub fn with_environment(environment: Vec<(String, String)>) -> Self { { let mut backend = Self::default(); backend.environment = environment; backend } }
+    pub fn with_environment(environment: Vec<(String, String)>) -> Self {
+        {
+            let mut backend = Self::default();
+            backend.environment = environment;
+            backend
+        }
+    }
     async fn server(&self, cwd: &Path) -> Result<Arc<Server>> {
         let cwd = canonicalize(cwd).await?;
         let cell = {
@@ -183,7 +189,12 @@ impl OpenCodeBackend {
     }
     /// Let (or stop letting) the server's shared browser credential reach `id`.
     fn set_browser_member(&self, server: &Server, id: &SessionId, member: bool) {
-        let group = server.browser.lock().unwrap().as_ref().map(|(group, _)| group.clone());
+        let group = server
+            .browser
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(group, _)| group.clone());
         if let (Some(group), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
             tools.credentials.set_shared_member(&group, id, member);
         }
@@ -373,7 +384,8 @@ impl OpenCodeBackend {
                             {
                                 let cwd = stream_live.config.lock().unwrap().cwd.clone();
                                 let server = stream_live.server.clone();
-                                let path = format!("/api/session/{}/diff", seg(session_id.as_str()));
+                                let path =
+                                    format!("/api/session/{}/diff", seg(session_id.as_str()));
                                 let diffs = tokio::spawn(async move {
                                     match server.json(Method::GET, &path, None).await {
                                         Ok(diffs) => mapping::diffs(&cwd, &diffs),
@@ -388,7 +400,8 @@ impl OpenCodeBackend {
                                 let _ = queue.send(Queued::Diffs(diffs));
                                 files_changed = false;
                             }
-                            let _ = queue.send(Queued::Events(mapped, event["durable"]["seq"].as_u64()));
+                            let _ = queue
+                                .send(Queued::Events(mapped, event["durable"]["seq"].as_u64()));
                         }
                     }
                 }
@@ -724,7 +737,10 @@ impl AgentBackend for OpenCodeBackend {
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_HISTORY_PAGES {
             let mut request = server
-                .request(Method::GET, &format!("/api/session/{}/message", seg(id.as_str())))
+                .request(
+                    Method::GET,
+                    &format!("/api/session/{}/message", seg(id.as_str())),
+                )
                 .query(&[("limit", "200")])
                 .timeout(std::time::Duration::from_secs(30));
             request = if let Some(cursor) = &cursor {
@@ -751,7 +767,10 @@ impl AgentBackend for OpenCodeBackend {
         }
         if let (Some(first), Some(last)) = (first_user, last_user) {
             let response = server
-                .request(Method::GET, &format!("/api/session/{}/diff", seg(id.as_str())))
+                .request(
+                    Method::GET,
+                    &format!("/api/session/{}/diff", seg(id.as_str())),
+                )
                 .query(&[("from", first), ("to", last)])
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
@@ -789,7 +808,11 @@ impl AgentBackend for OpenCodeBackend {
     async fn interrupt(&self, id: &SessionId) -> Result<()> {
         self.live(id)?
             .server
-            .json(Method::POST, &format!("/api/session/{}/interrupt", seg(id.as_str())), None)
+            .json(
+                Method::POST,
+                &format!("/api/session/{}/interrupt", seg(id.as_str())),
+                None,
+            )
             .await?;
         Ok(())
     }
@@ -847,7 +870,11 @@ impl AgentBackend for OpenCodeBackend {
             return Ok(None);
         };
         let value = server
-            .json(Method::GET, &format!("/api/session/{}", seg(id.as_str())), None)
+            .json(
+                Method::GET,
+                &format!("/api/session/{}", seg(id.as_str())),
+                None,
+            )
             .await?;
         Ok(value["data"]["title"].as_str().map(str::to_owned))
     }
@@ -901,7 +928,12 @@ pub async fn create_terminal_session(
     create_terminal_session_with_environment(cwd, model, variant, &[]).await
 }
 
-pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<&str>, variant: Option<&str>, env: &[(String, String)]) -> Result<String> {
+pub async fn create_terminal_session_with_environment(
+    cwd: &Path,
+    model: Option<&str>,
+    variant: Option<&str>,
+    env: &[(String, String)],
+) -> Result<String> {
     let cwd = canonicalize(cwd).await?;
     let server = Server::start(&cwd, env).await?;
     let mut body = json!({"location":{"directory":cwd}});
@@ -1164,7 +1196,12 @@ export default Plugin.define({{
                     assert_eq!(body["model"], "title-test");
                     let messages = body["messages"].to_string();
                     assert!(messages.contains("chess board"));
-                    assert!(messages.contains("Return only the title"));
+                    assert!(body["messages"].as_array().unwrap().iter().any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_str().is_some_and(|content| {
+                                content.contains(del_agent::titles::INSTRUCTIONS)
+                            })
+                    }), "title request must include the shared title instructions");
                     observed.store(true, Ordering::SeqCst);
                     let chunk = json!({"id":"test-title", "object":"chat.completion.chunk",
                         "created":1, "model":"title-test",

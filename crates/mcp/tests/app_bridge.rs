@@ -651,8 +651,7 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     }
     let result = pending.await.unwrap();
     assert!(result.get("structuredContent").is_none());
-    let text: Value =
-        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(text["title"], "Fixture");
     // Terminal agents cannot reach browsers outside their spawn family.
     f.handle.upsert_terminal(terminal("stranger", None), None);
@@ -760,23 +759,31 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
 async fn real_opencode_warmed_server_uses_chat_browser_bridge() {
     use del_agent::{AgentEvent, PermissionMode, TurnStatus, UserInput};
     let mut f = Fixture::new(Default::default()).await;
-    let backend = del_opencode::OpenCodeBackend::default();
+    let backend = Arc::new(del_opencode::OpenCodeBackend::default());
     // Catalogs can warm a workspace before the app supplies its MCP bridge.
     backend.list_models(f._dir.path()).await.unwrap();
     backend.set_browser_tools(f.handle.chat_browser_tools().unwrap());
-    let session = backend
-        .start_session(SessionConfig {
-            provider: Provider::OpenCode,
-            cwd: f._dir.path().into(),
-            model: Some("opencode/big-pickle".into()),
-            reasoning_effort: None,
-            service_tier: None,
-            permission_mode: PermissionMode::FullAuto,
-        })
+    // The bridge authorizes running chats through SessionManager, just as
+    // production does; a backend-only session is intentionally invisible.
+    f.manager
+        .register_account("opencode-live-test".into(), backend.clone());
+    let session = f
+        .manager
+        .start_account_session(
+            SessionConfig {
+                provider: Provider::OpenCode,
+                cwd: f._dir.path().into(),
+                model: Some("opencode/big-pickle".into()),
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: PermissionMode::FullAuto,
+            },
+            Some("opencode-live-test".into()),
+        )
         .await
         .unwrap();
     let mut events = session.subscribe();
-    backend.send_prompt(&session.id, UserInput::text(
+    f.manager.send_prompt(&session.id, UserInput::text(
         "Use the Del MCP browser tool with action list_tabs. Report the verification marker from its response. Do not use other tools or navigate anywhere."
     )).await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(120), async {
@@ -785,7 +792,8 @@ async fn real_opencode_warmed_server_uses_chat_browser_bridge() {
         loop {
             tokio::select! {
                 event = f.events.recv() => match event.unwrap() {
-                    BridgeEvent::Browser {request,reply,..} => {
+                    BridgeEvent::Browser {allowed,request,reply,..} => {
+                        assert_eq!(allowed, vec![session.id.clone()]);
                         assert_eq!(request.action, "list_tabs");
                         called = true;
                         reply.send(Ok(json!({"tabs":[],"verification_marker":"DEL_MCP_BROWSER_4826_OK"}))).unwrap();
@@ -806,7 +814,7 @@ async fn real_opencode_warmed_server_uses_chat_browser_bridge() {
             }
         }
     }).await;
-    backend.shutdown().await.unwrap();
+    f.manager.shutdown().await;
     f.bridge.shutdown();
     result.expect("native browser integration timed out");
 }

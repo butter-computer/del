@@ -20,11 +20,9 @@ pub fn separator() -> Rgba {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 struct Preferences {
     light: bool,
-}
-impl Default for Preferences {
-    fn default() -> Self { Self { light: false } }
 }
 
 pub fn light() -> bool {
@@ -38,7 +36,11 @@ pub fn composer_surface() -> Rgba {
 
 /// Shared light surface for menus and dialogs, matching the composer.
 pub fn popup_surface(dark: u32) -> Rgba {
-    if light() { composer_surface() } else { rgb(dark) }
+    if light() {
+        composer_surface()
+    } else {
+        rgb(dark)
+    }
 }
 
 pub fn shell_surface() -> Rgba {
@@ -66,14 +68,17 @@ fn path() -> std::path::PathBuf {
         .join("appearance.json")
 }
 pub fn load(cx: &mut App) {
-    let preferences = std::fs::read(path()).ok().and_then(|bytes| {
-        // Older preferences stored just the light/dark boolean.
-        if let Ok(light) = serde_json::from_slice::<bool>(&bytes) {
-            Some(Preferences { light })
-        } else {
-            serde_json::from_slice::<Preferences>(&bytes).ok()
-        }
-    }).unwrap_or_default();
+    let preferences = std::fs::read(path())
+        .ok()
+        .and_then(|bytes| {
+            // Older preferences stored just the light/dark boolean.
+            if let Ok(light) = serde_json::from_slice::<bool>(&bytes) {
+                Some(Preferences { light })
+            } else {
+                serde_json::from_slice::<Preferences>(&bytes).ok()
+            }
+        })
+        .unwrap_or_default();
     apply(preferences.light, cx);
 }
 fn save() {
@@ -204,14 +209,23 @@ fn palette(mut color: Rgba) -> Rgba {
             color.b = 0.98 - color.b * 0.88;
         } else {
             let value = (color.r + color.g + color.b) / 3.;
-            let tone = if value < 0.08 { 0x000000 }
-                else if value < 0.18 { DARK_SURFACE }
-                else if value < 0.26 { DARK_HOVER }
-                else if value < 0.36 { DARK_ACTIVE }
-                else if value < 0.52 { DARK_MUTED }
-                else if value < 0.75 { DARK_SECONDARY_TEXT }
-                else if value < 0.94 { DARK_PRIMARY_TEXT }
-                else { 0xffffff };
+            let tone = if value < 0.08 {
+                0x000000
+            } else if value < 0.18 {
+                DARK_SURFACE
+            } else if value < 0.26 {
+                DARK_HOVER
+            } else if value < 0.36 {
+                DARK_ACTIVE
+            } else if value < 0.52 {
+                DARK_MUTED
+            } else if value < 0.75 {
+                DARK_SECONDARY_TEXT
+            } else if value < 0.94 {
+                DARK_PRIMARY_TEXT
+            } else {
+                0xffffff
+            };
             let gray = (tone & 0xff) as f32 / 255.;
             color.r = gray;
             color.g = gray;

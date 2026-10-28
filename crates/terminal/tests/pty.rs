@@ -139,10 +139,12 @@ fn close_returns_while_a_detached_descendant_floods_the_pty() {
         "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(F, \">\", $ARGV[0]); print F $$; close F; $|=1; print \"x\" x 79, \"\\n\" while 1' '{}' & sleep 30",
         pidfile.display()
     ));
-    wait_for(|| {
-        std::fs::read_to_string(&pidfile).is_ok_and(|p| p.trim().parse::<i32>().is_ok())
-    });
-    let flood: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    wait_for(|| std::fs::read_to_string(&pidfile).is_ok_and(|p| p.trim().parse::<i32>().is_ok()));
+    let flood: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let started = Instant::now();
     s.close(Duration::ZERO);
     let elapsed = started.elapsed();
@@ -151,5 +153,8 @@ fn close_returns_while_a_detached_descendant_floods_the_pty() {
     }
     let _ = std::fs::remove_file(&pidfile);
     assert!(s.exited());
-    assert!(elapsed < Duration::from_secs(3), "close blocked for {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "close blocked for {elapsed:?}"
+    );
 }

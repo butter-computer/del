@@ -29,7 +29,8 @@ impl Queue {
     }
     fn open(path: std::path::PathBuf) -> Self {
         // An unreadable queue is preserved aside rather than overwritten by the next save.
-        let (mut queue, _): (Self, _) = crate::sessions::load_or_set_aside(&path, "queued follow-ups");
+        let (mut queue, _): (Self, _) =
+            crate::sessions::load_or_set_aside(&path, "queued follow-ups");
         queue.storage = Some(path);
         for item in &mut queue.items {
             if item.sending {
@@ -56,18 +57,31 @@ impl Queue {
     /// Delete a session's queue file and the imported attachment files it still
     /// references. Returns the attachment paths that were removed.
     pub fn remove_session(session: &SessionId) -> Vec<std::path::PathBuf> {
-        del_agent::data_dir().map(|d| Self::remove_session_in(&d, session)).unwrap_or_default()
+        del_agent::data_dir()
+            .map(|d| Self::remove_session_in(&d, session))
+            .unwrap_or_default()
     }
-    fn remove_session_in(data_dir: &std::path::Path, session: &SessionId) -> Vec<std::path::PathBuf> {
+    fn remove_session_in(
+        data_dir: &std::path::Path,
+        session: &SessionId,
+    ) -> Vec<std::path::PathBuf> {
         let path = Self::path_in(data_dir, session);
         let attachments = data_dir.join("attachments");
         let queue: Option<Self> = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         let mut removed = Vec::new();
-        for file in queue.iter().flat_map(|q| q.items.iter()).flat_map(|item| item.input.attachments.iter()) {
+        for file in queue
+            .iter()
+            .flat_map(|q| q.items.iter())
+            .flat_map(|item| item.input.attachments.iter())
+        {
             if let Some(entry) = attachment_entry(&attachments, &file.path) {
-                let _ = if entry.is_dir() { std::fs::remove_dir_all(&entry) } else { std::fs::remove_file(&entry) };
+                let _ = if entry.is_dir() {
+                    std::fs::remove_dir_all(&entry)
+                } else {
+                    std::fs::remove_file(&entry)
+                };
                 removed.push(entry);
             }
         }
@@ -78,7 +92,10 @@ impl Queue {
 
 /// The top-level entry under the attachments directory that holds this file:
 /// `attachments/<uuid>/<name>` imports map to their directory, clipboard images to the file.
-fn attachment_entry(attachments: &std::path::Path, file: &std::path::Path) -> Option<std::path::PathBuf> {
+fn attachment_entry(
+    attachments: &std::path::Path,
+    file: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     let relative = file.strip_prefix(attachments).ok()?;
     // Only a plain name directly inside the store: never `..` or a root.
     let std::path::Component::Normal(first) = relative.components().next()? else {
@@ -231,10 +248,22 @@ mod tests {
             skills: Vec::new(),
             text: "with files".into(),
             attachments: vec![
-                del_agent::Attachment { path: referenced.join("file.txt"), mime: None },
-                del_agent::Attachment { path: clipboard.clone(), mime: None },
-                del_agent::Attachment { path: outside.clone(), mime: None },
-                del_agent::Attachment { path: escaping, mime: None },
+                del_agent::Attachment {
+                    path: referenced.join("file.txt"),
+                    mime: None,
+                },
+                del_agent::Attachment {
+                    path: clipboard.clone(),
+                    mime: None,
+                },
+                del_agent::Attachment {
+                    path: outside.clone(),
+                    mime: None,
+                },
+                del_agent::Attachment {
+                    path: escaping,
+                    mime: None,
+                },
             ],
         });
         queue.save().unwrap();
@@ -271,9 +300,11 @@ mod tests {
         assert!(queue.items.is_empty());
         queue.push(UserInput::text("new"));
         queue.save().unwrap();
-        let aside: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.to_string_lossy().contains(".corrupt-")).collect();
+            .filter(|p| p.to_string_lossy().contains(".corrupt-"))
+            .collect();
         assert_eq!(aside.len(), 1);
         assert_eq!(std::fs::read(&aside[0]).unwrap(), b"{not json");
     }

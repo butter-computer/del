@@ -203,7 +203,10 @@ impl Render for Usage {
                                 let title = self.state.read(cx).current_title(&id);
                                 let state = self.state.read(cx);
                                 let provider = if terminal {
-                                    state.terminal_rows.iter().find(|row| row.id == id)
+                                    state
+                                        .terminal_rows
+                                        .iter()
+                                        .find(|row| row.id == id)
                                         .and_then(|row| row.provider)
                                 } else {
                                     state.provider_of(&id)
@@ -244,7 +247,9 @@ impl Render for Usage {
                                             .aria_label(format!("Open {title}"))
                                             .gap_2()
                                             .when_some(provider, |row, provider| {
-                                                row.child(crate::composer_ui::provider_logo(provider))
+                                                row.child(crate::composer_ui::provider_logo(
+                                                    provider,
+                                                ))
                                             })
                                             .child(crate::sidebar::fading_title(title))
                                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -382,7 +387,11 @@ mod tests {
             cx.simulate_mouse_move(row.center(), None, Modifiers::default());
             assert!(usage.read_with(cx, |usage, _| usage.hovered.is_some()));
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.simulate_mouse_move(point(row.right() + px(30.), row.bottom() + px(30.)), None, Modifiers::default());
+            cx.simulate_mouse_move(
+                point(row.right() + px(30.), row.bottom() + px(30.)),
+                None,
+                Modifiers::default(),
+            );
             assert!(usage.read_with(cx, |usage, _| usage.hovered.is_none()));
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }

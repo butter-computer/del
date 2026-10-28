@@ -153,11 +153,9 @@ impl CommandMenu {
         .detach();
         cx.observe(&state, |this, _, cx| {
             let (provider, _, cwd) = this.state.read(cx).effective();
-            if this
-                .context
-                .as_ref()
-                .is_some_and(|context| context != &(provider, this.state.read(cx).selected_account(), cwd))
-            {
+            if this.context.as_ref().is_some_and(|context| {
+                context != &(provider, this.state.read(cx).selected_account(), cwd)
+            }) {
                 this.context = None;
                 this.commands.clear();
                 this.chosen = None;
@@ -198,9 +196,12 @@ impl CommandMenu {
             self.generation += 1;
             let generation = self.generation;
             let backend = self.state.read(cx).backend();
-            let task = backend
-                .runtime
-                .spawn(async move { backend.manager.account_commands(provider, account.as_deref(), &cwd).await });
+            let task = backend.runtime.spawn(async move {
+                backend
+                    .manager
+                    .account_commands(provider, account.as_deref(), &cwd)
+                    .await
+            });
             cx.spawn(async move |this, cx| {
                 let result = task.await;
                 let _ = this.update(cx, |this, cx| {

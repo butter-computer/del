@@ -23,26 +23,64 @@ use std::rc::Rc;
 
 fn account_menu_label(name: String, remaining: Option<f64>, selected: bool) -> impl IntoElement {
     let scale = 18. / 26.;
-    h_flex().w_full().gap_3().items_center()
-        .child(div().flex_1().when(selected, |label| label.text_color(rgb(0x4cc38a))).child(name))
+    h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .when(selected, |label| label.text_color(rgb(0x4cc38a)))
+                .child(name),
+        )
         .children(remaining.map(|remaining| {
-            div().id("account-usage-ring").size(zpx(26. * scale)).flex_none().relative().flex().items_center().justify_center()
+            div()
+                .id("account-usage-ring")
+                .size(zpx(26. * scale))
+                .flex_none()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
                 .aria_label(format!("{remaining:.0}% usage left"))
-                .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
-                    let center = bounds.center();
-                    let radius = bounds.size.width / 2. - zpx(1.5 * scale);
-                    for (fraction, color) in [(1., rgba(0xffffff26)), ((remaining / 100.) as f32, rgb(0xebebeb))] {
-                        if fraction <= 0. { continue; }
-                        let mut path = PathBuilder::stroke(zpx(1.7 * scale));
-                        let steps = 80;
-                        for i in 0..=steps {
-                            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * fraction * i as f32 / steps as f32;
-                            let position = point(center.x + radius * angle.cos(), center.y + radius * angle.sin());
-                            if i == 0 { path.move_to(position); } else { path.line_to(position); }
-                        }
-                        if let Ok(path) = path.build() { window.paint_path(path, color); }
-                    }
-                }).absolute().size_full())
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let center = bounds.center();
+                            let radius = bounds.size.width / 2. - zpx(1.5 * scale);
+                            for (fraction, color) in [
+                                (1., rgba(0xffffff26)),
+                                ((remaining / 100.) as f32, rgb(0xebebeb)),
+                            ] {
+                                if fraction <= 0. {
+                                    continue;
+                                }
+                                let mut path = PathBuilder::stroke(zpx(1.7 * scale));
+                                let steps = 80;
+                                for i in 0..=steps {
+                                    let angle = -std::f32::consts::FRAC_PI_2
+                                        + std::f32::consts::TAU * fraction * i as f32
+                                            / steps as f32;
+                                    let position = point(
+                                        center.x + radius * angle.cos(),
+                                        center.y + radius * angle.sin(),
+                                    );
+                                    if i == 0 {
+                                        path.move_to(position);
+                                    } else {
+                                        path.line_to(position);
+                                    }
+                                }
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, color);
+                                }
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
         }))
 }
 
@@ -123,7 +161,10 @@ impl ComposerCard {
         }
     }
 
-    pub fn accounts(mut self, state: Entity<crate::state::AppState>) -> Self { self.account_state = Some(state); self }
+    pub fn accounts(mut self, state: Entity<crate::state::AppState>) -> Self {
+        self.account_state = Some(state);
+        self
+    }
 
     pub fn goal_mode(mut self, enabled: bool) -> Self {
         self.goal_mode = enabled;
@@ -250,48 +291,96 @@ impl RenderOnce for ComposerCard {
             on_provider,
         } = self;
 
-        let agent = chip("agent").h(zpx(24.)).px(zpx(8.)).disabled(starting).child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
-                .child(providers::display_name(provider)),
-        );
+        let agent = chip("agent")
+            .h(zpx(24.))
+            .px(zpx(8.))
+            .disabled(starting)
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
+                    .child(providers::display_name(provider)),
+            );
         let agent_el = {
             let current = provider;
             agent.dropdown_menu(move |menu, window, cx| {
-                providers::VISIBLE.iter().fold(menu.check_side(Side::Right), |menu, &p| {
-                    let on_provider = on_provider.clone();
-                    if let Some(state) = account_state.clone().filter(|_| p != Provider::Acp) {
-                        let default_state = state.clone();
-                        let (logo, color) = provider_brand(p);
-                        menu.submenu_with_icon(Some(crate::icons::path(logo).text_color(rgb(color))), providers::display_name(p), window, cx, move |menu, _, cx| {
-                            let accounts = state.read(cx).visible_accounts(p).into_iter().cloned().collect::<Vec<_>>();
-                            let system = state.clone();
-                            let system_label = state.clone();
-                            let mut menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                                let s = system_label.read(cx);
-                                account_menu_label(s.default_account_label(p), s.account_usage_remaining(p, None), s.account_is_selected(p, None))
+                providers::VISIBLE
+                    .iter()
+                    .fold(menu.check_side(Side::Right), |menu, &p| {
+                        let on_provider = on_provider.clone();
+                        if let Some(state) = account_state.clone().filter(|_| p != Provider::Acp) {
+                            let default_state = state.clone();
+                            let (logo, color) = provider_brand(p);
+                            menu.submenu_with_icon(
+                                Some(crate::icons::path(logo).text_color(rgb(color))),
+                                providers::display_name(p),
+                                window,
+                                cx,
+                                move |menu, _, cx| {
+                                    let accounts = state
+                                        .read(cx)
+                                        .visible_accounts(p)
+                                        .into_iter()
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    let system = state.clone();
+                                    let system_label = state.clone();
+                                    let mut menu =
+                                        menu.item(
+                                            PopupMenuItem::element(move |_, cx| {
+                                                let s = system_label.read(cx);
+                                                account_menu_label(
+                                                    s.default_account_label(p),
+                                                    s.account_usage_remaining(p, None),
+                                                    s.account_is_selected(p, None),
+                                                )
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                system.update(cx, |s, cx| {
+                                                    s.select_account(p, None, cx)
+                                                })
+                                            }),
+                                        );
+                                    for account in accounts {
+                                        let state = state.clone();
+                                        let id = account.id.clone();
+                                        let selected =
+                                            state.read(cx).account_is_selected(p, Some(&id));
+                                        let label_state = state.clone();
+                                        let label_id = id.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::element(move |_, cx| {
+                                                account_menu_label(
+                                                    account.display(),
+                                                    label_state.read(cx).account_usage_remaining(
+                                                        p,
+                                                        Some(&label_id),
+                                                    ),
+                                                    selected,
+                                                )
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                state.update(cx, |s, cx| {
+                                                    s.select_account(p, Some(id.clone()), cx)
+                                                })
+                                            }),
+                                        );
+                                    }
+                                    menu
+                                },
+                            )
+                            .submenu_on_click(move |_, _, cx| {
+                                default_state.update(cx, |s, cx| s.select_default_account(p, cx))
                             })
-                                .on_click(move |_, _, cx| system.update(cx, |s, cx| s.select_account(p, None, cx))));
-                            for account in accounts {
-                                let state = state.clone();
-                                let id = account.id.clone();
-                                let selected = state.read(cx).account_is_selected(p, Some(&id));
-                                let label_state = state.clone();
-                                let label_id = id.clone();
-                                menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                                    account_menu_label(account.display(), label_state.read(cx).account_usage_remaining(p, Some(&label_id)), selected)
-                                })
-                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_account(p, Some(id.clone()), cx))));
-                            }
-                            menu
-                        }).submenu_on_click(move |_, _, cx| default_state.update(cx, |s, cx| s.select_default_account(p, cx)))
-                    } else {
-                        menu.item(PopupMenuItem::new(providers::display_name(p))
-                            .checked(p == current).on_click(move |_, w, cx| on_provider(p, w, cx)))
-                    }
-                })
+                        } else {
+                            menu.item(
+                                PopupMenuItem::new(providers::display_name(p))
+                                    .checked(p == current)
+                                    .on_click(move |_, w, cx| on_provider(p, w, cx)),
+                            )
+                        }
+                    })
             })
         };
         let folder_el = if folder_locked {
@@ -328,7 +417,8 @@ impl RenderOnce for ComposerCard {
 
         // One round button: send, or stop while a turn is running.
         let action = div()
-            .id("send").debug_selector(|| "composer-action".into())
+            .id("send")
+            .debug_selector(|| "composer-action".into())
             .size(crate::icons::button_size())
             .flex()
             .items_center()
@@ -340,7 +430,8 @@ impl RenderOnce for ComposerCard {
             action
                 .bg(rgb(0xffffff))
                 .cursor_pointer()
-                .role(Role::Button).aria_label("Stop response")
+                .role(Role::Button)
+                .aria_label("Stop response")
                 .on_click(move |_, w, cx| on_stop(w, cx))
                 .child(crate::icons::icon(IconName::Square).text_color(rgb(0x111113)))
         } else {
@@ -473,9 +564,19 @@ mod tests {
     impl Render for StopFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let stopped = self.stopped.clone();
-            div().w(px(600.)).child(ComposerCard::new(&self.input, 600., Provider::Claude,
-                true, self.picker.clone(), "project".into(), true, true)
-                .on_stop(move |_, _| stopped.set(stopped.get() + 1)))
+            div().w(px(600.)).child(
+                ComposerCard::new(
+                    &self.input,
+                    600.,
+                    Provider::Claude,
+                    true,
+                    self.picker.clone(),
+                    "project".into(),
+                    true,
+                    true,
+                )
+                .on_stop(move |_, _| stopped.set(stopped.get() + 1)),
+            )
         }
     }
     #[gpui::test]
@@ -487,7 +588,11 @@ mod tests {
             let input = cx.new(|cx| TextareaState::new(window, cx));
             input.update(cx, |input, cx| input.focus(window, cx));
             let picker = cx.new(|cx| crate::model_picker::ModelPicker::new(state, window, cx));
-            StopFixture { input, picker, stopped: stopped.clone() }
+            StopFixture {
+                input,
+                picker,
+                stopped: stopped.clone(),
+            }
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let target = cx.debug_bounds("composer-action").unwrap().center();

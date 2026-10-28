@@ -22,13 +22,26 @@ pub const WORKER_SESSION_ENV: &[&str] = &[
 /// Prepare an independent provider child, including runtimes omitted from Finder's PATH.
 /// Keep explicit launch settings and credentials; never change the app's environment.
 pub fn prepare_provider_command(command: &mut std::process::Command) {
-    if command.get_envs().any(|(key, value)| key == "DEL_ACCOUNT_PROFILE" && value.is_some()) {
+    if command
+        .get_envs()
+        .any(|(key, value)| key == "DEL_ACCOUNT_PROFILE" && value.is_some())
+    {
         // Ambient credentials must not silently override the account selected in Del.
-        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ACCESS_TOKEN", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_IDENTITY_PROVIDER_ID"] {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "OPENAI_ACCESS_TOKEN",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+            "OPENAI_IDENTITY_PROVIDER_ID",
+        ] {
             command.env_remove(key);
         }
     }
-    let inherited = command.get_envs()
+    let inherited = command
+        .get_envs()
         .find(|(key, _)| *key == "PATH")
         .map(|(_, value)| value.unwrap_or_default().to_owned())
         .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
@@ -65,13 +78,22 @@ mod tests {
     #[test]
     fn account_profile_clears_ambient_credentials_without_changing_its_home() {
         let mut command = std::process::Command::new("provider");
-        command.env("DEL_ACCOUNT_PROFILE", "1").env("CODEX_HOME", "/private/account")
-            .env("OPENAI_API_KEY", "fixture").env("CLAUDE_CODE_OAUTH_TOKEN", "fixture");
+        command
+            .env("DEL_ACCOUNT_PROFILE", "1")
+            .env("CODEX_HOME", "/private/account")
+            .env("OPENAI_API_KEY", "fixture")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "fixture");
         prepare_provider_command(&mut command);
         let env: std::collections::HashMap<_, _> = command.get_envs().collect();
-        assert_eq!(env.get(std::ffi::OsStr::new("CODEX_HOME")), Some(&Some(std::ffi::OsStr::new("/private/account"))));
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CODEX_HOME")),
+            Some(&Some(std::ffi::OsStr::new("/private/account")))
+        );
         assert_eq!(env.get(std::ffi::OsStr::new("OPENAI_API_KEY")), Some(&None));
-        assert_eq!(env.get(std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")), Some(&None));
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")),
+            Some(&None)
+        );
     }
 
     #[test]
@@ -89,8 +111,15 @@ mod tests {
         command.env("PATH", "/usr/bin:/bin");
         prepare_provider_command(&mut command);
         let output = command.output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "provider-ready");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "provider-ready"
+        );
     }
 
     #[test]
@@ -98,9 +127,18 @@ mod tests {
         let mut command = std::process::Command::new("provider");
         command.env("PATH", ".:node_modules/.bin:/usr/bin::bin");
         prepare_provider_command(&mut command);
-        let path = command.get_envs().find(|(key, _)| *key == "PATH").unwrap().1.unwrap().to_owned();
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .unwrap()
+            .1
+            .unwrap()
+            .to_owned();
         let entries: Vec<_> = std::env::split_paths(&path).collect();
-        assert!(entries.iter().all(|entry| entry.is_absolute()), "{entries:?}");
+        assert!(
+            entries.iter().all(|entry| entry.is_absolute()),
+            "{entries:?}"
+        );
         assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
     }
 

@@ -196,8 +196,16 @@ impl SessionManager {
         self.backend(provider)?.session_display_title(id, cwd).await
     }
 
-    pub async fn account_session_display_title(&self, provider: Provider, account: Option<&str>, id: &SessionId, cwd: &Path) -> Result<Option<String>> {
-        self.account_backend(provider, account)?.session_display_title(id, cwd).await
+    pub async fn account_session_display_title(
+        &self,
+        provider: Provider,
+        account: Option<&str>,
+        id: &SessionId,
+        cwd: &Path,
+    ) -> Result<Option<String>> {
+        self.account_backend(provider, account)?
+            .session_display_title(id, cwd)
+            .await
     }
 
     /// Refresh provider-owned names without changing session order or live state.
@@ -229,13 +237,28 @@ impl SessionManager {
             }
             let marker = match activity.get(&record.id) {
                 Some(&len) => len,
-                None if warm.contains(&(record.provider, record.account_id.clone(), record.cwd.clone())) => usize::MAX,
+                None if warm.contains(&(
+                    record.provider,
+                    record.account_id.clone(),
+                    record.cwd.clone(),
+                )) =>
+                {
+                    usize::MAX
+                }
                 None => continue,
             };
-            if self.shared.title_polls.lock().unwrap().insert(record.id.clone(), marker) == Some(marker) {
+            if self
+                .shared
+                .title_polls
+                .lock()
+                .unwrap()
+                .insert(record.id.clone(), marker)
+                == Some(marker)
+            {
                 continue;
             }
-            let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref()) else {
+            let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref())
+            else {
                 continue;
             };
             let Ok(Ok(Some(title))) = tokio::time::timeout(
@@ -347,33 +370,79 @@ impl SessionManager {
         if let Some(tools) = self.shared.browser_tools.lock().unwrap().clone() {
             backend.set_browser_tools(tools);
         }
-        self.shared.account_backends.lock().unwrap().insert((backend.provider(), account), backend);
+        self.shared
+            .account_backends
+            .lock()
+            .unwrap()
+            .insert((backend.provider(), account), backend);
     }
 
-    pub fn unregister_account(&self, provider: Provider, account: &str) -> Option<Arc<dyn AgentBackend>> {
-        self.shared.account_backends.lock().unwrap().remove(&(provider, account.to_owned()))
+    pub fn unregister_account(
+        &self,
+        provider: Provider,
+        account: &str,
+    ) -> Option<Arc<dyn AgentBackend>> {
+        self.shared
+            .account_backends
+            .lock()
+            .unwrap()
+            .remove(&(provider, account.to_owned()))
     }
 
-    fn account_backend(&self, provider: Provider, account: Option<&str>) -> Result<Arc<dyn AgentBackend>> {
+    fn account_backend(
+        &self,
+        provider: Provider,
+        account: Option<&str>,
+    ) -> Result<Arc<dyn AgentBackend>> {
         match account {
             None => self.backend(provider),
-            Some(account) => self.shared.account_backends.lock().unwrap().get(&(provider, account.to_owned())).cloned()
-                .ok_or_else(|| AgentError::Backend("This account is unavailable. Reconnect it in Settings → Providers.".into())),
+            Some(account) => self
+                .shared
+                .account_backends
+                .lock()
+                .unwrap()
+                .get(&(provider, account.to_owned()))
+                .cloned()
+                .ok_or_else(|| {
+                    AgentError::Backend(
+                        "This account is unavailable. Reconnect it in Settings → Providers.".into(),
+                    )
+                }),
         }
     }
 
     fn session_backend(&self, id: &SessionId) -> Result<Arc<dyn AgentBackend>> {
-        let record = self.shared.index.lock().unwrap().get(id).cloned()
+        let record = self
+            .shared
+            .index
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
         self.account_backend(record.provider, record.account_id.as_deref())
     }
 
-    pub async fn account_models(&self, provider: Provider, account: Option<&str>, cwd: &Path) -> Result<Vec<crate::ModelInfo>> {
-        self.account_backend(provider, account)?.list_models(cwd).await
+    pub async fn account_models(
+        &self,
+        provider: Provider,
+        account: Option<&str>,
+        cwd: &Path,
+    ) -> Result<Vec<crate::ModelInfo>> {
+        self.account_backend(provider, account)?
+            .list_models(cwd)
+            .await
     }
 
-    pub async fn account_commands(&self, provider: Provider, account: Option<&str>, cwd: &Path) -> Result<Vec<crate::ComposerCommand>> {
-        self.account_backend(provider, account)?.list_commands(cwd).await
+    pub async fn account_commands(
+        &self,
+        provider: Provider,
+        account: Option<&str>,
+        cwd: &Path,
+    ) -> Result<Vec<crate::ComposerCommand>> {
+        self.account_backend(provider, account)?
+            .list_commands(cwd)
+            .await
     }
 
     fn backend(&self, p: Provider) -> Result<Arc<dyn AgentBackend>> {
@@ -493,9 +562,7 @@ impl SessionManager {
                         {
                             l.status
                         }
-                        Some(SessionStatus::Running) if l.status != SessionStatus::Idle => {
-                            l.status
-                        }
+                        Some(SessionStatus::Running) if l.status != SessionStatus::Idle => l.status,
                         Some(status) => status,
                         None => next_status(l.status, &event, !l.pending_approvals.is_empty()),
                     };
@@ -577,13 +644,18 @@ impl SessionManager {
         self.start_account_session(config, None).await
     }
 
-    pub async fn start_account_session(&self, config: SessionConfig, account_id: Option<String>) -> Result<SessionHandle> {
+    pub async fn start_account_session(
+        &self,
+        config: SessionConfig,
+        account_id: Option<String>,
+    ) -> Result<SessionHandle> {
         let applied_config = config.clone();
         let (prepared, expired) = {
             let mut slot = self.shared.standby.lock().unwrap();
-            if account_id.is_none() && slot
-                .as_ref()
-                .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
+            if account_id.is_none()
+                && slot
+                    .as_ref()
+                    .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
             {
                 (slot.take().map(|s| s.handle), None)
             } else if slot
@@ -683,9 +755,7 @@ impl SessionManager {
         id: &SessionId,
         action: Option<crate::GoalAction>,
     ) -> Result<Option<crate::Goal>> {
-        self.session_backend(id)?
-            .agent_goal(id, action)
-            .await
+        self.session_backend(id)?.agent_goal(id, action).await
     }
 
     async fn resolve_command(
@@ -776,7 +846,11 @@ impl SessionManager {
                     "settings apply after the current turn finishes".into(),
                 ));
             }
-            match self.session_backend(id)?.reconfigure(config.clone(), id).await {
+            match self
+                .session_backend(id)?
+                .reconfigure(config.clone(), id)
+                .await
+            {
                 Ok(handle) => {
                     self.attach(handle, config.clone());
                 }
@@ -822,8 +896,9 @@ impl SessionManager {
                 session.history.remove(title_position);
             }
             // Only undo our own Running; events may already have moved on.
-            self.shared
-                .transition(id, |current| (current == SessionStatus::Running).then_some(previous));
+            self.shared.transition(id, |current| {
+                (current == SessionStatus::Running).then_some(previous)
+            });
             return Err(error);
         }
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
@@ -839,41 +914,84 @@ impl SessionManager {
 
     /// Move an idle conversation to another account without changing its identity.
     /// The transfer runs after closing the old writer, under the same lock as sends.
-    pub async fn switch_account<F, Fut>(&self, id: &SessionId, account: Option<String>, transfer: F) -> Result<()>
-    where F: FnOnce(SessionRecord) -> Fut + Send,
-          Fut: std::future::Future<Output = Result<Option<std::path::PathBuf>>> + Send,
+    pub async fn switch_account<F, Fut>(
+        &self,
+        id: &SessionId,
+        account: Option<String>,
+        transfer: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(SessionRecord) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Option<std::path::PathBuf>>> + Send,
     {
         self.resume(id).await?;
-        let lock = self.shared.resume_locks.lock().unwrap().entry(id.clone()).or_default().clone();
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
         let _switching = lock.lock().await;
-        if matches!(self.status(id), Some(SessionStatus::Running | SessionStatus::WaitingApproval)) {
-            return Err(AgentError::Busy("Wait for the response to finish before switching accounts.".into()));
+        if matches!(
+            self.status(id),
+            Some(SessionStatus::Running | SessionStatus::WaitingApproval)
+        ) {
+            return Err(AgentError::Busy(
+                "Wait for the response to finish before switching accounts.".into(),
+            ));
         }
-        let record = self.shared.index.lock().unwrap().get(id).cloned()
+        let record = self
+            .shared
+            .index
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
-        if record.account_id == account { return Ok(()); }
+        if record.account_id == account {
+            return Ok(());
+        }
         let old = self.session_backend(id)?;
         let target = self.account_backend(record.provider, account.as_deref())?;
         old.close(id).await?;
         let result = async {
             let path = transfer(record.clone()).await?;
-            let handle = target.resume_transferred(record.config(), id, path.as_deref()).await?;
+            let handle = target
+                .resume_transferred(record.config(), id, path.as_deref())
+                .await?;
             if handle.id != *id {
                 let _ = target.close(&handle.id).await;
-                return Err(AgentError::Backend("The provider changed this conversation's identity during account transfer.".into()));
+                return Err(AgentError::Backend(
+                    "The provider changed this conversation's identity during account transfer."
+                        .into(),
+                ));
             }
-            self.shared.index.lock().unwrap().update(id, |r| r.account_id = account)?;
+            self.shared
+                .index
+                .lock()
+                .unwrap()
+                .update(id, |r| r.account_id = account)?;
             Ok(handle)
-        }.await;
+        }
+        .await;
         match result {
-            Ok(handle) => { self.attach(handle, record.config()); Ok(()) }
+            Ok(handle) => {
+                self.attach(handle, record.config());
+                Ok(())
+            }
             Err(error) => {
                 let _ = target.close(id).await;
                 match old.resume(record.config(), id).await {
                     Ok(handle) => {
                         self.attach(handle, record.config());
                     }
-                    Err(restore) => return Err(AgentError::Backend(format!("{error}; could not reconnect the original account: {restore}"))),
+                    Err(restore) => {
+                        return Err(AgentError::Backend(format!(
+                            "{error}; could not reconnect the original account: {restore}"
+                        )));
+                    }
                 }
                 Err(error)
             }
@@ -1099,8 +1217,18 @@ impl SessionManager {
             });
         }
         while closing.join_next().await.is_some() {}
-        let accounts: Vec<_> = self.shared.account_backends.lock().unwrap().values().cloned().collect();
-        for b in accounts.into_iter().chain(self.shared.backends.values().cloned()) {
+        let accounts: Vec<_> = self
+            .shared
+            .account_backends
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for b in accounts
+            .into_iter()
+            .chain(self.shared.backends.values().cloned())
+        {
             let _ = b.shutdown().await;
         }
         self.flush_index().await;
@@ -1170,31 +1298,67 @@ mod tests {
         manager.register_account("second".into(), target.clone());
         let handle = manager.start_session(cfg(Provider::Codex)).await.unwrap();
         let mut events = manager.subscribe_all();
-        manager.send_prompt(&handle.id, UserInput::text("remember this conversation")).await.unwrap();
-        assert!(manager.switch_account(&handle.id, Some("second".into()), |_| async { panic!("must not transfer a running turn") }).await.is_err());
+        manager
+            .send_prompt(&handle.id, UserInput::text("remember this conversation"))
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .switch_account(&handle.id, Some("second".into()), |_| async {
+                    panic!("must not transfer a running turn")
+                })
+                .await
+                .is_err()
+        );
         wait_status(&mut events, &handle.id, SessionStatus::Idle).await;
         let history = manager.subscribe_with_history(&handle.id).unwrap().0;
-        manager.switch_account(&handle.id, Some("second".into()), |record| async move {
-            assert_eq!(record.account_id, None);
-            Ok(None)
-        }).await.unwrap();
+        manager
+            .switch_account(&handle.id, Some("second".into()), |record| async move {
+                assert_eq!(record.account_id, None);
+                Ok(None)
+            })
+            .await
+            .unwrap();
         assert_eq!(manager.list_sessions().len(), 1);
         assert_eq!(manager.list_sessions()[0].id, handle.id);
-        assert_eq!(manager.subscribe_with_history(&handle.id).unwrap().0, history);
-        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &target));
-        let failed = manager.switch_account(&handle.id, None, |_| async {
-            Err(AgentError::Backend("transfer failed".into()))
-        }).await;
+        assert_eq!(
+            manager.subscribe_with_history(&handle.id).unwrap().0,
+            history
+        );
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&handle.id).unwrap(),
+            &target
+        ));
+        let failed = manager
+            .switch_account(&handle.id, None, |_| async {
+                Err(AgentError::Backend("transfer failed".into()))
+            })
+            .await;
         assert!(failed.is_err());
-        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &target));
-        manager.send_prompt(&handle.id, UserInput::text("continue after rollback")).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&handle.id).unwrap(),
+            &target
+        ));
+        manager
+            .send_prompt(&handle.id, UserInput::text("continue after rollback"))
+            .await
+            .unwrap();
         wait_status(&mut events, &handle.id, SessionStatus::Idle).await;
-        manager.switch_account(&handle.id, None, |_| async { Ok(None) }).await.unwrap();
-        assert!(Arc::ptr_eq(&manager.session_backend(&handle.id).unwrap(), &source));
+        manager
+            .switch_account(&handle.id, None, |_| async { Ok(None) })
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&handle.id).unwrap(),
+            &source
+        ));
         manager.shutdown().await;
         let restored = SessionManager::new(path, [source.clone()]).unwrap();
         restored.resume(&handle.id).await.unwrap();
-        assert!(Arc::ptr_eq(&restored.session_backend(&handle.id).unwrap(), &source));
+        assert!(Arc::ptr_eq(
+            &restored.session_backend(&handle.id).unwrap(),
+            &source
+        ));
         restored.shutdown().await;
     }
 
@@ -1208,14 +1372,35 @@ mod tests {
         let manager = SessionManager::new(&path, [default.clone()]).unwrap();
         manager.register_account("first".into(), first.clone());
         manager.register_account("second".into(), second.clone());
-        let a = manager.start_account_session(cfg(Provider::Codex), Some("first".into())).await.unwrap();
-        let b = manager.start_account_session(cfg(Provider::Codex), Some("second".into())).await.unwrap();
+        let a = manager
+            .start_account_session(cfg(Provider::Codex), Some("first".into()))
+            .await
+            .unwrap();
+        let b = manager
+            .start_account_session(cfg(Provider::Codex), Some("second".into()))
+            .await
+            .unwrap();
         let system = manager.start_session(cfg(Provider::Codex)).await.unwrap();
-        assert!(Arc::ptr_eq(&manager.session_backend(&a.id).unwrap(), &first));
-        assert!(Arc::ptr_eq(&manager.session_backend(&b.id).unwrap(), &second));
-        assert!(Arc::ptr_eq(&manager.session_backend(&system.id).unwrap(), &default));
-        manager.send_prompt(&a.id, UserInput::text("hello a")).await.unwrap();
-        manager.send_prompt(&b.id, UserInput::text("hello b")).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&a.id).unwrap(),
+            &first
+        ));
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&b.id).unwrap(),
+            &second
+        ));
+        assert!(Arc::ptr_eq(
+            &manager.session_backend(&system.id).unwrap(),
+            &default
+        ));
+        manager
+            .send_prompt(&a.id, UserInput::text("hello a"))
+            .await
+            .unwrap();
+        manager
+            .send_prompt(&b.id, UserInput::text("hello b"))
+            .await
+            .unwrap();
         manager.interrupt(&a.id).await.unwrap();
         manager.interrupt(&b.id).await.unwrap();
         manager.shutdown().await;
@@ -1224,9 +1409,21 @@ mod tests {
         assert!(restored.resume(&a.id).await.is_err());
         restored.register_account("first".into(), first.clone());
         restored.resume(&a.id).await.unwrap();
-        assert!(Arc::ptr_eq(&restored.session_backend(&a.id).unwrap(), &first));
+        assert!(Arc::ptr_eq(
+            &restored.session_backend(&a.id).unwrap(),
+            &first
+        ));
         assert!(restored.resume(&b.id).await.is_err());
-        assert_eq!(restored.list_sessions().iter().find(|r| r.id == b.id).unwrap().account_id.as_deref(), Some("second"));
+        assert_eq!(
+            restored
+                .list_sessions()
+                .iter()
+                .find(|r| r.id == b.id)
+                .unwrap()
+                .account_id
+                .as_deref(),
+            Some("second")
+        );
         restored.shutdown().await;
     }
 
@@ -1739,7 +1936,9 @@ mod tests {
         let m = manager(&dir.path().join("i.jsonl"));
         let mut all = m.subscribe_all();
         let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
-        m.send_prompt(&h.id, UserInput::text("withdraw")).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("withdraw"))
+            .await
+            .unwrap();
         wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
         let mut resolved = 0;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1785,7 +1984,9 @@ mod tests {
         let m = manager(&dir.path().join("i.jsonl"));
         let mut all = m.subscribe_all();
         let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
-        m.send_prompt(&h.id, UserInput::text("approve")).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("approve"))
+            .await
+            .unwrap();
         wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
         m.close(&h.id).await.unwrap();
         wait_status(&mut all, &h.id, SessionStatus::Idle).await;
@@ -1813,7 +2014,13 @@ mod tests {
         m.shared.index.lock().unwrap().remove(&h.id).unwrap();
         m.close(&h.id).await.unwrap();
         assert!(!m.is_live(&h.id));
-        assert!(m.backend(Provider::Codex).unwrap().send_prompt(&h.id, UserInput::text("x")).await.is_err());
+        assert!(
+            m.backend(Provider::Codex)
+                .unwrap()
+                .send_prompt(&h.id, UserInput::text("x"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1828,7 +2035,9 @@ mod tests {
         };
         {
             let mut index = SessionIndex::open(&path).unwrap();
-            index.update(&id, |r| r.status = SessionStatus::Error).unwrap();
+            index
+                .update(&id, |r| r.status = SessionStatus::Error)
+                .unwrap();
         }
         let m = manager(&path);
         let mut all = m.subscribe_all();
@@ -1863,7 +2072,12 @@ mod tests {
         let mut expected = vec![live.id.clone(), saved.id.clone()];
         expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         assert_eq!(read, expected, "same provider and folder only");
-        assert!(m.list_sessions().iter().filter(|r| r.id != other.id).all(|r| r.title.as_deref() == Some("Named by provider")));
+        assert!(
+            m.list_sessions()
+                .iter()
+                .filter(|r| r.id != other.id)
+                .all(|r| r.title.as_deref() == Some("Named by provider"))
+        );
         // No new activity: not asked again.
         assert!(!m.refresh_titles().await.unwrap());
         assert_eq!(reads.lock().unwrap().len(), 2);
@@ -1897,8 +2111,14 @@ mod tests {
         );
         let resolved = AgentEvent::ApprovalResolved { id: "a".into() };
         let waiting = SessionStatus::WaitingApproval;
-        assert_eq!(next_status(waiting, &resolved, false), SessionStatus::Running);
+        assert_eq!(
+            next_status(waiting, &resolved, false),
+            SessionStatus::Running
+        );
         assert_eq!(next_status(waiting, &resolved, true), waiting);
-        assert_eq!(next_status(SessionStatus::Idle, &resolved, false), SessionStatus::Idle);
+        assert_eq!(
+            next_status(SessionStatus::Idle, &resolved, false),
+            SessionStatus::Idle
+        );
     }
 }

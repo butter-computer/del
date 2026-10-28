@@ -29,15 +29,29 @@ pub struct DragMotion {
     pub generation: usize,
 }
 
-fn moving_row(item: impl IntoElement, id: &del_agent::SessionId, state: &Entity<AppState>, cx: &App) -> AnyElement {
+fn moving_row(
+    item: impl IntoElement,
+    id: &del_agent::SessionId,
+    state: &Entity<AppState>,
+    cx: &App,
+) -> AnyElement {
     let motion = &state.read(cx).sidebar_drag;
     let offset = motion.shifts.get(&id.0).copied().unwrap_or(0.);
     let hidden = motion.active.as_ref() == Some(id) && cx.has_active_drag();
-    div().flex_none().opacity(if hidden { 0. } else { 1. }).child(item)
-        .with_animation(SharedString::from(format!("sidebar-shift-{}-{}", id.0, motion.generation)),
-            Animation::new(std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 90 }))
-                .with_easing(ease_out_quint()),
-            move |row, t| row.relative().top(zpx(offset * (1. - t))))
+    div()
+        .flex_none()
+        .opacity(if hidden { 0. } else { 1. })
+        .child(item)
+        .with_animation(
+            SharedString::from(format!("sidebar-shift-{}-{}", id.0, motion.generation)),
+            Animation::new(std::time::Duration::from_millis(if cx.reduce_motion() {
+                0
+            } else {
+                90
+            }))
+            .with_easing(ease_out_quint()),
+            move |row, t| row.relative().top(zpx(offset * (1. - t))),
+        )
         .into_any_element()
 }
 
@@ -55,15 +69,34 @@ impl Render for SidebarDrag {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // Cancel horizontal pointer movement, retaining the original grab offset.
         div().w(zpx(SIDEBAR_WIDTH - 12.)).h(zpx(ROW_HEIGHT)).child(
-        div().relative().left(self.start_pointer_x - window.mouse_position().x).h(zpx(ROW_HEIGHT)).w(zpx(SIDEBAR_WIDTH - 12.)).px_2()
-            .flex().items_center().gap_1p5().rounded_md().bg(crate::appearance::popup_surface(0x262626))
-            .text_size(zpx(TEXT_MD)).text_color(rgb(TEXT))
-            .child(if self.terminal { crate::mode_ui::terminal_mark(self.provider) } else { crate::mode_ui::tab_mark(self.provider) })
-            .child(div().truncate().child(self.title.clone())))
+            div()
+                .relative()
+                .left(self.start_pointer_x - window.mouse_position().x)
+                .h(zpx(ROW_HEIGHT))
+                .w(zpx(SIDEBAR_WIDTH - 12.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_md()
+                .bg(crate::appearance::popup_surface(0x262626))
+                .text_size(zpx(TEXT_MD))
+                .text_color(rgb(TEXT))
+                .child(if self.terminal {
+                    crate::mode_ui::terminal_mark(self.provider)
+                } else {
+                    crate::mode_ui::tab_mark(self.provider)
+                })
+                .child(div().truncate().child(self.title.clone())),
+        )
     }
 }
 
-fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState>) -> Stateful<Div> {
+fn draggable_row(
+    item: Stateful<Div>,
+    drag: SidebarDrag,
+    state: &Entity<AppState>,
+) -> Stateful<Div> {
     let target = drag.clone();
     let moving_target = drag.clone();
     let moving_state = state.clone();
@@ -79,45 +112,75 @@ fn draggable_row(item: Stateful<Div>, drag: SidebarDrag, state: &Entity<AppState
         preview.start_pointer_x = window.mouse_position().x;
         cx.new(|_| preview)
     })
-        .on_drag_move(move |event: &DragMoveEvent<SidebarDrag>, _, cx| {
-            let drag = event.drag(cx).clone();
-            if event.event.position.y < event.bounds.top() || event.event.position.y > event.bounds.bottom() || drag.id == moving_target.id
-                || drag.pinned != moving_target.pinned { return; }
-            let state = moving_state.read(cx);
-            let ids: Vec<_> = state.unified_rows().into_iter().map(|row| row.id).collect();
-            let from = ids.iter().position(|id| id == &drag.id);
-            let to = ids.iter().position(|id| id == &moving_target.id);
-            let (Some(from), Some(to)) = (from, to) else { return; };
-            let midpoint = event.bounds.top() + event.bounds.size.height / 2.;
-            let dead_zone = zpx(3.);
-            if (from < to && event.event.position.y < midpoint + dead_zone)
-                || (from > to && event.event.position.y > midpoint - dead_zone) { return; }
-            moving_state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &moving_target.id, drag.terminal, cx));
-        })
-        .on_drop(move |drag: &SidebarDrag, _, cx| {
-            if drag.pinned == target.pinned {
-                state.update(cx, |state, cx| state.reorder_sidebar(&drag.id, &target.id, drag.terminal, cx));
-            }
-        })
+    .on_drag_move(move |event: &DragMoveEvent<SidebarDrag>, _, cx| {
+        let drag = event.drag(cx).clone();
+        if event.event.position.y < event.bounds.top()
+            || event.event.position.y > event.bounds.bottom()
+            || drag.id == moving_target.id
+            || drag.pinned != moving_target.pinned
+        {
+            return;
+        }
+        let state = moving_state.read(cx);
+        let ids: Vec<_> = state.unified_rows().into_iter().map(|row| row.id).collect();
+        let from = ids.iter().position(|id| id == &drag.id);
+        let to = ids.iter().position(|id| id == &moving_target.id);
+        let (Some(from), Some(to)) = (from, to) else {
+            return;
+        };
+        let midpoint = event.bounds.top() + event.bounds.size.height / 2.;
+        let dead_zone = zpx(3.);
+        if (from < to && event.event.position.y < midpoint + dead_zone)
+            || (from > to && event.event.position.y > midpoint - dead_zone)
+        {
+            return;
+        }
+        moving_state.update(cx, |state, cx| {
+            state.reorder_sidebar(&drag.id, &moving_target.id, drag.terminal, cx)
+        });
+    })
+    .on_drop(move |drag: &SidebarDrag, _, cx| {
+        if drag.pinned == target.pinned {
+            state.update(cx, |state, cx| {
+                state.reorder_sidebar(&drag.id, &target.id, drag.terminal, cx)
+            });
+        }
+    })
 }
 
 fn loading_title(title: String, id: &del_agent::SessionId) -> AnyElement {
-    h_flex().min_w_0().overflow_hidden().child(
-        gpui_kit::component::shimmer::ShimmerText::new(title)
-            .id(SharedString::from(format!("sidebar-title-{}", id.0)))
-            .flex_none().text_color(rgba(0xffffff66))
-            .highlight_color(rgb(0xf5f5f5)).spread(0.22)
-            .duration(std::time::Duration::from_millis(1200)),
-    ).into_any_element()
+    h_flex()
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            gpui_kit::component::shimmer::ShimmerText::new(title)
+                .id(SharedString::from(format!("sidebar-title-{}", id.0)))
+                .flex_none()
+                .text_color(rgba(0xffffff66))
+                .highlight_color(rgb(0xf5f5f5))
+                .spread(0.22)
+                .duration(std::time::Duration::from_millis(1200)),
+        )
+        .into_any_element()
 }
 
 fn toolbar_tint(alpha: u8) -> Rgba {
-    let tint = if crate::appearance::light() { 0x00000000 } else { 0xffffff00 };
+    let tint = if crate::appearance::light() {
+        0x00000000
+    } else {
+        0xffffff00
+    };
     gpui_kit::rgba(tint | u32::from(alpha))
 }
 
 fn toolbar_row() -> Div {
-    h_flex().w_full().min_w_0().gap(zpx(6.)).pr(zpx(6.)).py(zpx(8.)).flex_none()
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap(zpx(6.))
+        .pr(zpx(6.))
+        .py(zpx(8.))
+        .flex_none()
 }
 
 fn toolbar_button(id: &'static str, cx: &App) -> Button {
@@ -208,7 +271,9 @@ pub(crate) fn fading_title(text: String) -> impl IntoElement {
                             );
                             let decoration = DecorationRun {
                                 len: line.len() as u32,
-                                color: style.color.opacity(1. - (step as f32 + 0.5) / SLICES as f32),
+                                color: style
+                                    .color
+                                    .opacity(1. - (step as f32 + 0.5) / SLICES as f32),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -289,15 +354,18 @@ fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
                 if cx.reduce_motion() || !animate {
                     steam.opacity(0.6).into_any_element()
                 } else {
-                    steam.with_animation(
-                        ("coffee-steam", i as usize),
-                        Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-                        move |steam, t| {
-                            let phase = (t + i as f32 * 0.5) % 1.;
-                            steam.top(zpx(-2. - phase * 6.))
-                                .opacity((std::f32::consts::PI * phase).sin() * 0.75)
-                        },
-                    ).into_any_element()
+                    steam
+                        .with_animation(
+                            ("coffee-steam", i as usize),
+                            Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                            move |steam, t| {
+                                let phase = (t + i as f32 * 0.5) % 1.;
+                                steam
+                                    .top(zpx(-2. - phase * 6.))
+                                    .opacity((std::f32::consts::PI * phase).sin() * 0.75)
+                            },
+                        )
+                        .into_any_element()
                 }
             }))
         })
@@ -418,7 +486,9 @@ fn working_mark(working: bool, group: SharedString, right: f32) -> AnyElement {
         .justify_center()
         .flex_none()
         .group_hover(group, |mark| mark.opacity(0.0))
-        .when(working, |mark| mark.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+        .when(working, |mark| {
+            mark.child(crate::icons::working_spinner().color(rgba(MUTED).into()))
+        })
         .into_any_element()
 }
 
@@ -471,12 +541,34 @@ fn row_item(
                 rgba(0xffffff00)
             },
             rgba(0xffffff0a),
-            Some(std::rc::Rc::new(std::cell::Cell::new(if state.read(cx).sidebar_drag.active.as_ref() == Some(&id) && cx.has_active_drag() { 0. } else { 1. }))),
+            Some(std::rc::Rc::new(std::cell::Cell::new(
+                if state.read(cx).sidebar_drag.active.as_ref() == Some(&id) && cx.has_active_drag()
+                {
+                    0.
+                } else {
+                    1.
+                },
+            ))),
         ))
-        .child(if is_terminal { crate::mode_ui::terminal_mark(logo) } else { provider_logo(row.provider).into_any_element() });
+        .child(if is_terminal {
+            crate::mode_ui::terminal_mark(logo)
+        } else {
+            provider_logo(row.provider).into_any_element()
+        });
 
     if !archived && !renaming {
-        item = draggable_row(item, SidebarDrag { id: id.clone(), title: row.title.clone(), provider: logo, terminal: is_terminal, pinned: row.pinned, start_pointer_x: Pixels::ZERO }, state);
+        item = draggable_row(
+            item,
+            SidebarDrag {
+                id: id.clone(),
+                title: row.title.clone(),
+                provider: logo,
+                terminal: is_terminal,
+                pinned: row.pinned,
+                start_pointer_x: Pixels::ZERO,
+            },
+            state,
+        );
     }
     item = if renaming {
         item.child(
@@ -496,10 +588,21 @@ fn row_item(
                 if archived {
                     s.restore(id.clone(), cx);
                 } else {
-                    if is_terminal { s.select_terminal(id.clone(), cx); } else { s.select(id.clone(), cx); }
+                    if is_terminal {
+                        s.select_terminal(id.clone(), cx);
+                    } else {
+                        s.select(id.clone(), cx);
+                    }
                 }
                 if event.click_count() == 2 {
-                    s.keep_tab(&if is_terminal { crate::state::Tab::Terminal(id) } else { crate::state::Tab::Session(id) }, cx);
+                    s.keep_tab(
+                        &if is_terminal {
+                            crate::state::Tab::Terminal(id)
+                        } else {
+                            crate::state::Tab::Session(id)
+                        },
+                        cx,
+                    );
                 }
             });
         })
@@ -538,8 +641,12 @@ fn row_item(
                     0.0
                 })),
             )
-            .child(div().flex_none().group_hover(group.clone(), |dot| dot.opacity(0.))
-                .child(unread_dot(&row.id, state.read(cx), cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .group_hover(group.clone(), |dot| dot.opacity(0.))
+                    .child(unread_dot(&row.id, state.read(cx), cx)),
+            )
             .child(
                 // Always laid out and painted, only faded in on hover: toggling
                 // `display` under the pointer made GPUI paint children it had
@@ -586,7 +693,12 @@ fn row_item(
             let pinned = row.pinned;
             let motion_state = state.clone();
             let motion_id = id.clone();
-            return moving_row(item.context_menu(move |menu, _, cx| session_menu(menu, &state, &id, pinned, cx)), &motion_id, &motion_state, cx);
+            return moving_row(
+                item.context_menu(move |menu, _, cx| session_menu(menu, &state, &id, pinned, cx)),
+                &motion_id,
+                &motion_state,
+                cx,
+            );
         }
     }
     moving_row(item, &id, state, cx)
@@ -643,18 +755,52 @@ fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool,
         ))
 }
 
-fn project_menu_content(motion: &crate::hover_motion::HoverMotion, archived: bool, cx: &App) -> Div {
+fn project_menu_content(
+    motion: &crate::hover_motion::HoverMotion,
+    archived: bool,
+    cx: &App,
+) -> Div {
     let background: Rgba = cx.theme().popover.into();
-    v_flex().relative().flex_1().min_w(zpx(176.)).mx(gpui::px(-8.)).gap_0p5().bg(background)
+    v_flex()
+        .relative()
+        .flex_1()
+        .min_w(zpx(176.))
+        .mx(gpui::px(-8.))
+        .gap_0p5()
+        .bg(background)
         .child(motion.layer(Some(background), cx.theme().border.into()))
-        .child(session_menu_item("Rename", crate::icons::icon(ActionIcon::Pencil), motion))
-        .child(session_menu_item(if archived { "Restore project" } else { "Archive" },
-            crate::icons::path(if archived { "icons/restore.svg" } else { "icons/archive.svg" }), motion))
+        .child(session_menu_item(
+            "Rename",
+            crate::icons::icon(ActionIcon::Pencil),
+            motion,
+        ))
+        .child(session_menu_item(
+            if archived {
+                "Restore project"
+            } else {
+                "Archive"
+            },
+            crate::icons::path(if archived {
+                "icons/restore.svg"
+            } else {
+                "icons/archive.svg"
+            }),
+            motion,
+        ))
         .child(motion.divider())
-        .child(session_menu_item("Permanently delete", crate::icons::icon(ActionIcon::Trash), motion))
+        .child(session_menu_item(
+            "Permanently delete",
+            crate::icons::icon(ActionIcon::Trash),
+            motion,
+        ))
 }
 
-fn project_menu(menu: PopupMenu, state: &Entity<AppState>, path: &std::path::Path, cx: &mut App) -> PopupMenu {
+fn project_menu(
+    menu: PopupMenu,
+    state: &Entity<AppState>,
+    path: &std::path::Path,
+    cx: &mut App,
+) -> PopupMenu {
     let archived_only = state.read(cx).show_archived;
     let archived = archived_only;
     let motion = crate::hover_motion::HoverMotion::menu(cx);
@@ -731,7 +877,11 @@ pub fn render(
     let s = state.read(cx);
     let mut rows = s.unified_rows();
     // Archived rows are only cloned while the archive is shown.
-    let archived = if s.show_archived { s.archived_rows() } else { Vec::new() };
+    let archived = if s.show_archived {
+        s.archived_rows()
+    } else {
+        Vec::new()
+    };
     let archived_terminals: Vec<_> = s
         .terminal_rows
         .iter()
@@ -748,15 +898,26 @@ pub fn render(
         rows.clear();
         rows.extend(archived.iter().cloned());
         rows.extend(archived_terminals.iter().map(|r| Row {
-            id: r.id.clone(), provider: r.provider.unwrap_or(del_agent::Provider::Claude), model: None,
-            cwd: r.cwd.clone(), title: s.current_title(&r.id), status: del_agent::SessionStatus::Idle,
-            updated_secs: 0, archived: true, pinned: false, unread: false,
+            id: r.id.clone(),
+            provider: r.provider.unwrap_or(del_agent::Provider::Claude),
+            model: None,
+            cwd: r.cwd.clone(),
+            title: s.current_title(&r.id),
+            status: del_agent::SessionStatus::Idle,
+            updated_secs: 0,
+            archived: true,
+            pinned: false,
+            unread: false,
         }));
     }
 
     let pinned_state = state.clone();
     let section_state = state.clone();
-    let section = if show_archived { "Archived" } else { "Projects" };
+    let section = if show_archived {
+        "Archived"
+    } else {
+        "Projects"
+    };
     let pinned_open = !s.project_preferences.collapsed_sections.contains("Pinned");
     let projects_open = !s.project_preferences.collapsed_sections.contains(section);
     let add_project_state = state.clone();
@@ -1159,13 +1320,21 @@ mod menu_tests {
             let motion = crate::hover_motion::HoverMotion::menu(cx);
             let selection = motion.clone();
             let recorded = clicked.clone();
-            let menu = PopupMenu::build(window, cx, move |menu, _, _| menu.item(
-                PopupMenuItem::element(move |_, cx| session_menu_content(&motion, false, cx))
-                    .on_click(move |event, _, _| {
-                        if let Some(action) = selection.clicked(event) { recorded.borrow_mut().push(action); }
-                    })));
+            let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::element(move |_, cx| session_menu_content(&motion, false, cx))
+                        .on_click(move |event, _, _| {
+                            if let Some(action) = selection.clicked(event) {
+                                recorded.borrow_mut().push(action);
+                            }
+                        }),
+                )
+            });
             menu.read(cx).focus_handle(cx).focus(window, cx);
-            root.update(cx, |root, cx| { root.0 = menu; cx.notify(); });
+            root.update(cx, |root, cx| {
+                root.0 = menu;
+                cx.notify();
+            });
             window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("down down down enter");

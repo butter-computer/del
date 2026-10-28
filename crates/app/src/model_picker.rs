@@ -24,8 +24,11 @@ fn model_label(selected: Option<&str>, info: Option<&del_agent::ModelInfo>) -> S
 
 fn effort_label(explicit: Option<&str>, info: Option<&del_agent::ModelInfo>) -> Option<String> {
     let id = explicit.or_else(|| info.and_then(|model| model.default_effort.as_deref()))?;
-    Some(info.and_then(|model| model.efforts.iter().find(|effort| effort.id == id))
-        .map(|effort| effort.name.clone()).unwrap_or_else(|| EffortOption::named(id).name))
+    Some(
+        info.and_then(|model| model.efforts.iter().find(|effort| effort.id == id))
+            .map(|effort| effort.name.clone())
+            .unwrap_or_else(|| EffortOption::named(id).name),
+    )
 }
 
 #[derive(Clone)]
@@ -153,12 +156,17 @@ impl EventEmitter<CloseModelPicker> for ModelPanel {}
 
 impl ModelPanel {
     fn choose_effort(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.state.read(cx).is_starting() || index == self.effort_index { return; }
-        let Some(level) = self.levels.get(index) else { return; };
+        if self.state.read(cx).is_starting() || index == self.effort_index {
+            return;
+        }
+        let Some(level) = self.levels.get(index) else {
+            return;
+        };
         let effort = Some(level.id.clone());
         self.previous_effort_index = self.effort_index;
         self.effort_index = index;
-        self.state.update(cx, |state, cx| state.set_effort(effort, cx));
+        self.state
+            .update(cx, |state, cx| state.set_effort(effort, cx));
         crate::haptics::tick();
         cx.notify();
     }
@@ -466,8 +474,21 @@ impl Render for ModelPanel {
                                             bounds,
                                             linear_gradient(
                                                 0.,
-                                                linear_color_stop(crate::appearance::popup_surface(0x222222), 0.),
-                                                linear_color_stop({ let mut color = crate::appearance::popup_surface(0x222222); color.a = 0.; color }, 1.),
+                                                linear_color_stop(
+                                                    crate::appearance::popup_surface(0x222222),
+                                                    0.,
+                                                ),
+                                                linear_color_stop(
+                                                    {
+                                                        let mut color =
+                                                            crate::appearance::popup_surface(
+                                                                0x222222,
+                                                            );
+                                                        color.a = 0.;
+                                                        color
+                                                    },
+                                                    1.,
+                                                ),
                                             ),
                                         ));
                                     }
@@ -685,9 +706,9 @@ impl Render for ModelPanel {
                             .w(relative(1.0 / stops as f32))
                             .cursor_pointer()
                             .on_drag(EffortDrag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.choose_effort(stop, cx)
-                            }))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.choose_effort(stop, cx)),
+                            )
                     })),
             )
         })
@@ -746,14 +767,30 @@ mod tests {
     #[test]
     fn model_effort_label_shows_default_before_any_explicit_change() {
         let mut info = del_agent::ModelInfo {
-            id: "test".into(), name: "Test".into(), description: String::new(),
-            efforts: vec![del_agent::EffortOption::named("medium"), del_agent::EffortOption::named("high")],
-            default_effort: Some("medium".into()), fast_tier: None, is_default: false,
+            id: "test".into(),
+            name: "Test".into(),
+            description: String::new(),
+            efforts: vec![
+                del_agent::EffortOption::named("medium"),
+                del_agent::EffortOption::named("high"),
+            ],
+            default_effort: Some("medium".into()),
+            fast_tier: None,
+            is_default: false,
         };
-        assert_eq!(super::effort_label(None, Some(&info)).as_deref(), Some("Medium"));
-        assert_eq!(super::effort_label(Some("high"), Some(&info)).as_deref(), Some("High"));
+        assert_eq!(
+            super::effort_label(None, Some(&info)).as_deref(),
+            Some("Medium")
+        );
+        assert_eq!(
+            super::effort_label(Some("high"), Some(&info)).as_deref(),
+            Some("High")
+        );
         info.default_effort = Some("high".into());
-        assert_eq!(super::effort_label(None, Some(&info)).as_deref(), Some("High"));
+        assert_eq!(
+            super::effort_label(None, Some(&info)).as_deref(),
+            Some("High")
+        );
         info.default_effort = None;
         assert_eq!(super::effort_label(None, Some(&info)), None);
     }

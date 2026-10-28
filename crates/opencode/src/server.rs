@@ -80,7 +80,9 @@ impl Server {
         stdio: bool,
     ) -> std::result::Result<Self, StartError> {
         let binary = del_agent::detect::find_binary("opencode").ok_or_else(|| {
-            StartError::Other(error("not installed; install OpenCode and refresh Providers"))
+            StartError::Other(error(
+                "not installed; install OpenCode and refresh Providers",
+            ))
         })?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(binary);
@@ -145,7 +147,10 @@ impl Server {
         let url = match address {
             Ok(Ok(Some(url))) => url,
             result => {
-                let mut child = starting.child.take().expect("child retained until startup ends");
+                let mut child = starting
+                    .child
+                    .take()
+                    .expect("child retained until startup ends");
                 del_agent::procgroup::terminate_group(pid, &mut child, Duration::from_millis(200))
                     .await;
                 return Err(match result {
@@ -156,7 +161,10 @@ impl Server {
                 });
             }
         };
-        let child = starting.child.take().expect("child retained until startup ends");
+        let child = starting
+            .child
+            .take()
+            .expect("child retained until startup ends");
         // Drain logs as raw bytes without retaining potentially sensitive provider
         // output; stopping before EOF would block the server once the pipe fills.
         tokio::spawn(async move {

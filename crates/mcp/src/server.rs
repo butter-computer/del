@@ -390,8 +390,7 @@ fn origin_ok(h: &HeaderMap, port: u16) -> bool {
                     "https" => Some(443),
                     _ => None,
                 };
-                host_is_loopback(authority)
-                    && authority_port(authority).or(default) == Some(port)
+                host_is_loopback(authority) && authority_port(authority).or(default) == Some(port)
             }),
     }
 }
@@ -742,8 +741,7 @@ impl Inner {
                 let _reservation = {
                     let mut s = self.scope.lock().unwrap();
                     let (mine, total) = s.spawn_counts(caller);
-                    if mine >= self.opts.max_spawn_per_session
-                        || total >= self.opts.max_spawn_total
+                    if mine >= self.opts.max_spawn_per_session || total >= self.opts.max_spawn_total
                     {
                         return Ok(tool_err("spawn limit reached"));
                     }

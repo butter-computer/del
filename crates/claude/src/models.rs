@@ -91,10 +91,19 @@ pub async fn discover_catalog(options: &ClaudeOptions, cwd: &Path) -> Result<Val
 
 /// Read native plan limits without submitting a prompt or saving a session.
 pub async fn usage(options: &ClaudeOptions, cwd: &Path) -> Result<Value> {
-    control_query(options, cwd, Some(json!({"subtype":"get_usage","skip_behaviors":true}))).await
+    control_query(
+        options,
+        cwd,
+        Some(json!({"subtype":"get_usage","skip_behaviors":true})),
+    )
+    .await
 }
 
-async fn control_query(options: &ClaudeOptions, cwd: &Path, followup: Option<Value>) -> Result<Value> {
+async fn control_query(
+    options: &ClaudeOptions,
+    cwd: &Path,
+    followup: Option<Value>,
+) -> Result<Value> {
     let mut cmd = Command::new(&options.binary);
     options.prepare(&mut cmd);
     cmd.args([

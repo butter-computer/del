@@ -35,7 +35,9 @@ pub fn git_program() -> Option<&'static Path> {
             if !candidate.is_file() {
                 continue;
             }
-            let real = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+            let real = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
             if real == Path::new("/usr/bin/git")
                 && !*shim_checked.get_or_insert_with(developer_tools_installed)
             {
@@ -51,11 +53,10 @@ pub fn git_program() -> Option<&'static Path> {
 fn developer_tools_installed() -> bool {
     let mut command = Command::new("/usr/bin/xcode-select");
     command.arg("-p");
-    bounded(&mut command, std::time::Duration::from_secs(5))
-        .is_ok_and(|output| {
-            output.status.success()
-                && Path::new(String::from_utf8_lossy(&output.stdout).trim()).is_dir()
-        })
+    bounded(&mut command, std::time::Duration::from_secs(5)).is_ok_and(|output| {
+        output.status.success()
+            && Path::new(String::from_utf8_lossy(&output.stdout).trim()).is_dir()
+    })
 }
 
 /// Run with a deadline. Output goes through files so a full pipe cannot
@@ -92,7 +93,11 @@ fn bounded(
     stdout.read_to_end(&mut out)?;
     stderr.rewind()?;
     stderr.take(64 * 1024).read_to_end(&mut err)?;
-    Ok(std::process::Output { status, stdout: out, stderr: err })
+    Ok(std::process::Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -275,7 +280,10 @@ impl ProjectPreferences {
     /// Unreadable preferences are preserved aside and reported, never overwritten.
     pub fn load() -> (Self, Option<String>) {
         match del_agent::data_dir() {
-            Some(dir) => crate::sessions::load_or_set_aside(&dir.join("projects.json"), "project preferences"),
+            Some(dir) => crate::sessions::load_or_set_aside(
+                &dir.join("projects.json"),
+                "project preferences",
+            ),
             None => Default::default(),
         }
     }
@@ -379,13 +387,18 @@ mod tests {
     }
     #[test]
     fn preferences_without_newer_fields_still_load() {
-        let saved: ProjectPreferences = serde_json::from_str(r#"{"names":{"/repo":"Repo"}}"#).unwrap();
+        let saved: ProjectPreferences =
+            serde_json::from_str(r#"{"names":{"/repo":"Repo"}}"#).unwrap();
         assert_eq!(saved.names.len(), 1);
         assert!(saved.collapsed.is_empty());
     }
     #[test]
     fn git_runs_with_a_deadline() {
-        let error = bounded(Command::new("/bin/sleep").arg("5"), std::time::Duration::from_millis(50)).unwrap_err();
+        let error = bounded(
+            Command::new("/bin/sleep").arg("5"),
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(git_program().is_some());
     }

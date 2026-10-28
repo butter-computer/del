@@ -304,10 +304,16 @@ async fn resume_after_agent_exit_respawns_with_replayed_history() {
     assert_eq!(resumed.id, handle.id);
     let history = resumed.history();
     assert!(matches!(&history[0], AgentEvent::UserMessage { text } if text == "earlier"));
-    assert!(history.iter().any(
-        |e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "reply")
-    ));
-    assert!(!history.iter().any(|e| matches!(e, AgentEvent::AssistantTextDelta { .. })));
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "reply"))
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AssistantTextDelta { .. }))
+    );
     let mut rx = resumed.subscribe();
     backend
         .send_prompt(&resumed.id, UserInput::text("hello"))

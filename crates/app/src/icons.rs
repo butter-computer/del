@@ -28,7 +28,8 @@ pub fn spinner() -> gpui_kit::component::spinner::Spinner {
 pub fn working_spinner() -> gpui_kit::component::spinner::Spinner {
     gpui_kit::component::spinner::Spinner::new()
         .icon(Icon::default().path("icons/working-ring.svg"))
-        .with_size(zpx(14.)).ease(|t| t)
+        .with_size(zpx(14.))
+        .ease(|t| t)
 }
 
 // Source asset name -> public SF Symbols name. This also covers component
@@ -211,7 +212,8 @@ pub fn system_asset(path: &str) -> Option<Vec<u8>> {
             collections::HashMap,
             sync::{Mutex, OnceLock},
         };
-        static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<Vec<u8>>>>> = OnceLock::new();
+        type SymbolCache = HashMap<&'static str, Option<Vec<u8>>>;
+        static CACHE: OnceLock<Mutex<SymbolCache>> = OnceLock::new();
         let name = symbol_name(path)?;
         let mut cache = CACHE
             .get_or_init(Default::default)
@@ -386,8 +388,7 @@ mod tests {
         let target = cx.debug_bounds("close-fixture").unwrap();
         assert_eq!(target.size, gpui::size(button_size(), button_size()));
         let visible_hint = |window: &gpui::Window| {
-            let hint: gpui::Hsla =
-                crate::appearance::rgb(0x303033).into();
+            let hint: gpui::Hsla = crate::appearance::rgb(0x303033).into();
             window
                 .painted_quads()
                 .iter()
@@ -426,5 +427,4 @@ mod tests {
             "hint did not return after hover"
         );
     }
-
 }

@@ -48,7 +48,9 @@ impl Default for ClaudeOptions {
 impl ClaudeOptions {
     pub(crate) fn prepare(&self, command: &mut Command) {
         if let Some(root) = &self.config_dir {
-            command.env("CLAUDE_CONFIG_DIR", root).env("DEL_ACCOUNT_PROFILE", "1");
+            command
+                .env("CLAUDE_CONFIG_DIR", root)
+                .env("DEL_ACCOUNT_PROFILE", "1");
         }
     }
 }
@@ -127,7 +129,8 @@ impl Live {
 
     /// Terminate the process group (SIGTERM, then SIGKILL after the grace).
     async fn terminate(&self) {
-        self.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.closing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut child = self.child.lock().await;
         match self.pid {
             Some(pid) => del_agent::procgroup::terminate_group(pid, &mut child, CLOSE_GRACE).await,
@@ -614,7 +617,11 @@ impl AgentBackend for ClaudeBackend {
         session: &SessionId,
         cwd: &std::path::Path,
     ) -> Result<Option<String>> {
-        let Some(root) = self.options.config_dir.clone().or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+        let Some(root) = self
+            .options
+            .config_dir
+            .clone()
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
         else {
             return Ok(None);
@@ -680,8 +687,8 @@ impl AgentBackend for ClaudeBackend {
             Some(root) => crate::history::load_from(&root, &cwd, &id),
             None => crate::history::load(&cwd, &id),
         })
-            .await
-            .map_err(|e| AgentError::Backend(e.to_string()))??;
+        .await
+        .map_err(|e| AgentError::Backend(e.to_string()))??;
         Ok(self
             .spawn(&config, session.clone(), ["--resume", session.as_str()])?
             .with_history(history))
@@ -721,7 +728,13 @@ impl AgentBackend for ClaudeBackend {
     /// Stop every session at once: SIGTERM all groups first, then wait for
     /// them in parallel, so quitting costs one grace period, not one each.
     async fn shutdown(&self) -> Result<()> {
-        let lives: Vec<_> = self.sessions.lock().unwrap().drain().map(|(_, l)| l).collect();
+        let lives: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, l)| l)
+            .collect();
         let mut waits = tokio::task::JoinSet::new();
         for live in lives {
             if !live.closing.swap(true, std::sync::atomic::Ordering::SeqCst)

@@ -79,7 +79,11 @@ impl AppUpdater {
     pub fn new(_: &mut Context<Self>) -> Self {
         let bundle = public_bundle();
         let supported = bundle.is_some();
-        if let Some(parent) = bundle.as_ref().and_then(|b| b.parent()).map(Path::to_path_buf) {
+        if let Some(parent) = bundle
+            .as_ref()
+            .and_then(|b| b.parent())
+            .map(Path::to_path_buf)
+        {
             std::thread::spawn(move || prune_stale_bundles(&parent, STALE_BUNDLE_AGE));
         }
         Self {
@@ -137,10 +141,7 @@ impl AppUpdater {
     }
 
     fn drain(&mut self, cx: &mut Context<Self>) {
-        loop {
-            let Some(receiver) = self.receiver.as_ref() else {
-                break;
-            };
+        while let Some(receiver) = self.receiver.as_ref() {
             match receiver.try_recv() {
                 Ok(event) => {
                     self.status = match event {
@@ -475,7 +476,10 @@ fn select_release(release: Release, installed: &str) -> Result<Option<Update>> {
     // Tags this build cannot compare (pre-release suffixes, four parts) are
     // not offered, rather than leaving the control in a permanent error.
     let Some(latest) = version(&release.tag_name) else {
-        eprintln!("[del update] ignoring release with unsupported version {:?}", release.tag_name);
+        eprintln!(
+            "[del update] ignoring release with unsupported version {:?}",
+            release.tag_name
+        );
         return Ok(None);
     };
     let current = version(installed).ok_or("Unsupported installed version")?;
@@ -726,7 +730,12 @@ fn prune_stale_bundles(parent: &Path, age: Duration) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !entry.file_name().to_string_lossy().starts_with(".del-update-") || !old(&path) {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".del-update-")
+            || !old(&path)
+        {
             continue;
         }
         // Staging holds at most one Del.app; anything else means it is not ours to delete.
@@ -1273,7 +1282,10 @@ mod tests {
     #[test]
     fn unsupported_release_versions_are_not_an_error() {
         for tag in ["v0.2.0-beta.1", "v0.2.0.1", "nightly"] {
-            assert!(select_release(release(tag), "0.1.0").unwrap().is_none(), "{tag}");
+            assert!(
+                select_release(release(tag), "0.1.0").unwrap().is_none(),
+                "{tag}"
+            );
         }
     }
 
@@ -1306,7 +1318,9 @@ mod tests {
         super::prune_stale_bundles(parent, std::time::Duration::ZERO);
         assert!(!ours.exists(), "retired Del bundle is pruned");
         assert!(!staged.exists(), "abandoned staging is pruned");
-        assert!(foreign.exists() && unexpected_name.exists() && mixed.exists() && unrelated.exists());
+        assert!(
+            foreign.exists() && unexpected_name.exists() && mixed.exists() && unrelated.exists()
+        );
     }
 
     #[test]

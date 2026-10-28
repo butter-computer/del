@@ -30,7 +30,11 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// more room than metadata calls; both only guard against a hung server.
 pub fn request_timeout(method: &str) -> Duration {
     match method {
-        "thread/start" | "thread/resume" | "thread/fork" | "turn/start" | "turn/steer"
+        "thread/start"
+        | "thread/resume"
+        | "thread/fork"
+        | "turn/start"
+        | "turn/steer"
         | "account/login/start" => Duration::from_secs(600),
         _ => Duration::from_secs(120),
     }
@@ -368,7 +372,9 @@ impl CodexClient {
                         }
                     }
                     Ok(Some(Err(len))) => {
-                        eprintln!("codex: skipped a {len}-byte app-server line over the size limit");
+                        eprintln!(
+                            "codex: skipped a {len}-byte app-server line over the size limit"
+                        );
                     }
                     Ok(None) => break "app-server closed its output".to_owned(),
                     Err(e) => break format!("read error: {e}"),

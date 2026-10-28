@@ -59,7 +59,8 @@ pub struct FoldedMessages(Arc<std::sync::OnceLock<Vec<Folded>>>);
 
 impl FoldedMessages {
     fn get(&self, messages: &[Message]) -> &[Folded] {
-        self.0.get_or_init(|| messages.iter().map(|message| fold(&message.text)).collect())
+        self.0
+            .get_or_init(|| messages.iter().map(|message| fold(&message.text)).collect())
     }
 }
 
@@ -79,7 +80,10 @@ fn fold(text: &str) -> Folded {
             offsets.extend((before..folded.len()).map(|_| (start, start + ch.len_utf8())));
         }
     }
-    Folded { text: folded, offsets }
+    Folded {
+        text: folded,
+        offsets,
+    }
 }
 
 impl Folded {
@@ -127,7 +131,11 @@ impl Rollouts {
         let suffix = format!("{id}.jsonl");
         self.paths
             .iter()
-            .find(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|name| name.ends_with(&suffix)))
+            .find(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|name| name.ends_with(&suffix))
+            })
             .cloned()
     }
 }
@@ -167,8 +175,16 @@ impl Index {
                     None => del_claude::history::path(&source.cwd, id),
                 },
                 (Some(Provider::Codex), Some(id)) => {
-                    let root = source.account.as_ref().map_or_else(crate::terminal_conversation::codex_root, |a| a.root());
-                    rollouts.entry(root).or_insert_with_key(|root| Rollouts::new(crate::terminal_conversation::rollouts(root))).find(id)
+                    let root = source
+                        .account
+                        .as_ref()
+                        .map_or_else(crate::terminal_conversation::codex_root, |a| a.root());
+                    rollouts
+                        .entry(root)
+                        .or_insert_with_key(|root| {
+                            Rollouts::new(crate::terminal_conversation::rollouts(root))
+                        })
+                        .find(id)
                 }
                 _ => None,
             };
@@ -187,7 +203,15 @@ impl Index {
             if source.provider == Some(Provider::OpenCode)
                 && let Some(id) = id
             {
-                match self.opencode.read_with_environment(&source.cwd, id, &source.account.as_ref().map(|a| a.environment()).unwrap_or_default()) {
+                match self.opencode.read_with_environment(
+                    &source.cwd,
+                    id,
+                    &source
+                        .account
+                        .as_ref()
+                        .map(|a| a.environment())
+                        .unwrap_or_default(),
+                ) {
                     Ok(events) => {
                         let mut model = ChatModel::default();
                         for event in events.iter() {
@@ -580,7 +604,10 @@ mod tests {
         let (first, folded) = index.read(&path, Some(Provider::Codex), "id").unwrap();
         let (again, folded_again) = index.read(&path, Some(Provider::Codex), "id").unwrap();
         assert!(Arc::ptr_eq(&first, &again));
-        assert!(Arc::ptr_eq(&folded.0, &folded_again.0), "folded text is shared with the cache");
+        assert!(
+            Arc::ptr_eq(&folded.0, &folded_again.0),
+            "folded text is shared with the cache"
+        );
         std::fs::write(&path, record("first") + &record("later")).unwrap();
         assert_eq!(
             index
@@ -602,7 +629,10 @@ mod tests {
     #[test]
     fn superseded_searches_stop_early() {
         let documents = vec![document(false, false, "needle")];
-        assert_eq!(search_until(&documents, "needle", || false).map(|hits| hits.len()), Some(1));
+        assert_eq!(
+            search_until(&documents, "needle", || false).map(|hits| hits.len()),
+            Some(1)
+        );
         assert!(search_until(&documents, "needle", || true).is_none());
     }
 

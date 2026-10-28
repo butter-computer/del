@@ -281,7 +281,9 @@ pub struct RightPanel {
 }
 
 impl RightPanel {
-    pub fn is_changes(&self) -> bool { self.pane == Pane::Changes }
+    pub fn is_changes(&self) -> bool {
+        self.pane == Pane::Changes
+    }
 
     /// Free everything a panel for a closed tab still holds: shells, web views,
     /// and the polling tasks. The panel's saved state is the caller's business.
@@ -598,7 +600,9 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) -> Result<crate::browser::BrowserReply, String> {
         request.validate()?;
-        if request.action == "new_tab" && self.browser_tabs.len() >= del_mcp::browser::MAX_AGENT_TABS {
+        if request.action == "new_tab"
+            && self.browser_tabs.len() >= del_mcp::browser::MAX_AGENT_TABS
+        {
             return Err(format!(
                 "This session already has {} browser tabs; close one first",
                 del_mcp::browser::MAX_AGENT_TABS
@@ -807,10 +811,9 @@ impl RightPanel {
                         markdown: Some(markdown),
                         ..
                     } = &mut viewer
+                        && let Some(draft) = this.file_drafts.get(path)
                     {
-                        if let Some(draft) = this.file_drafts.get(path) {
-                            *markdown = draft.text.clone().into();
-                        }
+                        *markdown = draft.text.clone().into();
                     }
                     this.document_preview = match &viewer {
                         Viewer::Document { path } => {
@@ -1311,10 +1314,9 @@ impl RightPanel {
                     markdown: Some(markdown),
                     ..
                 } = &mut this.viewer
+                    && path == &edited
                 {
-                    if path == &edited {
-                        *markdown = text.into();
-                    }
+                    *markdown = text.into();
                 }
                 cx.notify();
             }
@@ -1576,7 +1578,8 @@ impl RightPanel {
                                     };
                                     (
                                         path.clone(),
-                                        review.unwrap_or_else(|| Rc::new(ChangeReview::parse(text))),
+                                        review
+                                            .unwrap_or_else(|| Rc::new(ChangeReview::parse(text))),
                                     )
                                 })
                                 .collect();
@@ -1609,7 +1612,9 @@ impl RightPanel {
         }
     }
     fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let (total_added, total_removed) = self.change_reviews.values()
+        let (total_added, total_removed) = self
+            .change_reviews
+            .values()
             .fold((0usize, 0usize), |(added, removed), review| {
                 (added + review.added, removed + review.removed)
             });
@@ -1653,9 +1658,21 @@ impl RightPanel {
                         .gap_2()
                         .text_size(zpx(11.))
                         .text_color(rgba(0xffffff8c))
-                        .child(format!("{} {}", total_files, if total_files == 1 { "file" } else { "files" }))
-                        .child(div().text_color(rgb(0x5fc27e)).child(format!("+{total_added}")))
-                        .child(div().text_color(rgb(0xf0716b)).child(format!("−{total_removed}"))),
+                        .child(format!(
+                            "{} {}",
+                            total_files,
+                            if total_files == 1 { "file" } else { "files" }
+                        ))
+                        .child(
+                            div()
+                                .text_color(rgb(0x5fc27e))
+                                .child(format!("+{total_added}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(0xf0716b))
+                                .child(format!("−{total_removed}")),
+                        ),
                 )
             })
             .children(self.change_files.iter().enumerate().map(|(index, file)| {
@@ -1799,7 +1816,11 @@ impl RightPanel {
                         .child(format!(
                             "{} more changed {} not shown",
                             self.change_omitted,
-                            if self.change_omitted == 1 { "file" } else { "files" }
+                            if self.change_omitted == 1 {
+                                "file"
+                            } else {
+                                "files"
+                            }
                         )),
                 )
             })
@@ -2017,9 +2038,11 @@ fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
 mod tests {
     #[test]
     fn saved_changes_requires_an_explicit_click() {
-        let mut saved = SavedPanel::default();
-        saved.open = true;
-        saved.pane = Pane::Changes;
+        let mut saved = SavedPanel {
+            open: true,
+            pane: Pane::Changes,
+            ..Default::default()
+        };
         assert!(!saved.restore_open());
         saved.pane = Pane::Files;
         assert!(saved.restore_open());

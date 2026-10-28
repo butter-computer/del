@@ -266,7 +266,10 @@ async fn list_and_summary() {
         &call(&e.me, "get_session_summary", json!({"session_id":"ghost"})).await
     ));
     let r = call(&e.me, "get_session_summary", json!({"session_id":"me"})).await;
-    assert_eq!(r["result"]["structuredContent"]["last_output"], "output of me");
+    assert_eq!(
+        r["result"]["structuredContent"]["last_output"],
+        "output of me"
+    );
 }
 
 #[tokio::test]
@@ -385,21 +388,26 @@ async fn forgotten_sessions_lose_family_access() {
     .await;
     let child = SessionId::new(r["result"]["structuredContent"]["id"].as_str().unwrap());
     let child_creds = e.server.register_session(&child);
-    let rows = call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]
-        ["sessions"]
-        .as_array()
-        .unwrap()
-        .len();
+    let rows =
+        call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]["sessions"]
+            .as_array()
+            .unwrap()
+            .len();
     assert_eq!(rows, 2);
     assert!(!is_error(
-        &call(&child_creds, "get_session_summary", json!({"session_id":"me"})).await
+        &call(
+            &child_creds,
+            "get_session_summary",
+            json!({"session_id":"me"})
+        )
+        .await
     ));
     e.server.forget_session(&child);
-    let rows = call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]
-        ["sessions"]
-        .as_array()
-        .unwrap()
-        .len();
+    let rows =
+        call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]["sessions"]
+            .as_array()
+            .unwrap()
+            .len();
     assert_eq!(rows, 1);
     assert!(is_error(
         &call(
@@ -429,7 +437,12 @@ async fn browser_targets_are_limited_to_the_spawn_family() {
             .contains("session_id must be your own session")
     );
     // Own session passes the server check and reaches the host.
-    let r = call(&e.me, "browser", json!({"action":"snapshot","session_id":"me"})).await;
+    let r = call(
+        &e.me,
+        "browser",
+        json!({"action":"snapshot","session_id":"me"}),
+    )
+    .await;
     assert_eq!(
         r["result"]["content"][0]["text"],
         "This host has no browser"
@@ -764,18 +777,29 @@ async fn chat_browser_credentials_cannot_call_session_or_notification_tools() {
 #[tokio::test]
 async fn chat_browser_credentials_are_bound_to_their_chat() {
     let e = env().await;
-    let text = |r: &Value| r["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+    let text = |r: &Value| {
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     let snapshot = |session: &str| json!({"action":"snapshot","session_id":session});
     let a = e.server.register_browser_client(&SessionId::new("chat-a"));
     let denied = call(&a, "browser", snapshot("chat-b")).await;
     assert!(text(&denied).contains("session_id must be your own session"));
-    assert_eq!(text(&call(&a, "browser", snapshot("chat-a")).await), "This host has no browser");
+    assert_eq!(
+        text(&call(&a, "browser", snapshot("chat-a")).await),
+        "This host has no browser"
+    );
 
     // A provisional credential becomes the chat's once its id is known.
     let pending = SessionId::new("pending");
     let b = e.server.register_browser_client(&pending);
     e.server.rebind_session(&pending, &SessionId::new("chat-b"));
-    assert_eq!(text(&call(&b, "browser", snapshot("chat-b")).await), "This host has no browser");
+    assert_eq!(
+        text(&call(&b, "browser", snapshot("chat-b")).await),
+        "This host has no browser"
+    );
     assert!(text(&call(&b, "browser", snapshot("pending")).await).contains("own session"));
     assert!(text(&call(&b, "browser", snapshot("chat-a")).await).contains("own session"));
     let list = rpc(&b, "tools/list", json!({})).await;
@@ -788,14 +812,22 @@ async fn chat_browser_credentials_are_bound_to_their_chat() {
     // A shared credential reaches exactly its member chats.
     let group = SessionId::new("workspace");
     let shared = e.server.register_shared_browser_client(&group);
-    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), true);
+    e.server
+        .set_shared_browser_member(&group, &SessionId::new("chat-a"), true);
     assert_eq!(
         text(&call(&shared, "browser", snapshot("chat-a")).await),
         "This host has no browser"
     );
-    assert!(text(&call(&shared, "browser", snapshot("chat-b")).await).contains("chats this credential serves"));
-    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), false);
-    assert!(text(&call(&shared, "browser", snapshot("chat-a")).await).contains("chats this credential serves"));
+    assert!(
+        text(&call(&shared, "browser", snapshot("chat-b")).await)
+            .contains("chats this credential serves")
+    );
+    e.server
+        .set_shared_browser_member(&group, &SessionId::new("chat-a"), false);
+    assert!(
+        text(&call(&shared, "browser", snapshot("chat-a")).await)
+            .contains("chats this credential serves")
+    );
     assert!(is_error(&call(&shared, "list_sessions", json!({})).await));
 }
 

@@ -275,7 +275,10 @@ impl CodexBackend {
     /// Read account quota without starting a conversation or model request.
     pub async fn account_rate_limits(&self) -> Result<Value> {
         let conn = self.connection().await.map_err(AgentError::from)?;
-        conn.client.call("account/rateLimits/read", json!({})).await.map_err(be)
+        conn.client
+            .call("account/rateLimits/read", json!({}))
+            .await
+            .map_err(be)
     }
 
     /// Attach to an already-connected client (tests, replay). Performs the
@@ -339,7 +342,8 @@ impl CodexBackend {
         }
         let (client, rx) = CodexClient::spawn(&spawn)?;
         self.conn.lock().unwrap().handshaking = Some(client.clone());
-        let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(client.clone(), rx)).await;
+        let result =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(client.clone(), rx)).await;
         let outcome = {
             let mut slot = self.conn.lock().unwrap();
             // `shutdown` takes the handshaking client to cancel it.
@@ -733,10 +737,18 @@ impl AgentBackend for CodexBackend {
         .await
     }
 
-    async fn resume_transferred(&self, config: SessionConfig, session: &SessionId, path: Option<&std::path::Path>) -> Result<SessionHandle> {
+    async fn resume_transferred(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+        path: Option<&std::path::Path>,
+    ) -> Result<SessionHandle> {
         let mut params = thread_params(&config);
-        if let Some(path) = path { params.insert("path".into(), json!(path)); }
-        self.open("thread/resume", params, Some(session), config.provider).await
+        if let Some(path) = path {
+            params.insert("path".into(), json!(path));
+        }
+        self.open("thread/resume", params, Some(session), config.provider)
+            .await
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
@@ -975,7 +987,10 @@ async fn route(client: WeakClient, mut rx: mpsc::UnboundedReceiver<Incoming>, se
             }
             Incoming::Closed { reason } => {
                 let mut msg = format!("Codex app-server stopped: {reason}");
-                if let Some(last) = client.upgrade().and_then(|c| c.stderr_tail().last().cloned()) {
+                if let Some(last) = client
+                    .upgrade()
+                    .and_then(|c| c.stderr_tail().last().cloned())
+                {
                     msg.push_str(&format!(" (last stderr: {last})"));
                 }
                 let all: Vec<_> = sessions.lock().unwrap().values().cloned().collect();

@@ -12,13 +12,37 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 fn usage_bar(remaining: Option<f64>) -> impl IntoElement {
-    div().w_full().max_w(zpx(240.)).children(remaining.map(|remaining| {
-        h_flex().w_full().gap_2().items_center()
-            .child(div().flex_1().h(zpx(4.)).rounded_full().overflow_hidden().bg(rgba(0xffffff20))
-                .child(div().h_full().w(relative((remaining / 100.) as f32)).rounded_full().bg(rgb(0xebebeb))))
-            .child(div().flex_shrink_0().text_size(zpx(11.)).text_color(rgba(0xffffff80))
-                .child(format!("{remaining:.0}% left")))
-    }))
+    div()
+        .w_full()
+        .max_w(zpx(240.))
+        .children(remaining.map(|remaining| {
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .h(zpx(4.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(rgba(0xffffff20))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative((remaining / 100.) as f32))
+                                .rounded_full()
+                                .bg(rgb(0xebebeb)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(zpx(11.))
+                        .text_color(rgba(0xffffff80))
+                        .child(format!("{remaining:.0}% left")),
+                )
+        }))
 }
 
 fn provider_row(
@@ -55,7 +79,11 @@ fn provider_row(
         .gap_3()
         .items_center()
         .rounded(zpx(14.))
-        .bg(if crate::appearance::light() { gpui_kit::rgb(0xf9f9f9) } else { gpui_kit::rgb(0x171719) })
+        .bg(if crate::appearance::light() {
+            gpui_kit::rgb(0xf9f9f9)
+        } else {
+            gpui_kit::rgb(0x171719)
+        })
         .child(crate::icons::path(logo).text_color(rgb(color)))
         .child(
             div()
@@ -103,13 +131,20 @@ fn provider_row(
                 .flex_none()
                 .gap_2()
                 .items_center()
-                .when(provider != Provider::Acp, |row| row.child(
-                    Button::new(SharedString::from(format!("add-account-{name}"))).ghost().small()
-                        .child(crate::icons::icon(IconName::Plus)).tooltip("Add account")
-                        .disabled(s.account_login_pending(provider))
-                        .accessibility_label(format!("Add {name} account"))
-                        .on_click(move |_, _, cx| add_state.update(cx, |s, cx| s.add_account(provider, cx))),
-                ))
+                .when(provider != Provider::Acp, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("add-account-{name}")))
+                            .ghost()
+                            .small()
+                            .child(crate::icons::icon(IconName::Plus))
+                            .tooltip("Add account")
+                            .disabled(s.account_login_pending(provider))
+                            .accessibility_label(format!("Add {name} account"))
+                            .on_click(move |_, _, cx| {
+                                add_state.update(cx, |s, cx| s.add_account(provider, cx))
+                            }),
+                    )
+                })
                 .when(can_sign_in, |row| {
                     row.child(
                         Button::new("sign-in")
@@ -154,28 +189,60 @@ fn provider_row(
 /// Category navigation replaces session navigation only while Settings is open.
 pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
     let preferences = state.read(cx).preferences_open;
-    v_flex().size_full().min_w_0().pl_2().py(zpx(8.)).gap_4()
-        .child(v_flex().w_full().min_w_0().gap_1()
-            .child(div().px_2().pb_2().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff80)).child("Settings"))
-            .children([("Appearance", true, IconName::Palette), ("Providers", false, IconName::CircleUser)]
-                .into_iter().map(|(label, category, icon)| {
-                    let state = state.clone();
-                    Button::new(label).ghost().w_full().h(zpx(34.)).px_2()
-                        .child(h_flex().w_full().items_center().gap_2()
-                            .child(crate::icons::icon(icon)).child(label))
-                        .selected(preferences == category)
-                        .accessibility_label(format!("Settings: {label}"))
-                        .on_click(move |_, _, cx| state.update(cx, |state, cx| {
-                            state.preferences_open = category;
-                            cx.notify();
-                        }))
-                })))
+    v_flex()
+        .size_full()
+        .min_w_0()
+        .pl_2()
+        .py(zpx(8.))
+        .gap_4()
+        .child(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .px_2()
+                        .pb_2()
+                        .text_size(zpx(TEXT_SM))
+                        .text_color(rgba(0xffffff80))
+                        .child("Settings"),
+                )
+                .children(
+                    [
+                        ("Appearance", true, IconName::Palette),
+                        ("Providers", false, IconName::CircleUser),
+                    ]
+                    .into_iter()
+                    .map(|(label, category, icon)| {
+                        let state = state.clone();
+                        Button::new(label)
+                            .ghost()
+                            .w_full()
+                            .h(zpx(34.))
+                            .px_2()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(crate::icons::icon(icon))
+                                    .child(label),
+                            )
+                            .selected(preferences == category)
+                            .accessibility_label(format!("Settings: {label}"))
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.preferences_open = category;
+                                    cx.notify();
+                                })
+                            })
+                    }),
+                ),
+        )
 }
 
-pub fn render(
-    state: &Entity<AppState>,
-    cx: &App,
-) -> impl IntoElement {
+pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
     let preferences = s.preferences_open;
     let back = state.clone();

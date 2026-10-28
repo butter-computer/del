@@ -546,7 +546,13 @@ mod history_tests {
             turn_id, status: del_agent::TurnStatus::Interrupted }) if turn_id == "t2"));
         assert_eq!(mapper.turn_id(), None);
         // Live notifications after history are not muted.
-        let live = mapper.notification("turn/completed", &json!({"turn":{"id":"t3","status":"failed","error":{"message":"live"}}}));
-        assert!(live.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "live")));
+        let live = mapper.notification(
+            "turn/completed",
+            &json!({"turn":{"id":"t3","status":"failed","error":{"message":"live"}}}),
+        );
+        assert!(
+            live.iter()
+                .any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "live"))
+        );
     }
 }

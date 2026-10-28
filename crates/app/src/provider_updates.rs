@@ -89,10 +89,13 @@ fn valid_npm_package(name: &str) -> bool {
     let segment = |s: &str| {
         !s.is_empty()
             && s.len() <= 214
-            && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
     };
     match name.strip_prefix('@') {
-        Some(scoped) => scoped.split_once('/').is_some_and(|(scope, pkg)| segment(scope) && segment(pkg)),
+        Some(scoped) => scoped
+            .split_once('/')
+            .is_some_and(|(scope, pkg)| segment(scope) && segment(pkg)),
         None => segment(name),
     }
 }
@@ -267,13 +270,19 @@ pub async fn ensure_program(
         .await
         .map_err(|e| e.to_string())?;
     let managed = plan != Installer::Unmanaged;
-    let result = apply_update(&program, &plan, &progress).await.map(|()| managed);
+    let result = apply_update(&program, &plan, &progress)
+        .await
+        .map(|()| managed);
     let failures = match (&result, checked.as_ref()) {
         (Ok(_), _) => 0,
         (Err(_), Some(previous)) => previous.failures + 1,
         (Err(_), None) => 1,
     };
-    *checked = Some(Checked { at: Instant::now(), result: result.clone(), failures });
+    *checked = Some(Checked {
+        at: Instant::now(),
+        result: result.clone(),
+        failures,
+    });
     result
 }
 
@@ -450,9 +459,16 @@ mod tests {
         assert_eq!(retry_after(false, 1), Duration::from_secs(300));
         assert_eq!(retry_after(false, 3), Duration::from_secs(1200));
         assert_eq!(retry_after(false, 40), Duration::from_secs(6 * 3600));
-        let failed = Checked { at: Instant::now(), result: Err("offline".into()), failures: 1 };
+        let failed = Checked {
+            at: Instant::now(),
+            result: Err("offline".into()),
+            failures: 1,
+        };
         assert!(failed.fresh());
-        let stale = Checked { at: Instant::now() - Duration::from_secs(301), ..failed };
+        let stale = Checked {
+            at: Instant::now() - Duration::from_secs(301),
+            ..failed
+        };
         assert!(!stale.fresh());
     }
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -539,9 +555,19 @@ esac
                 .await
                 .is_err()
         );
-        assert_eq!(std::fs::read_to_string(root.path().join("calls")).unwrap(), calls);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("calls")).unwrap(),
+            calls
+        );
         // Once the backoff passes, the update is retried and succeeds.
-        let lock = LOCKS.get().unwrap().lock().await.get(&program).unwrap().clone();
+        let lock = LOCKS
+            .get()
+            .unwrap()
+            .lock()
+            .await
+            .get(&program)
+            .unwrap()
+            .clone();
         if let Some(checked) = lock.lock().await.as_mut() {
             checked.at = Instant::now() - Duration::from_secs(301);
         }
@@ -554,10 +580,18 @@ esac
 
     #[test]
     fn npm_package_names_follow_the_registry_grammar() {
-        for ok in ["@openai/codex", "opencode-ai", "@anthropic-ai/claude-code", "a.b_c"] {
+        for ok in [
+            "@openai/codex",
+            "opencode-ai",
+            "@anthropic-ai/claude-code",
+            "a.b_c",
+        ] {
             assert!(valid_npm_package(ok), "{ok}");
         }
-        for bad in ["", "@", "@scope", "@scope/", "/x", "a/b", "@a/b/c", "Upper", "a b", "a;b", "@a@b/c", "../x", "x\n"] {
+        for bad in [
+            "", "@", "@scope", "@scope/", "/x", "a/b", "@a/b/c", "Upper", "a b", "a;b", "@a@b/c",
+            "../x", "x\n",
+        ] {
             assert!(!valid_npm_package(bad), "{bad:?}");
         }
     }

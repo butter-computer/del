@@ -180,7 +180,11 @@ async fn replays_command_and_file_change_with_approvals() {
             .any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "done"))
     );
     // Both were answered before the server reported them resolved.
-    assert!(!seen.iter().any(|e| matches!(e, AgentEvent::ApprovalResolved { .. })));
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalResolved { .. }))
+    );
     assert!(matches!(
         seen.last(),
         Some(AgentEvent::TurnCompleted {
@@ -720,7 +724,12 @@ async fn rejected_turn_start_does_not_block_the_next_prompt() {
     let (client, rx, server) = replay(lines);
     let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
     let h = backend.start_session(config()).await.unwrap();
-    assert!(backend.send_prompt(&h.id, UserInput::text("go")).await.is_err());
+    assert!(
+        backend
+            .send_prompt(&h.id, UserInput::text("go"))
+            .await
+            .is_err()
+    );
     backend
         .send_prompt(&h.id, UserInput::text("go"))
         .await
@@ -976,26 +985,48 @@ async fn goal_controls_use_native_rpcs_and_preserve_literal_objectives() {
 
 #[tokio::test]
 async fn account_usage_reads_the_selected_connection() {
-    let lines = script(&[HANDSHAKE[0], HANDSHAKE[1], HANDSHAKE[2], ACCOUNT_OK[0], ACCOUNT_OK[1],
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
         r#"> {"id":3,"method":"account/rateLimits/read","params":{}}"#,
-        r#"< {"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}"#]);
+        r#"< {"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}"#,
+    ]);
     let (client, rx, server) = replay(lines);
     let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
-    assert_eq!(backend.account_rate_limits().await.unwrap()["rateLimits"]["primary"]["usedPercent"], 25);
+    assert_eq!(
+        backend.account_rate_limits().await.unwrap()["rateLimits"]["primary"]["usedPercent"],
+        25
+    );
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn account_transfer_resumes_the_copied_native_transcript() {
-    let lines = script(&[HANDSHAKE[0], HANDSHAKE[1], HANDSHAKE[2], ACCOUNT_OK[0], ACCOUNT_OK[1],
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
         r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved","path":"/profile/sessions/copied.jsonl"}}"#,
         r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[]}}}"#,
         r#"> {"id":4,"method":"thread/goal/get","params":{"threadId":"saved"}}"#,
-        r#"< {"id":4,"result":{"goal":null}}"#]);
+        r#"< {"id":4,"result":{"goal":null}}"#,
+    ]);
     let (client, rx, server) = replay(lines);
     let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
-    let handle = backend.resume_transferred(config(), &SessionId::new("saved"), Some(std::path::Path::new("/profile/sessions/copied.jsonl"))).await.unwrap();
+    let handle = backend
+        .resume_transferred(
+            config(),
+            &SessionId::new("saved"),
+            Some(std::path::Path::new("/profile/sessions/copied.jsonl")),
+        )
+        .await
+        .unwrap();
     assert_eq!(handle.id.as_str(), "saved");
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
