@@ -847,11 +847,17 @@ impl AgentBackend for CodexBackend {
         if last {
             // No session left: stop the app-server rather than leave it idle.
             // The next session spawns a fresh one. Checked under the slot lock
-            // so an open that has started counting is never cut off.
+            // so an open that has started counting is never cut off. Other
+            // callers (model catalogs, account reads) hold a connection Arc;
+            // do not shut down their in-flight requests either.
             let idle = {
                 let mut slot = self.conn.lock().unwrap();
                 if self.opening.load(Ordering::SeqCst) == 0
                     && self.sessions.lock().unwrap().is_empty()
+                    && slot
+                        .live
+                        .as_ref()
+                        .is_none_or(|conn| Arc::strong_count(conn) == 1)
                 {
                     Some(slot.live.take())
                 } else {

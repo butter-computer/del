@@ -956,6 +956,48 @@ pub async fn create_terminal_session_with_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode 2.x; no model inference"]
+    async fn real_model_catalog_restarts_stopped_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let environment = [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ]
+        .map(|key| {
+            (
+                key.to_owned(),
+                dir.path().join(key).to_string_lossy().into_owned(),
+            )
+        })
+        .into();
+        let backend = OpenCodeBackend::with_environment(environment);
+        let first = backend.list_models(dir.path()).await.unwrap();
+        assert!(!first.is_empty());
+        let server = backend.server(dir.path()).await.unwrap();
+        let original = server.pid;
+        del_agent::procgroup::signal_group(original, true);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while server.is_alive() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = backend.list_models(dir.path()).await;
+        let replacement = backend.running_server(dir.path()).await.unwrap();
+        assert_ne!(replacement.pid, original);
+        backend.shutdown().await.unwrap();
+        assert!(
+            !result
+                .expect("model picker must replace a dead OpenCode server")
+                .is_empty()
+        );
+    }
+
     struct NoCredentials;
     impl backend::BrowserCredentials for NoCredentials {
         fn mint(&self, _: &SessionId) -> std::io::Result<String> {

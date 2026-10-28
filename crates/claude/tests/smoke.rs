@@ -189,6 +189,24 @@ async fn installed_cli_commands_and_goal_status() {
     )));
 }
 
+/// Model discovery owns a fresh CLI process, independent of chat cleanup.
+#[tokio::test]
+#[ignore = "requires an installed Claude CLI; no model inference"]
+async fn model_catalog_starts_without_a_running_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = ClaudeBackend::new(ClaudeOptions {
+        setting_sources: Some("project".into()),
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        let result = backend.list_models(dir.path()).await;
+        backend.shutdown().await.unwrap();
+        let models = result.expect("model picker must start Claude on demand");
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|model| model.is_default));
+    }
+}
+
 /// Exercises only disposable test goals, using the real native transcript.
 #[tokio::test]
 #[ignore]

@@ -1005,6 +1005,70 @@ async fn account_usage_reads_the_selected_connection() {
 }
 
 #[tokio::test]
+async fn closing_last_chat_does_not_interrupt_model_loading() {
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (sr, mut sw) = tokio::io::split(server_io);
+    let (client, incoming) = del_codex::CodexClient::from_io(cr, cw);
+    let requested = Arc::new(tokio::sync::Notify::new());
+    let ready = requested.clone();
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(sr).lines();
+        let mut model_request = None;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({"userAgent":"test"}),
+                "initialized" => continue,
+                "account/read" => json!({"requiresOpenaiAuth":false}),
+                "thread/start" => json!({"thread":{"id":"t1"}}),
+                "model/list" => {
+                    model_request = Some(request["id"].clone());
+                    ready.notify_one();
+                    continue;
+                }
+                "thread/unsubscribe" => json!({}),
+                method => panic!("unexpected request {method}"),
+            };
+            let reply = json!({"id":request["id"],"result":result});
+            sw.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            if request["method"] == "thread/unsubscribe" {
+                let reply = json!({"id":model_request.take().unwrap(),"result":{
+                    "data":[{"model":"available-model"}],"nextCursor":null
+                }});
+                sw.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let backend = Arc::new(
+        CodexBackend::attach(opts(), client, incoming)
+            .await
+            .unwrap(),
+    );
+    let session = backend.start_session(config()).await.unwrap();
+    let listing = {
+        let backend = backend.clone();
+        tokio::spawn(async move { backend.list_models(std::path::Path::new("/work")).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), requested.notified())
+        .await
+        .unwrap();
+    backend.close(&session.id).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), listing)
+        .await
+        .unwrap()
+        .unwrap();
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+    let models = result.expect("closing the last chat must not shut down an in-flight model list");
+    assert_eq!(models[0].id, "available-model");
+}
+
+#[tokio::test]
 async fn account_transfer_resumes_the_copied_native_transcript() {
     let lines = script(&[
         HANDSHAKE[0],

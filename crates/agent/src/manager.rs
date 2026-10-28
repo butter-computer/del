@@ -721,7 +721,15 @@ impl SessionManager {
             .or_default()
             .clone();
         let _resuming = lock.lock().await;
-        if let Some(l) = self.shared.live.lock().unwrap().get(id) {
+        self.resume_locked(id).await
+    }
+
+    /// Caller holds the session's resume/send lock. Failed sessions keep their
+    /// history and subscribers, but their provider process must be reattached.
+    async fn resume_locked(&self, id: &SessionId) -> Result<SessionHandle> {
+        if let Some(l) = self.shared.live.lock().unwrap().get(id)
+            && l.status != SessionStatus::Error
+        {
             return Ok(l.handle.clone());
         }
         let record = self
@@ -822,6 +830,9 @@ impl SessionManager {
             .or_default()
             .clone();
         let _sending = lock.lock().await;
+        if self.status(id) == Some(SessionStatus::Error) {
+            self.resume_locked(id).await?;
+        }
         self.live_provider(id)?;
         let config = self
             .shared

@@ -85,6 +85,32 @@ async fn installed_cli_returns_model_catalog() {
     assert!(models.iter().any(|model| model.is_default));
 }
 
+/// A stopped idle server must be started on demand without a manual refresh.
+#[tokio::test]
+#[ignore = "requires an installed and authenticated Codex CLI"]
+async fn model_catalog_restarts_after_last_chat_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let session = backend
+        .start_session(config(dir.path(), PermissionMode::Plan))
+        .await
+        .unwrap();
+    let original = backend.session_process(&session.id).await.unwrap().0;
+    backend.close(&session.id).await.unwrap();
+    assert!(backend.session_process(&session.id).await.is_none());
+
+    let result = backend.list_models(dir.path()).await;
+    let replacement = backend.session_process(&session.id).await;
+    backend.shutdown().await.unwrap();
+    let models = result.expect("model picker must start Codex automatically after idle shutdown");
+    assert!(!models.is_empty());
+    assert!(models.iter().any(|model| model.is_default));
+    assert_ne!(replacement.unwrap().0, original);
+}
+
 #[tokio::test]
 #[ignore]
 async fn real_turn_streams_and_completes() {

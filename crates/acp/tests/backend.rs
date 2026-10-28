@@ -330,6 +330,62 @@ async fn resume_after_agent_exit_respawns_with_replayed_history() {
 }
 
 #[tokio::test]
+async fn manager_recovers_failed_process_without_reopening_chat() {
+    manager_recovers_failed_process(true).await;
+}
+
+#[tokio::test]
+async fn manager_recovers_failed_process_on_direct_send() {
+    manager_recovers_failed_process(false).await;
+}
+
+async fn manager_recovers_failed_process(resume_first: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = std::sync::Arc::new(backend(&[]));
+    let manager = SessionManager::new(
+        dir.path().join("sessions.jsonl"),
+        [backend as std::sync::Arc<dyn AgentBackend>],
+    )
+    .unwrap();
+    let handle = manager.start_session(config()).await.unwrap();
+    let (_, mut events) = manager.subscribe_with_history(&handle.id).unwrap();
+    manager
+        .send_prompt(&handle.id, UserInput::text("exit"))
+        .await
+        .unwrap();
+    loop {
+        if matches!(
+            next(&mut events).await,
+            AgentEvent::Error {
+                recoverable: false,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    assert_eq!(manager.status(&handle.id), Some(SessionStatus::Error));
+    // Both app navigation and direct sends retain the chat and subscription.
+    if resume_first {
+        manager.resume(&handle.id).await.unwrap();
+    }
+    let result = manager
+        .send_prompt(&handle.id, UserInput::text("hello"))
+        .await;
+    if result.is_ok() {
+        assert!(matches!(
+            completed(&mut events).await.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+    manager.shutdown().await;
+    result.expect("a failed provider process must restart on the next send");
+}
+
+#[tokio::test]
 async fn authentication_error_is_actionable() {
     let backend = backend(&[("AUTH_REQUIRED", "1")]);
     let error = backend.start_session(config()).await.unwrap_err();
