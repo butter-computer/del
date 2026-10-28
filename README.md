@@ -34,20 +34,14 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.5-arm64.dmg, its .sha256 sidecar, and a signed latest.json
+# target/release/Del-0.1.5-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
-and verifies the app signature and DMG before producing the checksum. It then signs
-`target/release/latest.json` (release tag, DMG name, size, and SHA-256) with the
-release Ed25519 key from `$DEL_UPDATE_SIGNING_KEY` (default
-`~/.config/del/update-signing.key`, mode 0600, never stored in the repository). The
-script stops before building if the key is missing or does not match the key
-embedded in Del. It does not publish a GitHub release or modify the local
-development signing keychain. Upload the DMG, `.sha256` sidecar, and
-`target/release/latest.json` together to a draft GitHub release, then publish it
-only after all three assets are uploaded. Keep a private backup of the signing key:
-installed copies of Del accept only updates signed with it.
+and verifies the app signature and DMG before producing the checksum. It does not
+publish a GitHub release or modify the local development signing keychain. Upload
+the DMG, `.sha256` sidecar, and `target/release/latest.json` together to a draft
+GitHub release, then publish it only after all three assets are uploaded.
 
 ## Multiple provider accounts
 
@@ -717,14 +711,12 @@ when the selected session/tab changes, and when the window becomes active.
 Automatic checks are limited to once every 30 minutes and never block sessions;
 manual checks run immediately.
 Discovery reads the release-hosted `latest.json` manifest, avoiding GitHub API quotas.
-The manifest must carry an Ed25519 signature from Del's release key over the tag,
-DMG name, size, and SHA-256. Del rejects unsigned or incorrectly signed releases,
-and ignores releases whose version it cannot compare (such as pre-release tags).
+Releases whose version Del cannot compare (such as pre-release tags) are ignored.
 The control above **Settings** also lets you check manually and retry failures.
 Failed restarts keep the staged download so you can retry without downloading again.
 
 Click **Update to …** to download the existing release DMG. The control shows
-percentage progress, then verifies it against the signed SHA-256, bundle identity,
+percentage progress, then verifies its SHA-256 sidecar, bundle identity,
 version, and code signature before staging the app beside the current installation.
 **Restart to update** offers **Restart now** and **Later**. **Restart now** verifies
 and installs in the background (the control shows **Installing update…**). Later keeps the staged
@@ -738,8 +730,7 @@ later launch.
 Updates require a writable installation directory. Move a read-only or
 translocated app to Applications first. Local development bundles and raw Cargo
 runs do not self-update or replace their development signing identity. Releases
-continue to use the existing DMG/checksum publishing mechanism, plus the signed
-`latest.json`, and its documented
+continue to use the existing DMG/checksum publishing mechanism and its documented
 ad-hoc signing status. This feature becomes available after installing a build
 that includes it; older builds need that first upgrade manually.
 

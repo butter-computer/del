@@ -16,10 +16,6 @@ const RELEASES: &str =
 /// Automatic (startup, focus, tab change) checks; manual checks are not limited.
 const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const BUNDLE_ID: &str = "computer.butter.del";
-/// Ed25519 key that signs `latest.json` (see scripts/sign-update.py). Release
-/// assets alone cannot ship code: the private key never leaves the release machine.
-const UPDATE_PUBLIC_KEY: &str =
-    "f9ac5275c3a7d74f9703180bf312b7b16eb8fe83a90646b4c7d3423288beeb04";
 /// Leftover staging or retired bundles older than this are removed at startup.
 const STALE_BUNDLE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 type Result<T> = std::result::Result<T, String>;
@@ -36,19 +32,12 @@ struct Release {
     draft: bool,
     prerelease: bool,
     assets: Vec<Asset>,
-    /// SHA-256 of the DMG, covered by `signature`.
-    #[serde(default)]
-    sha256: Option<String>,
-    /// Hex Ed25519 signature over [`signed_message`].
-    #[serde(default)]
-    signature: Option<String>,
 }
 #[derive(Clone, Debug)]
 struct Update {
     version: String,
     dmg: Asset,
-    /// Verified against the release signature before the update is offered.
-    sha256: String,
+    checksum: Asset,
 }
 struct Staged {
     directory: tempfile::TempDir,
@@ -476,48 +465,10 @@ fn check_release() -> Result<Option<Update>> {
     let bytes = output(curl(RELEASES).args(["--max-time", "30"]))?;
     let release: Release =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid release metadata: {e}"))?;
-    select_release(release, env!("CARGO_PKG_VERSION"), &public_key()?)
+    select_release(release, env!("CARGO_PKG_VERSION"))
 }
 
-fn public_key() -> Result<[u8; 32]> {
-    hex_bytes(UPDATE_PUBLIC_KEY).ok_or_else(|| "Invalid embedded update key".into())
-}
-
-fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
-    let text = text.as_bytes();
-    if text.len() != N * 2 {
-        return None;
-    }
-    let mut bytes = [0; N];
-    for (byte, pair) in bytes.iter_mut().zip(text.chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(bytes)
-}
-
-/// Exactly what scripts/sign-update.py signs. Binding the tag, file name and
-/// size prevents replaying an older signed DMG as a newer release.
-fn signed_message(tag: &str, name: &str, size: u64, sha256: &str) -> String {
-    format!("del-update-v1\n{tag}\n{name}\n{size}\n{sha256}\n")
-}
-
-fn verify_signature(release: &Release, dmg: &Asset, key: &[u8; 32]) -> Result<String> {
-    let (Some(sha256), Some(signature)) = (&release.sha256, &release.signature) else {
-        return Err("This release is not signed. Del only installs signed updates.".into());
-    };
-    let rejected = || "Update signature verification failed. Del will not install this release.";
-    if sha256.len() != 64 || !sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return Err(rejected().into());
-    }
-    let signature = hex_bytes::<64>(signature).ok_or_else(rejected)?;
-    let message = signed_message(&release.tag_name, &dmg.name, dmg.size, sha256);
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-        .verify(message.as_bytes(), &signature)
-        .map_err(|_| rejected())?;
-    Ok(sha256.clone())
-}
-
-fn select_release(release: Release, installed: &str, key: &[u8; 32]) -> Result<Option<Update>> {
+fn select_release(release: Release, installed: &str) -> Result<Option<Update>> {
     if release.draft || release.prerelease {
         return Ok(None);
     }
@@ -557,11 +508,9 @@ fn select_release(release: Release, installed: &str, key: &[u8; 32]) -> Result<O
         }
         Ok(asset.clone())
     };
-    let dmg = asset(&filename)?;
-    let sha256 = verify_signature(&release, &dmg, key)?;
     Ok(Some(Update {
-        dmg,
-        sha256,
+        dmg: asset(&filename)?,
+        checksum: asset(&format!("{filename}.sha256"))?,
         version,
     }))
 }
@@ -586,6 +535,15 @@ fn public_bundle() -> Option<PathBuf> {
         return None;
     }
     Some(bundle.to_owned())
+}
+
+fn checksum_matches(sidecar: &str, filename: &str, actual: &str) -> bool {
+    let fields: Vec<_> = sidecar.split_whitespace().collect();
+    fields.len() == 2
+        && fields[1] == filename
+        && fields[0].len() == 64
+        && fields[0].bytes().all(|b| b.is_ascii_hexdigit())
+        && fields[0].eq_ignore_ascii_case(actual)
 }
 
 struct Mounted(PathBuf);
@@ -638,18 +596,18 @@ fn stage_update(update: Update, destination: PathBuf, tx: &mpsc::Sender<Event>) 
     if std::fs::metadata(&dmg).map_err(|e| e.to_string())?.len() != update.dmg.size {
         return Err("Downloaded update has the wrong size".into());
     }
+    let sidecar = output(&mut curl(&update.checksum.browser_download_url))?;
     let hash = output(
         Command::new("/usr/bin/shasum")
             .args(["-a", "256"])
             .arg(&dmg),
     )?;
     let hash = String::from_utf8_lossy(&hash);
-    // The expected digest came from the signed manifest, not a sidecar file.
-    if !hash
-        .split_whitespace()
-        .next()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(&update.sha256))
-    {
+    if !checksum_matches(
+        &String::from_utf8_lossy(&sidecar),
+        &update.dmg.name,
+        hash.split_whitespace().next().unwrap_or(""),
+    ) {
         return Err("Update checksum verification failed".into());
     }
     let mount = download.path().join("mounted");
@@ -849,37 +807,17 @@ fn install_and_relaunch(staged: &Staged) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppUpdater, Asset, Event, RELEASES, Release, Status, curl, output, replace_bundle,
-        stage_update, verify_bundle, version,
+        AppUpdater, Asset, Event, RELEASES, Release, Status, checksum_matches, curl, output,
+        replace_bundle, select_release, stage_update, verify_bundle, version,
     };
     use gpui::AppContext;
-    use ring::signature::KeyPair;
     use std::{path::PathBuf, sync::mpsc, time::Instant};
-    const TEST_SEED: [u8; 32] = [7; 32];
-    fn test_key() -> [u8; 32] {
-        let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&TEST_SEED).unwrap();
-        pair.public_key().as_ref().try_into().unwrap()
-    }
-    fn sign(release: &mut Release) {
-        let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&TEST_SEED).unwrap();
-        let digest = "ab".repeat(32);
-        let dmg = &release.assets[0];
-        let message = super::signed_message(&release.tag_name, &dmg.name, dmg.size, &digest);
-        let signature = pair.sign(message.as_bytes());
-        release.signature = Some(signature.as_ref().iter().map(|b| format!("{b:02x}")).collect());
-        release.sha256 = Some(digest);
-    }
-    fn select_release(release: Release, installed: &str) -> super::Result<Option<super::Update>> {
-        super::select_release(release, installed, &test_key())
-    }
     fn release(tag: &str) -> Release {
         let v = tag.trim_start_matches('v');
-        let mut release = Release {
+        Release {
             tag_name: tag.into(),
             draft: false,
             prerelease: false,
-            sha256: None,
-            signature: None,
             assets: [
                 format!("Del-{v}-arm64.dmg"),
                 format!("Del-{v}-arm64.dmg.sha256"),
@@ -893,18 +831,14 @@ mod tests {
                 size: 10,
             })
             .collect(),
-        };
-        sign(&mut release);
-        release
+        }
     }
     #[test]
     #[ignore = "downloads and verifies the public DMG; does not replace an installed app"]
     fn public_release_download_and_staging() {
         let bytes = output(&mut curl(RELEASES)).unwrap();
         let release = serde_json::from_slice(&bytes).unwrap();
-        let update = super::select_release(release, "0.0.0", &super::public_key().unwrap())
-            .unwrap()
-            .unwrap();
+        let update = select_release(release, "0.0.0").unwrap().unwrap();
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("Del.app");
         let (tx, rx) = mpsc::channel();
@@ -1316,56 +1250,24 @@ mod tests {
         assert!(version("0.2.0/../app").is_none());
     }
     #[test]
-    fn signed_manifest_is_required_and_bound_to_the_dmg() {
-        // Valid signature: the signed digest is what the download must match.
-        let update = select_release(release("v0.2.0"), "0.1.0").unwrap().unwrap();
-        assert_eq!(update.sha256, "ab".repeat(32));
-        // Tampered digest.
-        let mut r = release("v0.2.0");
-        r.sha256 = Some("cd".repeat(32));
-        assert!(select_release(r, "0.1.0").unwrap_err().contains("signature verification failed"));
-        // Missing signature or digest.
-        let mut r = release("v0.2.0");
-        r.signature = None;
-        assert!(select_release(r, "0.1.0").unwrap_err().contains("not signed"));
-        let mut r = release("v0.2.0");
-        r.sha256 = None;
-        assert!(select_release(r, "0.1.0").unwrap_err().contains("not signed"));
-        // Size, name or tag changes invalidate the signature.
-        let mut r = release("v0.2.0");
-        r.assets[0].size = 11;
-        assert!(select_release(r, "0.1.0").is_err());
-        let mut r = release("v0.2.0");
-        r.tag_name = "v0.3.0".into();
-        for asset in &mut r.assets {
-            asset.browser_download_url = asset.browser_download_url.replace("v0.2.0", "v0.3.0");
-            asset.name = asset.name.replace("0.2.0", "0.3.0");
-        }
-        assert!(select_release(r, "0.1.0").is_err(), "a signed old release cannot be relabelled");
-        // Malformed signatures and another key are rejected.
-        let mut r = release("v0.2.0");
-        r.signature = Some("zz".repeat(64));
-        assert!(select_release(r, "0.1.0").is_err());
-        assert!(super::select_release(release("v0.2.0"), "0.1.0", &super::public_key().unwrap()).is_err());
-    }
-
-    #[test]
-    fn release_script_signatures_verify_in_the_app() {
-        // Produced by scripts/sign-update.py with seed 00 01 .. 1f; keeps both
-        // implementations of the signed message byte-for-byte identical.
-        let key = super::hex_bytes::<32>("03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8").unwrap();
-        let mut r = release("v0.2.0");
-        r.sha256 = Some("ab".repeat(32));
-        r.signature = Some("045adebbdc71b4f23a3015c1232cf748241e6176de5b28d9dc93052904f00cc2ceb8e856ef5f5256737d554c1fa4981ee5cedd8042728a95801e34399c67d603".into());
-        assert!(super::select_release(r, "0.1.0", &key).unwrap().is_some());
-        // A manifest from scripts/make-dmg.sh (for a throwaway file) verifies with the
-        // embedded production key, proving the release key and the app agree.
-        let manifest: Release = serde_json::from_str(r#"{"tag_name":"v9.9.9","draft":false,"prerelease":false,
-            "assets":[{"name":"Del-9.9.9-arm64.dmg","size":100000,"browser_download_url":"https://github.com/butter-computer/del/releases/download/v9.9.9/Del-9.9.9-arm64.dmg"}],
-            "sha256":"a0c5f8112e3aa24ec7b4466080bd9179033792a433662c31142dab691da0758d",
-            "signature":"fc9f7fe582d9e57d6e5fbf8d9b5f046fc246c28679169319fb38281edc5cce6509e9f8fe2c196c3a6246daa9634d87b0f156ce415c8d2090e275d8b986798208"}"#).unwrap();
-        let update = super::select_release(manifest, "0.1.0", &super::public_key().unwrap()).unwrap().unwrap();
-        assert_eq!(update.version, "9.9.9");
+    fn checksum_requires_matching_digest_and_filename() {
+        let digest = "a".repeat(64);
+        assert!(checksum_matches(
+            &format!("{digest}  Del.dmg\n"),
+            "Del.dmg",
+            &digest
+        ));
+        assert!(!checksum_matches(
+            &format!("{digest}  Other.dmg"),
+            "Del.dmg",
+            &digest
+        ));
+        assert!(!checksum_matches(
+            &format!("{digest}  Del.dmg"),
+            "Del.dmg",
+            &"b".repeat(64)
+        ));
+        assert!(!checksum_matches("bad Del.dmg", "Del.dmg", "bad"));
     }
 
     #[test]
