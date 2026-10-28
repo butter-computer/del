@@ -41,12 +41,17 @@ pub struct TerminalView {
     exit: Option<Option<i32>>,
     search_flash: Option<std::ops::RangeInclusive<GridPoint>>,
     search_generation: u64,
+    /// Last reported mouse motion cell and button, to report each cell once.
+    last_motion: Option<(usize, usize, mouse::MouseButton)>,
     /// Forwards session events; dropped on close so the background shutdown
     /// does not wake this view after it was closed.
     events: std::cell::RefCell<Option<Task<()>>>,
     /// Treat Option as an ESC prefix. Set false to use OS Option characters.
     pub option_as_meta: bool,
 }
+
+const MAX_COLS: u16 = 1024;
+const MAX_ROWS: u16 = 512;
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 impl Focusable for TerminalView {
@@ -71,6 +76,7 @@ impl TerminalView {
             this.report_focus(false);
             this.selecting = false;
             this.composition.clear();
+            this.composition_selection = 0..0;
             cx.notify();
         })
         .detach();
@@ -79,15 +85,28 @@ impl TerminalView {
                 let exited = matches!(event, TerminalEvent::Exited { .. });
                 if this
                     .update_in(cx, |this, window, cx| {
-                        match &event {
+                        let event = match event {
                             TerminalEvent::Wakeup => {
                                 this.session.ack_wakeup();
+                                event
                             }
-                            TerminalEvent::TitleChanged(title) => this.title = title.clone(),
-                            TerminalEvent::Bell => window.play_system_bell(),
-                            TerminalEvent::Input => {},
-                            TerminalEvent::Exited { code } => this.exit = Some(*code),
-                        }
+                            // Title and bell events are coalesced by the
+                            // session; read the latest state and re-emit it.
+                            TerminalEvent::TitleChanged(_) => {
+                                this.title = this.session.take_title();
+                                TerminalEvent::TitleChanged(this.title.clone())
+                            }
+                            TerminalEvent::Bell => {
+                                this.session.ack_bell();
+                                window.play_system_bell();
+                                event
+                            }
+                            TerminalEvent::Input => event,
+                            TerminalEvent::Exited { code } => {
+                                this.exit = Some(code);
+                                event
+                            }
+                        };
                         cx.emit(event);
                         cx.notify();
                     })
@@ -112,6 +131,7 @@ impl TerminalView {
             exit: None,
             search_flash: None,
             search_generation: 0,
+            last_motion: None,
             option_as_meta: true,
         }
     }
@@ -199,7 +219,15 @@ impl TerminalView {
             return;
         }
         let k = &event.keystroke;
-        if k.modifiers.shift && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform {
+        let mode = self.session.mode();
+        // Full-screen programs own paging keys; scrollback is only on the
+        // primary screen.
+        if k.modifiers.shift
+            && !k.modifiers.control
+            && !k.modifiers.alt
+            && !k.modifiers.platform
+            && !mode.contains(TermMode::ALT_SCREEN)
+        {
             let scroll = match k.key.as_str() {
                 "pageup" => Some(Scroll::PageUp),
                 "pagedown" => Some(Scroll::PageDown),
@@ -214,7 +242,7 @@ impl TerminalView {
                 return;
             }
         }
-        if let Some(bytes) = keys::encode_key(k, self.session.mode(), self.option_as_meta) {
+        if let Some(bytes) = keys::encode_key(k, mode, self.option_as_meta) {
             self.input(bytes, cx);
             cx.stop_propagation();
         }
@@ -244,7 +272,7 @@ impl TerminalView {
         )
     }
     fn report_mouse(
-        &self,
+        &mut self,
         action: mouse::MouseAction,
         button: mouse::MouseButton,
         position: Point<Pixels>,
@@ -255,6 +283,15 @@ impl TerminalView {
             return false;
         }
         let (col, row, _) = self.cell_at(position);
+        // Pointer events arrive per pixel; programs only need one report per cell.
+        if action == mouse::MouseAction::Motion {
+            if self.last_motion == Some((col, row, button)) {
+                return true;
+            }
+            self.last_motion = Some((col, row, button));
+        } else {
+            self.last_motion = None;
+        }
         if let Some(bytes) = mouse::encode_mouse(
             action,
             button,
@@ -416,10 +453,12 @@ impl TerminalView {
                 zoom_px(FONT_SIZE),
                 'M',
             )
+            .ok()
             .map(|s| s.width)
+            .filter(|w| w.as_f32() > 0.)
             .unwrap_or(zoom_px(8.));
-        let cols = ((bounds.size.width / self.cell_width).floor() as u16).max(2);
-        let rows = ((bounds.size.height / zoom_px(LINE_HEIGHT)).floor() as u16).max(1);
+        let cols = ((bounds.size.width / self.cell_width).floor() as u16).clamp(2, MAX_COLS);
+        let rows = ((bounds.size.height / zoom_px(LINE_HEIGHT)).floor() as u16).clamp(1, MAX_ROWS);
         let _ = self.session.resize(TerminalSize {
             cols,
             rows,
@@ -874,6 +913,9 @@ impl EntityInputHandler for TerminalView {
         self.composition_selection = selected
             .map(|r| start + r.start..start + r.end)
             .unwrap_or(start + len..start + len);
+        // Composition is drawn at the cursor, so bring the cursor into view.
+        self.session
+            .with_term(|term| term.scroll_display(Scroll::Bottom));
         cx.notify();
     }
     fn bounds_for_range(
@@ -883,9 +925,13 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let (col, row) = self
-            .session
-            .with_term(|t| (t.grid().cursor.point.column.0, t.grid().cursor.point.line.0));
+        let (col, row) = self.session.with_term(|t| {
+            let grid = t.grid();
+            (
+                grid.cursor.point.column.0,
+                grid.cursor.point.line.0 + grid.display_offset() as i32,
+            )
+        });
         Some(Bounds::new(
             self.bounds.origin
                 + point(

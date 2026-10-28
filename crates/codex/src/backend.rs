@@ -5,7 +5,7 @@
 use crate::auth::{self, AuthStatus, CodexError};
 use crate::mapping::{ApprovalMethod, Mapper, RequestAction};
 use crate::protocol::*;
-use crate::rpc::{ClientError, CodexClient, Incoming, RequestId, SpawnOptions};
+use crate::rpc::{ClientError, CodexClient, Incoming, RequestId, SpawnOptions, WeakClient};
 use async_trait::async_trait;
 use del_agent::*;
 use serde_json::{Value, json};
@@ -55,6 +55,12 @@ struct SessionState {
     /// Stop was requested while `turn/start` had not yet returned a turn id.
     interrupt_pending: bool,
     turn_config: Option<SessionConfig>,
+    /// Parameters the thread was opened with (minus `threadId`), so it can be
+    /// re-attached to a replacement app-server with `thread/resume`.
+    open_params: Option<serde_json::Map<String, Value>>,
+    /// The app-server this thread lived on died; the next request must
+    /// `thread/resume` it on the new one first.
+    detached: bool,
 }
 
 struct Session {
@@ -199,7 +205,7 @@ impl CodexBackend {
             st.starting = true;
         }
         let starting = StartingGuard(&s);
-        let conn = self.connection().await?;
+        let conn = self.thread_connection(session, &s).await?;
         let mut params = json!({ "threadId": session.as_str(), "input": items });
         if let Some(config) = &s.state.lock().unwrap().turn_config {
             let (approval, sandbox) = policy_for(config.permission_mode);
@@ -233,6 +239,30 @@ impl CodexBackend {
             send_interrupt(&conn.client, session, &turn).await?;
         }
         Ok(())
+    }
+
+    /// The live connection, with `session` re-attached to it when the
+    /// app-server it was opened on has since died. Threads are persisted by
+    /// Codex, so a `thread/resume` on the replacement server restores them
+    /// lazily instead of forcing the user to reopen every chat.
+    async fn thread_connection(&self, id: &SessionId, s: &Session) -> Result<Arc<Connection>> {
+        let conn = self.connection().await?;
+        let params = {
+            let st = s.state.lock().unwrap();
+            if !st.detached {
+                return Ok(conn);
+            }
+            st.open_params.clone()
+        };
+        if let Some(mut params) = params {
+            params.insert("threadId".into(), json!(id.as_str()));
+            conn.client
+                .request("thread/resume", Value::Object(params))
+                .await
+                .map_err(be)?;
+        }
+        s.state.lock().unwrap().detached = false;
+        Ok(conn)
     }
 
     /// Check that `codex` can be started and is authenticated, without
@@ -276,7 +306,7 @@ impl CodexBackend {
             client.shutdown(Duration::from_millis(500)).await;
             return Err(e);
         }
-        tokio::spawn(route(client.clone(), incoming, self.sessions.clone()));
+        tokio::spawn(route(client.downgrade(), incoming, self.sessions.clone()));
         Ok(Arc::new(Connection { client }))
     }
 
@@ -377,6 +407,7 @@ impl CodexBackend {
             let token = tools.credentials.mint(&bound).map_err(be)?;
             apply_browser_tools(&mut params, &tools.url, &token);
         }
+        let open_params = params.clone();
         if let Some(t) = thread {
             params.insert("threadId".into(), json!(t.as_str()));
         }
@@ -398,15 +429,24 @@ impl CodexBackend {
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
         drop(opening);
-        let mut history = if thread.is_some() {
-            session
-                .state
-                .lock()
-                .unwrap()
-                .mapper
-                .history(&resp.thread.turns)
-        } else {
-            Vec::new()
+        let mut history = {
+            let mut st = session.state.lock().unwrap();
+            st.open_params = Some(open_params);
+            st.detached = false;
+            if thread.is_some() {
+                // A throwaway mapper: replaying persisted turns must not touch
+                // the live turn state (a stale `inProgress` turn would
+                // otherwise leave the session Busy forever).
+                let mut events = Mapper::default().history(&resp.thread.turns);
+                if let Some(live) = st.mapper.turn_id() {
+                    // The thread is live on this server and still running:
+                    // its turn is genuinely in progress, not stale.
+                    events.retain(|e| !matches!(e, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == live));
+                }
+                events
+            } else {
+                Vec::new()
+            }
         };
         if thread.is_some()
             && let Ok(response) = conn
@@ -493,10 +533,10 @@ impl AgentBackend for CodexBackend {
                     }
                     return Ok(());
                 }
-                let conn = self.connection().await.map_err(be)?;
+                let session = self.session(id)?;
+                let conn = self.thread_connection(id, &session).await?;
                 let (method, params) = crate::commands::goal_request(id.as_str(), arguments);
                 let response = conn.client.request(method, params).await.map_err(be)?;
-                let session = self.session(id)?;
                 session.emit(AgentEvent::GoalUpdated {
                     goal: crate::commands::goal(&response["goal"]),
                 });
@@ -528,7 +568,8 @@ impl AgentBackend for CodexBackend {
 
     async fn control_goal(&self, id: &SessionId, action: del_agent::GoalAction) -> Result<()> {
         use del_agent::GoalAction;
-        let conn = self.connection().await.map_err(be)?;
+        let session = self.session(id)?;
+        let conn = self.thread_connection(id, &session).await?;
         let (method, params) = match action {
             GoalAction::Set(objective) => (
                 "thread/goal/set",
@@ -868,7 +909,7 @@ async fn send_interrupt(client: &CodexClient, session: &SessionId, turn: &str) -
 }
 
 /// Demultiplex everything the server sends to the owning session.
-async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, sessions: Sessions) {
+async fn route(client: WeakClient, mut rx: mpsc::UnboundedReceiver<Incoming>, sessions: Sessions) {
     let find = |params: &Value| -> Option<Arc<Session>> {
         let tid = params["threadId"].as_str()?;
         sessions.lock().unwrap().get(tid).cloned()
@@ -902,7 +943,9 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
             }
             Incoming::Request { id, method, params } => {
                 let Some(s) = find(&params) else {
-                    let _ = client.respond_error(&id, -32602, "unknown thread");
+                    if let Some(client) = client.upgrade() {
+                        let _ = client.respond_error(&id, -32602, "unknown thread");
+                    }
                     continue;
                 };
                 let action = s
@@ -921,7 +964,9 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                         s.emit(event);
                     }
                     RequestAction::Reject { message, event } => {
-                        let _ = client.respond_error(&id, -32601, &message);
+                        if let Some(client) = client.upgrade() {
+                            let _ = client.respond_error(&id, -32601, &message);
+                        }
                         if let Some(e) = event {
                             s.emit(e);
                         }
@@ -930,7 +975,7 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
             }
             Incoming::Closed { reason } => {
                 let mut msg = format!("Codex app-server stopped: {reason}");
-                if let Some(last) = client.stderr_tail().last() {
+                if let Some(last) = client.upgrade().and_then(|c| c.stderr_tail().last().cloned()) {
                     msg.push_str(&format!(" (last stderr: {last})"));
                 }
                 let all: Vec<_> = sessions.lock().unwrap().values().cloned().collect();
@@ -940,6 +985,9 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                         st.starting = false;
                         st.interrupt_pending = false;
                         st.mapper = Mapper::default();
+                        // Sessions stay registered; `thread_connection` resumes
+                        // them on the replacement server at the next request.
+                        st.detached = true;
                         st.approvals.drain().map(|(id, _)| id).collect()
                     };
                     for id in dropped {

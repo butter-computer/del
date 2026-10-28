@@ -8,12 +8,18 @@
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Responses carry browser results of up to 6 MiB before JSON escaping, which
 /// can double their size; ureq's default 10 MB limit would fail them.
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 /// In-flight requests; reading pauses (backpressure) once this many are open.
 const MAX_WORKERS: usize = 64;
+/// Bound for each HTTP phase except waiting for the response headers.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Waiting for the response: `ask_user` legitimately blocks for the server's
+/// ask timeout (30 minutes by default), so this only reaps a wedged connection.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(35 * 60);
 
 fn emit(output: &Mutex<impl Write>, line: &str) {
     let mut o = output.lock().unwrap();
@@ -56,6 +62,11 @@ where
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(None)
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(HTTP_TIMEOUT))
+        .timeout_send_body(Some(HTTP_TIMEOUT))
+        .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+        .timeout_recv_body(Some(HTTP_TIMEOUT))
         .build()
         .into();
     let output = Arc::new(Mutex::new(output));

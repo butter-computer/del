@@ -172,14 +172,20 @@ pub fn encode_key(k: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option
 
 /// Bytes for pasting `text`: line breaks become CR, and in bracketed-paste
 /// mode the text is wrapped and any embedded end marker is removed so pasted
-/// content cannot escape the bracket.
+/// content cannot escape the bracket. Outside bracketed paste, C0 controls
+/// other than tab and CR (and the DEL byte) are stripped, as Alacritty does,
+/// so a paste cannot inject key sequences.
 pub fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if mode.contains(TermMode::BRACKETED_PASTE) {
         let safe = normalized.replace("\x1b[201~", "").replace("\x1b[200~", "");
         format!("\x1b[200~{safe}\x1b[201~").into_bytes()
     } else {
-        normalized.into_bytes()
+        normalized
+            .chars()
+            .filter(|&c| !(c.is_control() && c != '\t' && c != '\r'))
+            .collect::<String>()
+            .into_bytes()
     }
 }
 
@@ -264,6 +270,18 @@ mod tests {
         assert_eq!(enc("f12").unwrap(), "\x1b[24~");
         assert_eq!(enc("shift-f5").unwrap(), "\x1b[15;2~");
         assert_eq!(enc("ctrl-f1").unwrap(), "\x1b[1;5P");
+    }
+
+    #[test]
+    fn plain_paste_strips_control_bytes_except_tab_and_cr() {
+        assert_eq!(
+            encode_paste("a\x1b[Ab\x03\tc\x7f\u{85}", TermMode::NONE),
+            b"a[Ab\tc"
+        );
+        assert_eq!(
+            encode_paste("x\x1by", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~x\x1by\x1b[201~"
+        );
     }
 
     #[test]

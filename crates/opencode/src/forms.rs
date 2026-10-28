@@ -100,7 +100,13 @@ pub async fn answer(id: SessionId, form: &Value, ask: &QuestionHandler) -> Resul
                         }
                         continue;
                     }
-                    if selected.len() < field["minItems"].as_u64().unwrap_or(0) as usize
+                    // Without custom entries, no more than the offered options can be
+                    // selected; a larger minItems would make the form impossible.
+                    let mut min_items = field["minItems"].as_u64().unwrap_or(0) as usize;
+                    if field["custom"] != true {
+                        min_items = min_items.min(choices.len());
+                    }
+                    if selected.len() < min_items
                         || field["maxItems"]
                             .as_u64()
                             .is_some_and(|n| selected.len() > n as usize)
@@ -204,6 +210,27 @@ mod tests {
             answer,
             json!({"hidden":"native","enabled":true,"count":3.0,"items":["b"]})
         );
+    }
+
+    #[tokio::test]
+    async fn multiselect_min_items_is_capped_by_the_offered_options() {
+        let form = json!({"title":"Pick","fields":[
+            {"key":"items","type":"multiselect","minItems":5,
+             "options":[{"label":"A","value":"a"},{"label":"B","value":"b"}]}
+        ]});
+        // Two options can never satisfy minItems 5; the cap (2) lets the form
+        // complete once both are selected instead of asking forever.
+        let ask = scripted(vec![
+            Some(QuestionAnswer::Option(0)),
+            Some(QuestionAnswer::Option(2)),
+            Some(QuestionAnswer::Option(1)),
+            Some(QuestionAnswer::Option(2)),
+        ]);
+        let answer = answer(SessionId::new("ses_test"), &form, &ask)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer, json!({"items":["a","b"]}));
     }
 
     #[tokio::test]

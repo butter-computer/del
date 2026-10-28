@@ -55,6 +55,8 @@ impl ClaudeOptions {
 
 /// How long `claude` gets to exit after SIGTERM before its group is killed.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long `claude auth status` may take.
+const AUTH_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Goal transcript polling interval, and the slowest retry while it is missing.
 const GOAL_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 const GOAL_SEARCH_MAX: std::time::Duration = std::time::Duration::from_secs(5);
@@ -229,19 +231,19 @@ impl ClaudeBackend {
         id: SessionId,
         session_flag: [&str; 2],
     ) -> Result<SessionHandle> {
-        {
-            let mut sessions = self.sessions.lock().unwrap();
-            if let Some(live) = sessions.get(&id) {
-                if !live.closing.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Ok(SessionHandle::new(
-                        id,
-                        Provider::Claude,
-                        live.events.clone(),
-                    ));
-                }
-                // That process exited; start a fresh one for the session.
-                sessions.remove(&id);
+        // Held until the new process is registered: two concurrent resumes of
+        // one id must share a single `claude`, never start two.
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(live) = sessions.get(&id) {
+            if !live.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(SessionHandle::new(
+                    id,
+                    Provider::Claude,
+                    live.events.clone(),
+                ));
             }
+            // That process exited; start a fresh one for the session.
+            sessions.remove(&id);
         }
         let mut command = Command::new(&self.options.binary);
         self.options.prepare(&mut command);
@@ -422,7 +424,7 @@ impl ClaudeBackend {
                 }
             }
         });
-        self.sessions.lock().unwrap().insert(id.clone(), live);
+        sessions.insert(id.clone(), live);
         Ok(SessionHandle::new(id, Provider::Claude, tx))
     }
 
@@ -660,8 +662,14 @@ impl AgentBackend for ClaudeBackend {
         }
         let evs = live.translator.lock().unwrap().mark_interrupting();
         live.emit(evs);
-        live.write_line(&interrupt_line(&uuid::Uuid::new_v4().to_string()))
-            .await
+        let written = live
+            .write_line(&interrupt_line(&uuid::Uuid::new_v4().to_string()))
+            .await;
+        if written.is_err() {
+            // The CLI never saw the interrupt; the next result is not ours.
+            live.translator.lock().unwrap().unmark_interrupting();
+        }
+        written
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
@@ -757,14 +765,19 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
     let mut command = Command::new(&options.binary);
     options.prepare(&mut command);
     del_agent::environment::prepare_provider_command(command.as_std_mut());
-    let out = command
-        .args(["auth", "status"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| {
-            AgentError::Backend(format!("failed to run `{}`: {e}", options.binary.display()))
-        })?;
+    let out = tokio::time::timeout(
+        AUTH_STATUS_TIMEOUT,
+        command
+            .args(["auth", "status"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| AgentError::Backend("`claude auth status` timed out".into()))?
+    .map_err(|e| {
+        AgentError::Backend(format!("failed to run `{}`: {e}", options.binary.display()))
+    })?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| AgentError::Backend(format!("unexpected `claude auth status` output: {e}")))?;
     Ok(AuthStatus {

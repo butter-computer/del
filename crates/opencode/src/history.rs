@@ -66,7 +66,7 @@ impl Cache {
         let output = runtime.block_on(async {
             let mut command = tokio::process::Command::new(binary);
             command.envs(environment.iter().cloned())
-                .args(["session", "export", "--standalone", id])
+                .args(["session", "export", "--standalone", "--", id])
                 .current_dir(cwd)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())

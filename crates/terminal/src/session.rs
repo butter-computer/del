@@ -192,6 +192,10 @@ fn configure_environment(command: &mut CommandBuilder, spec: &TerminalSpec) {
 
 // Job-control shells put foreground jobs in separate process groups. Sweep
 // groups belonging to the PTY's session, rather than only the shell's group.
+//
+// The sweep only ever runs while the shell is un-reaped: the wait thread
+// observes exit with `WNOWAIT`, then takes `terminated` before reaping, so the
+// shell's pid cannot be reused by an unrelated process while it is swept.
 struct ProcessSession {
     pid: i32,
     terminated: Mutex<bool>,
@@ -204,6 +208,12 @@ impl ProcessSession {
         if *terminated {
             return;
         }
+        self.sweep(grace);
+        *terminated = true;
+    }
+
+    /// Caller holds `terminated`; the child is alive or an un-reaped zombie.
+    fn sweep(&self, grace: Duration) {
         let mut groups = session_groups(self.pid);
         for &group in &groups {
             unsafe {
@@ -222,7 +232,24 @@ impl ProcessSession {
                 libc::killpg(group, libc::SIGKILL);
             }
         }
-        *terminated = true;
+    }
+}
+
+/// Block until the child exits without reaping it, so its pid stays reserved.
+fn wait_without_reaping(pid: i32) {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
     }
 }
 
@@ -280,9 +307,16 @@ pub fn shutdown_all(grace: Duration) {
 }
 
 struct Shared {
-    tx: UnboundedSender<TerminalEvent>,
+    /// Taken on close, on the closing thread: the channel must close there,
+    /// since closing wakes the consumer task.
+    tx: Mutex<Option<UnboundedSender<TerminalEvent>>>,
     input: mpsc::Sender<Option<Vec<u8>>>,
     wakeup_pending: AtomicBool,
+    bell_pending: AtomicBool,
+    /// Latest title; the flag coalesces a burst into one event. The event's
+    /// payload is a hint: consumers read `TerminalSession::take_title`.
+    title: Mutex<Option<String>>,
+    title_pending: AtomicBool,
     exited: AtomicBool,
     child_exited: AtomicBool,
     /// Set once the session is being closed: after the child is reaped the
@@ -291,6 +325,23 @@ struct Shared {
     /// Bumped whenever grid content may have changed (output or reflow).
     output_generation: AtomicU64,
     size: Mutex<TerminalSize>,
+}
+
+impl Shared {
+    fn emit(&self, event: TerminalEvent) {
+        if let Some(tx) = self.tx.lock().unwrap().as_ref() {
+            let _ = tx.unbounded_send(event);
+        }
+    }
+    /// Stop emitting events; the sender drops on the caller's thread.
+    fn disconnect(&self) {
+        drop(self.tx.lock().unwrap().take());
+    }
+    fn set_title(&self, title: Option<String>) -> Option<TerminalEvent> {
+        *self.title.lock().unwrap() = title.clone();
+        (!self.title_pending.swap(true, Ordering::AcqRel))
+            .then_some(TerminalEvent::TitleChanged(title))
+    }
 }
 
 #[derive(Clone)]
@@ -303,9 +354,12 @@ impl EventListener for TerminalEventProxy {
             Event::Wakeup if !s.wakeup_pending.swap(true, Ordering::AcqRel) => {
                 Some(TerminalEvent::Wakeup)
             }
-            Event::Title(t) => Some(TerminalEvent::TitleChanged(Some(t))),
-            Event::ResetTitle => Some(TerminalEvent::TitleChanged(None)),
-            Event::Bell => Some(TerminalEvent::Bell),
+            Event::Title(t) => s.set_title(Some(t)),
+            Event::ResetTitle => s.set_title(None),
+            Event::Bell if !s.bell_pending.swap(true, Ordering::AcqRel) => {
+                Some(TerminalEvent::Bell)
+            }
+            Event::Bell => None,
             Event::PtyWrite(text) => {
                 let _ = s.input.send(Some(text.into_bytes()));
                 None
@@ -326,7 +380,7 @@ impl EventListener for TerminalEventProxy {
             _ => None,
         };
         if let Some(event) = event {
-            let _ = s.tx.unbounded_send(event);
+            s.emit(event);
         }
     }
 }
@@ -383,9 +437,12 @@ impl TerminalSession {
         let (tx, rx) = unbounded();
         let (input, input_rx) = mpsc::channel::<Option<Vec<u8>>>();
         let shared = Arc::new(Shared {
-            tx,
+            tx: Mutex::new(Some(tx)),
             input,
             wakeup_pending: AtomicBool::new(false),
+            bell_pending: AtomicBool::new(false),
+            title: Mutex::new(None),
+            title_pending: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
             closing: AtomicBool::new(false),
@@ -419,7 +476,7 @@ impl TerminalSession {
             let mut buf = [0; 65536];
             let wake = || {
                 if !read_shared.wakeup_pending.swap(true, Ordering::AcqRel) {
-                    let _ = read_shared.tx.unbounded_send(TerminalEvent::Wakeup);
+                    read_shared.emit(TerminalEvent::Wakeup);
                 }
             };
             // After the child exits, drain its final output briefly; a
@@ -487,20 +544,30 @@ impl TerminalSession {
         let wait_shared = shared.clone();
         let wait_process = process.clone();
         let worker = std::thread::spawn(move || {
+            wait_without_reaping(wait_process.pid);
+            // Sweep leftover job groups while the shell is still a zombie, then
+            // reap. A concurrent `terminate` holds the lock until its own
+            // sweep finished, so no sweep runs against a reused pid.
+            {
+                let mut terminated = wait_process.terminated.lock().unwrap();
+                if !*terminated {
+                    wait_process.sweep(Duration::from_millis(200));
+                    *terminated = true;
+                }
+            }
             let status = child.wait().ok();
-            wait_process.terminate(Duration::from_millis(200));
             wait_shared.child_exited.store(true, Ordering::Release);
             let _ = reader_thread.join();
+            // The writer finishes on its own once the PTY reports EIO; never
+            // block shutdown on a stalled write.
             let _ = wait_shared.input.send(None);
-            let _ = writer_thread.join();
+            drop(writer_thread);
             LIVE.lock()
                 .unwrap()
                 .retain(|p| !Arc::ptr_eq(p, &wait_process));
             wait_shared.exited.store(true, Ordering::Release);
             let code = status.and_then(|s| (s.signal().is_none()).then_some(s.exit_code() as i32));
-            let _ = wait_shared
-                .tx
-                .unbounded_send(TerminalEvent::Exited { code });
+            wait_shared.emit(TerminalEvent::Exited { code });
         });
         Ok(Self {
             term,
@@ -517,6 +584,16 @@ impl TerminalSession {
     }
     pub fn ack_wakeup(&self) {
         self.shared.wakeup_pending.store(false, Ordering::Release);
+    }
+    /// Clear the coalesced bell flag after handling a `Bell` event.
+    pub fn ack_bell(&self) {
+        self.shared.bell_pending.store(false, Ordering::Release);
+    }
+    /// Latest title set by the program (`None` after a reset). Clears the
+    /// coalescing flag; call once per `TitleChanged` event.
+    pub fn take_title(&self) -> Option<String> {
+        self.shared.title_pending.store(false, Ordering::Release);
+        self.shared.title.lock().unwrap().clone()
     }
     pub fn with_term<R>(&self, f: impl FnOnce(&mut Term<TerminalEventProxy>) -> R) -> R {
         f(&mut self.term.lock())
@@ -565,6 +642,7 @@ impl TerminalSession {
     /// Blocks for up to `grace` plus process reaping; UI code should use
     /// [`Self::close_in_background`].
     pub fn close(&self, grace: Duration) {
+        self.shared.disconnect();
         self.process.terminate(grace);
         self.shared.closing.store(true, Ordering::Release);
         if let Some(worker) = self.worker.lock().unwrap().take() {
@@ -574,6 +652,7 @@ impl TerminalSession {
     /// Like [`Self::close`], but returns immediately: termination, reaping
     /// and thread joins happen on a background thread.
     pub fn close_in_background(&self, grace: Duration) {
+        self.shared.disconnect();
         let Some(worker) = self.worker.lock().unwrap().take() else {
             return;
         };

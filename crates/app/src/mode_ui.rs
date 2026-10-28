@@ -449,19 +449,46 @@ impl AppShell {
         .detach();
     }
 
-    /// Refresh titles by exact provider identity, including saved terminals that
-    /// are not open. Keep all I/O off the UI thread and retain stable names on errors.
+    /// Refresh titles by exact provider identity. Saved terminals that are not
+    /// open are refreshed once at startup; afterwards only running terminals are
+    /// polled, backing off from 5 s to 30 s while nothing changes. Keep all I/O
+    /// off the UI thread and retain stable names on errors.
     pub(super) fn watch_terminal_titles(&self, cx: &mut Context<Self>) {
+        const INITIAL: Duration = Duration::from_secs(5);
+        const MAX_BACKOFF: Duration = Duration::from_secs(30);
         cx.spawn(async move |this, cx| {
+            let mut refresh_all = true;
+            let mut interval = INITIAL;
+            let mut previously_running: Vec<SessionId> = Vec::new();
             loop {
-                let Ok((records, backend)) = this.update(cx, |this, cx| {
-                    (
-                        this.terminal_store.records.clone(),
-                        this.state.read(cx).backend(),
-                    )
+                let Ok((records, running, backend)) = this.update(cx, |this, cx| {
+                    let mut running: Vec<SessionId> = this
+                        .terminals
+                        .iter()
+                        .filter(|(_, host)| {
+                            *host.read(cx).status()
+                                == crate::terminal_host::TerminalHostStatus::Running
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    running.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                    let records = this
+                        .terminal_store
+                        .records
+                        .iter()
+                        .filter(|record| refresh_all || running.contains(&record.id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (records, running, this.state.read(cx).backend())
                 }) else {
                     break;
                 };
+                refresh_all = false;
+                // A terminal (re)opening is polled promptly again.
+                if running != previously_running {
+                    interval = INITIAL;
+                    previously_running = running;
+                }
                 let lookup = backend.runtime.spawn(async move {
                     let mut titles = Vec::new();
                     for record in records {
@@ -488,7 +515,7 @@ impl AppShell {
                     titles
                 });
                 let titles = lookup.await.unwrap_or_default();
-                if this
+                let outcome = this
                     .update(cx, |this, cx| {
                         let mut changed = false;
                         for (id, identity, title) in titles {
@@ -525,12 +552,13 @@ impl AppShell {
                                 cx,
                             );
                         }
-                    })
-                    .is_err()
-                {
+                        changed
+                    });
+                let Ok(changed) = outcome else {
                     break;
-                }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
+                };
+                interval = if changed { INITIAL } else { (interval * 2).min(MAX_BACKOFF) };
+                cx.background_executor().timer(interval).await;
             }
         })
         .detach();
@@ -699,8 +727,8 @@ impl AppShell {
         if owner == self.right_owner {
             return Some(self.right.clone());
         }
-        if let Some((panel, _)) = self.right_cache.get(&owner) {
-            return Some(panel.clone());
+        if let Some(cached) = self.right_cache.get(&owner) {
+            return Some(cached.panel.clone());
         }
         let saved = self.right_store.get(&key);
         let open = saved.restore_open();
@@ -712,7 +740,14 @@ impl AppShell {
             panel.restore(quiet, window, cx);
             panel
         });
-        self.right_cache.insert(owner, (panel.clone(), open));
+        self.right_cache.insert(
+            owner,
+            crate::CachedRight {
+                panel: panel.clone(),
+                open,
+                key: Some(key.clone()),
+            },
+        );
         // Like watch_right, plus persisting while it stays in the background.
         cx.observe(&panel, move |this, panel, cx| {
             if this.right == panel {
@@ -734,8 +769,8 @@ impl AppShell {
         let open = self
             .right_cache
             .values()
-            .find(|(cached, _)| cached == panel)
-            .is_some_and(|(_, open)| *open);
+            .find(|cached| &cached.panel == panel)
+            .is_some_and(|cached| cached.open);
         if self.right_store.set(key, panel.read(cx).snapshot(open)) {
             self.persist_right(cx);
         }

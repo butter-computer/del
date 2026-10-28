@@ -73,9 +73,11 @@ pub fn is_user_image(path: &Path, home: Option<&Path>) -> bool {
     if !path.is_file() {
         return false;
     }
-    if path.starts_with("/System") {
+    if path.starts_with("/System") && !path.starts_with("/System/Volumes/Data") {
         // Stock wallpapers, dynamic desktops, solid colours and the Tahoe
-        // `/System/Library/Wallpapers` tree all live here.
+        // `/System/Library/Wallpapers` tree all live here. The data volume is
+        // mounted under `/System/Volumes/Data` but holds user files
+        // (`/System/Volumes/Data/Users/...` is where canonicalize may land).
         return false;
     }
     if path.starts_with("/Library/Application Support/com.apple.idleassetsd") {
@@ -327,6 +329,24 @@ mod tests {
         assert!(!is_user_image(
             Path::new("/nonexistent/photo.png"),
             Some(home)
+        ));
+    }
+
+    #[test]
+    fn data_volume_paths_are_not_system_assets() {
+        // `/System/Volumes/Data` is the writable data volume: user files
+        // canonicalize there on some setups and must not be rejected.
+        let dir = std::env::temp_dir().join("del-wallpaper-test-data-volume");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.png");
+        fs::write(&file, b"png").unwrap();
+        let data_volume = Path::new("/System/Volumes/Data").join(file.strip_prefix("/").unwrap());
+        if data_volume.is_file() {
+            assert!(is_user_image(&data_volume, None));
+        }
+        assert!(!is_user_image(
+            Path::new("/System/Library/Wallpapers/x.heic"),
+            None
         ));
     }
 

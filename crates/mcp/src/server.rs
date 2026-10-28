@@ -726,7 +726,13 @@ impl Inner {
                     return Ok(tool_err(e));
                 }
                 let cwd = Path::new(&a.cwd);
-                if !cwd.is_absolute() || !cwd.is_dir() {
+                let is_dir = {
+                    let probe = cwd.to_path_buf();
+                    tokio::task::spawn_blocking(move || probe.is_dir())
+                        .await
+                        .unwrap_or(false)
+                };
+                if !cwd.is_absolute() || !is_dir {
                     return Ok(tool_err(
                         "cwd must be an absolute path of an existing directory",
                     ));

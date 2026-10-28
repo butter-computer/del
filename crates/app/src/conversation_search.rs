@@ -49,6 +49,47 @@ pub struct Source {
 pub struct Document {
     pub source: Source,
     pub messages: Arc<Vec<Message>>,
+    /// Case-folded message text, computed once per document rather than per query.
+    pub folded: FoldedMessages,
+}
+
+/// Shared between a cached file and every `Document` built from it.
+#[derive(Clone, Default)]
+pub struct FoldedMessages(Arc<std::sync::OnceLock<Vec<Folded>>>);
+
+impl FoldedMessages {
+    fn get(&self, messages: &[Message]) -> &[Folded] {
+        self.0.get_or_init(|| messages.iter().map(|message| fold(&message.text)).collect())
+    }
+}
+
+/// Lowercased text with each folded byte mapped back to its original character.
+pub struct Folded {
+    text: String,
+    offsets: Vec<(usize, usize)>,
+}
+
+fn fold(text: &str) -> Folded {
+    let mut folded = String::with_capacity(text.len());
+    let mut offsets = Vec::with_capacity(text.len());
+    for (start, ch) in text.char_indices() {
+        for lower in ch.to_lowercase() {
+            let before = folded.len();
+            folded.push(lower);
+            offsets.extend((before..folded.len()).map(|_| (start, start + ch.len_utf8())));
+        }
+    }
+    Folded { text: folded, offsets }
+}
+
+impl Folded {
+    /// Byte ranges in the original text for an already lowercased, non-empty needle.
+    fn find(&self, needle: &str) -> Vec<Range<usize>> {
+        self.text
+            .match_indices(needle)
+            .map(|(start, value)| self.offsets[start].0..self.offsets[start + value.len() - 1].1)
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -100,6 +141,7 @@ struct CachedFile {
     modified: Option<std::time::SystemTime>,
     size: u64,
     messages: Arc<Vec<Message>>,
+    folded: FoldedMessages,
 }
 
 pub struct Snapshot {
@@ -131,10 +173,14 @@ impl Index {
                 _ => None,
             };
             let mut saved = Arc::new(vec![]);
+            let mut folded = FoldedMessages::default();
             if let Some(path) = path {
                 used.insert(path.clone());
                 match self.read(&path, source.provider, id.unwrap_or_default()) {
-                    Ok(messages) => saved = messages,
+                    Ok((messages, cached)) => {
+                        saved = messages;
+                        folded = cached;
+                    }
                     Err(error) => snapshot.errors.push(format!("{}: {error}", source.title)),
                 }
             }
@@ -148,6 +194,7 @@ impl Index {
                             model.apply(event);
                         }
                         saved = Arc::new(messages(&model));
+                        folded = FoldedMessages::default();
                     }
                     Err(error) => snapshot.errors.push(format!("{}: {error}", source.title)),
                 }
@@ -158,10 +205,12 @@ impl Index {
                 && !live.is_empty()
             {
                 saved = live.clone();
+                folded = FoldedMessages::default();
             }
             snapshot.documents.push(Arc::new(Document {
                 source,
                 messages: saved,
+                folded,
             }));
         }
         self.files.retain(|path, _| used.contains(path));
@@ -173,14 +222,14 @@ impl Index {
         path: &PathBuf,
         provider: Option<Provider>,
         id: &str,
-    ) -> std::io::Result<Arc<Vec<Message>>> {
+    ) -> std::io::Result<(Arc<Vec<Message>>, FoldedMessages)> {
         let meta = std::fs::metadata(path)?;
         let modified = meta.modified().ok();
         if let Some(cached) = self.files.get(path)
             && cached.size == meta.len()
             && cached.modified == modified
         {
-            return Ok(cached.messages.clone());
+            return Ok((cached.messages.clone(), cached.folded.clone()));
         }
         let reader = std::io::BufReader::new(std::fs::File::open(path)?);
         let messages = if provider == Some(Provider::Claude) {
@@ -193,15 +242,17 @@ impl Index {
             read_codex(reader)?
         };
         let messages = Arc::new(messages);
+        let folded = FoldedMessages::default();
         self.files.insert(
             path.clone(),
             CachedFile {
                 modified,
                 size: meta.len(),
                 messages: messages.clone(),
+                folded: folded.clone(),
             },
         );
-        Ok(messages)
+        Ok((messages, folded))
     }
 }
 
@@ -273,19 +324,7 @@ pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> {
     if query.is_empty() {
         return vec![];
     }
-    let mut folded = String::new();
-    let mut offsets = vec![];
-    for (start, ch) in text.char_indices() {
-        for lower in ch.to_lowercase() {
-            let before = folded.len();
-            folded.push(lower);
-            offsets.extend((before..folded.len()).map(|_| (start, start + ch.len_utf8())));
-        }
-    }
-    folded
-        .match_indices(&query)
-        .map(|(start, value)| offsets[start].0..offsets[start + value.len() - 1].1)
-        .collect()
+    fold(text).find(&query)
 }
 
 fn snippet(text: &str, range: &Range<usize>) -> (String, Range<usize>) {
@@ -346,6 +385,7 @@ pub fn search_until(
     if query.is_empty() && scope.is_none() {
         return Some(hits);
     }
+    let needle = query.to_lowercase();
     for document in documents {
         if superseded() {
             return None;
@@ -373,8 +413,12 @@ pub fn search_until(
                 snippet_range,
             });
         }
-        for (index, message) in document.messages.iter().enumerate() {
-            for range in ranges(&message.text, &query) {
+        if needle.is_empty() {
+            continue;
+        }
+        let folded = document.folded.get(&document.messages);
+        for (index, (message, folded)) in document.messages.iter().zip(folded).enumerate() {
+            for range in folded.find(&needle) {
                 let (snippet, snippet_range) = snippet(&message.text, &range);
                 hits.push(Hit {
                     document: document.clone(),
@@ -434,6 +478,7 @@ mod tests {
                 role: "You",
                 text: text.into(),
             }]),
+            folded: Default::default(),
         })
     }
     #[test]
@@ -532,22 +577,22 @@ mod tests {
         };
         std::fs::write(&path, record("first")).unwrap();
         let mut index = Index::default();
-        let first = index.read(&path, Some(Provider::Codex), "id").unwrap();
-        assert!(Arc::ptr_eq(
-            &first,
-            &index.read(&path, Some(Provider::Codex), "id").unwrap()
-        ));
+        let (first, folded) = index.read(&path, Some(Provider::Codex), "id").unwrap();
+        let (again, folded_again) = index.read(&path, Some(Provider::Codex), "id").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(Arc::ptr_eq(&folded.0, &folded_again.0), "folded text is shared with the cache");
         std::fs::write(&path, record("first") + &record("later")).unwrap();
         assert_eq!(
             index
                 .read(&path, Some(Provider::Codex), "id")
                 .unwrap()
+                .0
                 .len(),
             2
         );
         std::fs::write(&path, record("replaced")).unwrap();
         assert_eq!(
-            index.read(&path, Some(Provider::Codex), "id").unwrap()[0].text,
+            index.read(&path, Some(Provider::Codex), "id").unwrap().0[0].text,
             "replaced"
         );
         std::fs::remove_file(path).unwrap();

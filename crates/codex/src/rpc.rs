@@ -12,7 +12,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -213,15 +213,47 @@ struct Inner {
     backoff: BackoffPolicy,
 }
 
+impl Drop for Inner {
+    /// The last strong handle is gone: take the app-server down with it so a
+    /// dropped client never leaks a `codex` process (and its process group).
+    fn drop(&mut self) {
+        if let Some(child) = self.child.get_mut() {
+            if let Some(pid) = child.id() {
+                del_agent::procgroup::signal_group(pid, true);
+            }
+            let _ = child.start_kill();
+        }
+    }
+}
+
 /// Cheap-to-clone handle to one running app-server connection.
 #[derive(Clone)]
 pub struct CodexClient {
     inner: Arc<Inner>,
 }
 
+/// Non-owning handle: lets background tasks (the router) talk to the client
+/// without keeping the app-server alive once every [`CodexClient`] is dropped.
+#[derive(Clone)]
+pub struct WeakClient {
+    inner: Weak<Inner>,
+}
+
+impl WeakClient {
+    pub fn upgrade(&self) -> Option<CodexClient> {
+        self.inner.upgrade().map(|inner| CodexClient { inner })
+    }
+}
+
 impl CodexClient {
     pub async fn process_id(&self) -> Option<u32> {
         self.inner.child.lock().await.as_ref()?.id()
+    }
+
+    pub fn downgrade(&self) -> WeakClient {
+        WeakClient {
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 
     /// Spawn `codex app-server` (stdio transport) and connect to it.
@@ -251,11 +283,14 @@ impl CodexClient {
         let stderr = child.stderr.take().expect("piped stderr");
         let (client, rx) = Self::from_io(stdout, stdin);
         *client.inner.child.try_lock().expect("fresh mutex") = Some(child);
-        let inner = client.inner.clone();
+        // Weak: this task must not keep the process alive after the last
+        // `CodexClient` is dropped (see `Drop for Inner`).
+        let weak = Arc::downgrade(&client.inner);
         tokio::spawn(async move {
             let mut stderr = BufReader::new(stderr);
             while let Ok(Some(line)) = read_line_capped(&mut stderr, 64 * 1024).await {
                 let Ok(line) = line else { continue };
+                let Some(inner) = weak.upgrade() else { break };
                 let mut tail = inner.stderr_tail.lock().unwrap();
                 if tail.len() == STDERR_TAIL_LINES {
                     tail.pop_front();

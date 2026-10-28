@@ -116,6 +116,12 @@ open target/release/del.app
 After rebuilding, reopen Del to run the new binary. Building does not replace
 an already-running process. Keep using the same bundle path for local upgrades.
 
+The background shaders are precompiled with Xcode's Metal compiler (`xcrun metal`).
+On a Mac with only the Command Line Tools, debug builds still succeed with a
+warning and compile the shaders from source at first use. Release builds require
+the Metal compiler (install Xcode or point `DEVELOPER_DIR` at it); set
+`DEL_ALLOW_RUNTIME_SHADERS=1` to build a release without it anyway.
+
 ### Running on another Mac
 
 Each Mac needs its own provider CLI installation and authenticated account. Pulling
@@ -363,7 +369,8 @@ conversation. Unloading a running session also stops its current work.
 - Hover the final reply of a completed response to reveal Copy and its local reply time
   in 24-hour `HH:MM` format. Intermediate updates and streaming replies have no copy footer.
   Reply times are saved across reopening; older Codex and Claude replies recover their
-  timestamps from local transcripts. If no timestamp exists, only Copy is shown.
+  timestamps from local transcripts. The reply-time journal stores a short prefix and
+  fingerprint of each reply rather than its text; older journals stay readable. If no timestamp exists, only Copy is shown.
   The 13 px overlapping-squares Copy icon and 11 px time text fade in and out over
   160 ms on hover, without shifting the transcript. The square-proportioned glyph
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
@@ -545,7 +552,8 @@ Cards form a single horizontal scrolling row with no scrollbar. Wide, subtle
 edge fades appear only on sides with more offscreen content. Each card reveals
 a bright **×** on hover that remains visible while hovered or pressed. Click
 a card to preview its original file in the Files sidebar. Attachments survive
-queue editing, reordering, and retry. Codex receives local image references;
+queue editing, reordering, and retry. Permanently deleting a session also removes
+its queued follow-ups and the imported copies they still reference. Codex receives local image references;
 Claude and ACP receive encoded image content. Other files
 are supplied as local paths for the harness's tools to read. This does not embed
 PDF/spreadsheet contents in the prompt or transcode video; interpretation and

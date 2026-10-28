@@ -13,6 +13,11 @@ tier or goal loop: the inspected 2.1.4 protocol exposes no native goals API.
 
 Chat uses structured prompts, file URIs, native skill IDs, streaming events,
 permission replies, and native steering. Native forms use Del's question surface.
+If the event stream drops while the workspace server is still running, Del
+resubscribes with backoff (asking the server to replay from the last durable
+event) before reporting the connection closed. Concurrent chats in different
+workspaces start their servers independently, and title refresh only reads from a
+server that is already running.
 Model changes apply between turns; resetting the model resolves OpenCode's current
 default. Saved chats reload native paginated message history. Conversation search
 reads native session exports on its background worker.

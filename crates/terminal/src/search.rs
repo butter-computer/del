@@ -6,9 +6,12 @@ use alacritty_terminal::{
 };
 use std::ops::{Range, RangeInclusive};
 
+/// Normalized text with one entry per source cell instead of one per byte:
+/// `offsets[i]` is the byte offset where cell `points[i]` begins.
 #[derive(Default)]
 struct Text {
     value: String,
+    offsets: Vec<usize>,
     points: Vec<Point>,
 }
 impl Text {
@@ -17,10 +20,11 @@ impl Text {
         if ch == ' ' && self.value.ends_with(' ') {
             return;
         }
-        for ch in ch.to_lowercase() {
-            self.value.push(ch);
-            self.points
-                .extend(std::iter::repeat_n(point, ch.len_utf8()));
+        let start = self.value.len();
+        self.value.extend(ch.to_lowercase());
+        if self.value.len() > start {
+            self.offsets.push(start);
+            self.points.push(point);
         }
     }
     fn normalized(text: &str) -> String {
@@ -29,6 +33,11 @@ impl Text {
             out.push(ch, Point::new(Line(0), Column(0)));
         }
         out.value
+    }
+    /// Cell containing the byte at `offset`.
+    fn point_at(&self, offset: usize) -> Point {
+        let index = self.offsets.partition_point(|&start| start <= offset);
+        self.points[index.saturating_sub(1)]
     }
 }
 
@@ -59,6 +68,7 @@ pub fn snapshot(grid: &Grid<Cell>) -> Snapshot {
     let lines = (grid.bottommost_line().0 - grid.topmost_line().0 + 1).max(0) as usize;
     let mut text = Text {
         value: String::with_capacity(lines * 32),
+        offsets: Vec::with_capacity(lines * 32),
         points: Vec::with_capacity(lines * 32),
     };
     for line in grid.topmost_line().0..=grid.bottommost_line().0 {
@@ -119,7 +129,7 @@ impl Snapshot {
                 .count();
             prefix + suffix
         })?;
-        Some(text.points[start]..=text.points[start + query.len() - 1])
+        Some(text.point_at(start)..=text.point_at(start + query.len() - 1))
     }
 }
 

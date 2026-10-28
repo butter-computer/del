@@ -75,14 +75,23 @@ fn escaped_search_text(
 /// Combine only adjacent, already-received chunks for the same turn. Never wait
 /// for a newline, timer, or a later event, and never cross tool/status boundaries.
 fn coalesce_deltas(events: impl IntoIterator<Item = AgentEvent>) -> Vec<AgentEvent> {
-    let mut ready = Vec::new();
+    let mut ready: Vec<AgentEvent> = Vec::new();
     for event in events {
-        if let AgentEvent::AssistantTextDelta { turn_id, text } = &event
-            && let Some(AgentEvent::AssistantTextDelta { turn_id: previous, text: accumulated }) = ready.last_mut()
-            && previous == turn_id
-        {
-            accumulated.push_str(text);
-        } else {
+        let merged = match (&event, ready.last_mut()) {
+            (
+                AgentEvent::AssistantTextDelta { turn_id, text },
+                Some(AgentEvent::AssistantTextDelta { turn_id: previous, text: accumulated }),
+            )
+            | (
+                AgentEvent::ReasoningDelta { turn_id, text },
+                Some(AgentEvent::ReasoningDelta { turn_id: previous, text: accumulated }),
+            ) if previous == turn_id => {
+                accumulated.push_str(text);
+                true
+            }
+            _ => false,
+        };
+        if !merged {
             ready.push(event);
         }
     }
@@ -116,6 +125,11 @@ pub struct ChatView {
     search_messages: std::cell::RefCell<Option<std::sync::Arc<Vec<crate::conversation_search::Message>>>>,
     /// Consecutive tool rows shown as one group; refreshed once per render.
     pub(super) tool_groups: Vec<std::ops::Range<usize>>,
+    /// History is folded without per-event list updates; one reset follows.
+    replaying: bool,
+    /// Optimistic user rows awaiting delivery, by queue item id. Row removal
+    /// renumbers these, so a failed delivery never removes the wrong row.
+    optimistic_rows: std::collections::HashMap<String, usize>,
     backend: Backend,
     pub queue: crate::followups::Queue,
     session: Option<SessionId>,
@@ -180,6 +194,8 @@ impl ChatView {
             prompt_rows: Vec::new(),
             search_messages: Default::default(),
             tool_groups: Vec::new(),
+            replaying: false,
+            optimistic_rows: Default::default(),
             backend,
             session: session.clone(),
             closed: false,
@@ -415,6 +431,10 @@ impl ChatView {
                     self.assistant_text.insert(ix, view);
                 }
             }
+            if self.replaying {
+                // One `scroller.reset` and notify follow the whole replay.
+                return;
+            }
             match change {
                 Change::Pushed(_) => {
                     if matches!(self.model.blocks.get(ix), Some(Block::User { .. })) { self.prompt_rows.push(ix); }
@@ -428,6 +448,8 @@ impl ChatView {
             let mut end = ix + 1;
             while end < self.model.blocks.len() && matches!(self.model.blocks[end], Block::Tool(_)) { end += 1; }
             self.scroller.remeasure_items(start..end);
+        } else if self.replaying {
+            return;
         } else if !self.model.is_running() {
             // A successful final tool sequence can collapse when the turn settles.
             let end = self.model.blocks.len();
@@ -509,7 +531,7 @@ impl ChatView {
         self.save_queue();
         let backend = self.backend.clone();
         let displayed_input = input.clone();
-        let row_index = self.model.blocks.len();
+        let queued_id = item_id.clone();
         let delivery = self.backend.runtime.spawn(async move {
             backend.resume(&session).await?;
             if steer {
@@ -536,6 +558,7 @@ impl ChatView {
                 }
                 this.save_queue();
                 if result.is_ok() {
+                    this.optimistic_rows.remove(&item_id);
                     // Backend events may already have arrived. Add the user row
                     // before dispatch below, rather than changing phase on ack.
                     if !this.model.is_running()
@@ -544,8 +567,10 @@ impl ChatView {
                         this.send_next(cx);
                     }
                 } else {
-                    if matches!(this.model.blocks.get(row_index), Some(Block::User { .. })) {
-                        this.remove_row(row_index);
+                    if let Some(row) = this.optimistic_rows.remove(&item_id)
+                        && matches!(this.model.blocks.get(row), Some(Block::User { .. }))
+                    {
+                        this.remove_row(row);
                     }
                     this.model.reject_input();
                     if busy {
@@ -566,6 +591,9 @@ impl ChatView {
         })
         .detach();
         let change = self.model.push_input(&displayed_input, steer);
+        if let Change::Pushed(row) = change {
+            self.optimistic_rows.insert(queued_id, row);
+        }
         self.sync(Some(change), cx);
         self.scroller.scroll_to_end();
     }
@@ -591,6 +619,12 @@ impl ChatView {
             .filter_map(|key| shift(key, ix))
             .collect();
         self.working_message = self.working_message.and_then(|key| shift(key, ix));
+        self.optimistic_rows.retain(|_, row| *row != ix);
+        for row in self.optimistic_rows.values_mut() {
+            if *row > ix {
+                *row -= 1;
+            }
+        }
         self.search_flash = self.search_flash.take().and_then(|mut flash| {
             flash.ix = shift(flash.ix, ix)?;
             Some(flash)
@@ -668,6 +702,7 @@ impl ChatView {
         self.copied_responses.clear();
         self.response_hover.clear();
         self.expanded_activity.clear();
+        self.optimistic_rows.clear();
         self.search_flash = None;
         self.jump = None;
         self.working_since = None;
@@ -700,8 +735,10 @@ impl ChatView {
                 // Skip its plain-text history counterpart exactly once.
                 let first_prompt = this.first_prompt.take();
                 let mut opening_user = true;
-                for event in &history {
-                    if let AgentEvent::UserMessage { text } = event
+                // Fold history with list updates suppressed; reset the list once.
+                this.replaying = true;
+                for event in coalesce_deltas(history) {
+                    if let AgentEvent::UserMessage { text } = &event
                         && opening_user
                     {
                         opening_user = false;
@@ -709,8 +746,11 @@ impl ChatView {
                             continue;
                         }
                     }
-                    this.on_event(event, cx);
+                    this.on_event(&event, cx);
                 }
+                this.replaying = false;
+                this.scroller.reset(this.model.blocks.len());
+                this.refresh_prompt_rows();
                 this.response_times.extend(times.restore(&this.model));
                 if let Some(scroll) = scroll {
                     this.scroller.scroll_to(scroll);
@@ -1092,6 +1132,40 @@ mod tests {
         cx.executor().advance_clock(std::time::Duration::from_millis(1000));
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(!view.copied_responses.contains_key(&0)));
+    }
+
+    #[gpui::test]
+    fn failed_delivery_removes_its_own_row_and_renumbers_side_tables(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>()).unwrap();
+        let view = cx.new(|cx| ChatView::new(Backend { runtime: runtime.handle().clone(), manager }, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.on_event(&AgentEvent::UserMessage { text: "first".into() }, cx);
+            view.on_event(&AgentEvent::AssistantMessage { turn_id: "a".into(), text: "one".into() }, cx);
+            view.on_event(&AgentEvent::TurnCompleted { turn_id: "a".into(), status: del_agent::TurnStatus::Completed }, cx);
+            // Two optimistic prompts; the earlier one fails after the later one was queued.
+            let change = view.model.push_user("undelivered".into(), false);
+            view.optimistic_rows.insert("item-1".into(), 2);
+            view.sync(Some(change), cx);
+            let change = view.model.push_user("later".into(), true);
+            view.optimistic_rows.insert("item-2".into(), 3);
+            view.sync(Some(change), cx);
+            view.on_event(&AgentEvent::AssistantMessage { turn_id: "b".into(), text: "two".into() }, cx);
+            view.on_event(&AgentEvent::TurnCompleted { turn_id: "b".into(), status: del_agent::TurnStatus::Completed }, cx);
+            let before = view.response_times[&4];
+            assert_eq!(view.prompt_rows, vec![0, 2, 3]);
+            let row = view.optimistic_rows.remove("item-1").unwrap();
+            view.remove_row(row);
+            assert!(matches!(&view.model.blocks[2], Block::User { text, .. } if text == "later"));
+            assert_eq!(view.optimistic_rows["item-2"], 2);
+            assert_eq!(view.response_times.get(&3), Some(&before));
+            assert!(view.assistant_text.contains_key(&3) && !view.assistant_text.contains_key(&4));
+            assert!(view.model.is_completed_response(3));
+            assert_eq!(view.prompt_rows, vec![0, 2]);
+            assert_eq!(view.scroller.item_count(), view.model.blocks.len());
+        });
     }
 
     #[gpui::test]
@@ -1581,6 +1655,7 @@ mod search_tests {
                 archived: false,
                 live: None,
             },
+            folded: Default::default(),
             messages: Arc::new(messages),
         });
         search::search(&[doc], query).remove(n)

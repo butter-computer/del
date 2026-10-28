@@ -1539,6 +1539,7 @@ impl AppState {
     pub fn permanently_delete(&mut self, id: SessionId, cx: &mut Context<Self>) {
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.overrides_mut().remove(&id);
+            self.unread_motion.remove(&id);
             self.save_overrides();
             self.remove_terminal(&id, cx);
             return;
@@ -1552,12 +1553,18 @@ impl AppState {
         self.invalidate_rows();
         self.records.retain(|record| record.id != id);
         self.overrides_mut().remove(&id);
+        self.unread_motion.remove(&id);
         self.save_overrides();
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         self.rt.spawn(async move {
             if let Err(error) = manager.delete(&id).await {
                 let _ = tx.send(Msg::Error(format!("Could not delete session: {error}")));
             } else {
+                // The durable follow-up queue and its imported attachments belong to this session.
+                if !cfg!(test) {
+                    let queue_id = id.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::followups::Queue::remove_session(&queue_id)).await;
+                }
                 let _ = tx.send(Msg::PanelDeleted(format!("chat:{}", id.as_str()), uid));
             }
             let _ = tx.send(Msg::Refresh);

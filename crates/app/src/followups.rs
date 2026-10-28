@@ -18,12 +18,11 @@ pub struct Queue {
 }
 impl Queue {
     fn path(session: &SessionId) -> Option<std::path::PathBuf> {
+        Some(Self::path_in(&del_agent::data_dir()?, session))
+    }
+    fn path_in(data_dir: &std::path::Path, session: &SessionId) -> std::path::PathBuf {
         let name: String = session.0.bytes().map(|b| format!("{b:02x}")).collect();
-        Some(
-            del_agent::data_dir()?
-                .join("followups")
-                .join(format!("{name}.json")),
-        )
+        data_dir.join("followups").join(format!("{name}.json"))
     }
     pub fn load(session: &SessionId) -> Self {
         Self::path(session).map(Self::open).unwrap_or_default()
@@ -54,6 +53,41 @@ impl Queue {
         };
         crate::sessions::write_atomic(path, &serde_json::to_vec(self)?, crate::sessions::PRIVATE)
     }
+    /// Delete a session's queue file and the imported attachment files it still
+    /// references. Returns the attachment paths that were removed.
+    pub fn remove_session(session: &SessionId) -> Vec<std::path::PathBuf> {
+        del_agent::data_dir().map(|d| Self::remove_session_in(&d, session)).unwrap_or_default()
+    }
+    fn remove_session_in(data_dir: &std::path::Path, session: &SessionId) -> Vec<std::path::PathBuf> {
+        let path = Self::path_in(data_dir, session);
+        let attachments = data_dir.join("attachments");
+        let queue: Option<Self> = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let mut removed = Vec::new();
+        for file in queue.iter().flat_map(|q| q.items.iter()).flat_map(|item| item.input.attachments.iter()) {
+            if let Some(entry) = attachment_entry(&attachments, &file.path) {
+                let _ = if entry.is_dir() { std::fs::remove_dir_all(&entry) } else { std::fs::remove_file(&entry) };
+                removed.push(entry);
+            }
+        }
+        let _ = std::fs::remove_file(path);
+        removed
+    }
+}
+
+/// The top-level entry under the attachments directory that holds this file:
+/// `attachments/<uuid>/<name>` imports map to their directory, clipboard images to the file.
+fn attachment_entry(attachments: &std::path::Path, file: &std::path::Path) -> Option<std::path::PathBuf> {
+    let relative = file.strip_prefix(attachments).ok()?;
+    // Only a plain name directly inside the store: never `..` or a root.
+    let std::path::Component::Normal(first) = relative.components().next()? else {
+        return None;
+    };
+    Some(attachments.join(first))
+}
+
+impl Queue {
     pub fn push(&mut self, input: UserInput) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.items.push(Followup {
@@ -173,6 +207,43 @@ mod tests {
         assert!(reopened.next().is_none());
     }
 
+    #[test]
+    fn deleting_a_session_removes_its_queue_and_its_attachments_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let attachments = data.join("attachments");
+        let referenced = attachments.join("ref-dir");
+        let clipboard = attachments.join("clipboard-1.png");
+        let other = attachments.join("other-dir");
+        for d in [&referenced, &other] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("file.txt"), "x").unwrap();
+        }
+        std::fs::write(&clipboard, "png").unwrap();
+        let outside = data.join("outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        let escaping = attachments.join("../outside.txt");
+        let session = SessionId::new("s1");
+        let path = Queue::path_in(data, &session);
+        let mut queue = Queue::open(path.clone());
+        queue.push(UserInput {
+            command: None,
+            skills: Vec::new(),
+            text: "with files".into(),
+            attachments: vec![
+                del_agent::Attachment { path: referenced.join("file.txt"), mime: None },
+                del_agent::Attachment { path: clipboard.clone(), mime: None },
+                del_agent::Attachment { path: outside.clone(), mime: None },
+                del_agent::Attachment { path: escaping, mime: None },
+            ],
+        });
+        queue.save().unwrap();
+        let removed = Queue::remove_session_in(data, &session);
+        assert_eq!(removed.len(), 2);
+        assert!(!path.exists() && !referenced.exists() && !clipboard.exists());
+        // Files outside Del's attachment store and other imports are untouched.
+        assert!(outside.exists() && other.exists());
+    }
     #[test]
     fn reopening_retries_known_busy_rejections_but_retains_other_failures() {
         let dir = tempfile::tempdir().unwrap();

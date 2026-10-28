@@ -208,9 +208,14 @@ impl Rpc {
                 let _ = w.send(Err(closed_error()));
             }
             let tail = tail.lock().unwrap().trim().to_owned();
-            // Do not hold the child lock while waiting: a process can close
-            // stdout yet ignore SIGTERM, and close() still needs to kill it.
-            handler.closed(None, tail);
+            // Report the real exit code when the process has already gone; do
+            // not wait for it here: a process can close stdout yet ignore
+            // SIGTERM, and close() still needs to kill it.
+            let exit = match r.child.try_lock() {
+                Ok(mut child) => child.try_wait().ok().flatten().and_then(|s| s.code()),
+                Err(_) => None,
+            };
+            handler.closed(exit, tail);
             r.kill(Duration::from_secs(2)).await;
         });
         Ok(rpc)

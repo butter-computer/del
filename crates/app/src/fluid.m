@@ -26,6 +26,7 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     BOOL _running, _clear;
 }
 @property(nonatomic,strong) NSData *libraryData;
+@property(nonatomic,strong) NSString *librarySource;
 @property(nonatomic,strong) id<MTLDevice> device;
 @property(nonatomic,strong) id<MTLComputePipelineState> clearState, lifeState, blurHorizontalState, blurVerticalState;
 @property(nonatomic,strong) id<MTLRenderPipelineState> displayState, compositeState;
@@ -37,6 +38,17 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
 - (void)region:(NSUInteger)slot x:(double)x y:(double)y width:(double)width height:(double)height radius:(double)radius;
 - (void)encode:(id<MTLCommandBuffer>)command buffer:(CVPixelBufferRef)buffer;
 @end
+// Shared by fluid.m and backdrop.m. A zero-length library means the build host had
+// no `xcrun metal`; compile the embedded shader source at runtime instead.
+id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSString *source,NSError **error) {
+    if(libraryBytes.length==0) {
+        if(source.length==0)return nil;
+        MTLCompileOptions *options=[MTLCompileOptions new];
+        return [device newLibraryWithSource:source options:options error:error];
+    }
+    dispatch_data_t data=dispatch_data_create(libraryBytes.bytes,libraryBytes.length,dispatch_get_main_queue(),^{ (void)libraryBytes; });
+    return [device newLibraryWithData:data error:error];
+}
 @implementation DelFluidRenderer
 - (instancetype)init { if((self=[super init])) { _clear=YES;_universeSeed=arc4random_uniform(65536); } return self; }
 - (void)dealloc { if(_surface)CFRelease(_surface);if(_cache)CFRelease(_cache);if(_buffer)CFRelease(_buffer); }
@@ -79,10 +91,8 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
 - (BOOL)prepareDevice:(id<MTLDevice>)device {
     if(self.device==device&&self.displayState&&self.compositeState&&self.blurHorizontalState&&self.blurVerticalState)return YES;
     self.device=device;
-    NSData *libraryBytes=self.libraryData;
-    dispatch_data_t data=dispatch_data_create(libraryBytes.bytes,libraryBytes.length,dispatch_get_main_queue(),^{ (void)libraryBytes; });
     NSError *error=nil;
-    id<MTLLibrary> library=[device newLibraryWithData:data error:&error];
+    id<MTLLibrary> library=del_metal_library(device,self.libraryData,self.librarySource,&error);
     if(!library){NSLog(@"Del Metal library: %@",error);return NO;}
 #define PIPE(property,name) self.property=[device newComputePipelineStateWithFunction:[library newFunctionWithName:@name] error:&error]; if(!self.property){NSLog(@"Del Metal pipeline: %@",error);return NO;}
     PIPE(clearState,"fluid_clear") PIPE(lifeState,"cellular_life")
@@ -197,8 +207,9 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     // CPU wait, staging copies, readbacks, or second presentation queue here.
 }
 @end
-void *del_fluid_create(const unsigned char *bytes,size_t length) {
+void *del_fluid_create(const unsigned char *bytes,size_t length,const char *source,size_t sourceLength) {
     DelFluidRenderer *renderer=[DelFluidRenderer new];renderer.libraryData=[NSData dataWithBytes:bytes length:length];
+    if(source&&sourceLength)renderer.librarySource=[[NSString alloc] initWithBytes:source length:sourceLength encoding:NSUTF8StringEncoding];
     return (__bridge_retained void *)renderer;
 }
 void del_fluid_release(void *pointer) { if(pointer) { DelFluidRenderer *renderer=(__bridge_transfer DelFluidRenderer *)pointer;(void)renderer; } }

@@ -62,6 +62,11 @@ impl Translator {
         self.drop_approvals()
     }
 
+    /// The interrupt never reached the CLI; forget it.
+    pub fn unmark_interrupting(&mut self) {
+        self.interrupting = false;
+    }
+
     /// Forget every pending prompt, retiring its card.
     fn drop_approvals(&mut self) -> Vec<AgentEvent> {
         let mut ids: Vec<String> = self.approvals.drain().map(|(id, _)| id).collect();

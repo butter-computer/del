@@ -711,7 +711,7 @@ impl TerminalHost {
                 let mut last_attempt = None;
                 while started.elapsed() < std::time::Duration::from_secs(120) {
                     cx.background_executor()
-                        .timer(std::time::Duration::from_millis(100))
+                        .timer(trust_poll_interval(started.elapsed()))
                         .await;
                     let keep_waiting = this.update(cx, |this, cx| {
                         let session = this.terminal.read(cx).session();
@@ -823,6 +823,9 @@ impl TerminalHost {
     pub fn snapshot(&self) -> TerminalHostSnapshot {
         self.snapshot.clone()
     }
+    pub fn status(&self) -> &TerminalHostStatus {
+        &self.snapshot.status
+    }
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.terminal
             .update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -913,6 +916,17 @@ fn screen_tail(session: &TerminalSession) -> String {
             .chars()
             .rev()
             .collect()
+    })
+}
+
+/// Poll quickly while the CLI is mounting, then back off.
+fn trust_poll_interval(elapsed: std::time::Duration) -> std::time::Duration {
+    std::time::Duration::from_millis(if elapsed.as_secs() < 5 {
+        100
+    } else if elapsed.as_secs() < 20 {
+        250
+    } else {
+        1000
     })
 }
 
@@ -1039,6 +1053,15 @@ mod tests {
             Some(now),
             now + Duration::from_millis(250)
         ));
+    }
+
+    #[test]
+    fn trust_polling_backs_off_after_startup() {
+        use std::time::Duration;
+        assert_eq!(super::trust_poll_interval(Duration::ZERO), Duration::from_millis(100));
+        assert_eq!(super::trust_poll_interval(Duration::from_secs(4)), Duration::from_millis(100));
+        assert_eq!(super::trust_poll_interval(Duration::from_secs(6)), Duration::from_millis(250));
+        assert_eq!(super::trust_poll_interval(Duration::from_secs(30)), Duration::from_secs(1));
     }
 
     #[test]

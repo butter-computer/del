@@ -84,6 +84,19 @@ fn retry_after(succeeded: bool, failures: u32) -> Duration {
 type UpdateLocks = Mutex<HashMap<PathBuf, Arc<Mutex<Option<Checked>>>>>;
 static LOCKS: OnceLock<UpdateLocks> = OnceLock::new();
 
+/// A global npm package name: optional `@scope/`, then lowercase URL-safe characters.
+fn valid_npm_package(name: &str) -> bool {
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 214
+            && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+    };
+    match name.strip_prefix('@') {
+        Some(scoped) => scoped.split_once('/').is_some_and(|(scope, pkg)| segment(scope) && segment(pkg)),
+        None => segment(name),
+    }
+}
+
 fn version(value: &str) -> Option<(u64, u64, u64)> {
     let parts = value
         .trim()
@@ -145,13 +158,7 @@ fn installer(program: &Path, provider: Provider) -> Installer {
             _ => false,
         };
         let npm = prefix.join("bin/npm");
-        if owns_binary
-            && npm.is_file()
-            && version(installed).is_some()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "@/._-".contains(c))
-        {
+        if owns_binary && npm.is_file() && version(installed).is_some() && valid_npm_package(name) {
             return Installer::Npm {
                 npm,
                 prefix: prefix.to_path_buf(),
@@ -543,6 +550,16 @@ esac
             Ok(true)
         );
         assert!(root.path().join("installed").is_file());
+    }
+
+    #[test]
+    fn npm_package_names_follow_the_registry_grammar() {
+        for ok in ["@openai/codex", "opencode-ai", "@anthropic-ai/claude-code", "a.b_c"] {
+            assert!(valid_npm_package(ok), "{ok}");
+        }
+        for bad in ["", "@", "@scope", "@scope/", "/x", "a/b", "@a/b/c", "Upper", "a b", "a;b", "@a@b/c", "../x", "x\n"] {
+            assert!(!valid_npm_package(bad), "{bad:?}");
+        }
     }
 
     #[tokio::test]

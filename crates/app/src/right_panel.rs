@@ -283,6 +283,21 @@ pub struct RightPanel {
 impl RightPanel {
     pub fn is_changes(&self) -> bool { self.pane == Pane::Changes }
 
+    /// Free everything a panel for a closed tab still holds: shells, web views,
+    /// and the polling tasks. The panel's saved state is the caller's business.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        for (_, terminal) in self.terminals.drain() {
+            terminal.update(cx, |terminal, cx| terminal.close(cx));
+        }
+        if let Some(browser) = self.browser.take() {
+            browser.hide();
+        }
+        self.browsers.clear();
+        self.browser_watch = None;
+        self.changes_watch = None;
+        self.document_preview = None;
+    }
+
     pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if !visible && let Some(preview) = &self.document_preview {
             preview.hide();

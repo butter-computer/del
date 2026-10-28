@@ -3,9 +3,28 @@ use del_agent::{AgentError, Result};
 use serde_json::Value;
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{Child, Command},
 };
+
+/// Longest startup log line kept before it is treated as noise.
+const MAX_LINE_BYTES: usize = 1 << 20;
+
+/// Owns the child until startup succeeds; a cancelled or failed start kills the
+/// whole process group instead of relying on `kill_on_drop` for the leader only.
+struct Starting {
+    child: Option<Child>,
+    pid: u32,
+}
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            del_agent::procgroup::signal_group(self.pid, false);
+            let _ = child.start_kill();
+            del_agent::procgroup::signal_group(self.pid, true);
+        }
+    }
+}
 
 pub struct Server {
     child: std::sync::Mutex<Child>,
@@ -88,9 +107,24 @@ impl Server {
             .ok_or_else(|| StartError::Other(error("server exited during startup")))?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped stdout");
-        let mut lines = BufReader::new(stdout).lines();
+        let mut starting = Starting {
+            child: Some(child),
+            pid,
+        };
+        let mut reader = BufReader::new(stdout);
         let address = tokio::time::timeout(Duration::from_secs(20), async {
-            while let Some(line) = lines.next_line().await? {
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                // Bytes, not `lines()`: one non-UTF-8 log line must not end the read.
+                let read = (&mut reader)
+                    .take(MAX_LINE_BYTES as u64)
+                    .read_until(b'\n', &mut bytes)
+                    .await?;
+                if read == 0 {
+                    break;
+                }
+                let line = String::from_utf8_lossy(&bytes);
                 let url = match serde_json::from_str::<Value>(line.trim()) {
                     Ok(v) => v["url"].as_str().map(str::to_owned),
                     Err(_) => line.strip_prefix("server listening on ").map(str::to_owned),
@@ -111,6 +145,7 @@ impl Server {
         let url = match address {
             Ok(Ok(Some(url))) => url,
             result => {
+                let mut child = starting.child.take().expect("child retained until startup ends");
                 del_agent::procgroup::terminate_group(pid, &mut child, Duration::from_millis(200))
                     .await;
                 return Err(match result {
@@ -121,8 +156,12 @@ impl Server {
                 });
             }
         };
-        // Drain logs without retaining potentially sensitive provider output.
-        tokio::spawn(async move { while matches!(lines.next_line().await, Ok(Some(_))) {} });
+        let child = starting.child.take().expect("child retained until startup ends");
+        // Drain logs as raw bytes without retaining potentially sensitive provider
+        // output; stopping before EOF would block the server once the pipe fills.
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+        });
         Ok(Self {
             child: std::sync::Mutex::new(child),
             _stdin: stdin,
@@ -210,6 +249,22 @@ impl Server {
     }
 
     pub async fn events(&self) -> Result<reqwest::Response> {
+        self.events_after(None).await
+    }
+
+    /// Subscribe to the event stream, asking the server to replay durable events
+    /// newer than `after` when it supports that query; otherwise subscribe fresh.
+    pub async fn events_after(&self, after: Option<u64>) -> Result<reqwest::Response> {
+        if let Some(after) = after {
+            let request = self
+                .request(reqwest::Method::GET, "/api/event")
+                .query(&[("after", after)]);
+            if let Ok(response) = request.send().await
+                && let Ok(response) = response.error_for_status()
+            {
+                return Ok(response);
+            }
+        }
         self.request(reqwest::Method::GET, "/api/event")
             .send()
             .await

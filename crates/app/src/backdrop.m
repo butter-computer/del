@@ -3,6 +3,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <simd/simd.h>
 @class DelBackdrop;
+id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSString *source,NSError **error);
 @interface DelBackdropOwner:NSObject
 @property(nonatomic,weak) DelBackdrop *renderer;
 @end
@@ -13,6 +14,7 @@
     id<MTLTexture> _horizontal,_vertical;
 }
 @property(nonatomic,strong) NSData *libraryData;
+@property(nonatomic,strong) NSString *librarySource;
 @property(nonatomic,strong) id<MTLDevice> device;
 @property(nonatomic,strong) id<MTLComputePipelineState> horizontalState,verticalState;
 @property(nonatomic,strong) id<MTLRenderPipelineState> compositeState;
@@ -35,10 +37,8 @@
 - (BOOL)prepare:(id<MTLDevice>)device format:(MTLPixelFormat)format {
     if(self.device==device&&self.compositeState&&self.horizontalState&&self.verticalState)return YES;
     self.device=device;
-    NSData *bytes=self.libraryData;
-    dispatch_data_t data=dispatch_data_create(bytes.bytes,bytes.length,dispatch_get_main_queue(),^{(void)bytes;});
     NSError *error=nil;
-    id<MTLLibrary> library=[device newLibraryWithData:data error:&error];
+    id<MTLLibrary> library=del_metal_library(device,self.libraryData,self.librarySource,&error);
     if(!library){NSLog(@"Del backdrop library: %@",error);return NO;}
     self.horizontalState=[device newComputePipelineStateWithFunction:[library newFunctionWithName:@"backdrop_horizontal"] error:&error];
     self.verticalState=[device newComputePipelineStateWithFunction:[library newFunctionWithName:@"backdrop_vertical"] error:&error];
@@ -86,8 +86,9 @@
     // GPUI resumes on this same buffer with Load, before drawing the dialog.
 }
 @end
-void *del_backdrop_create(const unsigned char *bytes,size_t length){
+void *del_backdrop_create(const unsigned char *bytes,size_t length,const char *source,size_t sourceLength){
     DelBackdrop *renderer=[DelBackdrop new];renderer.libraryData=[NSData dataWithBytes:bytes length:length];
+    if(source&&sourceLength)renderer.librarySource=[[NSString alloc] initWithBytes:source length:sourceLength encoding:NSUTF8StringEncoding];
     return (__bridge_retained void *)renderer;
 }
 void del_backdrop_release(void *pointer){if(pointer){DelBackdrop *renderer=(__bridge_transfer DelBackdrop *)pointer;(void)renderer;}}

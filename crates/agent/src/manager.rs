@@ -605,20 +605,17 @@ impl SessionManager {
         }
         let started = Instant::now();
         let warm = prepared.is_some();
+        let backend = self.account_backend(config.provider, account_id.as_deref())?;
         let handle = match prepared {
             Some(handle) => handle,
-            None => {
-                self.account_backend(config.provider, account_id.as_deref())?
-                    .start_session(config.clone())
-                    .await?
-            }
+            None => backend.start_session(config.clone()).await?,
         };
         eprintln!(
             "[del startup] session ready warm={warm} elapsed={}ms",
             started.elapsed().as_millis()
         );
         let now = now_ms();
-        self.shared.index.lock().unwrap().upsert(SessionRecord {
+        let recorded = self.shared.index.lock().unwrap().upsert(SessionRecord {
             id: handle.id.clone(),
             provider: config.provider,
             account_id,
@@ -632,7 +629,12 @@ impl SessionManager {
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
-        })?;
+        });
+        if let Err(error) = recorded {
+            // Never leave a provider process running for a session nobody can reach.
+            let _ = backend.close(&handle.id).await;
+            return Err(error);
+        }
         Ok(self.attach(handle, applied_config))
     }
 
@@ -990,8 +992,15 @@ impl SessionManager {
             return Ok(());
         };
         live.pump.abort();
+        let provider = live.handle.provider;
         drop(live);
-        let res = match self.session_backend(id) {
+        // A live session must always be closable, even when its index record
+        // is gone: fall back to the provider the live handle was started on.
+        let backend = match self.session_backend(id) {
+            Err(AgentError::UnknownSession(_)) => self.backend(provider),
+            other => other,
+        };
+        let res = match backend {
             Ok(backend) => match backend.close(id).await {
                 // Already gone on the provider side: closing is done.
                 Err(AgentError::UnknownSession(_)) => Ok(()),
@@ -1794,6 +1803,17 @@ mod tests {
         m.delete(&a.id).await.unwrap();
         assert!(!m.shared.resume_locks.lock().unwrap().contains_key(&a.id));
         m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_session_closes_even_without_an_index_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.shared.index.lock().unwrap().remove(&h.id).unwrap();
+        m.close(&h.id).await.unwrap();
+        assert!(!m.is_live(&h.id));
+        assert!(m.backend(Provider::Codex).unwrap().send_prompt(&h.id, UserInput::text("x")).await.is_err());
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ mod native {
     use objc2_core_foundation::CFRetained;
     use objc2_core_video::CVPixelBuffer;
     unsafe extern "C" {
-        fn del_backdrop_create(bytes:*const u8,length:usize)->*mut c_void;
+        fn del_backdrop_create(bytes:*const u8,length:usize,source:*const u8,source_length:usize)->*mut c_void;
         fn del_backdrop_release(context:*mut c_void);
         fn del_backdrop_marker(context:*mut c_void,scale:f64,zoom:f64)->*mut c_void;
         fn del_backdrop_encode(buffer:*const c_void,command:*mut c_void,texture:*mut c_void)->bool;
@@ -18,7 +18,9 @@ mod native {
         fn new()->Self {
             gpui_apple::metal_renderer::set_surface_backdrop_callback(Some(del_backdrop_encode));
             let bytes=include_bytes!(concat!(env!("OUT_DIR"),"/del-fluid.metallib"));
-            Self(unsafe{del_backdrop_create(bytes.as_ptr(),bytes.len())})
+            // Empty when the build host lacked `xcrun metal`; the source compiles at runtime.
+            let source=include_str!("fluid.metal");
+            Self(unsafe{del_backdrop_create(bytes.as_ptr(),bytes.len(),source.as_ptr(),source.len())})
         }
         fn marker(&self,window:&Window)->Option<CFRetained<CVPixelBuffer>> {
             let pointer=unsafe{del_backdrop_marker(self.0,window.scale_factor() as f64,del_core::zoom::factor() as f64)};

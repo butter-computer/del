@@ -334,7 +334,7 @@ impl AgentBackend for MockBackend {
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
         let state = self.get(session)?;
         let mut inner = state.inner.lock().unwrap();
-        if inner.task.is_some() {
+        if inner.task.as_ref().is_some_and(|t| !t.is_finished()) {
             return Err(AgentError::Busy("a turn is already running".into()));
         }
         inner.turns += 1;

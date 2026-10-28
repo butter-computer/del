@@ -436,8 +436,10 @@ pub async fn provider_identity(provider: Provider, account: Option<&Account>, bi
     Ok(None)
 }
 
+/// The profile a record names. Only a UUID can name a profile directory (same rule as `load`).
 pub fn for_record(record: &del_agent::SessionRecord) -> Option<Account> {
-    Some(Account { id: record.account_id.clone()?, provider: record.provider, number: 0, identity: None, is_default: false, requires_login: false })
+    let id = record.account_id.clone().filter(|id| uuid::Uuid::parse_str(id).is_ok())?;
+    Some(Account { id, provider: record.provider, number: 0, identity: None, is_default: false, requires_login: false })
 }
 
 #[cfg(test)]
@@ -617,6 +619,21 @@ mod tests {
             assert_eq!(restored.environment(), a.environment());
             assert_eq!(restored.display(), "Account 1");
         }
+    }
+    #[test]
+    fn record_profiles_require_uuid_ids() {
+        let mut record = del_agent::SessionRecord {
+            id: del_agent::SessionId::new("s"), provider: Provider::Claude, account_id: Some("../../etc".into()),
+            cwd: "/tmp".into(), model: None, reasoning_effort: None, service_tier: None,
+            permission_mode: Default::default(), title: None, title_turns: 0, created_at_ms: 0, updated_at_ms: 0,
+            status: del_agent::SessionStatus::Idle,
+        };
+        assert!(for_record(&record).is_none());
+        let id = uuid::Uuid::new_v4().to_string();
+        record.account_id = Some(id.clone());
+        assert_eq!(for_record(&record).unwrap().id, id);
+        record.account_id = None;
+        assert!(for_record(&record).is_none());
     }
     #[test]
     fn terminal_arguments_are_quoted_as_literals() {

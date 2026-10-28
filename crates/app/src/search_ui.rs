@@ -133,28 +133,37 @@ impl Palette {
         self.hits.clear();
         self.previews.clear();
         self.reset_scroll(cx);
-        let task = self.runtime.spawn_blocking(move || {
-            if query.trim().is_empty() {
-                documents
-                    .iter()
-                    .filter(|document| !document.source.archived)
-                    .take(8)
-                    .map(|document| search::Hit {
-                        document: document.clone(),
-                        message: None,
-                        range: 0..0,
-                        snippet: document.source.cwd.to_string_lossy().into_owned(),
-                        snippet_range: 0..0,
-                    })
-                    .collect()
-            } else {
-                search::search_until(&documents, &query, || {
-                    latest.load(std::sync::atomic::Ordering::Relaxed) != generation
-                })
-                .unwrap_or_default()
-            }
-        });
+        let runtime = self.runtime.clone();
+        // Keystrokes settle for ~100 ms before a search starts; the recent list is immediate.
+        let debounce = !query.trim().is_empty();
         cx.spawn(async move |this, cx| {
+            if debounce {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                if latest.load(std::sync::atomic::Ordering::Relaxed) != generation {
+                    return;
+                }
+            }
+            let task = runtime.spawn_blocking(move || {
+                if query.trim().is_empty() {
+                    documents
+                        .iter()
+                        .filter(|document| !document.source.archived)
+                        .take(8)
+                        .map(|document| search::Hit {
+                            document: document.clone(),
+                            message: None,
+                            range: 0..0,
+                            snippet: document.source.cwd.to_string_lossy().into_owned(),
+                            snippet_range: 0..0,
+                        })
+                        .collect()
+                } else {
+                    search::search_until(&documents, &query, || {
+                        latest.load(std::sync::atomic::Ordering::Relaxed) != generation
+                    })
+                    .unwrap_or_default()
+                }
+            });
             if let Ok(hits) = task.await {
                 let _ = this.update(cx, |this, cx| {
                     if this.generation != generation {
@@ -1042,6 +1051,7 @@ mod tests {
                         archived: false,
                         live: None,
                     },
+                    folded: Default::default(),
                     messages: Arc::new(vec![search::Message {
                         role: "Assistant",
                         text: "**Cats** and *purrs*, `code`, [a link](https://example.com).".into(),
@@ -1101,6 +1111,7 @@ mod tests {
                         archived: false,
                         live: None,
                     },
+                    folded: Default::default(),
                     messages: Arc::new(vec![search::Message {
                         role: "You",
                         text: "match second match".into(),

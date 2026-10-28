@@ -16,12 +16,22 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::sync::{OnceCell, broadcast};
+
+/// Event-stream reconnection: first delay, ceiling, and attempts before giving up.
+const RECONNECT_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+const RECONNECT_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+const RECONNECT_ATTEMPTS: u32 = 10;
+/// Resume pagination stops after this many pages even if the server keeps paging.
+const MAX_HISTORY_PAGES: usize = 500;
 
 #[derive(Default)]
 pub struct OpenCodeBackend {
     environment: Vec<(String, String)>,
-    servers: AsyncMutex<HashMap<PathBuf, Arc<Server>>>,
+    /// One server per workspace. The cell lets concurrent callers for the same
+    /// workspace share a single startup without holding the map lock across it
+    /// (or blocking other workspaces).
+    servers: Mutex<HashMap<PathBuf, Arc<OnceCell<Arc<Server>>>>>,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
     tools: Mutex<Option<backend::BrowserTools>>,
 }
@@ -76,24 +86,43 @@ pub(crate) fn seg(s: &str) -> String {
 fn err(message: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {message}"))
 }
+/// `Path::canonicalize` off the async runtime's worker threads.
+async fn canonicalize(path: &Path) -> Result<PathBuf> {
+    let path = path.to_path_buf();
+    Ok(tokio::task::spawn_blocking(move || path.canonicalize())
+        .await
+        .map_err(|e| err(format!("canonicalize task failed: {e}")))??)
+}
 impl OpenCodeBackend {
     pub fn with_environment(environment: Vec<(String, String)>) -> Self { { let mut backend = Self::default(); backend.environment = environment; backend } }
     async fn server(&self, cwd: &Path) -> Result<Arc<Server>> {
-        let cwd = cwd.canonicalize()?;
-        let mut servers = self.servers.lock().await;
-        if let Some(server) = servers.get(&cwd) {
-            if server.is_alive() {
-                return Ok(server.clone());
+        let cwd = canonicalize(cwd).await?;
+        let cell = {
+            let mut servers = self.servers.lock().unwrap();
+            let crashed = servers
+                .get(&cwd)
+                .and_then(|cell| cell.get())
+                .is_some_and(|server| !server.is_alive());
+            if crashed {
+                // Crashed: start a fresh server rather than reuse a dead address.
+                if let Some(server) = servers.remove(&cwd).and_then(|cell| cell.get().cloned()) {
+                    self.retire_browser(&server);
+                }
             }
-            // Crashed: start a fresh server rather than reuse a dead address.
-            if let Some(server) = servers.remove(&cwd) {
-                self.retire_browser(&server);
-            }
-        }
+            servers.entry(cwd.clone()).or_default().clone()
+        };
         // Browser tools are installed per session by `install_tools`.
-        let server = Arc::new(Server::start(&cwd, &self.environment).await?);
-        servers.insert(cwd, server.clone());
-        Ok(server)
+        cell.get_or_try_init(|| async {
+            Ok(Arc::new(Server::start(&cwd, &self.environment).await?))
+        })
+        .await
+        .cloned()
+    }
+    /// The workspace's server only if it is already running; never starts one.
+    async fn running_server(&self, cwd: &Path) -> Option<Arc<Server>> {
+        let cwd = canonicalize(cwd).await.ok()?;
+        let cell = self.servers.lock().unwrap().get(&cwd).cloned()?;
+        cell.get().filter(|server| server.is_alive()).cloned()
     }
     /// Revoke the browser credential of a server that is going away.
     fn retire_browser(&self, server: &Server) {
@@ -248,6 +277,7 @@ impl OpenCodeBackend {
             // Bytes before `scanned` hold no newline; never rescan them.
             let mut scanned = 0;
             let mut files_changed = false;
+            let mut attempts = 0u32;
             loop {
                 let mut start = 0;
                 while let Some(offset) = buffer[scanned..].iter().position(|b| *b == b'\n') {
@@ -365,11 +395,38 @@ impl OpenCodeBackend {
                 buffer.drain(..start);
                 scanned = buffer.len();
                 match response.chunk().await {
-                    Ok(Some(bytes)) => buffer.extend_from_slice(&bytes),
+                    Ok(Some(bytes)) => {
+                        attempts = 0;
+                        buffer.extend_from_slice(&bytes);
+                    }
                     _ => {
-                        stream_live.connected.store(false, Ordering::SeqCst);
-                        let _ = queue.send(Queued::Closed);
-                        break;
+                        // Resubscribe with backoff, replaying from the last durable
+                        // sequence when the server honours `after`. Give up only when
+                        // the server process is gone or the attempts are exhausted.
+                        let mut delay = RECONNECT_INITIAL;
+                        let mut reconnected = None;
+                        while attempts < RECONNECT_ATTEMPTS && stream_live.server.is_alive() {
+                            attempts += 1;
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(RECONNECT_MAX);
+                            let after = *stream_live.sequence.lock().unwrap();
+                            if let Ok(next) = stream_live.server.events_after(after).await {
+                                reconnected = Some(next);
+                                break;
+                            }
+                        }
+                        match reconnected {
+                            Some(next) => {
+                                response = next;
+                                buffer.clear();
+                                scanned = 0;
+                            }
+                            None => {
+                                stream_live.connected.store(false, Ordering::SeqCst);
+                                let _ = queue.send(Queued::Closed);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -403,7 +460,13 @@ impl OpenCodeBackend {
         {
             return Err(AgentError::Busy(id.to_string()));
         }
-        let generation = live.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // A steer joins the current execution; bumping the generation for it
+        // would orphan a running local command's completion and leave `busy` set.
+        let generation = if steer {
+            live.generation.load(Ordering::SeqCst)
+        } else {
+            live.generation.fetch_add(1, Ordering::SeqCst) + 1
+        };
         let result = async {
             // A native command can complete locally without starting an execution.
             // Capture its boundary so completion can be reconciled with the event stream.
@@ -411,7 +474,11 @@ impl OpenCodeBackend {
                 let previous = *live.sequence.lock().unwrap();
                 live.server.watermark(id, previous).await?
             } else { None };
-            let body = prompt_body(&input, command.as_ref(), steer)?;
+            let mut attachments = Vec::with_capacity(input.attachments.len());
+            for attachment in &input.attachments {
+                attachments.push(canonicalize(&attachment.path).await?);
+            }
+            let body = prompt_body(&input, &attachments, command.as_ref(), steer)?;
             let path = format!(
                 "/api/session/{}/{}",
                 seg(id.as_str()),
@@ -473,7 +540,13 @@ impl OpenCodeBackend {
         result
     }
 }
-fn prompt_body(input: &UserInput, command: Option<&ComposerCommand>, steer: bool) -> Result<Value> {
+/// `attachments` are the already-canonicalized paths of `input.attachments`, in order.
+fn prompt_body(
+    input: &UserInput,
+    attachments: &[PathBuf],
+    command: Option<&ComposerCommand>,
+    steer: bool,
+) -> Result<Value> {
     let mut text = input.text.trim().to_owned();
     for skill in &input.skills {
         if let Some(rest) = text
@@ -497,9 +570,8 @@ fn prompt_body(input: &UserInput, command: Option<&ComposerCommand>, steer: bool
             .collect::<Result<Vec<_>>>()?
             .into();
     }
-    body["files"]=input.attachments.iter().map(|a|{
-        let path=a.path.canonicalize()?;
-        let uri=reqwest::Url::from_file_path(&path).map_err(|_|err("invalid attachment path"))?;
+    body["files"]=attachments.iter().map(|path|{
+        let uri=reqwest::Url::from_file_path(path).map_err(|_|err("invalid attachment path"))?;
         Ok(json!({"uri":uri.as_str(),"name":path.file_name().unwrap_or_default().to_string_lossy()}))
     }).collect::<Result<Vec<_>>>()?.into();
     if let Some(c) = command {
@@ -611,7 +683,7 @@ impl AgentBackend for OpenCodeBackend {
         Ok(mapping::commands(&commands, &skills))
     }
     async fn start_session(&self, mut config: SessionConfig) -> Result<SessionHandle> {
-        config.cwd = config.cwd.canonicalize()?;
+        config.cwd = canonicalize(&config.cwd).await?;
         let server = self.server(&config.cwd).await?;
         self.install_tools(&server).await?;
         let mut body = json!({"location":{"directory":config.cwd},"permissions":permissions(config.permission_mode)});
@@ -650,7 +722,7 @@ impl AgentBackend for OpenCodeBackend {
         let mut first_user: Option<String> = None;
         let mut last_user: Option<String> = None;
         let mut cursor: Option<String> = None;
-        loop {
+        for _ in 0..MAX_HISTORY_PAGES {
             let mut request = server
                 .request(Method::GET, &format!("/api/session/{}/message", seg(id.as_str())))
                 .query(&[("limit", "200")])
@@ -670,10 +742,12 @@ impl AgentBackend for OpenCodeBackend {
                 }
                 history.extend(mapping.message(message));
             }
-            cursor = page["cursor"]["next"].as_str().map(str::to_owned);
-            if cursor.is_none() {
+            let next = page["cursor"]["next"].as_str().map(str::to_owned);
+            // A repeated cursor would page forever; treat it as the end.
+            if next.is_none() || next == cursor {
                 break;
             }
+            cursor = next;
         }
         if let (Some(first), Some(last)) = (first_user, last_user) {
             let response = server
@@ -766,9 +840,13 @@ impl AgentBackend for OpenCodeBackend {
     }
 
     async fn session_title(&self, id: &SessionId, cwd: &Path) -> Result<Option<String>> {
-        let value = self
-            .server(cwd)
-            .await?
+        // Title refresh runs for recorded sessions; starting a server per
+        // workspace just to read a name is not worth it. Answer only from a
+        // server that is already running for other reasons.
+        let Some(server) = self.running_server(cwd).await else {
+            return Ok(None);
+        };
+        let value = server
             .json(Method::GET, &format!("/api/session/{}", seg(id.as_str())), None)
             .await?;
         Ok(value["data"]["title"].as_str().map(str::to_owned))
@@ -796,8 +874,11 @@ impl AgentBackend for OpenCodeBackend {
         for id in ids {
             self.close(&id).await?;
         }
-        for (_, server) in self.servers.lock().await.drain() {
-            self.retire_browser(&server);
+        let servers: Vec<_> = self.servers.lock().unwrap().drain().collect();
+        for (_, cell) in servers {
+            if let Some(server) = cell.get() {
+                self.retire_browser(server);
+            }
         }
         Ok(())
     }
@@ -821,7 +902,7 @@ pub async fn create_terminal_session(
 }
 
 pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<&str>, variant: Option<&str>, env: &[(String, String)]) -> Result<String> {
-    let cwd = cwd.canonicalize()?;
+    let cwd = canonicalize(cwd).await?;
     let server = Server::start(&cwd, env).await?;
     let mut body = json!({"location":{"directory":cwd}});
     if let Some(model) = model {
@@ -1202,7 +1283,7 @@ export default Plugin.define({{
             source: "OpenCode".into(),
             target: Some("opaque-id".into()),
         });
-        let body = prompt_body(&input, None, true).unwrap();
+        let body = prompt_body(&input, &[], None, true).unwrap();
         assert_eq!(body["text"], "Inspect changes");
         assert_eq!(body["skills"], json!([{"id":"opaque-id"}]));
         assert_eq!(body["delivery"], "steer");
