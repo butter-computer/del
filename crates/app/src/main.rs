@@ -37,6 +37,7 @@ mod icons;
 mod mcp_bridge;
 mod mode_ui;
 mod model_picker;
+mod new_tab;
 mod projects;
 mod provider_updates;
 mod providers;
@@ -54,6 +55,7 @@ mod terminal_store;
 mod usage;
 mod voice_ui;
 mod workspace_files;
+mod workspace_tabs;
 mod zoom;
 
 use crate::appearance::{page_surface, rgb, rgba, shell_surface};
@@ -224,6 +226,9 @@ actions!(
     del,
     [
         NewSession,
+        NewWorkspaceTab,
+        NextWorkspaceTab,
+        PrevWorkspaceTab,
         NextSession,
         PrevSession,
         FocusComposer,
@@ -375,6 +380,8 @@ struct AppShell {
     sidebar_toggles: u64,
     tab_scroll: ScrollHandle,
     tab_reveal: Option<(u64, std::time::Instant)>,
+    workspaces: HashMap<u64, Entity<workspace_tabs::WorkspaceTabs>>,
+    workspace_previous: Option<u64>,
     right: Entity<RightPanel>,
     right_owner: u64,
     right_key: Option<String>,
@@ -681,6 +688,8 @@ impl AppShell {
             sidebar_toggles: 0,
             tab_scroll: ScrollHandle::new(),
             tab_reveal: None,
+            workspaces: HashMap::new(),
+            workspace_previous: None,
             right,
             right_owner: 0,
             right_key: None,
@@ -1104,8 +1113,8 @@ impl AppShell {
             self.remember_right(cx);
         }
         // Panels for closed tabs would otherwise keep PTYs, WKWebViews and their
-        // 2 s Changes watch alive for the rest of the run. Uid 0 is the unlisted
-        // startup composer, which has no tab and is reused.
+        // 2 s Changes watch alive for the rest of the run. Uid 0 belongs to
+        // the startup composer.
         let stale: Vec<u64> = self
             .right_cache
             .keys()
@@ -1123,6 +1132,45 @@ impl AppShell {
         });
     }
 
+    fn workspace(&self, cx: &App) -> Option<Entity<workspace_tabs::WorkspaceTabs>> {
+        self.workspaces.get(&self.composer_owner(cx)).cloned()
+    }
+
+    fn sync_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let owner = self.composer_owner(cx);
+        let root = self.state.read(cx).effective().2;
+        self.workspaces.entry(owner).or_insert_with(|| {
+            let workspace =
+                cx.new(|cx| workspace_tabs::WorkspaceTabs::new(root.clone(), window, cx));
+            cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+            workspace
+        });
+        if self.workspace_previous != Some(owner) {
+            if let Some(previous) = self
+                .workspace_previous
+                .and_then(|id| self.workspaces.get(&id))
+            {
+                previous.update(cx, |w, cx| w.set_visible(false, cx));
+            }
+            self.workspace_previous = Some(owner);
+        }
+        if let Some(workspace) = self.workspace(cx) {
+            let visible = !self.search_open && self.state.read(cx).panel == Panel::Chat;
+            workspace.update(cx, |w, cx| {
+                w.set_root(root, window, cx);
+                w.set_visible(visible, cx);
+            });
+        }
+    }
+
+    fn new_workspace_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_workspaces(window, cx);
+        if let Some(workspace) = self.workspace(cx) {
+            workspace.update(cx, |w, cx| w.new_tab(window, cx));
+        }
+        cx.notify();
+    }
+
     fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.select_nth(n, cx));
         self.focus_composer(window, cx);
@@ -1130,6 +1178,12 @@ impl AppShell {
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_open {
+            return;
+        }
+        if let Some(workspace) = self.workspace(cx)
+            && !workspace.read(cx).is_chat()
+        {
+            workspace.update(cx, |w, cx| w.focus(window, cx));
             return;
         }
         if let Selection::Terminal(id) = &self.state.read(cx).selection
@@ -1847,6 +1901,91 @@ impl AppShell {
     }
 
     fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace(cx);
+        let chat_active = workspace.as_ref().is_none_or(|w| w.read(cx).is_chat());
+        let (title, provider) = {
+            let state = self.state.read(cx);
+            let tab = match &state.selection {
+                Selection::Draft(id) => Tab::Draft(*id),
+                Selection::Session(id) => Tab::Session(id.clone()),
+                Selection::Terminal(id) => Tab::Terminal(id.clone()),
+            };
+            state.tab_info(&tab)
+        };
+        let tools = workspace.map(|w| w.update(cx, |w, cx| w.render_strip(false, cx)));
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .id("session-workspace-tabs")
+                    .h(zpx(50.))
+                    .flex_none()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .child(
+                        h_flex()
+                            .id("workspace-chat-tab")
+                            .role(gpui::Role::Button)
+                            .aria_label("Open session chat tab")
+                            .h(zpx(34.))
+                            .max_w(zpx(220.))
+                            .flex_none()
+                            .px_2()
+                            .gap_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(zpx(TEXT_MD))
+                            .text_color(if chat_active {
+                                rgb(0xf5f5f5)
+                            } else {
+                                rgba(0xffffff8c)
+                            })
+                            .when(chat_active, |t| t.bg(rgba(0xffffff14)))
+                            .hover(|t| t.bg(rgba(0xffffff0a)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(workspace) = this.workspace(cx) {
+                                    workspace.update(cx, |w, cx| w.select_index(0, window, cx));
+                                }
+                                this.focus_composer(window, cx);
+                            }))
+                            .child(mode_ui::tab_mark(provider))
+                            .child(div().min_w_0().truncate().child(title)),
+                    )
+                    .children(tools)
+                    .child(
+                        Button::new("new-session-workspace-tab")
+                            .accessibility_label("New session tab")
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .tooltip("New tab (Ctrl+T)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_workspace_tab(window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_session_content(window, cx)),
+            )
+    }
+
+    fn render_session_content(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(workspace) = self.workspace(cx)
+            && !workspace.read(cx).is_chat()
+        {
+            self.ambient
+                .update(cx, |ambient, cx| ambient.set_visible(false, window, cx));
+            return div()
+                .size_full()
+                .rounded(zpx(self.metrics.page_radius))
+                .overflow_hidden()
+                .bg(page_surface())
+                .child(workspace)
+                .into_any_element();
+        }
         let radius = zpx(self.metrics.page_radius);
         let (panel, selection) = {
             let st = self.state.read(cx);
@@ -2147,6 +2286,7 @@ impl Render for AppShell {
             window.request_animation_frame();
         }
         self.ensure_modes(window, cx);
+        self.sync_workspaces(window, cx);
         let mode_key = (
             self.state.read(cx).selection.clone(),
             self.state.read(cx).mode(),
@@ -2293,6 +2433,13 @@ impl Render for AppShell {
                 this.right.update(cx, |r, cx| r.show_terminal(window, cx));
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.state.read(cx).panel != Panel::Providers
+                    && let Some(workspace) = this.workspace(cx)
+                    && workspace.update(cx, |w, cx| w.close_active(window, cx))
+                {
+                    this.focus_composer(window, cx);
+                    return;
+                }
                 this.state.update(cx, |state, cx| {
                     if state.panel == Panel::Providers {
                         state.toggle_providers(cx);
@@ -2311,8 +2458,25 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &Tab7, w, cx| this.go_tab(6, w, cx)))
             .on_action(cx.listener(|this, _: &Tab8, w, cx| this.go_tab(7, w, cx)))
             .on_action(cx.listener(|this, _: &Tab9, w, cx| this.go_tab(8, w, cx)))
+            .on_action(cx.listener(|this, _: &NewWorkspaceTab, window, cx| {
+                if this.state.read(cx).panel == Panel::Chat {
+                    this.new_workspace_tab(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 this.state.update(cx, |s, cx| s.new_session(cx));
+                this.focus_composer(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextWorkspaceTab, window, cx| {
+                if let Some(workspace) = this.workspace(cx) {
+                    workspace.update(cx, |w, cx| w.select_relative(1, window, cx));
+                }
+                this.focus_composer(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevWorkspaceTab, window, cx| {
+                if let Some(workspace) = this.workspace(cx) {
+                    workspace.update(cx, |w, cx| w.select_relative(-1, window, cx));
+                }
                 this.focus_composer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| {
@@ -2509,7 +2673,8 @@ fn main() {
                 KeyBinding::new("cmd-shift-b", ToggleFiles, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("cmd-j", ToggleTerminal, None),
-                KeyBinding::new("cmd-t", NewSession, None),
+                KeyBinding::new("cmd-t", NewWorkspaceTab, None),
+                KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-w", CloseTab, None),
                 KeyBinding::new("cmd-1", Tab1, None),
@@ -2523,9 +2688,9 @@ fn main() {
                 KeyBinding::new("cmd-9", Tab9, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("ctrl-tab", NextSession, None),
+                KeyBinding::new("ctrl-tab", NextWorkspaceTab, None),
                 KeyBinding::new("cmd-shift-]", NextSession, None),
-                KeyBinding::new("ctrl-shift-tab", PrevSession, None),
+                KeyBinding::new("ctrl-shift-tab", PrevWorkspaceTab, None),
                 KeyBinding::new("cmd-shift-[", PrevSession, None),
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("cmd-.", StopSession, None),

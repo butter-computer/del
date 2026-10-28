@@ -398,7 +398,7 @@ impl AppState {
             pending_prompts: HashMap::new(),
             starting: Default::default(),
             switching_accounts: Default::default(),
-            tabs: Vec::new(),
+            tabs: vec![Tab::Draft(0)],
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             next_uid: 1,

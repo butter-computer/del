@@ -4,7 +4,7 @@ use crate::appearance::{rgb, rgba};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
 use del_core::typography::TEXT_SM;
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -72,12 +72,29 @@ fn resized_tree_height(start: f32, delta: f32, available: f32) -> f32 {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-enum Pane {
+pub(crate) enum Pane {
     #[default]
     Files,
     Terminal,
     Browser,
     Changes,
+    NewTab,
+}
+
+impl Pane {
+    fn tab_label(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Files => ("tab-files", "Files"),
+            Self::Changes => ("tab-changes", "Changes"),
+            Self::Terminal => ("tab-terminal", "Terminal"),
+            Self::Browser => ("tab-browser", "Browser"),
+            Self::NewTab => ("tab-new", "New tab"),
+        }
+    }
+}
+
+fn default_panes() -> Vec<Pane> {
+    vec![Pane::Files, Pane::Changes, Pane::Terminal, Pane::Browser]
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +102,7 @@ enum Pane {
 pub struct SavedPanel {
     pub open: bool,
     pane: Pane,
+    open_panes: Vec<Pane>,
     expanded: HashSet<PathBuf>,
     selected: Option<PathBuf>,
     show_hidden: bool,
@@ -112,6 +130,7 @@ impl Default for SavedPanel {
         Self {
             open: false,
             pane: Pane::Files,
+            open_panes: default_panes(),
             expanded: HashSet::new(),
             selected: None,
             show_hidden: false,
@@ -237,7 +256,12 @@ enum Viewer {
 }
 
 pub struct RightPanel {
+    workspace: bool,
     pane: Pane,
+    open_panes: Vec<Pane>,
+    address: Entity<InputState>,
+    new_tab_scroll: ScrollHandle,
+    tool_tab_scroll: ScrollHandle,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
     viewer: Viewer,
@@ -281,6 +305,136 @@ pub struct RightPanel {
 }
 
 impl RightPanel {
+    fn activate_pane(&mut self, pane: Pane) {
+        if pane != Pane::NewTab && !self.open_panes.contains(&pane) {
+            self.open_panes.push(pane);
+        }
+        self.pane = pane;
+    }
+
+    fn open_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane != pane {
+            self.change_expanded.clear();
+        }
+        self.activate_pane(pane);
+        if let Some(index) = self.open_panes.iter().position(|p| *p == pane) {
+            self.tool_tab_scroll.scroll_to_item(index);
+        }
+        self.prepare_to_show(window, cx);
+        match pane {
+            Pane::Terminal => self.focus_terminal(window, cx),
+            Pane::Changes => self.refresh_changes(cx),
+            Pane::Files => self.refresh_tree(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane = Pane::NewTab;
+        self.tool_tab_scroll.scroll_to_item(self.open_panes.len());
+        self.address.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn navigate_from_new_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = crate::new_tab::destination(self.address.read(cx).value().as_ref()) else {
+            return;
+        };
+        self.activate_pane(Pane::Browser);
+        // Reuse an untouched initial browser page; preserve existing browsing tabs.
+        if self.browser_tabs.len() == 1
+            && self.browser_tabs[0].url == "about:blank"
+            && self.browser.is_none()
+        {
+            self.browser_tabs[0].url = url;
+            self.ensure_browser(cx);
+        } else {
+            self.new_browser_tab(Some(url), cx);
+        }
+        cx.notify();
+    }
+
+    fn close_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.open_panes.iter().position(|p| *p == pane) else {
+            return;
+        };
+        if pane == Pane::Files && self.has_unsaved_edits() {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(
+                    "Save or revert your file edits before closing this tab.",
+                ),
+                cx,
+            );
+            return;
+        }
+        match pane {
+            Pane::Files => {
+                if let Some(preview) = self.document_preview.take() {
+                    preview.hide();
+                }
+                self.file_request += 1;
+                self.viewer = Viewer::None;
+                self.editors.clear();
+                self.file_drafts.clear();
+            }
+            Pane::Terminal => {
+                for (_, terminal) in self.terminals.drain() {
+                    terminal.update(cx, |terminal, cx| terminal.close(cx));
+                }
+                self.terminal_tabs = vec![uuid::Uuid::new_v4().to_string()];
+                self.terminal_active = 0;
+                self.terminal_error = None;
+            }
+            Pane::Browser => {
+                if let Some(browser) = self.browser.take() {
+                    browser.hide();
+                }
+                self.browsers.clear();
+                self.browser_tabs = vec![Default::default()];
+                self.browser_active = 0;
+                self.browser_watch = None;
+            }
+            Pane::Changes => {
+                self.changes_watch = None;
+                self.change_request += 1;
+                self.changes_loading = false;
+                self.change_expanded.clear();
+            }
+            Pane::NewTab => {}
+        }
+        self.open_panes.remove(index);
+        if self.open_panes.is_empty() {
+            self.open_new_tab(window, cx);
+        } else if self.pane == pane {
+            let next = self.open_panes[index.min(self.open_panes.len() - 1)];
+            self.open_tool(next, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn has_unsaved_edits(&self) -> bool {
+        !self.saving.is_empty()
+            || self
+                .file_drafts
+                .values()
+                .any(|draft| draft.text != draft.original)
+    }
+
+    /// Reuse the tool body in a session tab without the sidebar's pane switcher.
+    pub fn show_workspace(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace = true;
+        self.pane = pane;
+        self.prepare_to_show(window, cx);
+        if pane == Pane::Terminal {
+            self.focus_terminal(window, cx);
+        }
+        cx.notify();
+    }
+
     pub fn is_changes(&self) -> bool {
         self.pane == Pane::Changes
     }
@@ -317,7 +471,7 @@ impl RightPanel {
     }
 
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.changes_watch.is_none() {
+        if self.pane == Pane::Changes && self.changes_watch.is_none() {
             self.changes_watch = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -348,6 +502,7 @@ impl RightPanel {
         SavedPanel {
             open,
             pane: self.pane,
+            open_panes: self.open_panes.clone(),
             expanded: self.expanded.clone(),
             selected: match &self.viewer {
                 Viewer::None => None,
@@ -379,6 +534,15 @@ impl RightPanel {
         } else {
             saved.pane
         };
+        self.open_panes = saved
+            .open_panes
+            .into_iter()
+            .filter(|p| *p != Pane::NewTab)
+            .collect();
+        self.open_panes.dedup();
+        if self.pane != Pane::NewTab && !self.open_panes.contains(&self.pane) {
+            self.pane = self.open_panes.first().copied().unwrap_or(Pane::NewTab);
+        }
         self.terminal_tabs = if saved.terminal_tabs.is_empty() {
             vec![uuid::Uuid::new_v4().to_string()]
         } else {
@@ -418,9 +582,21 @@ impl RightPanel {
         }
     }
 
-    pub fn new(root: PathBuf, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter a URL"));
+        cx.subscribe_in(&address, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.navigate_from_new_tab(cx);
+            }
+        })
+        .detach();
         let mut panel = Self {
+            workspace: false,
             pane: Pane::Files,
+            open_panes: default_panes(),
+            address,
+            new_tab_scroll: ScrollHandle::new(),
+            tool_tab_scroll: ScrollHandle::new(),
             root,
             expanded: HashSet::new(),
             viewer: Viewer::None,
@@ -498,7 +674,7 @@ impl RightPanel {
     }
 
     pub fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane = Pane::Terminal;
+        self.activate_pane(Pane::Terminal);
         self.ensure_terminal(window, cx);
         self.focus_terminal(window, cx);
         cx.notify();
@@ -609,7 +785,7 @@ impl RightPanel {
             ));
         }
         if reveal {
-            self.pane = Pane::Browser;
+            self.activate_pane(Pane::Browser);
         }
         if let Some(id) = &request.tab_id {
             let index = self
@@ -780,7 +956,7 @@ impl RightPanel {
     }
 
     pub fn preview_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.pane = Pane::Files;
+        self.activate_pane(Pane::Files);
         self.open_file(path, cx);
     }
 
@@ -876,6 +1052,7 @@ impl RightPanel {
         let active = self.pane == pane;
         div()
             .id(id)
+            .group(id)
             .role(gpui::Role::Button)
             .aria_label(label)
             .px_1p5()
@@ -894,24 +1071,30 @@ impl RightPanel {
             })
             .when(active, |t| t.bg(rgba(0xffffff14)))
             .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if this.pane != pane {
-                    this.change_expanded.clear();
-                }
-                this.pane = pane;
-                if pane == Pane::Terminal {
-                    this.ensure_terminal(window, cx);
-                    this.focus_terminal(window, cx);
-                } else if pane == Pane::Browser {
-                    this.ensure_browser(cx);
-                } else if pane == Pane::Changes {
-                    this.refresh_changes(cx);
-                } else {
-                    this.refresh_tree(cx);
-                }
-                cx.notify();
-            }))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_tool(pane, window, cx)))
             .child(label)
+            .child(
+                div()
+                    .id(SharedString::from(format!("close-{id}")))
+                    .debug_selector(move || format!("close-{id}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Close {label} sidebar tab"))
+                    .ml_1()
+                    .size(zpx(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .text_color(rgba(0xffffff80))
+                    .opacity(0.)
+                    .group_hover(id, |button| button.opacity(1.))
+                    .hover(|b| b.bg(rgba(0xffffff14)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tool(pane, window, cx);
+                    }))
+                    .child(crate::icons::icon(IconName::Close).with_size(zpx(11.))),
+            )
     }
 
     fn render_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1871,7 +2054,28 @@ impl Render for RightPanel {
             Pane::Terminal => self.render_terminal(cx),
             Pane::Browser => self.render_browser(cx),
             Pane::Changes => self.render_changes(window, cx),
+            Pane::NewTab => v_flex()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .child(crate::new_tab::address_bar(&self.address))
+                .child(crate::new_tab::tools(
+                    true,
+                    &self.new_tab_scroll,
+                    Self::open_tool,
+                    cx,
+                ))
+                .into_any_element(),
         };
+        if self.workspace {
+            return v_flex()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .child(body)
+                .into_any_element();
+        }
         v_flex()
             .size_full()
             .min_w_0()
@@ -1887,10 +2091,40 @@ impl Render for RightPanel {
                     .px_2()
                     .gap_0p5()
                     .items_center()
-                    .child(self.tab("tab-files", "Files", Pane::Files, cx))
-                    .child(self.tab("tab-changes", "Changes", Pane::Changes, cx))
-                    .child(self.tab("tab-terminal", "Terminal", Pane::Terminal, cx))
-                    .child(self.tab("tab-browser", "Browser", Pane::Browser, cx))
+                    .child(
+                        h_flex()
+                            .id("sidebar-tool-tabs")
+                            .track_scroll(&self.tool_tab_scroll)
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .gap_0p5()
+                            .children(self.open_panes.iter().map(|pane| {
+                                let (id, label) = pane.tab_label();
+                                self.tab(id, label, *pane, cx)
+                            }))
+                            .when(self.pane == Pane::NewTab, |row| {
+                                row.child(div().px_1p5().text_size(zpx(TEXT_SM)).child("New tab"))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("new-sidebar-tab")
+                            .role(gpui::Role::Button)
+                            .aria_label("New sidebar tab")
+                            .size(zpx(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|button| button.bg(rgba(0xffffff14)))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)),
+                            )
+                            .child(crate::icons::icon(IconName::Plus).with_size(zpx(14.))),
+                    )
                     .when(self.pane == Pane::Files, |row| {
                         row.child(div().flex_1()).child(
                             h_flex()
@@ -1951,6 +2185,7 @@ impl Render for RightPanel {
                     }),
             )
             .child(v_flex().flex_1().min_h_0().overflow_hidden().child(body))
+            .into_any_element()
     }
 }
 
@@ -2036,6 +2271,175 @@ fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn older_sidebar_state_keeps_all_four_tool_tabs() {
+        let saved: SavedPanel = serde_json::from_str(r#"{"open":true,"pane":"Files"}"#).unwrap();
+        assert!(saved.open_panes == default_panes());
+        let empty: SavedPanel =
+            serde_json::from_str(r#"{"open":true,"pane":"NewTab","open_panes":[]}"#).unwrap();
+        assert!(empty.open_panes.is_empty());
+        assert!(empty.restore_open());
+    }
+
+    #[::gpui::test]
+    fn closing_sidebar_tools_reaches_shared_launcher_and_restores_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                // Closing a background tool must leave Files selected.
+                panel.close_tool(Pane::Browser, window, cx);
+                assert!(panel.pane == Pane::Files);
+                panel.close_tool(Pane::Terminal, window, cx);
+                panel.close_tool(Pane::Changes, window, cx);
+                panel.close_tool(Pane::Files, window, cx);
+                assert!(panel.open_panes.is_empty());
+                assert!(panel.pane == Pane::NewTab);
+                let saved =
+                    serde_json::from_str(&serde_json::to_string(&panel.snapshot(true)).unwrap())
+                        .unwrap();
+                panel.restore(saved, window, cx);
+                assert!(panel.open_panes.is_empty());
+                assert!(panel.pane == Pane::NewTab);
+                panel.open_tool(Pane::Files, window, cx);
+                assert!(panel.open_panes == vec![Pane::Files]);
+                panel.open_new_tab(window, cx);
+                panel.open_tool(Pane::Files, window, cx);
+                assert_eq!(panel.open_panes.len(), 1);
+                panel.close_tool(Pane::Files, window, cx);
+                panel.address.update(cx, |input, cx| {
+                    input.set_value("http://localhost:8766", window, cx)
+                });
+                panel.navigate_from_new_tab(cx);
+                assert!(panel.open_panes == vec![Pane::Browser]);
+                assert_eq!(
+                    panel.browser.as_ref().unwrap().url(),
+                    "http://localhost:8766/"
+                );
+                panel.close_tool(Pane::Browser, window, cx);
+                assert!(panel.browser.is_none());
+                assert!(panel.browsers.is_empty());
+                assert!(panel.pane == Pane::NewTab);
+            })
+        });
+    }
+
+    #[::gpui::test]
+    fn sidebar_close_buttons_reveal_launcher_at_sidebar_width(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<RightPanel>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(zpx(PANEL_WIDTH)).h(zpx(600.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            panel = Some(view.clone());
+            let fixture = cx.new(|_| Fixture(view));
+            gpui_kit::component::Root::new(fixture, window, cx)
+        });
+        let panel = panel.unwrap();
+        for id in [
+            "close-tab-files",
+            "close-tab-changes",
+            "close-tab-terminal",
+            "close-tab-browser",
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let target = cx
+                .debug_bounds(id)
+                .expect("close button is laid out")
+                .center();
+            cx.simulate_mouse_move(target, None, Modifiers::default());
+            cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+        }
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.open_panes.is_empty());
+            assert!(panel.pane == Pane::NewTab);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("Files").expect("launcher shows Files");
+        assert!(target.size.width > zpx(200.));
+        assert_eq!(target.size.height, zpx(44.));
+        cx.simulate_mouse_move(target.center(), None, Modifiers::default());
+        cx.simulate_mouse_down(target.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.open_panes == vec![Pane::Files]);
+            assert!(panel.pane == Pane::Files);
+        });
+    }
+
+    #[::gpui::test]
+    fn closing_sidebar_files_keeps_unsaved_edits(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        let mut panel = None;
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            panel = Some(view.clone());
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let panel = panel.unwrap();
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.file_drafts.insert(
+                    path.clone(),
+                    crate::workspace_files::FileDraft {
+                        original: "original".into(),
+                        text: "unsaved".into(),
+                    },
+                );
+                panel.close_tool(Pane::Files, window, cx);
+                assert!(panel.open_panes.contains(&Pane::Files));
+                assert!(panel.pane == Pane::Files);
+                assert_eq!(panel.file_drafts[&path].text, "unsaved");
+            })
+        });
+    }
+
+    #[::gpui::test]
+    fn closing_sidebar_terminal_releases_shells_and_reopening_starts_fresh(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (_panel, _cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.open_tool(Pane::Terminal, window, cx);
+            let first_id = panel.terminal_tabs[0].clone();
+            let first = panel.terminals[&first_id].clone();
+            panel.new_terminal_tab(window, cx);
+            let second = panel.terminals[&panel.terminal_tabs[1]].clone();
+            panel.close_tool(Pane::Terminal, window, cx);
+            assert!(panel.terminals.is_empty());
+            assert_eq!(
+                first.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Closed
+            );
+            assert_eq!(
+                second.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Closed
+            );
+            panel.open_tool(Pane::Terminal, window, cx);
+            assert_ne!(panel.terminal_tabs[0], first_id);
+            assert_eq!(panel.terminals.len(), 1);
+            panel.release(cx);
+            panel
+        });
+    }
+
     #[test]
     fn saved_changes_requires_an_explicit_click() {
         let mut saved = SavedPanel {
