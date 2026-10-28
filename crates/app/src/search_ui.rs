@@ -599,7 +599,7 @@ impl Render for Palette {
                     .items_center()
                     .border_t_1()
                     .border_color(rgba(0xffffff0a))
-                    .bg(crate::appearance::popup_surface(0x1b1b1d))
+                    .bg(crate::appearance::popup_surface())
                     .rounded_b(zpx(11.))
                     .text_size(zpx(12.))
                     .text_color(rgba(0xffffff80))
@@ -864,7 +864,7 @@ impl AppShell {
             let width = zpx(500.).min((viewport.width - zpx(32.)).max(px(0.)));
             let height = content.read(cx).layout_height(window, cx).1 + px(2.);
             dialog
-                .bg(crate::appearance::popup_surface(0x18181a))
+                .bg(crate::appearance::popup_surface())
                 .p_0()
                 .rounded(zpx(12.))
                 .border_1()

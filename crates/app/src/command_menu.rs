@@ -523,7 +523,7 @@ impl Render for CommandMenu {
             .w_full()
             .p_1()
             .rounded_xl()
-            .bg(crate::appearance::popup_surface(0x29292b))
+            .bg(crate::appearance::popup_surface())
             .shadow_lg()
             .when(self.matches.is_empty(), |menu| {
                 menu.child(

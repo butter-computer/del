@@ -22,6 +22,7 @@ gpui_kit::assets::icon_assets!(
         Play,
         MessagesSquare,
         Terminal,
+        FileDiff,
         ChevronDown,
         ChevronUp
     ]

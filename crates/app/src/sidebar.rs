@@ -79,7 +79,7 @@ impl Render for SidebarDrag {
                 .items_center()
                 .gap_1p5()
                 .rounded_md()
-                .bg(crate::appearance::popup_surface(0x262626))
+                .bg(crate::appearance::popup_surface())
                 .text_size(zpx(TEXT_MD))
                 .text_color(rgb(TEXT))
                 .child(if self.terminal {
@@ -820,7 +820,7 @@ fn project_menu(
             window.open_dialog(cx, move |dialog, _, _| {
                 let state = state.clone(); let path = path.clone();
                 dialog.title("Permanently delete project?")
-                    .bg(crate::appearance::popup_surface(0x0b0b0d))
+                    .bg(crate::appearance::popup_surface())
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                     .footer(gpui_kit::component::dialog::DialogFooter::new()
                         .child(Button::new("project-cancel").label("Cancel")

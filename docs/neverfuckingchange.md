@@ -17,8 +17,13 @@ This records the final decisions, including corrections to earlier experiments.
 - Preserve readable selections, hover states, separators, and muted text.
 - Do not change unrelated colors when asked to adjust one surface. Keep dark-mode
   styling independent of light-mode adjustments.
-- Shell opacity is fixed at 85%. Do not restore the opacity slider or load old
-  saved opacity values. Light surfaces are opaque to preserve the reference colors.
+- Dark mode follows the supplied ChatGPT desktop reference: opaque near-black
+  chrome, black workspaces, a slightly darker left sidebar, and charcoal inputs.
+  Keep surfaces stable across wallpapers; avoid washed-out translucent greys.
+- Use blue for actions and selections, green for save/success, amber for revert or
+  caution, and red for destructive/error states. Ordinary tabs and text stay neutral.
+- Keep the existing light-mode palette. Do not restore an opacity slider or load
+  old saved opacity values.
 
 ## Sidebar toolbar and keep-awake
 
@@ -193,7 +198,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Use an opaque modal surface so the underlying composer cannot bleed through.
 - Use the same fade-and-slide entrance as Cmd-K, with a heavily blurred, dim backdrop.
 - Done, Escape, and clicking outside close Settings and return to the workspace.
-- No opacity controls; the value is fixed at 85%.
+- No opacity controls; use the shared appearance surfaces.
 
 ## Titles
 
@@ -412,6 +417,23 @@ This records the final decisions, including corrections to earlier experiments.
   refreshes automatically while visible. No Refresh, Edit file, or Ask about this
   buttons; no Ask about this buttons in Files or Terminal either.
 - The no-Git indicator is informational and must not accept clicks.
+- Each click of the right-sidebar plus adds an independent New tab with a
+  hover-only close button. Switching tools preserves blank tabs and their address
+  drafts; restore explicitly created blanks across restarts. Fresh sidebars still
+  default to Files, Changes, and Terminal only. Closing a blank removes only that
+  tab. If the sidebar would become empty,
+  show one fresh New tab with its label and hover-close control.
+- The right-sidebar plus follows the last tab instead of filling empty space.
+  When tabs overflow, keep the plus reachable and gradually fade the clipped
+  strip edges; fades must not intercept clicks or scrolling.
+- Right-sidebar tabs can be reordered independently across tool kinds. Preserve
+  the active instance, drafts, live shells, and each session’s saved order.
+- Use matching tool icons in the launcher and both tab rows. New tab uses a page
+  icon; reserve the plus icon for adding tabs.
+- Each terminal appears directly in its session or right-sidebar tab row, with
+  no nested terminal subtab strip. All are labeled Terminal, without numbers.
+  The plus icon stays neutral. Choosing Terminal
+  from a new tab always creates a fresh shell, even when other terminals exist.
 - Workspace terminal tabs own independent PTYs. Switching tabs keeps shells alive;
   closing one tab must not terminate another. Restore tab layout with fresh shells,
   never by replaying old commands.

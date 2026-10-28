@@ -2334,7 +2334,7 @@ impl Render for AppShell {
                     .p_0()
                     .close_button(false)
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
-                    .bg(appearance::popup_surface(0x0b0b0d))
+                    .bg(appearance::popup_surface())
                     .rounded(zpx(14.))
                     .overflow_hidden()
                     .on_close(move |_, _, cx| {
@@ -2635,6 +2635,7 @@ impl Render for AppShell {
                     ))
                     .when(SIDEBAR_ENABLED && sidebar_visible, |row| {
                         let sidebar = div()
+                            .bg(appearance::sidebar_surface())
                             .relative()
                             .h_full()
                             .flex_none()

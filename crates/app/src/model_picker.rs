@@ -251,7 +251,7 @@ impl Render for ModelPanel {
             .p_3()
             .gap_3()
             .rounded_xl()
-            .bg(crate::appearance::popup_surface(0x222222))
+            .bg(crate::appearance::popup_surface())
             .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
@@ -475,15 +475,13 @@ impl Render for ModelPanel {
                                             linear_gradient(
                                                 0.,
                                                 linear_color_stop(
-                                                    crate::appearance::popup_surface(0x222222),
+                                                    crate::appearance::popup_surface(),
                                                     0.,
                                                 ),
                                                 linear_color_stop(
                                                     {
                                                         let mut color =
-                                                            crate::appearance::popup_surface(
-                                                                0x222222,
-                                                            );
+                                                            crate::appearance::popup_surface();
                                                         color.a = 0.;
                                                         color
                                                     },

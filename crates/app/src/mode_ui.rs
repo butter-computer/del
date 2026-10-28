@@ -59,7 +59,7 @@ pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
                     .bottom(zpx(-2.))
                     .size(zpx(11.))
                     .rounded(zpx(3.))
-                    .bg(crate::appearance::popup_surface(0x202020))
+                    .bg(crate::appearance::popup_surface())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1353,7 +1353,7 @@ impl AppShell {
                     .p_3()
                     .gap_3()
                     .rounded(zpx(12.))
-                    .bg(crate::appearance::popup_surface(0x262629))
+                    .bg(crate::appearance::popup_surface())
                     .child(
                         div()
                             .text_size(zpx(14.))

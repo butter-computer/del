@@ -49,9 +49,7 @@ impl Render for DraggedWorkspaceTab {
                     .text_color(rgb(0xf5f5f5))
                     .text_size(zpx(del_core::typography::TEXT_MD))
                     .shadow_md()
-                    .when(self.kind != Kind::Blank, |tab| {
-                        tab.child(crate::icons::icon(self.kind.icon()).with_size(zpx(15.)))
-                    })
+                    .child(crate::icons::icon(self.kind.icon()).with_size(zpx(15.)))
                     .child(
                         div()
                             .flex_1()
@@ -119,13 +117,14 @@ impl Kind {
     }
     fn icon(self) -> Icon {
         match self {
-            Self::Blank => IconName::Plus.into(),
-            Self::Files => IconName::Folder.into(),
-            Self::Changes => IconName::File.into(),
-            Self::Terminal => Icon::default().path("icons/terminal.svg"),
-            Self::Browser => IconName::Globe.into(),
-            Self::SideChat => Icon::default().path("icons/side-chat.svg"),
+            Self::Blank => Pane::NewTab,
+            Self::Files => Pane::Files,
+            Self::Changes => Pane::Changes,
+            Self::Terminal => Pane::Terminal,
+            Self::Browser => Pane::Browser,
+            Self::SideChat => Pane::SideChat,
         }
+        .icon()
     }
 }
 struct ToolTab {
@@ -634,9 +633,7 @@ impl WorkspaceTabs {
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.select(Some(id), window, cx)),
                     )
-                    .when(tab.kind != Kind::Blank, |tab_element| {
-                        tab_element.child(crate::icons::icon(tab.kind.icon()).with_size(zpx(15.)))
-                    })
+                    .child(crate::icons::icon(tab.kind.icon()).with_size(zpx(15.)))
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .when(hints && index < 8, |t| {
                         t.child(div().text_size(zpx(10.)).child(format!("⌘{}", index + 2)))

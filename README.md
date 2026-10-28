@@ -600,11 +600,16 @@ No Codex, Claude, or third-party transcription API is used.
 
 ## Files, terminals, and browser
 
-The right sidebar has **Files**, **Changes**, **Terminal**, and **Browser** panes. The file tree loads
+The right sidebar starts with **Files**, **Changes**, **Terminal**, and **+**.
+Use **+** for a new tool or browser page. Each terminal occupies its own tab in
+that row; choosing Terminal from a new tab starts an independent shell. Closing
+one terminal leaves the others running. Drag tabs to reorder them; each session
+remembers its sidebar order. Blank tabs stay open until closed, and closing the
+last tab leaves a fresh **New tab** with the shared launcher. Tool icons match
+between the session tabs, sidebar tabs, and launcher. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
 `target`/`node_modules` trees. Selection highlights fit the file label. The tree
-and preview have a draggable split. The file tree has no opaque edge overlays
-over its translucent background.
+and preview have a draggable split. The file tree has no edge overlays hiding its content.
 
 Text files are editable with line numbers and syntax highlighting. Use **Save** or
 **Cmd-S** to save, **Revert** to discard edits, and **Reload** to read from disk.

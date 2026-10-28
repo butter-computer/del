@@ -50,7 +50,7 @@ pub fn tools<T: 'static>(
     choose: fn(&mut T, Pane, &mut Window, &mut Context<T>),
     cx: &mut Context<T>,
 ) -> AnyElement {
-    let tool = |pane: Pane, label: &'static str, icon: Icon, cx: &mut Context<T>| {
+    let tool = |pane: Pane, label: &'static str, cx: &mut Context<T>| {
         h_flex()
             .id(label)
             .debug_selector(move || label.into())
@@ -63,27 +63,20 @@ pub fn tools<T: 'static>(
             .px_3()
             .gap_2()
             .rounded_lg()
-            .bg(rgba(0xffffff05))
+            .bg(crate::appearance::popup_surface())
             .hover(|b| b.bg(rgba(0xffffff0f)))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| choose(this, pane, window, cx)))
-            .child(crate::icons::icon(icon).text_color(rgba(0xffffff80)))
+            .child(
+                crate::icons::icon(pane.icon())
+                    .text_color(crate::appearance::ActionTone::Accent.foreground()),
+            )
             .child(label)
     };
-    let changes = tool(Pane::Changes, "Changes", IconName::File.into(), cx);
-    let terminal = tool(
-        Pane::Terminal,
-        "Terminal",
-        Icon::default().path("icons/terminal.svg"),
-        cx,
-    );
-    let files = tool(Pane::Files, "Files", IconName::Folder.into(), cx);
-    let side_chat = tool(
-        Pane::SideChat,
-        "Side chat",
-        Icon::default().path("icons/side-chat.svg"),
-        cx,
-    );
+    let changes = tool(Pane::Changes, "Changes", cx);
+    let terminal = tool(Pane::Terminal, "Terminal", cx);
+    let files = tool(Pane::Files, "Files", cx);
+    let side_chat = tool(Pane::SideChat, "Side chat", cx);
     div()
         .id("new-tab-tools")
         .flex_1()

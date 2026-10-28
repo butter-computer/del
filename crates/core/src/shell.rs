@@ -6,18 +6,12 @@
 //! left, right and bottom edges share one gutter. All lengths are in logical
 //! pixels.
 
-/// The one colour of the shell surface: the top bar and the gutter around the
-/// page are painted with exactly this value so they read as a single
-/// continuous surface. Near-pure black; packed `0xRRGGBBAA`. The window is
-/// blurred behind it, so the alpha lets the blur show through.
-pub const SHELL_SURFACE_RGBA: u32 = 0x000000d9;
+/// Opaque near-black chrome matching the dark desktop reference. Keeping this
+/// stable prevents the wallpaper or native material from washing out the UI.
+pub const SHELL_SURFACE_RGBA: u32 = 0x0c0c0cff;
 
-/// Tint of the rounded page: a faint black shade over the shell colour beneath
-/// it, so the page reads as slightly darker than its surround. It is
-/// deliberately light. The page sits on top of the shell colour, so a strong
-/// page colour would stack two translucent layers and look far more opaque
-/// than the top bar. Packed `0xRRGGBBAA`.
-pub const PAGE_SURFACE_RGBA: u32 = 0x00000008;
+/// Black workspace surface, distinct from chrome and raised input cards.
+pub const PAGE_SURFACE_RGBA: u32 = 0x000000ff;
 
 /// Diameter of a macOS traffic light button, in logical pixels.
 pub const TRAFFIC_LIGHT_SIZE: f32 = 12.0;

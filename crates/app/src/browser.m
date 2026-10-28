@@ -268,7 +268,7 @@ void del_browser_frame(void *pointer, double x, double y, double width, double h
     if (!parent.isFlipped) y = NSHeight(parent.bounds) - y - height;
     browser.frame = NSMakeRect(x,y,width,height);
     browser.appearance = [NSAppearance appearanceNamed:light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
-    browser.layer.backgroundColor = (light ? [NSColor colorWithWhite:0.98 alpha:1] : [NSColor colorWithWhite:0.085 alpha:1]).CGColor;
+    browser.layer.backgroundColor = (light ? [NSColor colorWithWhite:0.98 alpha:1] : [NSColor colorWithWhite:0.047 alpha:1]).CGColor;
     browser.zoom = zoom;
     browser.mousePassthrough = mousePassthrough;
     if (browser.web.pageZoom != zoom) browser.web.pageZoom = zoom;

@@ -1,9 +1,9 @@
 //! The right sidebar: files, a workspace PTY, and an embedded browser.
 
-use crate::appearance::{rgb, rgba};
+use crate::appearance::{ActionTone, rgb, rgba};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
-use del_core::typography::TEXT_SM;
+use del_core::typography::{TEXT_MD, TEXT_SM};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
@@ -71,7 +71,7 @@ fn resized_tree_height(start: f32, delta: f32, available: f32) -> f32 {
     (start + delta).clamp(MIN_SPLIT_HEIGHT, max)
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Pane {
     #[default]
     Files,
@@ -83,6 +83,17 @@ pub(crate) enum Pane {
 }
 
 impl Pane {
+    pub(crate) fn icon(self) -> Icon {
+        match self {
+            Self::Files => IconName::Folder.into(),
+            Self::Changes => Icon::default().path("icons/file-diff.svg"),
+            Self::Terminal => Icon::default().path("icons/terminal.svg"),
+            Self::Browser => IconName::Globe.into(),
+            Self::SideChat => Icon::default().path("icons/side-chat.svg"),
+            Self::NewTab => IconName::File.into(),
+        }
+    }
+
     fn tab_label(self) -> (&'static str, &'static str) {
         match self {
             Self::Files => ("tab-files", "Files"),
@@ -99,6 +110,62 @@ fn default_panes() -> Vec<Pane> {
     vec![Pane::Files, Pane::Changes, Pane::Terminal]
 }
 
+/// Visual order is independent of the backing tool instances and selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum SidebarTab {
+    Tool(Pane),
+    Terminal(String),
+    Blank(String),
+}
+
+#[derive(Clone)]
+struct DraggedSidebarTab {
+    owner: EntityId,
+    key: SidebarTab,
+    pane: Pane,
+    scroll: ScrollHandle,
+    origin: Rc<Cell<Point<Pixels>>>,
+    width: Pixels,
+    offset: Point<Pixels>,
+}
+
+impl Render for DraggedSidebarTab {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let bounds = self.scroll.bounds();
+        let width = self.width.min(bounds.size.width);
+        let natural = window.mouse_position().x - self.offset.x;
+        let left = natural.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
+        h_flex()
+            .relative()
+            .left(left - natural)
+            .top(self.origin.get().y - window.mouse_position().y)
+            .w(width)
+            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+            .px_1p5()
+            .gap_1p5()
+            .rounded_md()
+            .bg(crate::appearance::popup_surface())
+            .text_color(rgb(0xf5f5f5))
+            .text_size(zpx(14.))
+            .shadow_md()
+            .child(crate::icons::icon(self.pane.icon()).with_size(zpx(15.)))
+            .child(self.pane.tab_label().1)
+    }
+}
+
+struct SidebarDrag {
+    key: SidebarTab,
+    order: Vec<SidebarTab>,
+    centers: Vec<Pixels>,
+    pointer_offset: Pixels,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct BlankTab {
+    id: String,
+    address: String,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedPanel {
@@ -106,6 +173,9 @@ pub struct SavedPanel {
     side_chat_id: Option<String>,
     pane: Pane,
     open_panes: Vec<Pane>,
+    tab_order: Vec<SidebarTab>,
+    blank_tabs: Vec<BlankTab>,
+    blank_active: usize,
     expanded: HashSet<PathBuf>,
     selected: Option<PathBuf>,
     show_hidden: bool,
@@ -135,6 +205,9 @@ impl Default for SavedPanel {
             side_chat_id: None,
             pane: Pane::Files,
             open_panes: default_panes(),
+            tab_order: Vec::new(),
+            blank_tabs: Vec::new(),
+            blank_active: 0,
             expanded: HashSet::new(),
             selected: None,
             show_hidden: false,
@@ -266,9 +339,14 @@ pub struct RightPanel {
     workspace: bool,
     pane: Pane,
     open_panes: Vec<Pane>,
+    tab_order: Vec<SidebarTab>,
+    blank_tabs: Vec<BlankTab>,
+    blank_active: usize,
     address: Entity<InputState>,
     new_tab_scroll: ScrollHandle,
     tool_tab_scroll: ScrollHandle,
+    tab_drag: Option<SidebarDrag>,
+    tab_drag_origin: Rc<Cell<Point<Pixels>>>,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
     viewer: Viewer,
@@ -352,18 +430,191 @@ impl RightPanel {
     }
 
     fn activate_pane(&mut self, pane: Pane) {
-        if pane != Pane::NewTab && !self.open_panes.contains(&pane) {
+        if (pane != Pane::NewTab || !self.blank_tabs.is_empty()) && !self.open_panes.contains(&pane)
+        {
             self.open_panes.push(pane);
         }
         self.pane = pane;
+        self.tab_order = self.sidebar_keys();
+    }
+
+    /// Terminal instances occupy the same strip as the other tools. The saved
+    /// IDs also migrate older terminal subtabs without losing their order.
+    fn sidebar_tabs(&self) -> Vec<(Pane, Option<usize>)> {
+        let mut tabs: Vec<_> = self
+            .open_panes
+            .iter()
+            .flat_map(|pane| {
+                if *pane == Pane::Terminal {
+                    (0..self.terminal_tabs.len())
+                        .map(|index| (*pane, Some(index)))
+                        .collect()
+                } else if *pane == Pane::NewTab {
+                    (0..self.blank_tabs.len())
+                        .map(|index| (*pane, Some(index)))
+                        .collect()
+                } else {
+                    vec![(*pane, None)]
+                }
+            })
+            .collect();
+        tabs.sort_by_key(|(pane, instance)| {
+            let key = self.tab_key(*pane, *instance);
+            self.tab_order
+                .iter()
+                .position(|tab| *tab == key)
+                .unwrap_or(usize::MAX)
+        });
+        tabs
+    }
+
+    fn tab_key(&self, pane: Pane, instance: Option<usize>) -> SidebarTab {
+        match (pane, instance) {
+            (Pane::Terminal, Some(index)) => {
+                SidebarTab::Terminal(self.terminal_tabs[index].clone())
+            }
+            (Pane::NewTab, Some(index)) => SidebarTab::Blank(self.blank_tabs[index].id.clone()),
+            _ => SidebarTab::Tool(pane),
+        }
+    }
+
+    fn sidebar_keys(&self) -> Vec<SidebarTab> {
+        self.sidebar_tabs()
+            .into_iter()
+            .map(|(pane, instance)| self.tab_key(pane, instance))
+            .collect()
+    }
+
+    fn begin_tab_drag(&mut self, key: &SidebarTab, cx: &mut Context<Self>) {
+        let order = self.sidebar_keys();
+        let Some(source) = order.iter().position(|tab| tab == key) else {
+            return;
+        };
+        let centers: Vec<_> = (0..order.len())
+            .filter_map(|index| {
+                self.tool_tab_scroll
+                    .bounds_for_item(index)
+                    .map(|bounds| bounds.center().x)
+            })
+            .collect();
+        if centers.len() != order.len() {
+            return;
+        }
+        self.tab_drag = Some(SidebarDrag {
+            key: key.clone(),
+            pointer_offset: self.tab_drag_origin.get().x
+                - self.tool_tab_scroll.offset().x
+                - centers[source],
+            order,
+            centers,
+        });
+        cx.notify();
+    }
+
+    fn move_tab_drag(
+        &mut self,
+        owner: EntityId,
+        key: &SidebarTab,
+        pointer: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if owner != cx.entity_id() {
+            return;
+        }
+        let Some(drag) = &self.tab_drag else {
+            return;
+        };
+        if &drag.key != key {
+            return;
+        }
+        let viewport = self.tool_tab_scroll.bounds();
+        let mut offset = self.tool_tab_scroll.offset();
+        if pointer.x < viewport.left() + zpx(20.) {
+            offset.x = (offset.x + zpx(12.)).min(Pixels::ZERO);
+        } else if pointer.x > viewport.right() - zpx(20.) {
+            offset.x = (offset.x - zpx(12.)).max(-self.tool_tab_scroll.max_offset().x);
+        }
+        self.tool_tab_scroll.set_offset(offset);
+        let center = pointer.x - offset.x - drag.pointer_offset;
+        let source = drag.order.iter().position(|tab| tab == key).unwrap();
+        let mut target = source;
+        while target + 1 < drag.centers.len() && center > drag.centers[target + 1] {
+            target += 1;
+        }
+        while target > 0 && center < drag.centers[target - 1] {
+            target -= 1;
+        }
+        let mut order = drag.order.clone();
+        let tab = order.remove(source);
+        order.insert(target, tab);
+        if order != self.tab_order {
+            self.tab_order = order;
+            crate::haptics::tick();
+        }
+        cx.notify();
+    }
+
+    fn finish_tab_drag(&mut self, cx: &mut Context<Self>) {
+        if self.tab_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn pane_instance(&self, pane: Pane) -> Option<usize> {
+        match pane {
+            Pane::Terminal => Some(self.terminal_active),
+            Pane::NewTab if !self.blank_tabs.is_empty() => Some(self.blank_active),
+            _ => None,
+        }
+    }
+
+    fn select_blank_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_blank(cx);
+        self.blank_active = index;
+        self.activate_pane(Pane::NewTab);
+        self.show_blank_address(window, cx);
+        cx.notify();
+    }
+
+    fn choose_new_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        // A new tool takes this blank's place. Selecting an already-open
+        // singleton tool leaves the blank available to return to.
+        let position = if pane == Pane::Terminal || !self.open_panes.contains(&pane) {
+            self.consume_blank(pane)
+        } else {
+            None
+        };
+        if pane == Pane::Terminal {
+            self.new_terminal_tab(window, cx);
+        } else {
+            self.open_tool(pane, window, cx);
+        }
+        self.place_active_tab(position);
+    }
+
+    fn place_active_tab(&mut self, position: Option<usize>) {
+        let Some(position) = position else {
+            return;
+        };
+        let key = self.tab_key(self.pane, self.pane_instance(self.pane));
+        let mut order = self.sidebar_keys();
+        order.retain(|tab| tab != &key);
+        order.insert(position.min(order.len()), key);
+        self.tab_order = order;
+        self.tool_tab_scroll.scroll_to_item(position);
     }
 
     fn open_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_blank(cx);
         if self.pane != pane {
             self.change_expanded.clear();
         }
         self.activate_pane(pane);
-        if let Some(index) = self.open_panes.iter().position(|p| *p == pane) {
+        if let Some(index) = self
+            .sidebar_tabs()
+            .iter()
+            .position(|(p, instance)| *p == pane && *instance == self.pane_instance(pane))
+        {
             self.tool_tab_scroll.scroll_to_item(index);
         }
         self.prepare_to_show(window, cx);
@@ -372,18 +623,81 @@ impl RightPanel {
             Pane::Changes => self.refresh_changes(cx),
             Pane::Files => self.refresh_tree(cx),
             Pane::SideChat => self.ensure_side_chat(window, cx),
+            Pane::NewTab => self.show_blank_address(window, cx),
             _ => {}
         }
         cx.notify();
     }
 
-    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane = Pane::NewTab;
-        self.tool_tab_scroll.scroll_to_item(self.open_panes.len());
+    fn remember_blank(&mut self, cx: &App) {
+        if self.pane == Pane::NewTab
+            && let Some(tab) = self.blank_tabs.get_mut(self.blank_active)
+        {
+            tab.address = self.address.read(cx).value().to_string();
+        }
+    }
+
+    fn show_blank_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self
+            .blank_tabs
+            .get(self.blank_active)
+            .map(|tab| tab.address.clone())
+            .unwrap_or_default();
         self.address.update(cx, |input, cx| {
-            input.set_value("", window, cx);
+            input.set_value(value, window, cx);
             input.focus(window, cx);
         });
+    }
+
+    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_blank(cx);
+        self.blank_tabs.push(BlankTab {
+            id: uuid::Uuid::new_v4().to_string(),
+            address: String::new(),
+        });
+        self.blank_active = self.blank_tabs.len() - 1;
+        self.activate_pane(Pane::NewTab);
+        self.tool_tab_scroll
+            .scroll_to_item(self.sidebar_tabs().len() - 1);
+        self.show_blank_address(window, cx);
+        cx.notify();
+    }
+
+    fn consume_blank(&mut self, destination: Pane) -> Option<usize> {
+        if self.pane != Pane::NewTab || self.blank_tabs.is_empty() {
+            return None;
+        }
+        let key = self.tab_key(Pane::NewTab, Some(self.blank_active));
+        let position = self.sidebar_keys().iter().position(|tab| tab == &key);
+        self.blank_tabs.remove(self.blank_active);
+        self.blank_active = self
+            .blank_active
+            .min(self.blank_tabs.len().saturating_sub(1));
+        if self.blank_tabs.is_empty() {
+            self.open_panes.retain(|pane| *pane != Pane::NewTab);
+        }
+        // The caller immediately activates the destination. Avoid copying this
+        // blank's address into its neighbor while switching.
+        self.pane = destination;
+        position
+    }
+
+    fn close_blank_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_blank(cx);
+        if self.blank_tabs.len() == 1 {
+            self.close_tool(Pane::NewTab, window, cx);
+            return;
+        }
+        self.blank_tabs.remove(index);
+        self.blank_active = if index < self.blank_active {
+            self.blank_active - 1
+        } else {
+            self.blank_active
+        }
+        .min(self.blank_tabs.len() - 1);
+        if self.pane == Pane::NewTab {
+            self.show_blank_address(window, cx);
+        }
         cx.notify();
     }
 
@@ -391,7 +705,9 @@ impl RightPanel {
         let Some(url) = crate::new_tab::destination(self.address.read(cx).value().as_ref()) else {
             return;
         };
+        let position = self.consume_blank(Pane::Browser);
         self.activate_pane(Pane::Browser);
+        self.place_active_tab(position);
         // Reuse an untouched initial browser page; preserve existing browsing tabs.
         if self.browser_tabs.len() == 1
             && self.browser_tabs[0].url == "about:blank"
@@ -452,7 +768,10 @@ impl RightPanel {
                 self.change_expanded.clear();
             }
             Pane::SideChat => self.forget_side_chat(cx),
-            Pane::NewTab => {}
+            Pane::NewTab => {
+                self.blank_tabs.clear();
+                self.blank_active = 0;
+            }
         }
         self.open_panes.remove(index);
         if self.open_panes.is_empty() {
@@ -581,21 +900,11 @@ impl RightPanel {
         SavedPanel {
             open,
             side_chat_id: self.side_chat_id.clone(),
-            pane: if self.pane == Pane::NewTab {
-                self.open_panes
-                    .iter()
-                    .copied()
-                    .find(|p| !matches!(p, Pane::SideChat | Pane::NewTab))
-                    .unwrap_or(Pane::NewTab)
-            } else {
-                self.pane
-            },
-            open_panes: self
-                .open_panes
-                .iter()
-                .copied()
-                .filter(|p| *p != Pane::NewTab)
-                .collect(),
+            pane: self.pane,
+            open_panes: self.open_panes.clone(),
+            tab_order: self.sidebar_keys(),
+            blank_tabs: self.blank_tabs.clone(),
+            blank_active: self.blank_active,
             expanded: self.expanded.clone(),
             selected: match &self.viewer {
                 Viewer::None => None,
@@ -622,27 +931,40 @@ impl RightPanel {
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_order = saved.tab_order;
+        self.tab_drag = None;
         self.side_chat_id = saved.side_chat_id;
+        self.blank_tabs = saved.blank_tabs;
+        let mut ids = HashSet::new();
+        self.blank_tabs.retain(|tab| ids.insert(tab.id.clone()));
+        self.blank_active = saved
+            .blank_active
+            .min(self.blank_tabs.len().saturating_sub(1));
         let unused_browser = saved
             .browser_tabs
             .iter()
             .all(|tab| tab.url == "about:blank" || tab.url.is_empty());
-        self.pane =
-            if matches!(saved.pane, Pane::Changes | Pane::NewTab) && !saved.open_panes.is_empty() {
-                Pane::Files
-            } else {
-                saved.pane
-            };
+        self.pane = if (saved.pane == Pane::Changes
+            || (saved.pane == Pane::NewTab && self.blank_tabs.is_empty()))
+            && !saved.open_panes.is_empty()
+        {
+            Pane::Files
+        } else {
+            saved.pane
+        };
         self.open_panes = saved
             .open_panes
             .into_iter()
             .filter(|p| {
-                *p != Pane::NewTab
+                !(*p == Pane::NewTab && self.blank_tabs.is_empty())
                     && !(*p == Pane::SideChat && self.side_chat_id.is_none())
                     && !(*p == Pane::Browser && unused_browser)
             })
             .collect();
         self.open_panes.dedup();
+        if !self.blank_tabs.is_empty() && !self.open_panes.contains(&Pane::NewTab) {
+            self.open_panes.push(Pane::NewTab);
+        }
         if self.pane != Pane::NewTab && !self.open_panes.contains(&self.pane) {
             self.pane = self.open_panes.first().copied().unwrap_or(Pane::NewTab);
         }
@@ -680,6 +1002,11 @@ impl RightPanel {
         if let Some(path) = saved.selected {
             self.open_file(path, cx);
         }
+        if self.open_panes.is_empty() {
+            self.open_new_tab(window, cx);
+        } else if self.pane == Pane::NewTab {
+            self.show_blank_address(window, cx);
+        }
         if saved.open && saved.pane != Pane::Changes {
             self.prepare_to_show(window, cx);
         }
@@ -690,6 +1017,9 @@ impl RightPanel {
         cx.subscribe_in(&address, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.navigate_from_new_tab(cx);
+            } else if matches!(event, InputEvent::Change) {
+                this.remember_blank(cx);
+                cx.notify();
             }
         })
         .detach();
@@ -700,9 +1030,14 @@ impl RightPanel {
             side_chat_id: None,
             pane: Pane::Files,
             open_panes: default_panes(),
+            tab_order: Vec::new(),
+            blank_tabs: Vec::new(),
+            blank_active: 0,
             address,
             new_tab_scroll: ScrollHandle::new(),
             tool_tab_scroll: ScrollHandle::new(),
+            tab_drag: None,
+            tab_drag_origin: Rc::default(),
             root,
             expanded: HashSet::new(),
             viewer: Viewer::None,
@@ -972,7 +1307,7 @@ impl RightPanel {
                                     .gap_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .text_size(zpx(11.))
+                                    .text_size(zpx(TEXT_SM))
                                     .when(index == self.browser_active, |row| {
                                         row.bg(rgba(0xffffff14))
                                     })
@@ -1148,19 +1483,41 @@ impl RightPanel {
         self.rows = cached_tree_rows(&self.root, &self.expanded, &self.directory_entries);
     }
 
-    fn tab(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        pane: Pane,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let active = self.pane == pane;
+    fn tab(&self, pane: Pane, instance: Option<usize>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let (base, name) = pane.tab_label();
+        let id: SharedString = match instance {
+            Some(index) if pane == Pane::NewTab => {
+                format!("{base}-{}", self.blank_tabs[index].id).into()
+            }
+            Some(index) => format!("{base}-{}", self.terminal_tabs[index]).into(),
+            None => base.into(),
+        };
+        let label: SharedString = name.into();
+        let close_id = format!("close-{id}");
+        let close_selector = instance
+            .map(|index| format!("close-{base}-{index}"))
+            .unwrap_or_else(|| close_id.clone());
+        let active = self.pane == pane && instance == self.pane_instance(pane);
+        let key = self.tab_key(pane, instance);
+        let dragging = self.tab_drag.as_ref().is_some_and(|drag| drag.key == key);
+        let payload = DraggedSidebarTab {
+            owner: cx.entity_id(),
+            key,
+            pane,
+            scroll: self.tool_tab_scroll.clone(),
+            origin: self.tab_drag_origin.clone(),
+            width: Pixels::ZERO,
+            offset: Point::default(),
+        };
+        let origin = self.tab_drag_origin.clone();
+        let panel = cx.entity();
+        let selector = id.to_string();
         div()
-            .id(id)
-            .group(id)
+            .id(id.clone())
+            .debug_selector(move || selector.clone())
+            .group(id.clone())
             .role(gpui::Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .px_1p5()
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .flex()
@@ -1169,7 +1526,7 @@ impl RightPanel {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(zpx(del_core::typography::TEXT_MD))
+            .text_size(zpx(14.))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
@@ -1177,12 +1534,53 @@ impl RightPanel {
             })
             .when(active, |t| t.bg(rgba(0xffffff14)))
             .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
-            .on_click(cx.listener(move |this, _, window, cx| this.open_tool(pane, window, cx)))
-            .child(label)
+            .when(dragging, |tab| tab.opacity(0.))
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                origin.set(event.position);
+                cx.stop_propagation();
+            })
+            .on_drag(payload, move |drag, offset, window, cx| {
+                let mut preview = drag.clone();
+                let movement = window.mouse_position() - drag.origin.get();
+                preview.offset = offset - movement;
+                panel.update(cx, |this, cx| {
+                    let index = this
+                        .sidebar_keys()
+                        .iter()
+                        .position(|key| key == &drag.key)
+                        .unwrap();
+                    preview.width = this
+                        .tool_tab_scroll
+                        .bounds_for_item(index)
+                        .unwrap()
+                        .size
+                        .width;
+                    this.begin_tab_drag(&drag.key, cx);
+                    this.move_tab_drag(drag.owner, &drag.key, window.mouse_position(), cx);
+                });
+                cx.new(|_| preview)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(index) = instance {
+                    if pane == Pane::NewTab {
+                        this.select_blank_tab(index, window, cx);
+                        return;
+                    }
+                    this.terminal_active = index;
+                }
+                this.open_tool(pane, window, cx);
+            }))
             .child(
                 div()
-                    .id(SharedString::from(format!("close-{id}")))
-                    .debug_selector(move || format!("close-{id}"))
+                    .mr_1p5()
+                    .flex_none()
+                    .child(crate::icons::icon(pane.icon()).with_size(zpx(15.))),
+            )
+            .child(label.clone())
+            .child(
+                div()
+                    .id(SharedString::from(close_id))
+                    .debug_selector(move || close_selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(format!("Close {label} sidebar tab"))
                     .ml_1()
@@ -1195,9 +1593,18 @@ impl RightPanel {
                     .opacity(0.)
                     .group_hover(id, |button| button.opacity(1.))
                     .hover(|b| b.bg(rgba(0xffffff14)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.close_tool(pane, window, cx);
+                        if let Some(index) = instance {
+                            if pane == Pane::NewTab {
+                                this.close_blank_tab(index, window, cx);
+                            } else {
+                                this.close_terminal_tab(index, window, cx);
+                            }
+                        } else {
+                            this.close_tool(pane, window, cx);
+                        }
                     }))
                     .child(crate::icons::icon(IconName::Close).with_size(zpx(11.))),
             )
@@ -1230,28 +1637,29 @@ impl RightPanel {
                 let click = path.clone();
                 h_flex()
                     .w_full()
-                    .h(zpx(22.0))
+                    .h(zpx(26.0))
                     .flex_none()
                     .pl(zpx(4.0 + depth as f32 * 12.0))
                     .pr_1()
                     .child(
                         h_flex()
                             .id(SharedString::from(path.display().to_string()))
-                            .h(zpx(22.0))
+                            .h(zpx(26.0))
                             .min_w_0()
                             .px_1()
                             .gap_1p5()
                             .items_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .text_size(zpx(TEXT_SM))
+                            .text_size(zpx(TEXT_MD))
                             .text_color(if is_dir {
                                 rgb(0xf0f0f0)
                             } else {
                                 rgba(0xffffffcc)
                             })
                             .when(is_selected, |r| {
-                                r.bg(rgba(0xffffff1f)).text_color(rgb(0xf5f5f5))
+                                r.bg(ActionTone::Accent.surface(false))
+                                    .text_color(rgb(0xf5f5f5))
                             })
                             .when(!is_selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1275,7 +1683,11 @@ impl RightPanel {
                                 } else {
                                     IconName::File
                                 })
-                                .text_color(muted),
+                                .text_color(if is_dir {
+                                    ActionTone::Accent.foreground()
+                                } else {
+                                    muted
+                                }),
                             )
                             .child(div().min_w_0().truncate().child(name)),
                     )
@@ -1291,20 +1703,20 @@ impl RightPanel {
             Viewer::None => div()
                 .p_3()
                 .whitespace_nowrap()
-                .text_size(zpx(TEXT_SM))
+                .text_size(zpx(TEXT_MD))
                 .text_color(muted)
                 .child("Select a file to view it")
                 .into_any_element(),
             Viewer::Loading { .. } => div()
                 .p_3()
-                .text_size(zpx(TEXT_SM))
+                .text_size(zpx(TEXT_MD))
                 .text_color(muted)
                 .child("Loading file…")
                 .into_any_element(),
             Viewer::Note { message, .. } => div()
                 .p_3()
                 .whitespace_nowrap()
-                .text_size(zpx(TEXT_SM))
+                .text_size(zpx(TEXT_MD))
                 .text_color(muted)
                 .child(message.clone())
                 .into_any_element(),
@@ -1323,7 +1735,7 @@ impl RightPanel {
                         .p_3()
                         .w_full()
                         .whitespace_normal()
-                        .text_size(zpx(TEXT_SM))
+                        .text_size(zpx(TEXT_MD))
                         .child(
                             TextView::markdown(
                                 ("file-markdown", self.file_request),
@@ -1352,7 +1764,7 @@ impl RightPanel {
                                 .appearance(false)
                                 .bordered(false)
                                 .font_family(MONO)
-                                .text_size(zpx(TEXT_SM))
+                                .text_size(zpx(TEXT_MD))
                                 .aria_label("File editor"),
                         )
                         .into_any_element()
@@ -1392,7 +1804,7 @@ impl RightPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(zpx(TEXT_SM))
+                                .text_size(zpx(TEXT_MD))
                                 .child(if self.selected_dirty() {
                                     format!("{name} •")
                                 } else {
@@ -1412,10 +1824,12 @@ impl RightPanel {
                                             .flex()
                                             .items_center()
                                             .rounded_md()
-                                            .text_size(zpx(11.0))
+                                            .text_size(zpx(TEXT_SM))
                                             .cursor_pointer()
                                             .when(self.markdown_preview == preview, |button| {
-                                                button.bg(rgba(0xffffff20))
+                                                button
+                                                    .bg(ActionTone::Accent.surface(false))
+                                                    .text_color(ActionTone::Accent.foreground())
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.markdown_preview = preview;
@@ -1464,14 +1878,17 @@ impl RightPanel {
                                 } else {
                                     "Save"
                                 },
+                                ActionTone::Success,
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
                         )
-                        .child(action("revert-file", "Revert").on_click(
-                            cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
-                        ))
                         .child(
-                            action("reload-file", "Reload")
+                            action("revert-file", "Revert", ActionTone::Warning).on_click(
+                                cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
+                            ),
+                        )
+                        .child(
+                            action("reload-file", "Reload", ActionTone::Accent)
                                 .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
                         ),
                 )
@@ -1480,7 +1897,7 @@ impl RightPanel {
                 preview.child(
                     div()
                         .p_2()
-                        .text_size(zpx(11.))
+                        .text_size(zpx(TEXT_SM))
                         .whitespace_normal()
                         .text_color(rgb(0xf08080))
                         .child(error),
@@ -1701,19 +2118,23 @@ impl RightPanel {
         self.open_file(path, cx);
     }
     fn new_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
+        let id = uuid::Uuid::new_v4().to_string();
+        if self.open_panes.contains(&Pane::Terminal) {
+            self.terminal_tabs.push(id);
+        } else {
+            self.terminal_tabs = vec![id];
+        }
         self.terminal_active = self.terminal_tabs.len() - 1;
-        self.ensure_terminal(window, cx);
-        self.focus_terminal(window, cx);
-        cx.notify();
+        self.open_tool(Pane::Terminal, window, cx);
     }
     fn close_terminal_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_tabs.len() == 1 {
+            self.close_tool(Pane::Terminal, window, cx);
+            return;
+        }
         let id = self.terminal_tabs.remove(index);
         if let Some(terminal) = self.terminals.remove(&id) {
             terminal.update(cx, |terminal, cx| terminal.close(cx));
-        }
-        if self.terminal_tabs.is_empty() {
-            self.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
         }
         self.terminal_active = if index < self.terminal_active {
             self.terminal_active - 1
@@ -1721,8 +2142,10 @@ impl RightPanel {
             self.terminal_active
         }
         .min(self.terminal_tabs.len() - 1);
-        self.ensure_terminal(window, cx);
-        self.focus_terminal(window, cx);
+        if self.pane == Pane::Terminal {
+            self.ensure_terminal(window, cx);
+            self.focus_terminal(window, cx);
+        }
         cx.notify();
     }
     fn render_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1730,79 +2153,11 @@ impl RightPanel {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .child(
-                h_flex()
-                    .h(zpx(28.))
-                    .flex_none()
-                    .px_2()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .id("terminal-tabs")
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_scroll()
-                            .children(self.terminal_tabs.iter().enumerate().map(|(index, id)| {
-                                let title = self
-                                    .terminals
-                                    .get(id)
-                                    .map(|terminal| terminal.read(cx).snapshot().title)
-                                    .filter(|title| !title.is_empty())
-                                    .unwrap_or_else(|| format!("Terminal {}", index + 1));
-                                h_flex()
-                                    .id(("terminal-tab", index))
-                                    .h(crate::icons::button_size())
-                                    .max_w(zpx(150.))
-                                    .px_2()
-                                    .gap_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(zpx(11.))
-                                    .when(index == self.terminal_active, |row| {
-                                        row.bg(rgba(0xffffff14))
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.terminal_active = index;
-                                        this.ensure_terminal(window, cx);
-                                        this.focus_terminal(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(div().truncate().child(title))
-                                    .child(
-                                        div()
-                                            .id(("close-terminal-tab", index))
-                                            .size(crate::icons::button_size())
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .role(gpui::Role::Button)
-                                            .aria_label("Close terminal tab")
-                                            .child(
-                                                crate::icons::icon(IconName::Close)
-                                                    .with_size(zpx(14.)),
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.close_terminal_tab(index, window, cx);
-                                            })),
-                                    )
-                            })),
-                    )
-                    .child(
-                        action("new-terminal-tab", "+")
-                            .aria_label("New terminal tab")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.new_terminal_tab(window, cx)
-                                }),
-                            ),
-                    ),
-            )
-            .when_some(self.file_error.clone(), |view, error| {
+            .when_some(self.terminal_error.clone(), |view, error| {
                 view.child(
                     div()
                         .p_2()
-                        .text_size(zpx(11.))
+                        .text_size(zpx(TEXT_SM))
                         .whitespace_normal()
                         .child(error),
                 )
@@ -1920,7 +2275,7 @@ impl RightPanel {
                     div()
                         .p_3()
                         .whitespace_normal()
-                        .text_size(zpx(TEXT_SM))
+                        .text_size(zpx(TEXT_MD))
                         .child(error),
                 )
             })
@@ -1930,7 +2285,7 @@ impl RightPanel {
                     view.child(
                         div()
                             .p_3()
-                            .text_size(zpx(TEXT_SM))
+                            .text_size(zpx(TEXT_MD))
                             .child(if self.changes_loading {
                                 "Loading changes…"
                             } else {
@@ -1945,7 +2300,7 @@ impl RightPanel {
                         .px_3()
                         .py_2()
                         .gap_2()
-                        .text_size(zpx(11.))
+                        .text_size(zpx(TEXT_SM))
                         .text_color(rgba(0xffffff8c))
                         .child(format!(
                             "{} {}",
@@ -1982,7 +2337,7 @@ impl RightPanel {
                             .border_t_1()
                             .border_color(rgba(0xffffff14))
                             .cursor_pointer()
-                            .text_size(zpx(TEXT_SM))
+                            .text_size(zpx(TEXT_MD))
                             .role(gpui::Role::Button)
                             .aria_label(format!(
                                 "{} {} +{} -{}",
@@ -2046,7 +2401,7 @@ impl RightPanel {
                                         .flex_none()
                                         .bg(rgba(fill))
                                         .font_family(MONO)
-                                        .text_size(zpx(11.))
+                                        .text_size(zpx(TEXT_SM))
                                         .line_height(relative(1.6))
                                         .child(
                                             div()
@@ -2082,7 +2437,7 @@ impl RightPanel {
                                             .px_2()
                                             .py_1()
                                             .flex_none()
-                                            .text_size(zpx(11.))
+                                            .text_size(zpx(TEXT_SM))
                                             .text_color(rgba(0xffffff8c))
                                             .child(format!(
                                                 "{hidden} more {} not shown",
@@ -2100,7 +2455,7 @@ impl RightPanel {
                         .py_2()
                         .border_t_1()
                         .border_color(rgba(0xffffff14))
-                        .text_size(zpx(11.))
+                        .text_size(zpx(TEXT_SM))
                         .text_color(rgba(0xffffff8c))
                         .child(format!(
                             "{} more changed {} not shown",
@@ -2129,7 +2484,7 @@ impl RightPanel {
         }
         div()
             .p_3()
-            .text_size(zpx(TEXT_SM))
+            .text_size(zpx(TEXT_MD))
             .text_color(rgba(0xffffff8c))
             .child(if self.terminal_error.is_some() {
                 "Terminal unavailable. Switch back to Terminal to retry."
@@ -2142,6 +2497,10 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tab_drag.is_some() && !cx.has_active_drag() {
+            self.tab_drag = None;
+        }
+
         if (!self.preview_visible
             || self.pane != Pane::Files
             || !matches!(self.viewer, Viewer::Document { .. }))
@@ -2172,7 +2531,7 @@ impl Render for RightPanel {
                 .child(crate::new_tab::tools(
                     true,
                     &self.new_tab_scroll,
-                    Self::open_tool,
+                    Self::choose_new_tool,
                     cx,
                 ))
                 .into_any_element(),
@@ -2203,23 +2562,87 @@ impl Render for RightPanel {
                     .items_center()
                     .child(
                         h_flex()
-                            .id("sidebar-tool-tabs")
-                            .track_scroll(&self.tool_tab_scroll)
-                            .flex_1()
+                            .relative()
                             .min_w_0()
-                            .overflow_x_scroll()
-                            .gap_0p5()
-                            .children(self.open_panes.iter().map(|pane| {
-                                let (id, label) = pane.tab_label();
-                                self.tab(id, label, *pane, cx)
-                            }))
-                            .when(self.pane == Pane::NewTab, |row| {
-                                row.child(div().px_1p5().text_size(zpx(TEXT_SM)).child("New tab"))
-                            }),
+                            .flex_shrink_1()
+                            .overflow_hidden()
+                            .child(
+                                h_flex()
+                                    .id("sidebar-tool-tabs")
+                                    .debug_selector(|| "sidebar-tool-tabs".into())
+                                    .on_drag_move(cx.listener(
+                                        |this, event: &DragMoveEvent<DraggedSidebarTab>, _, cx| {
+                                            let drag = event.drag(cx).clone();
+                                            this.move_tab_drag(
+                                                drag.owner,
+                                                &drag.key,
+                                                event.event.position,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
+                                    )
+                                    .on_mouse_up_out(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
+                                    )
+                                    .on_drop(cx.listener(
+                                        |this, drag: &DraggedSidebarTab, _, cx| {
+                                            if drag.owner == cx.entity_id() {
+                                                this.finish_tab_drag(cx);
+                                            }
+                                        },
+                                    ))
+                                    .track_scroll(&self.tool_tab_scroll)
+                                    .flex_shrink_1()
+                                    .min_w_0()
+                                    .overflow_x_scroll()
+                                    .gap_0p5()
+                                    .children(
+                                        self.sidebar_tabs()
+                                            .into_iter()
+                                            .map(|(pane, instance)| self.tab(pane, instance, cx)),
+                                    ),
+                            )
+                            .children([true, false].into_iter().map(|left| {
+                                let scroll = self.tool_tab_scroll.clone();
+                                canvas(
+                                    |bounds, _, _| bounds,
+                                    move |_, bounds, window, _| {
+                                        let distance = if left {
+                                            -scroll.offset().x
+                                        } else {
+                                            scroll.max_offset().x + scroll.offset().x
+                                        };
+                                        let alpha = (distance / zpx(24.)).clamp(0., 1.);
+                                        if alpha > 0. {
+                                            let surface = crate::appearance::page_surface();
+                                            window.paint_quad(fill(
+                                                bounds,
+                                                linear_gradient(
+                                                    if left { 90. } else { 270. },
+                                                    linear_color_stop(surface.opacity(alpha), 0.),
+                                                    linear_color_stop(surface.opacity(0.), 1.),
+                                                ),
+                                            ));
+                                        }
+                                    },
+                                )
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .w(zpx(24.))
+                                .when(left, |fade| fade.left_0())
+                                .when(!left, |fade| fade.right_0())
+                            })),
                     )
                     .child(
                         div()
                             .id("new-sidebar-tab")
+                            .debug_selector(|| "new-sidebar-tab".into())
                             .role(gpui::Role::Button)
                             .aria_label("New sidebar tab")
                             .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
@@ -2233,18 +2656,18 @@ impl Render for RightPanel {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)),
                             )
-                            .child(crate::icons::icon(IconName::Plus).with_size(zpx(14.))),
+                            .child(crate::icons::icon(IconName::Plus)),
                     )
                     .when(self.pane == Pane::Files, |row| {
                         row.child(
                             h_flex()
                                 .id("show-hidden-files")
+                                .ml_auto()
                                 .gap(zpx(5.0))
                                 .items_center()
                                 .cursor_pointer()
-                                .opacity(0.55)
-                                .hover(|control| control.opacity(0.82))
-                                .text_size(zpx(11.0))
+                                .hover(|control| control.opacity(0.85))
+                                .text_size(zpx(TEXT_SM))
                                 .text_color(rgba(0xffffff8c))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_hidden = !this.show_hidden;
@@ -2260,7 +2683,7 @@ impl Render for RightPanel {
                                         .h(zpx(12.0))
                                         .rounded_full()
                                         .bg(if show_hidden {
-                                            rgba(0x448aff80)
+                                            ActionTone::Accent.foreground()
                                         } else {
                                             rgba(0xffffff20)
                                         })
@@ -2299,20 +2722,22 @@ impl Render for RightPanel {
     }
 }
 
-fn action(id: &'static str, label: &'static str) -> Stateful<Div> {
+fn action(id: &'static str, label: &'static str, tone: ActionTone) -> Stateful<Div> {
     div()
         .id(id)
         .role(gpui::Role::Button)
         .aria_label(label)
         .px_1p5()
-        .h(zpx(24.))
+        .h(zpx(28.))
         .flex()
         .items_center()
         .flex_none()
         .rounded_md()
-        .text_size(zpx(11.))
+        .text_size(zpx(TEXT_SM))
         .cursor_pointer()
-        .hover(|button| button.bg(rgba(0xffffff14)))
+        .bg(tone.surface(false))
+        .text_color(tone.foreground())
+        .hover(move |button| button.bg(tone.surface(true)))
         .child(label)
 }
 
@@ -2382,13 +2807,292 @@ fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn older_sidebar_state_keeps_all_four_tool_tabs() {
+    fn older_sidebar_state_uses_default_tool_tabs() {
         let saved: SavedPanel = serde_json::from_str(r#"{"open":true,"pane":"Files"}"#).unwrap();
         assert!(saved.open_panes == default_panes());
         let empty: SavedPanel =
             serde_json::from_str(r#"{"open":true,"pane":"NewTab","open_panes":[]}"#).unwrap();
         assert!(empty.open_panes.is_empty());
         assert!(empty.restore_open());
+    }
+
+    #[::gpui::test]
+    fn sidebar_mouse_drag_keeps_instances_selection_and_saved_order(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<RightPanel>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(zpx(1000.)).h(zpx(600.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut panel = RightPanel::new(dir.path().into(), window, cx);
+                panel.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
+                panel.open_new_tab(window, cx);
+                panel.open_new_tab(window, cx);
+                panel.address.update(cx, |input, cx| {
+                    input.set_value("keep-this-draft", window, cx)
+                });
+                panel.remember_blank(cx);
+                panel
+            });
+            panel = Some(view.clone());
+            cx.observe(&view, |_, _, cx| cx.notify()).detach();
+            Fixture(view)
+        });
+        let panel = panel.unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let original = panel.read_with(cx, |panel, _| panel.sidebar_keys());
+        let (blank, terminal) = panel.read_with(cx, |panel, _| {
+            (
+                format!("tab-new-{}", panel.blank_tabs[1].id),
+                format!("tab-terminal-{}", panel.terminal_tabs[1]),
+            )
+        });
+        let from = cx
+            .debug_bounds(Box::leak(blank.into_boxed_str()))
+            .unwrap()
+            .center();
+        let to = cx.debug_bounds("tab-files").unwrap().center() - point(zpx(8.), zpx(0.));
+        cx.simulate_mouse_move(from, None, Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let mut expected = original.clone();
+        let last = expected.pop().unwrap();
+        expected.insert(0, last);
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.sidebar_keys(), expected);
+            assert_eq!(panel.pane, Pane::NewTab);
+            assert_eq!(panel.blank_active, 1);
+            assert_eq!(panel.address.read(cx).value().as_ref(), "keep-this-draft");
+        });
+        // A terminal instance can cross tool kinds without moving its sibling.
+        let from = cx
+            .debug_bounds(Box::leak(terminal.into_boxed_str()))
+            .unwrap()
+            .center();
+        let to = cx.debug_bounds("tab-files").unwrap().center() - point(zpx(8.), zpx(0.));
+        cx.simulate_mouse_move(from, None, Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            from + point(zpx(12.), zpx(0.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(
+            to + point(zpx(0.), zpx(100.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let moved = expected.remove(4);
+        expected.insert(1, moved);
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                assert_eq!(panel.sidebar_keys(), expected);
+                assert_eq!(panel.pane, Pane::NewTab);
+                assert_eq!(panel.terminal_tabs.len(), 2);
+                let saved: SavedPanel =
+                    serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true)).unwrap())
+                        .unwrap();
+                panel.restore(saved, window, cx);
+                assert_eq!(panel.sidebar_keys(), expected);
+                assert_eq!(panel.address.read(cx).value().as_ref(), "keep-this-draft");
+                panel.open_new_tab(window, cx);
+                assert_eq!(&panel.sidebar_keys()[..expected.len()], expected.as_slice());
+                panel.close_blank_tab(0, window, cx);
+                expected.retain(|key| key != &original[4]);
+                assert_eq!(&panel.sidebar_keys()[..expected.len()], expected.as_slice());
+                panel.select_blank_tab(0, window, cx);
+                panel.open_panes.retain(|pane| *pane != Pane::Changes);
+                panel.choose_new_tool(Pane::Changes, window, cx);
+                assert_eq!(panel.sidebar_keys()[0], SidebarTab::Tool(Pane::Changes));
+            })
+        });
+    }
+
+    #[::gpui::test]
+    fn restoring_an_empty_sidebar_creates_one_visible_blank_tab(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (_panel, _cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let saved =
+                serde_json::from_str(r#"{"open":true,"pane":"NewTab","open_panes":[]}"#).unwrap();
+            panel.restore(saved, window, cx);
+            assert!(panel.pane == Pane::NewTab);
+            assert!(panel.open_panes == vec![Pane::NewTab]);
+            assert_eq!(panel.blank_tabs.len(), 1);
+            panel.restore(panel.snapshot(true), window, cx);
+            assert_eq!(panel.blank_tabs.len(), 1);
+            panel
+        });
+    }
+
+    #[::gpui::test]
+    fn blank_tabs_keep_identity_and_drafts_until_explicitly_closed(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (_panel, _cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            assert!(panel.blank_tabs.is_empty());
+            for index in 0..8 {
+                panel.open_new_tab(window, cx);
+                panel.address.update(cx, |input, cx| {
+                    input.set_value(format!("draft-{index}.example"), window, cx)
+                });
+            }
+            panel.open_tool(Pane::Files, window, cx);
+            assert_eq!(panel.blank_tabs.len(), 8);
+            assert_eq!(panel.sidebar_tabs().len(), 11);
+            let ids: Vec<_> = panel.blank_tabs.iter().map(|tab| tab.id.clone()).collect();
+            for index in 0..8 {
+                panel.select_blank_tab(index, window, cx);
+                assert_eq!(
+                    panel.address.read(cx).value().as_ref(),
+                    format!("draft-{index}.example")
+                );
+            }
+            let saved: SavedPanel =
+                serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true)).unwrap())
+                    .unwrap();
+            panel.restore(saved, window, cx);
+            assert!(panel.pane == Pane::NewTab);
+            assert_eq!(panel.blank_active, 7);
+            assert_eq!(panel.address.read(cx).value().as_ref(), "draft-7.example");
+            assert_eq!(
+                panel
+                    .blank_tabs
+                    .iter()
+                    .map(|tab| tab.id.clone())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            panel.open_tool(Pane::Files, window, cx);
+            panel.close_blank_tab(2, window, cx);
+            assert!(panel.pane == Pane::Files);
+            assert_eq!(panel.blank_tabs.len(), 7);
+            assert_eq!(panel.blank_tabs[2].id, ids[3]);
+            panel.select_blank_tab(6, window, cx);
+            panel.close_blank_tab(6, window, cx);
+            assert_eq!(panel.address.read(cx).value().as_ref(), "draft-6.example");
+            panel.select_blank_tab(0, window, cx);
+            panel.choose_new_tool(Pane::Terminal, window, cx);
+            assert_eq!(panel.blank_tabs.len(), 5);
+            assert_eq!(panel.blank_tabs[0].id, ids[1]);
+            panel.release(cx);
+            panel
+        });
+    }
+
+    #[::gpui::test]
+    fn sidebar_plus_follows_tabs_and_stays_reachable_when_they_overflow(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture {
+            panel: Entity<RightPanel>,
+            width: f32,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(zpx(self.width))
+                    .h(zpx(600.))
+                    .child(self.panel.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (fixture, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            panel = Some(view.clone());
+            Fixture {
+                panel: view,
+                width: 700.,
+            }
+        });
+        let panel = panel.unwrap();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let tabs = cx.debug_bounds("sidebar-tool-tabs").unwrap();
+        let plus = cx.debug_bounds("new-sidebar-tab").unwrap();
+        assert!((plus.left() - tabs.right()).abs() <= zpx(4.));
+        assert!(
+            plus.right() < zpx(500.),
+            "plus must not fill the available width"
+        );
+        cx.update(|window, cx| {
+            fixture.update(cx, |fixture, cx| {
+                fixture.width = PANEL_WIDTH;
+                cx.notify();
+            });
+            panel.update(cx, |panel, cx| {
+                for _ in 0..8 {
+                    panel.open_new_tab(window, cx);
+                }
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let plus = cx.debug_bounds("new-sidebar-tab").unwrap();
+        assert!(plus.right() <= zpx(PANEL_WIDTH));
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.tool_tab_scroll.max_offset().x > zpx(100.))
+        });
+        cx.simulate_mouse_move(plus.center(), None, Modifiers::default());
+        cx.simulate_mouse_down(plus.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(plus.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| assert_eq!(panel.blank_tabs.len(), 9));
+    }
+
+    #[::gpui::test]
+    fn plus_creates_multiple_blank_tabs_and_hover_close_removes_only_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let target = cx.debug_bounds("new-sidebar-tab").unwrap().center();
+            cx.simulate_mouse_move(target, None, Modifiers::default());
+            cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+        }
+        let ids = panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.blank_tabs.len(), 3);
+            panel
+                .blank_tabs
+                .iter()
+                .map(|tab| tab.id.clone())
+                .collect::<Vec<_>>()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let close = cx.debug_bounds("close-tab-new-1").unwrap().center();
+        cx.simulate_mouse_move(close, None, Modifiers::default());
+        cx.simulate_mouse_down(close, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(close, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.blank_tabs.len(), 2);
+            assert_eq!(panel.blank_tabs[0].id, ids[0]);
+            assert_eq!(panel.blank_tabs[1].id, ids[2]);
+            assert_eq!(panel.blank_active, 1);
+        });
     }
 
     #[::gpui::test]
@@ -2407,19 +3111,26 @@ mod tests {
                 panel.close_tool(Pane::Terminal, window, cx);
                 panel.close_tool(Pane::Changes, window, cx);
                 panel.close_tool(Pane::Files, window, cx);
-                assert!(panel.open_panes.is_empty());
+                assert!(panel.open_panes == vec![Pane::NewTab]);
+                assert_eq!(panel.blank_tabs.len(), 1);
                 assert!(panel.pane == Pane::NewTab);
+                let first_blank = panel.blank_tabs[0].id.clone();
+                panel.close_blank_tab(0, window, cx);
+                assert_eq!(panel.blank_tabs.len(), 1);
+                assert_ne!(panel.blank_tabs[0].id, first_blank);
                 let saved =
                     serde_json::from_str(&serde_json::to_string(&panel.snapshot(true)).unwrap())
                         .unwrap();
                 panel.restore(saved, window, cx);
-                assert!(panel.open_panes.is_empty());
+                assert!(panel.open_panes == vec![Pane::NewTab]);
+                assert_eq!(panel.blank_tabs.len(), 1);
                 assert!(panel.pane == Pane::NewTab);
-                panel.open_tool(Pane::Files, window, cx);
+                panel.choose_new_tool(Pane::Files, window, cx);
                 assert!(panel.open_panes == vec![Pane::Files]);
                 panel.open_new_tab(window, cx);
                 panel.open_tool(Pane::Files, window, cx);
-                assert_eq!(panel.open_panes.len(), 1);
+                assert_eq!(panel.open_panes.len(), 2);
+                assert_eq!(panel.blank_tabs.len(), 1);
                 panel.close_tool(Pane::Files, window, cx);
                 panel.address.update(cx, |input, cx| {
                     input.set_value("http://localhost:8766", window, cx)
@@ -2456,7 +3167,11 @@ mod tests {
             gpui_kit::component::Root::new(fixture, window, cx)
         });
         let panel = panel.unwrap();
-        for id in ["close-tab-files", "close-tab-changes", "close-tab-terminal"] {
+        for id in [
+            "close-tab-files",
+            "close-tab-changes",
+            "close-tab-terminal-0",
+        ] {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let target = cx
                 .debug_bounds(id)
@@ -2468,7 +3183,8 @@ mod tests {
             cx.run_until_parked();
         }
         panel.read_with(cx, |panel, _| {
-            assert!(panel.open_panes.is_empty());
+            assert!(panel.open_panes == vec![Pane::NewTab]);
+            assert_eq!(panel.blank_tabs.len(), 1);
             assert!(panel.pane == Pane::NewTab);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -2758,6 +3474,63 @@ mod tests {
                 panel.prepare_to_show(window, cx);
                 assert_eq!(panel.change_request, request);
                 assert!(!panel.changes_loading);
+            })
+        });
+    }
+
+    #[::gpui::test]
+    fn launcher_creates_a_fresh_terminal_in_the_main_strip(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.open_tool(Pane::Terminal, window, cx);
+            panel.open_new_tab(window, cx);
+            panel
+        });
+        let first = panel.read_with(cx, |panel, _| {
+            panel.terminals[&panel.terminal_tabs[0]].clone()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("Terminal").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert!(panel.pane == Pane::Terminal);
+            assert_eq!(panel.terminal_active, 1);
+            assert_eq!(panel.terminal_tabs.len(), 2);
+            let second = &panel.terminals[&panel.terminal_tabs[1]];
+            assert_ne!(
+                first.read(cx).snapshot().pid,
+                second.read(cx).snapshot().pid
+            );
+            assert_eq!(panel.sidebar_tabs().len(), 4);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for id in ["close-tab-terminal-0", "close-tab-terminal-1"] {
+            let close = cx.debug_bounds(id).unwrap();
+            assert!(close.center().y < zpx(crate::icons::TOOL_ROW_HEIGHT));
+        }
+        assert!(cx.debug_bounds("terminal-tabs").is_none());
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.terminal_active = 0;
+                panel.open_tool(Pane::Terminal, window, cx);
+                assert_eq!(panel.terminals[&panel.terminal_tabs[0]], first);
+                panel.open_tool(Pane::Files, window, cx);
+                panel.close_terminal_tab(0, window, cx);
+                assert!(panel.pane == Pane::Files);
+                assert_eq!(panel.terminals.len(), 1);
+                panel.close_terminal_tab(0, window, cx);
+                assert!(panel.terminals.is_empty());
+                assert!(!panel.open_panes.contains(&Pane::Terminal));
+                panel.open_new_tab(window, cx);
+                panel.choose_new_tool(Pane::Terminal, window, cx);
+                assert_eq!(panel.terminal_tabs.len(), 1);
+                assert_eq!(panel.terminals.len(), 1);
+                panel.release(cx);
             })
         });
     }

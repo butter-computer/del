@@ -326,7 +326,7 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                     window.open_dialog(cx, move |dialog, _, _| {
                         let updater = updater.clone();
                         dialog.title("Restart to update Del?")
-                            .bg(crate::appearance::popup_surface(0x0b0b0d))
+                            .bg(crate::appearance::popup_surface())
                             .child(div().child("Your saved sessions will remain available. Running agents and terminals will stop when Del restarts."))
                             .footer(gpui_kit::component::dialog::DialogFooter::new()
                                 .child(Button::new("update-later").label("Later").on_click(|_, window, cx| window.close_dialog(cx)))

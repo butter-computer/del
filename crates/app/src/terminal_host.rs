@@ -490,7 +490,10 @@ impl Render for TerminalLauncher {
                     .small()
                     .label(kind.label())
                     .disabled(self.launching || !installed)
-                    .when(selected, |b| b.bg(rgba(0xffffff18)))
+                    .when(selected, |b| {
+                        b.bg(crate::appearance::ActionTone::Accent.surface(false))
+                            .text_color(crate::appearance::ActionTone::Accent.foreground())
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.kind = kind;
                         this.error = None;
@@ -545,7 +548,7 @@ impl Render for TerminalLauncher {
                     })
                     .child(
                         Button::new("launch-terminal")
-                            .ghost()
+                            .primary()
                             .small()
                             .label(if self.launching {
                                 "Opening…"

@@ -4,15 +4,44 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Rgba};
 use std::sync::atomic::{AtomicBool, Ordering};
 static LIGHT: AtomicBool = AtomicBool::new(false);
-const OPACITY: u8 = 85;
 
 // Shared neutral dark tones used by both custom chrome and component defaults.
-const DARK_SURFACE: u32 = 0x0a0a0a;
-const DARK_HOVER: u32 = 0x171717;
-const DARK_ACTIVE: u32 = 0x262626;
+const DARK_SURFACE: u32 = 0x101010;
+const DARK_HOVER: u32 = 0x191919;
+const DARK_ACTIVE: u32 = 0x222222;
 const DARK_MUTED: u32 = 0x737373;
 const DARK_SECONDARY_TEXT: u32 = 0xa1a1a1;
 const DARK_PRIMARY_TEXT: u32 = 0xfafafa;
+
+/// Semantic action colors; neutrals stay neutral and color signals intent.
+#[derive(Clone, Copy)]
+pub enum ActionTone {
+    Accent,
+    Success,
+    Warning,
+}
+impl ActionTone {
+    pub fn foreground(self) -> Rgba {
+        let value = match (self, light()) {
+            (Self::Accent, false) => 0x79b4ff,
+            (Self::Accent, true) => 0x175db5,
+            (Self::Success, false) => 0x72c997,
+            (Self::Success, true) => 0x236940,
+            (Self::Warning, false) => 0xe6b56c,
+            (Self::Warning, true) => 0x885210,
+        };
+        gpui_kit::rgb(value)
+    }
+    pub fn surface(self, hovered: bool) -> Rgba {
+        let mut color = self.foreground();
+        color.a = if hovered { 0.20 } else { 0.11 };
+        color
+    }
+}
+
+pub fn sidebar_surface() -> Rgba {
+    gpui_kit::rgb(if light() { 0xfcfcfc } else { 0x060606 })
+}
 
 pub fn separator() -> Rgba {
     gpui_kit::rgba(if light() { 0x00000014 } else { 0xffffff14 })
@@ -29,29 +58,26 @@ pub fn light() -> bool {
     LIGHT.load(Ordering::Relaxed)
 }
 
-/// A visible composer surface that still lets the page show through.
+/// Stable input surface, distinct from the black workspace.
 pub fn composer_surface() -> Rgba {
-    gpui_kit::rgba(if light() { 0xf9f9f9ff } else { 0xffffff12 })
+    gpui_kit::rgba(if light() { 0xf9f9f9ff } else { 0x191919ff })
 }
 
-/// Shared light surface for menus and dialogs, matching the composer.
-pub fn popup_surface(dark: u32) -> Rgba {
+/// Shared raised surface for menus and dialogs in both themes.
+pub fn popup_surface() -> Rgba {
     if light() {
         composer_surface()
     } else {
-        rgb(dark)
+        gpui_kit::rgb(0x161616)
     }
 }
 
 pub fn shell_surface() -> Rgba {
-    let mut color = gpui_kit::rgba(if light() {
-        0xfcfcfcd6
+    gpui_kit::rgba(if light() {
+        0xfcfcfcd9
     } else {
         del_core::SHELL_SURFACE_RGBA
-    });
-    // Quantize to the same RGBA8 alpha as the native shell token (85% -> 0xd9).
-    color.a = ((u32::from(OPACITY) * 255 + 50) / 100) as f32 / 255.;
-    color
+    })
 }
 
 pub fn page_surface() -> Rgba {
@@ -112,7 +138,7 @@ fn apply(light: bool, cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.colors.background = gpui_kit::transparent_black();
         theme.font_size = zpx(del_core::typography::TEXT_MD);
-        theme.colors.popover = popup_surface(0x2b2b2e).into();
+        theme.colors.popover = popup_surface().into();
         theme.colors.popover_foreground = rgb(0xf0f0f0).into();
         theme.colors.border = rgba(0xffffff14).into();
         theme.colors.accent = rgba(0xffffff14).into();
@@ -128,7 +154,7 @@ fn apply(light: bool, cx: &mut App) {
             let black = gpui_kit::rgb(0x000000).into();
             let border = separator().into();
             c.foreground = text;
-            c.popover = surface;
+            c.popover = popup_surface().into();
             c.popover_foreground = text;
             c.border = border;
             c.input = border;
@@ -140,14 +166,14 @@ fn apply(light: bool, cx: &mut App) {
             c.button_hover = hover;
             c.button_active = active;
             c.button_foreground = text;
-            c.primary = white;
-            c.primary_hover = gpui_kit::rgb(0xe5e5e5).into();
-            c.primary_active = gpui_kit::rgb(0xd4d4d4).into();
-            c.primary_foreground = black;
+            c.primary = gpui_kit::rgb(0x286bd1).into();
+            c.primary_hover = gpui_kit::rgb(0x347be5).into();
+            c.primary_active = gpui_kit::rgb(0x205bb8).into();
+            c.primary_foreground = white;
             c.button_primary = c.primary;
             c.button_primary_hover = c.primary_hover;
             c.button_primary_active = c.primary_active;
-            c.button_primary_foreground = black;
+            c.button_primary_foreground = white;
             c.secondary = surface;
             c.secondary_hover = hover;
             c.secondary_active = active;
@@ -156,11 +182,11 @@ fn apply(light: bool, cx: &mut App) {
             c.button_secondary_hover = hover;
             c.button_secondary_active = active;
             c.button_secondary_foreground = text;
-            c.ring = gpui_kit::rgb(DARK_MUTED).into();
-            c.selection = gpui_kit::rgba(0xffffff30).into();
-            c.link = text;
-            c.link_hover = white;
-            c.link_active = secondary;
+            c.ring = ActionTone::Accent.foreground().into();
+            c.selection = gpui_kit::rgba(0x579fff40).into();
+            c.link = ActionTone::Accent.foreground().into();
+            c.link_hover = gpui_kit::rgb(0xa8cfff).into();
+            c.link_active = c.link;
             c.list = surface;
             c.list_head = surface;
             c.list_even = surface;
