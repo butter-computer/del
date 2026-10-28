@@ -29,10 +29,8 @@ impl Queue {
         Self::path(session).map(Self::open).unwrap_or_default()
     }
     fn open(path: std::path::PathBuf) -> Self {
-        let mut queue: Self = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        // An unreadable queue is preserved aside rather than overwritten by the next save.
+        let (mut queue, _): (Self, _) = crate::sessions::load_or_set_aside(&path, "queued follow-ups");
         queue.storage = Some(path);
         for item in &mut queue.items {
             if item.sending {
@@ -54,10 +52,7 @@ impl Queue {
         let Some(path) = &self.storage else {
             return Ok(());
         };
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        let temporary = path.with_extension("tmp");
-        std::fs::write(&temporary, serde_json::to_vec(self)?)?;
-        std::fs::rename(temporary, path)
+        crate::sessions::write_atomic(path, &serde_json::to_vec(self)?, crate::sessions::PRIVATE)
     }
     pub fn push(&mut self, input: UserInput) -> String {
         let id = uuid::Uuid::new_v4().to_string();
@@ -194,5 +189,21 @@ mod tests {
         let reopened = Queue::open(path);
         assert_eq!(reopened.next(), Some(busy));
         assert_eq!(reopened.items[1].error.as_deref(), Some("connection lost"));
+    }
+
+    #[test]
+    fn unreadable_queue_is_preserved_instead_of_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let mut queue = Queue::open(path.clone());
+        assert!(queue.items.is_empty());
+        queue.push(UserInput::text("new"));
+        queue.save().unwrap();
+        let aside: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains(".corrupt-")).collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), b"{not json");
     }
 }

@@ -48,6 +48,7 @@ static NSString *DelJoinSpeech(NSString *left, NSString *right) {
 @property(nonatomic, strong) NSLock *audioLock;
 @property(nonatomic, strong) SFSpeechAudioBufferRecognitionRequest *audioRequest;
 @property(nonatomic) BOOL tapped;
+@property(nonatomic, strong) id configurationObserver;
 @property(nonatomic) BOOL ended;
 @property(nonatomic) BOOL finishing;
 - (void)begin;
@@ -60,6 +61,10 @@ static NSString *DelJoinSpeech(NSString *left, NSString *right) {
     if (self.callback) self.callback(self.context, kind, (text ?: @"").UTF8String);
 }
 - (void)stopAudio {
+    if (self.configurationObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:self.configurationObserver];
+        self.configurationObserver = nil;
+    }
     [self.engine stop];
     if (self.tapped) { [self.engine.inputNode removeTapOnBus:0]; self.tapped = NO; }
     [self.audioLock lock];
@@ -208,33 +213,67 @@ static NSString *DelJoinSpeech(NSString *left, NSString *right) {
     __weak DelDictation *weakSelf = self;
     @try {
         self.engine = [AVAudioEngine new];
-        AVAudioInputNode *input = self.engine.inputNode;
-        AVAudioFormat *format = [input outputFormatForBus:0];
+        AVAudioFormat *format = [self.engine.inputNode outputFormatForBus:0];
         if (!format.channelCount || !format.sampleRate) { [self fail:@"No microphone is available. Connect or select an input device in macOS Sound settings."]; return; }
         [self startSegment];
         if (self.ended) return;
-        AVAudioNodeTapBlock tap = ^(AVAudioPCMBuffer *buffer, AVAudioTime *time) {
-            (void)time;
-            DelDictation *owner = weakSelf;
-            [owner.audioLock lock];
-            [owner.audioRequest appendAudioPCMBuffer:buffer];
-            [owner.audioLock unlock];
-        };
-        // Use the long-supported API on every supported OS. New SDKs deprecate it
-        // but it remains available; no macOS 27-only selector is needed here.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        [input installTapOnBus:0 bufferSize:1024 format:format block:tap];
-#pragma clang diagnostic pop
-        self.tapped = YES;
-        [self.engine prepare];
-        NSError *error = nil;
-        if (![self.engine startAndReturnError:&error]) { [self fail:error.localizedDescription ?: @"Could not start microphone."]; return; }
+        NSString *failure = [self connectInput];
+        if (failure) { [self fail:failure]; return; }
     } @catch (NSException *exception) {
         NSLog(@"Del microphone setup failed (%@): %@", exception.name, exception.reason);
         [self fail:@"Could not start microphone. Check your macOS audio input and try again."]; return;
     }
+    // Connecting or removing a device (such as AirPods) stops the engine and
+    // may change the input format. Without this, the UI would keep listening.
+    self.configurationObserver = [NSNotificationCenter.defaultCenter
+        addObserverForName:AVAudioEngineConfigurationChangeNotification object:self.engine
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            (void)note;
+            [weakSelf inputChanged];
+        }];
     [self emit:"listening" text:nil];
+}
+// Install the microphone tap in the input's current format and start the
+// engine. Returns a user-facing failure, or nil.
+- (NSString *)connectInput {
+    AVAudioInputNode *input = self.engine.inputNode;
+    if (self.tapped) { [input removeTapOnBus:0]; self.tapped = NO; }
+    AVAudioFormat *format = [input outputFormatForBus:0];
+    if (!format.channelCount || !format.sampleRate) return @"No microphone is available. Connect or select an input device in macOS Sound settings.";
+    __weak DelDictation *weakSelf = self;
+    AVAudioNodeTapBlock tap = ^(AVAudioPCMBuffer *buffer, AVAudioTime *time) {
+        (void)time;
+        DelDictation *owner = weakSelf;
+        [owner.audioLock lock];
+        [owner.audioRequest appendAudioPCMBuffer:buffer];
+        [owner.audioLock unlock];
+    };
+    // Use the long-supported API on every supported OS. New SDKs deprecate it
+    // but it remains available; no macOS 27-only selector is needed here.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [input installTapOnBus:0 bufferSize:1024 format:format block:tap];
+#pragma clang diagnostic pop
+    self.tapped = YES;
+    [self.engine prepare];
+    NSError *error = nil;
+    if (![self.engine startAndReturnError:&error]) return error.localizedDescription ?: @"Could not start microphone.";
+    return nil;
+}
+- (void)inputChanged {
+    if (self.ended || self.finishing || !self.engine) return;
+    NSString *failure = nil;
+    @try {
+        [self.engine stop];
+        failure = [self connectInput];
+    } @catch (NSException *exception) {
+        NSLog(@"Del microphone reconfiguration failed (%@): %@", exception.name, exception.reason);
+        failure = @"Could not restart the microphone after the input device changed.";
+    }
+    if (failure) { [self fail:[@"Dictation stopped: " stringByAppendingString:failure]]; return; }
+    // The new device can use another format; give it a fresh request while
+    // the previous one finishes what it already heard.
+    if (self.active) [self rotateSegment:self.active];
 }
 - (void)finish {
     if (self.ended || self.finishing) return;

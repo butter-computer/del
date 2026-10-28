@@ -291,13 +291,7 @@ impl SidebarWidths {
 
     fn save(mut self) -> std::io::Result<()> {
         self.left = self.left.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX);
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&self)?)?;
-        std::fs::rename(tmp, path)
+        sessions::write_atomic(&Self::path(), &serde_json::to_vec(&self)?, 0o644)
     }
 }
 
@@ -370,6 +364,9 @@ struct AppShell {
     renaming_loaded: Option<SessionId>,
     project_renaming_loaded: Option<std::path::PathBuf>,
     sidebar_widths: SidebarWidths,
+    sidebar_widths_generation: u64,
+    /// A one-second repaint runs only while the open chat has an active goal.
+    goal_ticking: bool,
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
     tab_drag_origin: std::rc::Rc<std::cell::Cell<Pixels>>,
     tab_strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
@@ -672,6 +669,8 @@ impl AppShell {
             renaming_loaded: None,
             project_renaming_loaded: None,
             sidebar_widths: SidebarWidths::load(),
+            sidebar_widths_generation: 0,
+            goal_ticking: false,
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
             tab_strip_bounds: Default::default(),
@@ -729,28 +728,6 @@ impl AppShell {
             drag_target: None,
             previous_drag_target: None,
         };
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.open_chat(cx).is_some_and(|chat| {
-                            chat.read(cx)
-                                .goal()
-                                .is_some_and(|goal| goal.status == del_agent::GoalStatus::Active)
-                        }) {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -774,6 +751,64 @@ impl AppShell {
         })
         .detach();
         shell
+    }
+
+    fn goal_active(&self, cx: &App) -> bool {
+        self.open_chat(cx).is_some_and(|chat| {
+            chat.read(cx)
+                .goal()
+                .is_some_and(|goal| goal.status == del_agent::GoalStatus::Active)
+        })
+    }
+
+    /// Refresh the goal's elapsed time each second, only while one is active.
+    fn ensure_goal_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.goal_ticking || !self.goal_active(cx) {
+            return;
+        }
+        self.goal_ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let active = this.update(cx, |this, cx| {
+                    let active = this.goal_active(cx);
+                    if active {
+                        cx.notify();
+                    } else {
+                        this.goal_ticking = false;
+                    }
+                    active
+                });
+                if !matches!(active, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Divider drags update widths every frame; coalesce disk writes like the right panel.
+    fn save_sidebar_widths_soon(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_widths_generation += 1;
+        let generation = self.sidebar_widths_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.sidebar_widths_generation == generation
+                    && let Err(error) = this.sidebar_widths.save()
+                {
+                    this.state.update(cx, |state, cx| {
+                        state.error = Some(format!("Could not save sidebar widths: {error}"));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     /// Make sure the open session has a live chat view.
@@ -814,11 +849,19 @@ impl AppShell {
         .detach();
         cx.subscribe(&chat, |this, _, event: &chat::OpenLink, cx| {
             let cwd = this.state.read(cx).effective().2;
-            if let Some(path) = chat::links::local_path(&event.0, &cwd) {
-                this.set_right(true, cx);
-                this.right.update(cx, |right, cx| right.preview_file(path, cx));
-            } else {
-                cx.open_url(&event.0);
+            match chat::links::classify(&event.0, &cwd) {
+                chat::links::LinkTarget::Local(path) => {
+                    this.set_right(true, cx);
+                    this.right.update(cx, |right, cx| right.preview_file(path, cx));
+                }
+                chat::links::LinkTarget::External(url) => cx.open_url(&url),
+                chat::links::LinkTarget::Blocked => this.state.update(cx, |state, cx| {
+                    state.error = Some(format!(
+                        "Del did not open {}. Only web (http, https) and mail links open outside Del.",
+                        event.0.chars().take(200).collect::<String>()
+                    ));
+                    cx.notify();
+                }),
             }
         }).detach();
         self.chats.insert(id, chat);
@@ -1891,6 +1934,7 @@ impl Drop for AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_goal_ticker(cx);
         let zoom = del_core::zoom::percent();
         if self.zoom_percent != zoom {
             self.zoom_percent = zoom;
@@ -2203,6 +2247,7 @@ impl Render for AppShell {
                             } else {
                                 this.sidebar_widths.left = width;
                             }
+                            this.save_sidebar_widths_soon(cx);
                             cx.notify();
                         },
                     ))

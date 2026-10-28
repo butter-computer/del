@@ -252,12 +252,19 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         HANDSHAKE[2],
         ACCOUNT_OK[0],
         ACCOUNT_OK[1],
-        r#"> {"id":3,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":3,"result":{"thread":{"id":"saved","name":"Build a smooth sidebar","preview":"hello"}}}"#,
+        r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved"}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[]}}}"#,
+        r#"> {"id":30,"method":"thread/goal/get","params":{"threadId":"saved"}}"#,
+        r#"< {"id":30,"result":{"goal":null}}"#,
         r#"> {"id":4,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":4,"result":{"thread":{"id":"saved","name":"Renamed in Codex","preview":"hello"}}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"saved","name":"Build a smooth sidebar","preview":"hello"}}}"#,
+        // New activity, after which the provider's name is worth asking for again.
+        r#"> {"id":40,"method":"turn/start","params":{"threadId":"saved","input":[{"type":"text","text":"next"}]}}"#,
+        r#"< {"id":40,"result":{"turn":{"id":"next"}}}"#,
+        r#"< {"method":"turn/started","params":{"threadId":"saved","turn":{"id":"next"}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"saved","turn":{"id":"next","status":"completed"}}}"#,
         r#"> {"id":5,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":5,"result":{"thread":{"id":"saved","name":null,"preview":"hello"}}}"#,
+        r#"< {"id":5,"result":{"thread":{"id":"saved","name":"Renamed in Codex","preview":"hello"}}}"#,
     ]);
     let (client, rx, server) = replay(lines);
     let backend = std::sync::Arc::new(CodexBackend::attach(opts(), client, rx).await.unwrap());
@@ -285,19 +292,41 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         .unwrap();
     let manager =
         SessionManager::new(&path, [backend as std::sync::Arc<dyn AgentBackend>]).unwrap();
+    // Titles are only read for live sessions; never resume one just for its name.
+    manager.resume(&id).await.unwrap();
+    let (_, mut events) = manager.subscribe_with_history(&id).unwrap();
+    let order = |m: &SessionManager| {
+        m.list_sessions()
+            .iter()
+            .map(|r| (r.id.clone(), r.updated_at_ms))
+            .collect::<Vec<_>>()
+    };
+    let before = order(&manager);
     assert!(manager.refresh_titles().await.unwrap());
     assert_eq!(
         manager.list_sessions()[0].title.as_deref(),
         Some("Build a smooth sidebar")
     );
-    assert!(manager.refresh_titles().await.unwrap());
+    assert_eq!(order(&manager), before, "a rename must not reorder chats");
+    // Without new activity the provider is not asked again.
     assert!(!manager.refresh_titles().await.unwrap());
+    manager
+        .send_prompt(&id, UserInput::text("next"))
+        .await
+        .unwrap();
+    until_turn_end(&mut events).await;
+    manager.flush_index().await;
+    let before = order(&manager);
+    assert!(manager.refresh_titles().await.unwrap());
+    assert_eq!(order(&manager), before, "a rename must not reorder chats");
+    assert!(!manager.refresh_titles().await.unwrap());
+    manager.flush_index().await;
     let saved = del_agent::index::SessionIndex::open(&path)
         .unwrap()
         .list()
         .remove(0);
     assert_eq!(saved.title.as_deref(), Some("Renamed in Codex"));
-    assert_eq!(saved.updated_at_ms, record.updated_at_ms);
+    assert_eq!(saved.updated_at_ms, before[0].1);
     assert_eq!(saved.status, SessionStatus::Idle);
     manager.shutdown().await;
     server.await.unwrap().unwrap();
@@ -552,6 +581,33 @@ async fn failed_turn_and_unsupported_request() {
             ..
         }
     ));
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn rejected_turn_start_does_not_block_the_next_prompt() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":4,"error":{"code":-32600,"message":"nope"}}"#,
+        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":5,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let h = backend.start_session(config()).await.unwrap();
+    assert!(backend.send_prompt(&h.id, UserInput::text("go")).await.is_err());
+    backend
+        .send_prompt(&h.id, UserInput::text("go"))
+        .await
+        .unwrap();
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

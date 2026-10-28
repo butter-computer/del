@@ -92,7 +92,9 @@ pub type HostResult<T> = Result<T, HostError>;
 
 /// Implemented by the app. Every call carries `caller`, the session whose
 /// bearer token authenticated the request; the server has already enforced
-/// scoping, so hosts may trust it but must not widen it.
+/// scoping (`list_sessions` results are filtered to the caller's family and
+/// `session_summary` targets are checked), so hosts may trust it but must not
+/// widen it.
 ///
 /// Methods may be dropped mid-await when the agent disconnects (notably
 /// `ask_user`); implementations should treat drop as cancellation and remove
@@ -107,9 +109,11 @@ pub trait McpHost: Send + Sync + 'static {
         Err(HostError::Failed("This host has no goal controls".into()))
     }
 
+    /// Run one browser action within `access`; never target a session outside it.
     async fn browser(
         &self,
         _caller: &SessionId,
+        _access: crate::BrowserAccess,
         _request: crate::BrowserRequest,
     ) -> HostResult<serde_json::Value> {
         Err(HostError::Failed("This host has no browser".into()))

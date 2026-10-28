@@ -48,6 +48,10 @@ impl SessionHandle {
     pub fn history(&self) -> &[AgentEvent] {
         &self.history
     }
+    /// Release the restored snapshot once it has been copied elsewhere.
+    pub fn take_history(&mut self) -> std::sync::Arc<[AgentEvent]> {
+        std::mem::take(&mut self.history)
+    }
     /// Subscribe to events emitted from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.events.subscribe()
@@ -205,7 +209,11 @@ pub trait AgentBackend: Send + Sync {
         config: SessionConfig,
         session: &SessionId,
     ) -> Result<SessionHandle> {
-        self.close(session).await?;
+        match self.close(session).await {
+            // Already gone (e.g. an earlier reconfigure failed after closing).
+            Ok(()) | Err(AgentError::UnknownSession(_)) => {}
+            Err(e) => return Err(e),
+        }
         self.resume(config, session).await
     }
     /// Answer a pending `ApprovalRequested`.

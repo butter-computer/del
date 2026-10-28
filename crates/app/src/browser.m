@@ -30,6 +30,12 @@ static NSURL *DelBrowserURL(NSString *address) {
 @property(nonatomic, copy) NSString *savedURL;
 @property(nonatomic) CGFloat zoom;
 @property(nonatomic) BOOL mousePassthrough;
+// Page dialogs: a short burst limit, and an opt-out that lasts while the
+// main frame stays on the same host.
+@property(nonatomic, copy) NSString *dialogHost;
+@property(nonatomic, strong) NSDate *dialogBurstStart;
+@property(nonatomic) NSUInteger dialogBurstCount;
+@property(nonatomic) BOOL dialogsBlocked;
 - (void)navigate:(NSString *)address;
 - (void)refreshControls;
 @end
@@ -144,7 +150,16 @@ static NSURL *DelBrowserURL(NSString *address) {
 - (void)webView:(WKWebView *)web didStartProvisionalNavigation:(WKNavigation *)navigation {
     [self showStatus:@"Loading…"]; [self refreshControls];
 }
-- (void)webView:(WKWebView *)web didCommitNavigation:(WKNavigation *)navigation { [self refreshControls]; }
+- (void)webView:(WKWebView *)web didCommitNavigation:(WKNavigation *)navigation {
+    NSString *host = web.URL.host ?: @"";
+    if (![host isEqualToString:self.dialogHost ?: @""]) {
+        self.dialogHost = host;
+        self.dialogsBlocked = NO;
+        self.dialogBurstStart = nil;
+        self.dialogBurstCount = 0;
+    }
+    [self refreshControls];
+}
 - (void)webView:(WKWebView *)web didFinishNavigation:(WKNavigation *)navigation {
     [self showStatus:nil]; [self refreshControls];
 }
@@ -157,9 +172,15 @@ static NSURL *DelBrowserURL(NSString *address) {
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)web { [self showStatus:@"Page stopped. Press Reload to try again."]; }
 - (void)webView:(WKWebView *)web decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSString *scheme = action.request.URL.scheme.lowercaseString;
-    BOOL allowed = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"] ||
-        [action.request.URL.absoluteString isEqualToString:@"about:blank"];
-    if (!allowed) [self showStatus:@"This pane supports HTTP and HTTPS pages."];
+    BOOL webScheme = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+    // A nil target frame opens a new window, which loads in the main frame.
+    BOOL mainFrame = !action.targetFrame || action.targetFrame.isMainFrame;
+    // Embedded frames commonly use srcdoc, data: and blob: documents; the
+    // top-level page itself stays limited to web addresses.
+    BOOL allowed = mainFrame
+        ? webScheme || [action.request.URL.absoluteString isEqualToString:@"about:blank"]
+        : webScheme || [@[@"about", @"data", @"blob"] containsObject:scheme ?: @""];
+    if (!allowed && mainFrame) [self showStatus:@"This pane supports HTTP and HTTPS pages."];
     decisionHandler(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
 }
 - (void)webView:(WKWebView *)web decidePolicyForNavigationResponse:(WKNavigationResponse *)response decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
@@ -171,21 +192,59 @@ static NSURL *DelBrowserURL(NSString *address) {
     if (!action.targetFrame) [web loadRequest:action.request];
     return nil;
 }
+// NO dismisses the dialog unseen: blocked pages, bursts (alert loops would
+// otherwise hold the whole window), hidden/background browsers, or a sheet
+// already showing.
+- (BOOL)admitDialog {
+    if (self.dialogsBlocked || !self.window || self.isHiddenOrHasHiddenAncestor || self.window.attachedSheet) return NO;
+    NSDate *now = NSDate.date;
+    if (!self.dialogBurstStart || [now timeIntervalSinceDate:self.dialogBurstStart] > 10) {
+        self.dialogBurstStart = now;
+        self.dialogBurstCount = 0;
+    }
+    if (++self.dialogBurstCount > 3) {
+        self.dialogsBlocked = YES;
+        [self showStatus:@"This page opened too many dialogs; further dialogs are blocked."];
+        return NO;
+    }
+    return YES;
+}
+// Names the page's origin so it can't pose as Del or another site.
+- (NSAlert *)dialogFrom:(WKFrameInfo *)frame message:(NSString *)message {
+    WKSecurityOrigin *origin = frame.securityOrigin;
+    NSString *site = origin.host.length
+        ? (origin.port ? [NSString stringWithFormat:@"%@://%@:%ld", origin.protocol, origin.host, (long)origin.port]
+                       : [NSString stringWithFormat:@"%@://%@", origin.protocol, origin.host])
+        : @"This page";
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = [NSString stringWithFormat:@"The page at %@ says:", site];
+    NSString *text = message ?: @"";
+    alert.informativeText = text.length > 1000 ? [[text substringToIndex:1000] stringByAppendingString:@"…"] : text;
+    alert.showsSuppressionButton = YES;
+    alert.suppressionButton.title = @"Block further dialogs from this site";
+    return alert;
+}
+- (void)dialogClosed:(NSAlert *)alert {
+    if (alert.suppressionButton.state == NSControlStateValueOn) self.dialogsBlocked = YES;
+}
 - (void)webView:(WKWebView *)web runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completionHandler {
-    NSAlert *alert = [NSAlert new]; alert.messageText = message; [alert addButtonWithTitle:@"OK"];
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { (void)response; completionHandler(); }];
+    if (![self admitDialog]) { completionHandler(); return; }
+    NSAlert *alert = [self dialogFrom:frame message:message]; [alert addButtonWithTitle:@"OK"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { (void)response; [self dialogClosed:alert]; completionHandler(); }];
 }
 - (void)webView:(WKWebView *)web runJavaScriptConfirmPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL))completionHandler {
-    NSAlert *alert = [NSAlert new]; alert.messageText = message;
+    if (![self admitDialog]) { completionHandler(NO); return; }
+    NSAlert *alert = [self dialogFrom:frame message:message];
     [alert addButtonWithTitle:@"OK"]; [alert addButtonWithTitle:@"Cancel"];
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { completionHandler(response == NSAlertFirstButtonReturn); }];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { [self dialogClosed:alert]; completionHandler(response == NSAlertFirstButtonReturn); }];
 }
 - (void)webView:(WKWebView *)web runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt defaultText:(NSString *)text initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSString *))completionHandler {
-    NSAlert *alert = [NSAlert new]; alert.messageText = prompt;
+    if (![self admitDialog]) { completionHandler(nil); return; }
+    NSAlert *alert = [self dialogFrom:frame message:prompt];
     [alert addButtonWithTitle:@"OK"]; [alert addButtonWithTitle:@"Cancel"];
     NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,24)]; input.stringValue = text ?: @"";
     alert.accessoryView = input;
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { completionHandler(response == NSAlertFirstButtonReturn ? input.stringValue : nil); }];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) { [self dialogClosed:alert]; completionHandler(response == NSAlertFirstButtonReturn ? input.stringValue : nil); }];
 }
 @end
 
@@ -243,16 +302,61 @@ void del_browser_release(void *pointer) {
 // Tool results return JSON through a one-shot callback; no native app capabilities
 // are exposed to page JavaScript.
 typedef void (*DelBrowserReply)(void *, const char *);
+// Page results may hold values JSON can't represent (Date, NaN, Infinity,
+// cyclic or exotic objects). Convert them so serialization can never throw.
+static id DelJSONSafe(id value, NSUInteger depth) {
+    if (depth > 64) return NSNull.null;
+    if (!value || value == NSNull.null || [value isKindOfClass:NSString.class]) return value ?: NSNull.null;
+    if ([value isKindOfClass:NSNumber.class]) {
+        double number = [value doubleValue];
+        return isfinite(number) ? value : NSNull.null;
+    }
+    if ([value isKindOfClass:NSDate.class]) {
+        NSISO8601DateFormatter *format = [NSISO8601DateFormatter new];
+        format.formatOptions |= NSISO8601DateFormatWithFractionalSeconds;
+        return [format stringFromDate:value];
+    }
+    if ([value isKindOfClass:NSArray.class]) {
+        NSMutableArray *items = [NSMutableArray arrayWithCapacity:[value count]];
+        for (id item in value) [items addObject:DelJSONSafe(item, depth + 1)];
+        return items;
+    }
+    if ([value isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *items = [NSMutableDictionary dictionaryWithCapacity:[value count]];
+        for (id key in (NSDictionary *)value)
+            items[[key isKindOfClass:NSString.class] ? key : [key description]] = DelJSONSafe(value[key], depth + 1);
+        return items;
+    }
+    return [value description] ?: NSNull.null;
+}
 static void DelReply(DelBrowserReply reply, void *context, id value, NSString *error) {
-    NSDictionary *result = error ? @{@"error":error} : @{@"result":value ?: NSNull.null};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingFragmentsAllowed error:nil];
+    NSDictionary *result = error ? @{@"error":error} : @{@"result":DelJSONSafe(value, 0)};
+    NSData *data = nil;
+    @try {
+        if ([NSJSONSerialization isValidJSONObject:result])
+            data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingFragmentsAllowed error:nil];
+    } @catch (NSException *exception) {
+        data = nil;
+    }
+    if (!data) { reply(context, "{\"error\":\"Result could not be converted to JSON; return plain strings, numbers, arrays or objects\"}"); return; }
     if (data.length > 6*1024*1024) { reply(context, "{\"error\":\"Result too large; return a smaller selection\"}"); return; }
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     reply(context, (json ?: @"{\"error\":\"Result could not be serialized\"}").UTF8String);
 }
+// Page scripts reject after this long, and the reply is forced shortly after
+// in case the page defeats the script timer. Both stay under the MCP
+// server's 30-second browser timeout.
+static const NSTimeInterval DelScriptTimeout = 25, DelReplyTimeout = 28;
 void del_browser_command(void *pointer, const char *command, DelBrowserReply reply, void *context) {
     if (![NSThread isMainThread] || !pointer) { DelReply(reply, context, nil, @"Browser unavailable (macOS 14 or newer required)"); return; }
     DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
+    // A background session's browser has never been laid out; give it a
+    // viewport so pages render, scripts see real dimensions, and screenshots
+    // work while the view stays hidden. Painting sets the real frame later.
+    if (NSIsEmptyRect(browser.frame)) {
+        browser.frame = NSMakeRect(0, 0, 1024, 768);
+        [browser layoutSubtreeIfNeeded];
+    }
     NSDictionary *request = [NSJSONSerialization JSONObjectWithData:[[NSString stringWithUTF8String:command] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
     NSString *action = request[@"action"];
     if ([action isEqualToString:@"navigate"]) {
@@ -276,8 +380,26 @@ void del_browser_command(void *pointer, const char *command, DelBrowserReply rep
     }
     NSString *script = request[@"script"];
     if (!script) { DelReply(reply,context,nil,@"Missing script"); return; }
-    [browser.web callAsyncJavaScript:script arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id value, NSError *error) {
-        if (error) { DelReply(reply,context,nil,error.localizedDescription); return; }
+    NSString *timed = [NSString stringWithFormat:
+        @"const __delWork = (async () => {\n%@\n})();\n"
+        "return await Promise.race([__delWork, new Promise((_, reject) => setTimeout(() => "
+        "reject(new Error('Browser script timed out after %.0f seconds')), %.0f))]);",
+        script, DelScriptTimeout, DelScriptTimeout * 1000];
+    // Exactly one reply frees the Rust-side context, whichever finishes first.
+    __block BOOL answered = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(DelReplyTimeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (answered) return;
+        answered = YES;
+        DelReply(reply,context,nil,@"Browser script did not finish in time");
+    });
+    [browser.web callAsyncJavaScript:timed arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id value, NSError *error) {
+        if (answered) return;
+        answered = YES;
+        if (error) {
+            NSString *thrown = error.userInfo[@"WKJavaScriptExceptionMessage"];
+            DelReply(reply,context,nil,[thrown isKindOfClass:NSString.class] && thrown.length ? thrown : error.localizedDescription);
+            return;
+        }
         if ([value isKindOfClass:NSString.class] && [(NSString *)value length] > 200000) {
             DelReply(reply,context,nil,@"Result too large; return a smaller selection"); return;
         }

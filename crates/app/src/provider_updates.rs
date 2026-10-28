@@ -25,7 +25,33 @@ enum Installer {
     Unmanaged,
 }
 
-type UpdateLocks = Mutex<HashMap<PathBuf, Arc<Mutex<Option<(Instant, bool)>>>>>;
+/// Last outcome per harness binary. Failures (typically offline) back off so a
+/// config change or terminal launch does not rerun `brew update` each time.
+#[derive(Clone)]
+struct Checked {
+    at: Instant,
+    result: Result<bool, String>,
+    failures: u32,
+}
+
+impl Checked {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < retry_after(self.result.is_ok(), self.failures)
+    }
+}
+
+const SUCCESS_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// 5, 10, 20 … minutes after consecutive failures, capped at six hours.
+fn retry_after(succeeded: bool, failures: u32) -> Duration {
+    if succeeded {
+        return SUCCESS_INTERVAL;
+    }
+    let exponent = failures.saturating_sub(1).min(7);
+    (Duration::from_secs(5 * 60) * 2u32.pow(exponent)).min(Duration::from_secs(6 * 60 * 60))
+}
+
+type UpdateLocks = Mutex<HashMap<PathBuf, Arc<Mutex<Option<Checked>>>>>;
 static LOCKS: OnceLock<UpdateLocks> = OnceLock::new();
 
 fn version(value: &str) -> Option<(u64, u64, u64)> {
@@ -196,19 +222,22 @@ pub async fn ensure_program(
         crate::providers::display_name(provider)
     ));
     let mut checked = lock.lock().await;
-    if let Some((at, managed)) = *checked
-        && at.elapsed() < Duration::from_secs(1800)
-    {
-        return Ok(managed);
+    if let Some(previous) = checked.as_ref().filter(|checked| checked.fresh()) {
+        return previous.result.clone();
     }
     let target = program.clone();
     let plan = tokio::task::spawn_blocking(move || installer(&target, provider))
         .await
         .map_err(|e| e.to_string())?;
     let managed = plan != Installer::Unmanaged;
-    apply_update(&program, &plan, &progress).await?;
-    *checked = Some((Instant::now(), managed));
-    Ok(managed)
+    let result = apply_update(&program, &plan, &progress).await.map(|()| managed);
+    let failures = match (&result, checked.as_ref()) {
+        (Ok(_), _) => 0,
+        (Err(_), Some(previous)) => previous.failures + 1,
+        (Err(_), None) => 1,
+    };
+    *checked = Some(Checked { at: Instant::now(), result: result.clone(), failures });
+    result
 }
 
 async fn apply_update(
@@ -367,6 +396,18 @@ pub fn completed_cli_update(provider: Provider, output: &str, exit: Option<i32>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_checks_back_off_instead_of_rerunning_immediately() {
+        assert_eq!(retry_after(true, 0), SUCCESS_INTERVAL);
+        assert_eq!(retry_after(false, 1), Duration::from_secs(300));
+        assert_eq!(retry_after(false, 3), Duration::from_secs(1200));
+        assert_eq!(retry_after(false, 40), Duration::from_secs(6 * 3600));
+        let failed = Checked { at: Instant::now(), result: Err("offline".into()), failures: 1 };
+        assert!(failed.fresh());
+        let stale = Checked { at: Instant::now() - Duration::from_secs(301), ..failed };
+        assert!(!stale.fresh());
+    }
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn executable(path: &Path, source: &str) {
@@ -433,7 +474,7 @@ esac
     }
 
     #[tokio::test]
-    async fn failed_update_is_retryable_and_never_cached_as_success() {
+    async fn failed_update_backs_off_then_retries_and_is_never_cached_as_success() {
         let (root, program) = installation("1.0.0", "2.0.0");
         std::fs::write(root.path().join("fail"), "").unwrap();
         assert!(
@@ -444,6 +485,19 @@ esac
         );
         assert!(!root.path().join("installed").exists());
         std::fs::remove_file(root.path().join("fail")).unwrap();
+        // Within the backoff the failure is reported without rerunning the installer.
+        let calls = std::fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(
+            ensure_program(program.clone(), Provider::Codex, |_| {})
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(root.path().join("calls")).unwrap(), calls);
+        // Once the backoff passes, the update is retried and succeeds.
+        let lock = LOCKS.get().unwrap().lock().await.get(&program).unwrap().clone();
+        if let Some(checked) = lock.lock().await.as_mut() {
+            checked.at = Instant::now() - Duration::from_secs(301);
+        }
         assert_eq!(
             ensure_program(program, Provider::Codex, |_| {}).await,
             Ok(true)

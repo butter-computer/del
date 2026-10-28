@@ -101,6 +101,21 @@ pub fn diffs(cwd: &std::path::Path, value: &Value) -> Vec<AgentEvent> {
         .collect()
 }
 
+/// Cap on summaries copied into events, as for the other backends; the full
+/// tool input and output stay in OpenCode's own transcript.
+const SUMMARY_LIMIT: usize = 4096;
+
+fn truncate(s: &str) -> String {
+    if s.len() <= SUMMARY_LIMIT {
+        return s.to_owned();
+    }
+    let mut end = SUMMARY_LIMIT;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [truncated]", &s[..end])
+}
+
 fn content(v: &Value) -> String {
     v.as_array()
         .into_iter()
@@ -197,27 +212,27 @@ impl Stream {
             }],
             Some("session.tool.called") => vec![AgentEvent::ToolCallUpdated {
                 id: string(d, "id"),
-                output_summary: d["input"].to_string(),
+                output_summary: truncate(&d["input"].to_string()),
             }],
             Some("session.tool.progress") => vec![AgentEvent::ToolCallUpdated {
                 id: string(d, "id"),
-                output_summary: d["metadata"].to_string(),
+                output_summary: truncate(&d["metadata"].to_string()),
             }],
             Some("session.tool.success") => vec![AgentEvent::ToolCallFinished {
                 id: string(d, "id"),
                 status: ToolStatus::Completed,
-                output_summary: content(&d["content"]),
+                output_summary: truncate(&content(&d["content"])),
             }],
             Some("session.tool.failed") => vec![AgentEvent::ToolCallFinished {
                 id: string(d, "id"),
                 status: ToolStatus::Failed,
-                output_summary: error_message(&d["error"]),
+                output_summary: truncate(&error_message(&d["error"])),
             }],
             Some("session.step.ended") => vec![usage(&d["tokens"])],
             Some("permission.asked") => vec![AgentEvent::ApprovalRequested {
                 id: string(d, "id"),
                 kind: ApprovalKind::Other,
-                detail: format!("{}: {}", string(d, "action"), d["resources"]),
+                detail: truncate(&format!("{}: {}", string(d, "action"), d["resources"])),
             }],
             _ => vec![],
         }
@@ -245,7 +260,7 @@ impl Stream {
                             out.push(AgentEvent::ToolCallStarted {
                                 id: string(c, "id"),
                                 name: string(c, "name"),
-                                input_summary: state["input"].to_string(),
+                                input_summary: truncate(&state["input"].to_string()),
                             });
                             if matches!(state["status"].as_str(), Some("completed" | "error")) {
                                 out.push(AgentEvent::ToolCallFinished {
@@ -255,11 +270,11 @@ impl Stream {
                                     } else {
                                         ToolStatus::Completed
                                     },
-                                    output_summary: if state["status"] == "error" {
+                                    output_summary: truncate(&if state["status"] == "error" {
                                         error_message(&state["error"])
                                     } else {
                                         content(&state["content"])
-                                    },
+                                    }),
                                 });
                             }
                         }
@@ -279,6 +294,18 @@ impl Stream {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn tool_summaries_are_capped() {
+        let big = "é".repeat(5000);
+        let events = Stream::default().event(&json!({"type":"session.tool.called",
+            "data":{"id":"t","input":{"command":big}}}));
+        let AgentEvent::ToolCallUpdated { output_summary, .. } = &events[0] else {
+            panic!("tool update");
+        };
+        assert!(output_summary.len() < SUMMARY_LIMIT + 32);
+        assert!(output_summary.ends_with("[truncated]"));
+    }
+
     #[test]
     fn provider_quota_error_is_readable_and_preserves_retry_hint() {
         let mut stream = Stream::default();

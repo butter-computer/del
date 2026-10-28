@@ -1,5 +1,20 @@
 //! Commands for Del's visible browser. All page data is untrusted content.
+use del_agent::SessionId;
 use serde::{Deserialize, Serialize};
+
+/// Most tabs one session's browser may hold through agent `new_tab` calls.
+pub const MAX_AGENT_TABS: usize = 20;
+
+/// Which sessions' browsers one browser request may touch. The server derives
+/// this from the authenticated caller; hosts must never widen it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserAccess {
+    /// The caller's own session plus the sessions it spawned and its parent.
+    Sessions(Vec<SessionId>),
+    /// The shared chat-browser credential, which is not bound to one session.
+    /// Hosts limit it to chat sessions that are currently running a turn.
+    SharedChat,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -21,6 +21,10 @@ use gpui_kit::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
+/// Agent questions waiting in the UI, overall and per asking session.
+const MAX_QUESTIONS: usize = 16;
+const MAX_QUESTIONS_PER_SESSION: usize = 3;
+
 pub(super) struct PendingQuestion {
     id: u64,
     caller: SessionId,
@@ -618,17 +622,24 @@ impl AppShell {
         }
         let active = snapshot.status == TerminalHostStatus::Running;
         self.state.update(cx, |s, cx| {
-            if snapshot.title_loading {
-                s.terminal_title_loading.insert(id.clone());
+            // Only repaint (and re-sort the sidebar) when a visible field moved.
+            let mut changed = if snapshot.title_loading {
+                s.terminal_title_loading.insert(id.clone())
             } else {
-                s.terminal_title_loading.remove(id);
-            }
+                s.terminal_title_loading.remove(id)
+            };
             if let Some(row) = s.terminal_rows.iter_mut().find(|r| &r.id == id) {
-                row.title = snapshot.title.clone();
-                row.active = active;
-                row.summary = snapshot.summary.clone().unwrap_or_default();
+                let summary = snapshot.summary.as_deref().unwrap_or_default();
+                if row.title != snapshot.title || row.active != active || row.summary != summary {
+                    row.title = snapshot.title.clone();
+                    row.active = active;
+                    row.summary = summary.to_owned();
+                    changed = true;
+                }
             }
-            cx.notify();
+            if changed {
+                cx.notify();
+            }
         });
         if self.terminal_store.set_title(id, &snapshot.title)
             && let Err(error) = self.terminal_store.save(&TerminalStore::path())
@@ -659,7 +670,67 @@ impl AppShell {
                 bridge.handle().revoke(id);
             }
         }
-        cx.notify();
+        // Visible changes notify through AppState, which AppShell observes.
+    }
+
+    /// The right panel that hosts `tab`'s browser, without selecting the tab.
+    /// `None` when the session isn't open in a tab: it then has no panel
+    /// identity to keep a background panel under.
+    fn browser_panel(
+        &mut self,
+        tab: &crate::state::Tab,
+        key: String,
+        cwd: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::right_panel::RightPanel>> {
+        let owner = self.state.read(cx).uid_of(tab);
+        if owner == 0 {
+            return None;
+        }
+        if owner == self.right_owner {
+            return Some(self.right.clone());
+        }
+        if let Some((panel, _)) = self.right_cache.get(&owner) {
+            return Some(panel.clone());
+        }
+        let saved = self.right_store.get(&key);
+        let open = saved.restore_open();
+        // Restore without showing: a hidden panel must not start shells.
+        let mut quiet = saved;
+        quiet.open = false;
+        let panel = cx.new(|cx| {
+            let mut panel = crate::right_panel::RightPanel::new(cwd, window, cx);
+            panel.restore(quiet, window, cx);
+            panel
+        });
+        self.right_cache.insert(owner, (panel.clone(), open));
+        // Like watch_right, plus persisting while it stays in the background.
+        cx.observe(&panel, move |this, panel, cx| {
+            if this.right == panel {
+                this.remember_right(cx);
+            } else {
+                this.remember_background_right(&panel, key.clone(), cx);
+            }
+        })
+        .detach();
+        Some(panel)
+    }
+
+    fn remember_background_right(
+        &mut self,
+        panel: &Entity<crate::right_panel::RightPanel>,
+        key: String,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self
+            .right_cache
+            .values()
+            .find(|(cached, _)| cached == panel)
+            .is_some_and(|(_, open)| *open);
+        if self.right_store.set(key, panel.read(cx).snapshot(open)) {
+            self.persist_right(cx);
+        }
     }
 
     pub(super) fn set_mode_error(&mut self, error: String, cx: &mut Context<Self>) {
@@ -673,6 +744,7 @@ impl AppShell {
         match event {
             BridgeEvent::Browser {
                 caller,
+                allowed,
                 request,
                 reply,
             } => {
@@ -680,76 +752,110 @@ impl AppShell {
                     return;
                 }
                 self.remember_right(cx);
+                // Only the sessions the server allowed this caller are listed
+                // or addressable, whether by session_id or by tab_id.
                 let manager = self.state.read(cx).backend().manager;
-                let mut sessions: Vec<_> = manager.list_sessions().into_iter().map(|record| {
-                    let key = format!("chat:{}", record.id.as_str());
-                    serde_json::json!({"session_id":record.id.as_str(),"title":record.title,"mode":"chat","tabs":self.right_store.browser_tabs(&key)})
-                }).collect();
-                sessions.extend(self.state.read(cx).terminal_rows.iter().map(|row| {
-                    let key = format!("terminal:{}", row.id.as_str());
-                    serde_json::json!({"session_id":row.id.as_str(),"title":row.title,"mode":"terminal","tabs":self.right_store.browser_tabs(&key)})
-                }));
+                let records = manager.list_sessions();
+                let mut sessions = Vec::new();
+                let mut places = Vec::new();
+                for id in &allowed {
+                    let (title, terminal, cwd) = if let Some(record) = records.iter().find(|r| &r.id == id) {
+                        (record.title.clone(), false, record.cwd.clone())
+                    } else if let Some(row) = self.state.read(cx).terminal_rows.iter().find(|r| &r.id == id) {
+                        (Some(row.title.clone()), true, row.cwd.clone())
+                    } else {
+                        continue;
+                    };
+                    let key = format!("{}:{}", if terminal { "terminal" } else { "chat" }, id.as_str());
+                    sessions.push(serde_json::json!({"session_id":id.as_str(),"title":title,"mode":if terminal { "terminal" } else { "chat" },"tabs":self.right_store.browser_tabs(&key)}));
+                    let tab = if terminal {
+                        crate::state::Tab::Terminal(id.clone())
+                    } else {
+                        crate::state::Tab::Session(id.clone())
+                    };
+                    places.push((tab, key, cwd));
+                }
+                let selected = match &self.state.read(cx).selection {
+                    Selection::Session(id) | Selection::Terminal(id) => Some(id.clone()),
+                    Selection::Draft(_) => None,
+                };
                 if request.action == "list_tabs"
                     && request.session_id.is_none()
                     && request.tab_id.is_none()
                 {
-                    let active = match &self.state.read(cx).selection {
-                        Selection::Session(id) | Selection::Terminal(id) => Some(id.as_str()),
-                        Selection::Draft(_) => None,
-                    };
+                    let active = selected.filter(|id| allowed.contains(id));
                     let _ = reply.send(Ok(
-                        serde_json::json!({"sessions":sessions,"active_session_id":active}),
+                        serde_json::json!({"sessions":sessions,"active_session_id":active.as_ref().map(SessionId::as_str)}),
                     ));
                     return;
                 }
-                let target = request
-                    .session_id
-                    .clone()
-                    .or_else(|| {
-                        request.tab_id.as_ref().and_then(|id| {
-                            sessions
-                                .iter()
-                                .find(|session| {
-                                    session["tabs"].as_array().is_some_and(|tabs| {
-                                        tabs.iter().any(|tab| tab["id"].as_str() == Some(id))
-                                    })
-                                })
-                                .and_then(|session| {
-                                    session["session_id"].as_str().map(str::to_owned)
-                                })
+                let by_tab = request.tab_id.as_ref().and_then(|id| {
+                    sessions.iter().position(|session| {
+                        session["tabs"].as_array().is_some_and(|tabs| {
+                            tabs.iter().any(|tab| tab["id"].as_str() == Some(id))
                         })
                     })
-                    .unwrap_or_else(|| caller.to_string());
-                let Some(session) = sessions
-                    .iter()
-                    .find(|session| session["session_id"].as_str() == Some(&target))
-                else {
+                });
+                let position = |id: &str| sessions.iter().position(|s| s["session_id"].as_str() == Some(id));
+                let target = match &request.session_id {
+                    Some(id) => position(id),
+                    None => by_tab
+                        .or_else(|| position(caller.as_str()))
+                        .or_else(|| (sessions.len() == 1).then_some(0))
+                        .or_else(|| selected.as_ref().and_then(|id| position(id.as_str()))),
+                };
+                let Some(target) = target else {
                     let _ = reply.send(Err(HostError::Failed(
                         "Choose a session_id from browser list_tabs".into(),
                     )));
                     return;
                 };
-                let tab = if session["mode"] == "terminal" {
-                    crate::state::Tab::Terminal(SessionId::new(target))
-                } else {
-                    crate::state::Tab::Session(SessionId::new(target))
+                let (tab, key, cwd) = places.swap_remove(target);
+                let panel = match self.browser_panel(&tab, key.clone(), cwd, window, cx) {
+                    Some(panel) => panel,
+                    None => {
+                        // Not open in any tab, so it has no panel to run in
+                        // the background: open it as before.
+                        self.state
+                            .update(cx, |state, cx| state.select_tab(&tab, cx));
+                        self.sync_right(window, cx);
+                        self.right.clone()
+                    }
                 };
-                self.state
-                    .update(cx, |state, cx| state.select_tab(&tab, cx));
-                self.sync_right(window, cx);
-                self.set_right(true, cx);
-                let result = self.right.update(cx, |panel, cx| {
-                    panel.set_preview_visible(true, cx);
-                    panel.browser_command(request, window, cx)
+                let foreground = panel == self.right;
+                // In the session the user is viewing, page-changing actions
+                // show the browser. Reading it, or any action in a background
+                // session, never moves the user's selection or layout.
+                let reveal = foreground
+                    && !matches!(request.action.as_str(), "list_tabs" | "snapshot" | "screenshot");
+                if reveal {
+                    self.set_right(true, cx);
+                }
+                let result = panel.update(cx, |panel, cx| {
+                    if reveal {
+                        panel.set_preview_visible(true, cx);
+                    }
+                    panel.browser_command(request, reveal, window, cx)
                 });
+                if !foreground {
+                    // Keep tab_id lookups and restarts in sync with tabs the
+                    // agent opened or closed in the background.
+                    self.remember_background_right(&panel, key, cx);
+                }
                 match result {
                     Err(error) => {
                         let _ = reply.send(Err(HostError::Failed(error)));
                     }
                     Ok(result) => {
                         cx.spawn(async move |_, _| {
+                            let mut reply = reply;
+                            // The MCP request may time out first; stop waiting
+                            // then instead of holding the reply.
+                            let result = tokio::select! {
+                                result = result => result,
+                                _ = reply.closed() => return,
+                            };
                             let result = result
-                                .await
                                 .map_err(|_| HostError::Failed("Browser closed".into()))
                                 .and_then(|result| result.map_err(HostError::Failed));
                             let _ = reply.send(result);
@@ -765,7 +871,12 @@ impl AppShell {
                 options,
                 reply,
             } => {
-                if !reply.is_closed() {
+                // Bound what agents can queue; a dropped reply fails the tool call.
+                let mine = self.questions.iter().filter(|q| q.caller == caller).count();
+                if !reply.is_closed()
+                    && self.questions.len() < MAX_QUESTIONS
+                    && mine < MAX_QUESTIONS_PER_SESSION
+                {
                     self.questions.push_back(PendingQuestion {
                         id: request_id,
                         caller,

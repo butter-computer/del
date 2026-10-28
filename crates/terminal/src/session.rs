@@ -11,7 +11,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -228,25 +228,47 @@ impl ProcessSession {
 
 fn session_groups(sid: i32) -> HashSet<i32> {
     let mut groups = HashSet::from([sid]);
-    if let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-A", "-o", "pid="])
-        .output()
-    {
-        for pid in String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .filter_map(|p| p.parse::<i32>().ok())
-        {
-            unsafe {
-                if libc::getsid(pid) == sid {
-                    let group = libc::getpgid(pid);
-                    if group > 0 {
-                        groups.insert(group);
-                    }
+    for pid in all_pids() {
+        unsafe {
+            if libc::getsid(pid) == sid {
+                let group = libc::getpgid(pid);
+                if group > 0 {
+                    groups.insert(group);
                 }
             }
         }
     }
     groups
+}
+
+/// Every pid on the system, read from the kernel without spawning `ps`.
+#[cfg(target_os = "macos")]
+fn all_pids() -> Vec<i32> {
+    // The count can grow between the sizing call and the read; leave slack.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0i32; count as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(count.max(0) as usize);
+    pids.retain(|&pid| pid > 0);
+    pids
+}
+
+#[cfg(not(target_os = "macos"))]
+fn all_pids() -> Vec<i32> {
+    std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid="])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .filter_map(|p| p.parse::<i32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Call from the host's app-quit hook. Also kills foreground job-control groups.
@@ -263,6 +285,11 @@ struct Shared {
     wakeup_pending: AtomicBool,
     exited: AtomicBool,
     child_exited: AtomicBool,
+    /// Set once the session is being closed: after the child is reaped the
+    /// reader stops even if a detached descendant keeps writing to the PTY.
+    closing: AtomicBool,
+    /// Bumped whenever grid content may have changed (output or reflow).
+    output_generation: AtomicU64,
     size: Mutex<TerminalSize>,
 }
 
@@ -361,6 +388,8 @@ impl TerminalSession {
             wakeup_pending: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            output_generation: AtomicU64::new(0),
             size: Mutex::new(spec.size),
         });
         let proxy = TerminalEventProxy(shared.clone());
@@ -393,6 +422,9 @@ impl TerminalSession {
                     let _ = read_shared.tx.unbounded_send(TerminalEvent::Wakeup);
                 }
             };
+            // After the child exits, drain its final output briefly; a
+            // detached descendant may hold the PTY open indefinitely.
+            let mut drain_deadline = None;
             loop {
                 // Poll also bounds synchronized-output buffering when the
                 // program omits its ending marker or stops writing.
@@ -402,6 +434,7 @@ impl TerminalSession {
                     .is_some_and(|deadline| deadline <= std::time::Instant::now())
                 {
                     parser.stop_sync(&mut *read_term.lock());
+                    read_shared.output_generation.fetch_add(1, Ordering::AcqRel);
                     wake();
                 }
                 let mut poll = libc::pollfd {
@@ -410,6 +443,19 @@ impl TerminalSession {
                     revents: 0,
                 };
                 let ready = unsafe { libc::poll(&mut poll, 1, 50) };
+                // Keep draining until the child is reaped: an exiting session
+                // leader blocks until the PTY's output queue drains.
+                if read_shared.child_exited.load(Ordering::Acquire) {
+                    if read_shared.closing.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let deadline = *drain_deadline.get_or_insert_with(|| {
+                        std::time::Instant::now() + Duration::from_millis(250)
+                    });
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                }
                 if ready < 0 {
                     if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                         continue;
@@ -426,6 +472,7 @@ impl TerminalSession {
                     Ok(0) => break,
                     Ok(n) => {
                         parser.advance(&mut *read_term.lock(), &buf[..n]);
+                        read_shared.output_generation.fetch_add(1, Ordering::AcqRel);
                         if parser.sync_timeout().sync_timeout().is_none() {
                             wake();
                         }
@@ -477,6 +524,11 @@ impl TerminalSession {
     pub fn pid(&self) -> u32 {
         self.process.pid as u32
     }
+    /// Changes whenever the grid may hold different text; equal values mean
+    /// a previous scan of the grid is still current.
+    pub fn output_generation(&self) -> u64 {
+        self.shared.output_generation.load(Ordering::Acquire)
+    }
     pub fn exited(&self) -> bool {
         self.shared.exited.load(Ordering::Acquire)
     }
@@ -506,19 +558,38 @@ impl TerminalSession {
         *current = size;
         drop(current);
         self.term.lock().resize(size);
+        self.shared.output_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
+    /// Terminates the process tree and waits for every session thread.
+    /// Blocks for up to `grace` plus process reaping; UI code should use
+    /// [`Self::close_in_background`].
     pub fn close(&self, grace: Duration) {
         self.process.terminate(grace);
+        self.shared.closing.store(true, Ordering::Release);
         if let Some(worker) = self.worker.lock().unwrap().take() {
             let _ = worker.join();
         }
+    }
+    /// Like [`Self::close`], but returns immediately: termination, reaping
+    /// and thread joins happen on a background thread.
+    pub fn close_in_background(&self, grace: Duration) {
+        let Some(worker) = self.worker.lock().unwrap().take() else {
+            return;
+        };
+        let process = self.process.clone();
+        let shared = self.shared.clone();
+        std::thread::spawn(move || {
+            process.terminate(grace);
+            shared.closing.store(true, Ordering::Release);
+            let _ = worker.join();
+        });
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        self.close(Duration::from_millis(200));
+        self.close_in_background(Duration::from_millis(200));
     }
 }
 

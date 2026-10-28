@@ -41,6 +41,9 @@ pub struct TerminalView {
     exit: Option<Option<i32>>,
     search_flash: Option<std::ops::RangeInclusive<GridPoint>>,
     search_generation: u64,
+    /// Forwards session events; dropped on close so the background shutdown
+    /// does not wake this view after it was closed.
+    events: std::cell::RefCell<Option<Task<()>>>,
     /// Treat Option as an ESC prefix. Set false to use OS Option characters.
     pub option_as_meta: bool,
 }
@@ -71,7 +74,7 @@ impl TerminalView {
             cx.notify();
         })
         .detach();
-        cx.spawn_in(window, async move |this, cx| {
+        let events = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 let exited = matches!(event, TerminalEvent::Exited { .. });
                 if this
@@ -94,9 +97,9 @@ impl TerminalView {
                     break;
                 }
             }
-        })
-        .detach();
+        });
         Self {
+            events: std::cell::RefCell::new(Some(events)),
             session,
             focus,
             bounds: Bounds::default(),
@@ -122,8 +125,10 @@ impl TerminalView {
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
     }
+    /// Non-blocking: the process tree is terminated and reaped off the UI thread.
     pub fn close(&self) {
-        self.session.close(Duration::from_millis(200));
+        self.events.borrow_mut().take();
+        self.session.close_in_background(Duration::from_millis(200));
     }
 
     /// Reveal a saved transcript match if it is present in the live terminal buffer.
@@ -133,16 +138,22 @@ impl TerminalView {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let found = self.session.with_term(|term| {
-            let found = crate::search::locate(term.grid(), source, range)?;
+        if !crate::search::searchable(source, range.clone()) {
+            return false;
+        }
+        // Only copying the grid text needs the lock; matching runs after it
+        // is released so the PTY reader is not stalled by the search.
+        let snapshot = self
+            .session
+            .with_term(|term| crate::search::snapshot(term.grid()));
+        let Some(found) = snapshot.locate(source, range) else {
+            return false;
+        };
+        self.session.with_term(|term| {
             let offset = (term.screen_lines() as i32 / 3 - found.start().line.0).max(0);
             term.scroll_display(Scroll::Bottom);
             term.scroll_display(Scroll::Delta(offset));
-            Some(found)
         });
-        let Some(found) = found else {
-            return false;
-        };
         self.search_flash = Some(found);
         self.search_generation += 1;
         let generation = self.search_generation;
@@ -381,7 +392,9 @@ fn transparent_background(background: Color, flags: Flags) -> bool {
 struct PaintCell {
     col: usize,
     row: usize,
-    text: String,
+    ch: char,
+    /// Combining characters; empty (and unallocated) for nearly every cell.
+    zerowidth: Vec<char>,
     fg: Hsla,
     bg: Option<Hsla>,
     flags: Flags,
@@ -442,14 +455,11 @@ impl TerminalView {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let selected = content.selection.is_some_and(|s| s.contains(indexed.point));
-                let mut text = cell.c.to_string();
-                if let Some(zero) = cell.zerowidth() {
-                    text.extend(zero);
-                }
                 cells.push(PaintCell {
                     col: indexed.point.column.0,
                     row: row as usize,
-                    text,
+                    ch: cell.c,
+                    zerowidth: cell.zerowidth().map(<[char]>::to_vec).unwrap_or_default(),
                     fg: color(fg),
                     bg: if self
                         .search_flash
@@ -527,6 +537,119 @@ fn paint_text(
     );
 }
 
+struct BackgroundSpan {
+    col: usize,
+    row: usize,
+    cols: usize,
+    color: Hsla,
+}
+
+/// Merges horizontally adjacent cells sharing a background into one quad.
+fn background_spans(cells: &[PaintCell]) -> Vec<BackgroundSpan> {
+    let mut spans: Vec<BackgroundSpan> = Vec::new();
+    for cell in cells {
+        let Some(background) = cell.bg else {
+            continue;
+        };
+        match spans.last_mut() {
+            Some(span)
+                if span.row == cell.row
+                    && span.col + span.cols == cell.col
+                    && span.color == background =>
+            {
+                span.cols += 1;
+            }
+            _ => spans.push(BackgroundSpan {
+                col: cell.col,
+                row: cell.row,
+                cols: 1,
+                color: background,
+            }),
+        }
+    }
+    spans
+}
+
+#[derive(Debug, PartialEq)]
+struct TextSpan {
+    col: usize,
+    row: usize,
+    text: String,
+    fg: Hsla,
+    flags: Flags,
+}
+
+/// Flags that change how a glyph is shaped or decorated.
+const STYLE_FLAGS: Flags = Flags::BOLD
+    .union(Flags::ITALIC)
+    .union(Flags::ALL_UNDERLINES)
+    .union(Flags::STRIKEOUT);
+
+/// Groups consecutive cells into shaped runs. Only printable ASCII joins a
+/// run: Menlo's advance for those equals the cell width, so the run stays on
+/// the grid. Anything else (wide, combining, fallback-font glyphs) is painted
+/// on its own at its cell origin. The block-cursor cell is drawn black.
+fn text_spans(cells: &[PaintCell], block: Option<(usize, usize)>) -> Vec<TextSpan> {
+    let mut spans: Vec<TextSpan> = Vec::new();
+    // Whether the last span may still be extended by the next cell.
+    let mut open = false;
+    let finish = |spans: &mut Vec<TextSpan>, open: &mut bool| {
+        if std::mem::take(open)
+            && let Some(span) = spans.last_mut()
+            && !span.flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+        {
+            // Plain trailing spaces paint nothing.
+            span.text.truncate(span.text.trim_end_matches(' ').len());
+        }
+    };
+    for cell in cells {
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN)
+        {
+            finish(&mut spans, &mut open);
+            continue;
+        }
+        let flags = cell.flags & STYLE_FLAGS;
+        let decorated = flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
+        let fg = if block == Some((cell.col, cell.row)) {
+            rgb(0).into()
+        } else {
+            cell.fg
+        };
+        let gridded = cell.zerowidth.is_empty()
+            && !cell.flags.contains(Flags::WIDE_CHAR)
+            && (cell.ch.is_ascii_graphic() || cell.ch == ' ');
+        if gridded
+            && open
+            && let Some(span) = spans.last_mut()
+            && span.row == cell.row
+            && span.col + span.text.len() == cell.col
+            && span.fg == fg
+            && span.flags == flags
+        {
+            span.text.push(cell.ch);
+            continue;
+        }
+        finish(&mut spans, &mut open);
+        if cell.ch == ' ' && cell.zerowidth.is_empty() && !decorated {
+            continue;
+        }
+        let mut text = String::from(cell.ch);
+        text.extend(&cell.zerowidth);
+        spans.push(TextSpan {
+            col: cell.col,
+            row: cell.row,
+            text,
+            fg,
+            flags,
+        });
+        open = gridded;
+    }
+    finish(&mut spans, &mut open);
+    spans
+}
+
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let before = cx.entity();
@@ -572,61 +695,50 @@ impl Render for TerminalView {
                             let cursor = frame.cursor.filter(|_| focused);
                             // Paint every background before glyphs: a wide glyph
                             // extends into its spacer cell.
-                            for cell in &frame.cells {
-                                let Some(background) = cell.bg else {
-                                    continue;
-                                };
+                            for span in background_spans(&frame.cells) {
                                 let origin = bounds.origin
                                     + point(
-                                        frame.width * cell.col as f32,
-                                        zoom_px(LINE_HEIGHT * cell.row as f32),
+                                        frame.width * span.col as f32,
+                                        zoom_px(LINE_HEIGHT * span.row as f32),
                                     );
                                 window.paint_quad(fill(
-                                    Bounds::new(origin, size(frame.width, zoom_px(LINE_HEIGHT))),
-                                    background,
+                                    Bounds::new(
+                                        origin,
+                                        size(frame.width * span.cols as f32, zoom_px(LINE_HEIGHT)),
+                                    ),
+                                    span.color,
                                 ));
                             }
-                            for cell in frame.cells {
+                            let block = cursor
+                                .filter(|&(_, _, shape)| shape == CursorShape::Block)
+                                .map(|(col, row, _)| (col, row));
+                            if let Some((col, row)) = block {
+                                let wide = frame.cells.iter().any(|cell| {
+                                    cell.col == col
+                                        && cell.row == row
+                                        && cell.flags.contains(Flags::WIDE_CHAR)
+                                });
                                 let origin = bounds.origin
                                     + point(
-                                        frame.width * cell.col as f32,
-                                        zoom_px(LINE_HEIGHT * cell.row as f32),
+                                        frame.width * col as f32,
+                                        zoom_px(LINE_HEIGHT * row as f32),
                                     );
-                                let cell_bounds =
-                                    Bounds::new(origin, size(frame.width, zoom_px(LINE_HEIGHT)));
-                                let block = focused
-                                    && cursor.is_some_and(|(c, r, s)| {
-                                        c == cell.col && r == cell.row && s == CursorShape::Block
-                                    });
-                                if block {
-                                    let cursor_bounds = if cell.flags.contains(Flags::WIDE_CHAR) {
-                                        Bounds::new(
-                                            origin,
-                                            size(frame.width * 2., zoom_px(LINE_HEIGHT)),
-                                        )
-                                    } else {
-                                        cell_bounds
-                                    };
-                                    window.paint_quad(fill(cursor_bounds, color(colors::CURSOR)));
-                                }
-                                if !cell.flags.intersects(
-                                    Flags::WIDE_CHAR_SPACER
-                                        | Flags::LEADING_WIDE_CHAR_SPACER
-                                        | Flags::HIDDEN,
-                                ) && (cell.text != " "
-                                    || cell
-                                        .flags
-                                        .intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT))
-                                {
-                                    paint_text(
-                                        cell.text,
+                                let cells = if wide { 2. } else { 1. };
+                                window.paint_quad(fill(
+                                    Bounds::new(
                                         origin,
-                                        if block { rgb(0).into() } else { cell.fg },
-                                        cell.flags,
-                                        window,
-                                        cx,
+                                        size(frame.width * cells, zoom_px(LINE_HEIGHT)),
+                                    ),
+                                    color(colors::CURSOR),
+                                ));
+                            }
+                            for span in text_spans(&frame.cells, block) {
+                                let origin = bounds.origin
+                                    + point(
+                                        frame.width * span.col as f32,
+                                        zoom_px(LINE_HEIGHT * span.row as f32),
                                     );
-                                }
+                                paint_text(span.text, origin, span.fg, span.flags, window, cx);
                             }
                             if let Some((col, row, shape)) = cursor {
                                 let origin = bounds.origin
@@ -798,7 +910,86 @@ fn zoom_px(value: f32) -> Pixels {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Color, Flags, NamedColor, Rgb, byte_range, transparent_background};
+    use super::{
+        Color, Flags, Hsla, NamedColor, PaintCell, Rgb, byte_range, rgb, text_spans,
+        transparent_background,
+    };
+
+    fn row(text: &str, row: usize, fg: Hsla) -> Vec<PaintCell> {
+        text.chars()
+            .enumerate()
+            .map(|(col, ch)| PaintCell {
+                col,
+                row,
+                ch,
+                zerowidth: Vec::new(),
+                fg,
+                bg: None,
+                flags: Flags::empty(),
+            })
+            .collect()
+    }
+
+    fn spans(cells: &[PaintCell], block: Option<(usize, usize)>) -> Vec<(usize, usize, String)> {
+        text_spans(cells, block)
+            .into_iter()
+            .map(|span| (span.col, span.row, span.text))
+            .collect()
+    }
+
+    #[test]
+    fn ascii_runs_join_across_spaces_and_break_on_style_rows_and_cursor() {
+        let white: Hsla = rgb(0xffffff).into();
+        let mut cells = row("ls  -la   ", 0, white);
+        cells.extend(row("ab", 1, white));
+        assert_eq!(
+            spans(&cells, None),
+            [(0, 0, "ls  -la".into()), (0, 1, "ab".into())]
+        );
+        // The block cursor cell is drawn black, so it is its own run.
+        assert_eq!(
+            spans(&cells, Some((1, 0))),
+            [
+                (0, 0, "l".into()),
+                (1, 0, "s".into()),
+                (4, 0, "-la".into()),
+                (0, 1, "ab".into())
+            ]
+        );
+        cells[5].flags = Flags::BOLD;
+        assert_eq!(
+            spans(&cells[..7], None),
+            [(0, 0, "ls  -".into()), (5, 0, "l".into()), (6, 0, "a".into())]
+        );
+    }
+
+    #[test]
+    fn wide_combining_and_hidden_cells_are_painted_alone_on_their_cell() {
+        let white: Hsla = rgb(0xffffff).into();
+        let mut cells = row("a界 bé!xc", 0, white);
+        cells[1].flags = Flags::WIDE_CHAR;
+        cells[2].flags = Flags::WIDE_CHAR_SPACER;
+        cells[4].ch = 'e';
+        cells[4].zerowidth = vec!['\u{301}'];
+        cells[6].flags = Flags::HIDDEN;
+        assert_eq!(
+            spans(&cells, None),
+            [
+                (0, 0, "a".into()),
+                (1, 0, "界".into()),
+                (3, 0, "b".into()),
+                (4, 0, "e\u{301}".into()),
+                (5, 0, "!".into()),
+                (7, 0, "c".into())
+            ]
+        );
+        // Decorated spaces are content.
+        let mut cells = row("a  ", 0, white);
+        for cell in &mut cells {
+            cell.flags = Flags::UNDERLINE;
+        }
+        assert_eq!(spans(&cells, None), [(0, 0, "a  ".into())]);
+    }
 
     #[test]
     fn glass_only_replaces_default_background_not_explicit_colours_or_inverse() {

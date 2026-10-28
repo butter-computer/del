@@ -128,3 +128,28 @@ fn synchronized_updates_flush_on_timeout_without_more_output() {
     assert!(!s.exited());
     s.close(Duration::from_millis(50));
 }
+
+#[test]
+fn close_returns_while_a_detached_descendant_floods_the_pty() {
+    let pidfile = std::env::temp_dir().join(format!("del-pty-flood-{}", std::process::id()));
+    let _ = std::fs::remove_file(&pidfile);
+    // setsid moves the writer out of the PTY's session, so termination
+    // cannot reach it while it holds the PTY open and keeps writing.
+    let s = spawn(&format!(
+        "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(F, \">\", $ARGV[0]); print F $$; close F; $|=1; print \"x\" x 79, \"\\n\" while 1' '{}' & sleep 30",
+        pidfile.display()
+    ));
+    wait_for(|| {
+        std::fs::read_to_string(&pidfile).is_ok_and(|p| p.trim().parse::<i32>().is_ok())
+    });
+    let flood: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    let started = Instant::now();
+    s.close(Duration::ZERO);
+    let elapsed = started.elapsed();
+    unsafe {
+        libc::kill(flood, libc::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&pidfile);
+    assert!(s.exited());
+    assert!(elapsed < Duration::from_secs(3), "close blocked for {elapsed:?}");
+}

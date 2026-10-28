@@ -157,6 +157,16 @@ impl ChatModel {
             .any(|b| matches!(b, Block::Approval(a) if a.state == ApprovalState::Pending))
     }
 
+    /// Remove one row. Index-keyed state after it moves up with the rows.
+    pub fn remove_block(&mut self, ix: usize) -> Block {
+        let block = self.blocks.remove(ix);
+        self.completed_responses = std::mem::take(&mut self.completed_responses)
+            .into_iter()
+            .filter_map(|key| shifted_after_removal(key, ix))
+            .collect();
+        block
+    }
+
     fn push(&mut self, block: Block) -> Change {
         self.blocks.push(block);
         Change::Pushed(self.blocks.len() - 1)
@@ -436,6 +446,15 @@ impl ChatModel {
     }
 }
 
+/// Where row `key` lands after row `removed` is deleted; `None` for the removed row.
+pub fn shifted_after_removal(key: usize, removed: usize) -> Option<usize> {
+    match key.cmp(&removed) {
+        std::cmp::Ordering::Less => Some(key),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(key - 1),
+    }
+}
+
 /// Diffs up to this many lines start expanded.
 const AUTO_EXPAND_DIFF_LINES: usize = 12;
 
@@ -479,6 +498,35 @@ mod tests {
             name: "bash".into(),
             input_summary: "ls".into(),
         }
+    }
+
+    #[test]
+    fn removing_a_row_shifts_completed_responses_with_it() {
+        let mut model = ChatModel::default();
+        model.push_user("first".into(), false);
+        model.apply(&AgentEvent::TurnStarted { turn_id: "t1".into() });
+        model.apply(&delta("one"));
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "t1".into(),
+            status: TurnStatus::Completed,
+        });
+        model.push_user("rejected".into(), false);
+        model.push_user("second".into(), false);
+        model.apply(&AgentEvent::TurnStarted { turn_id: "t2".into() });
+        model.apply(&AgentEvent::AssistantTextDelta {
+            turn_id: "t2".into(),
+            text: "two".into(),
+        });
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "t2".into(),
+            status: TurnStatus::Completed,
+        });
+        assert!(model.is_completed_response(1) && model.is_completed_response(4));
+        model.remove_block(2);
+        assert!(model.is_completed_response(1));
+        assert!(model.is_completed_response(3));
+        assert!(!model.is_completed_response(4));
+        assert_eq!(shifted_after_removal(2, 2), None);
     }
 
     #[test]

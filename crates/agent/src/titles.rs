@@ -31,12 +31,44 @@ pub fn context(events: &[AgentEvent]) -> (u32, String) {
     (count, rows.join("\n\n"))
 }
 
+/// Longest title kept, in characters.
+pub const MAX_CHARS: usize = 80;
+
+/// Directional formatting characters that can visually reorder a title.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Remove control and bidi-override characters; tabs become spaces.
+fn strip_controls(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\t' => Some(' '),
+            c if c.is_control() || is_bidi_control(c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Validate a generated title: one line, at most [`MAX_CHARS`], no control characters.
 pub fn clean(text: &str) -> Option<String> {
-    let title = text.trim().trim_matches(['"', '\'', '`']).trim();
-    if title.is_empty() || title.contains(['\n', '\r']) || title.chars().count() > 80 {
+    if text.trim().contains(['\n', '\r']) {
+        return None;
+    }
+    let stripped = strip_controls(text);
+    let title = stripped.trim().trim_matches(['"', '\'', '`']).trim();
+    if title.is_empty() || title.chars().count() > MAX_CHARS {
         return None;
     }
     Some(title.to_owned())
+}
+
+/// Sanitize a provider-owned title: first line only, truncated rather than rejected.
+pub fn clean_provider(text: &str) -> Option<String> {
+    let line = text.trim().lines().next().unwrap_or_default();
+    let stripped = strip_controls(line);
+    let truncated: String = stripped.trim().chars().take(MAX_CHARS).collect();
+    clean(&truncated)
 }
 
 pub fn due(previous: u32, current: u32) -> bool {
@@ -70,5 +102,23 @@ mod tests {
             Some("Build a chess game".into())
         );
         assert!(clean("Title\nExplanation").is_none());
+    }
+
+    #[test]
+    fn titles_lose_control_and_bidi_characters() {
+        assert_eq!(
+            clean("\u{1b}[31mRed\u{202E}txt\tTab\u{2066}").as_deref(),
+            Some("[31mRedtxt Tab")
+        );
+        assert!(clean("\u{202E}\u{200F}").is_none());
+        assert_eq!(
+            clean_provider(&"y".repeat(200)).map(|t| t.chars().count()),
+            Some(MAX_CHARS)
+        );
+        assert_eq!(
+            clean_provider("Renamed\u{202E} in Codex\nsecond").as_deref(),
+            Some("Renamed in Codex")
+        );
+        assert!(clean_provider("  ").is_none());
     }
 }

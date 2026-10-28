@@ -136,16 +136,21 @@ async fn real_manager_and_terminal_context_status_notify_and_summary() {
         .await
         .unwrap();
     f.handle.upsert_terminal(terminal("shell", None), None);
+    // Unrelated chats and terminals stay private to their own sessions.
     let list = call(&f.config, "list_sessions", json!({})).await;
     let rows = list["structuredContent"]["sessions"].as_array().unwrap();
-    assert_eq!(rows.len(), 3);
-    let chat_row = rows.iter().find(|r| r["id"] == chat.id.as_str()).unwrap();
-    assert_eq!(chat_row["mode"], "chat");
-    assert_eq!(chat_row["provider"], "codex");
-    let shell = rows.iter().find(|r| r["id"] == "shell").unwrap();
-    assert!(shell["provider"].is_null());
-    assert_eq!(shell["command"], "/bin/zsh");
-    assert_eq!(shell["mode"], "terminal");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "parent");
+    assert_eq!(rows[0]["mode"], "terminal");
+    for other in [chat.id.as_str(), "shell"] {
+        let summary = call(
+            &f.config,
+            "get_session_summary",
+            json!({"session_id": other}),
+        )
+        .await;
+        assert_eq!(summary["isError"], true);
+    }
     assert!(
         f.handle
             .launch_config(&SessionId::new("shell"), Provider::Codex)
@@ -525,13 +530,26 @@ async fn opaque_terminal_lease_is_generation_safe_and_cancels_pending_questions(
         matches!(f.event().await, BridgeEvent::QuestionClosed { request_id: id } if id == request_id)
     );
     assert_eq!(post(&replacement_config, "ping", json!({})).await.0, 401);
+    // Metadata outlives the lease: a relaunch finds it and reads its own summary.
+    let relaunched = f
+        .handle
+        .launch_config(&SessionId::new("leased"), Provider::Codex)
+        .unwrap();
+    let summary = call(
+        &relaunched,
+        "get_session_summary",
+        json!({"session_id":"leased"}),
+    )
+    .await;
+    assert_eq!(summary["structuredContent"]["info"]["id"], "leased");
+    // Other sessions cannot read it.
     let summary = call(
         &f.config,
         "get_session_summary",
         json!({"session_id":"leased"}),
     )
     .await;
-    assert_eq!(summary["structuredContent"]["info"]["id"], "leased");
+    assert_eq!(summary["isError"], true);
 
     let claude = f
         .handle
@@ -553,14 +571,14 @@ async fn shell_registration_has_context_without_agent_lease() {
             .unwrap()
             .is_none()
     );
+    // Shells are not in any agent's spawn family, so agents cannot read them.
     let summary = call(
         &f.config,
         "get_session_summary",
         json!({"session_id":"plain-shell"}),
     )
     .await;
-    assert!(summary["structuredContent"]["info"]["provider"].is_null());
-    assert_eq!(summary["structuredContent"]["info"]["command"], "/bin/zsh");
+    assert_eq!(summary["isError"], true);
     assert!(
         f.handle
             .register_terminal(terminal("acp", Some(Provider::Acp)))
@@ -619,20 +637,32 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     match f.event().await {
         BridgeEvent::Browser {
             caller,
+            allowed,
             request,
             reply,
         } => {
             assert_eq!(caller.as_str(), "parent");
+            assert_eq!(allowed, [SessionId::new("parent")]);
             assert_eq!(request.action, "snapshot");
             assert_eq!(request.tab_id.as_deref(), Some("tab-a"));
             reply.send(Ok(json!({"title":"Fixture"}))).unwrap();
         }
         _ => panic!("expected browser command"),
     }
-    assert_eq!(
-        pending.await.unwrap()["structuredContent"]["title"],
-        "Fixture"
-    );
+    let result = pending.await.unwrap();
+    assert!(result.get("structuredContent").is_none());
+    let text: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["title"], "Fixture");
+    // Terminal agents cannot reach browsers outside their spawn family.
+    f.handle.upsert_terminal(terminal("stranger", None), None);
+    let denied = call(
+        &f.config,
+        "browser",
+        json!({"action":"snapshot","session_id":"stranger"}),
+    )
+    .await;
+    assert_eq!(denied["isError"], true);
     let tools = f.handle.chat_browser_tools().unwrap();
     let config = LaunchConfig {
         args: vec![],
@@ -648,6 +678,9 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     assert_eq!(listing["result"]["tools"][0]["name"], "browser");
     let denied = call(&config, "list_sessions", json!({})).await;
     assert_eq!(denied["isError"], true);
+    // The shared chat credential only reaches chats that are running a turn.
+    let idle = call(&config, "browser", json!({"action":"list_tabs"})).await;
+    assert_eq!(idle["isError"], true);
     f.bridge.shutdown();
     assert!(!tools.claude_config.exists());
 }

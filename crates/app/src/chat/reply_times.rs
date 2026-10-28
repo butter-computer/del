@@ -17,14 +17,21 @@ fn path(id: &str) -> Option<PathBuf> {
     Some(del_agent::data_dir()?.join("reply-times").join(format!("{name}.jsonl")))
 }
 
-pub fn save(id: &str, model: &ChatModel, ix: usize, time: DateTime<Local>) -> std::io::Result<()> {
-    let Some(path) = path(id) else { return Ok(()) };
-    let Some(Block::Assistant { text, .. }) = model.blocks.get(ix) else { return Ok(()) };
+/// The record for reply `ix`; cheap enough for the UI thread. Write it with [`append`].
+pub fn entry(model: &ChatModel, ix: usize, time: DateTime<Local>) -> Option<Saved> {
+    let Some(Block::Assistant { text, .. }) = model.blocks.get(ix) else { return None };
     let ordinal = model.blocks[..ix].iter().filter(|b| matches!(b, Block::Assistant { .. })).count();
+    Some(Saved { ordinal, text: text.clone(), milliseconds: time.timestamp_millis() })
+}
+
+/// File IO; run off the UI thread. One write per record keeps concurrent appends whole.
+pub fn append(id: &str, entry: &Saved) -> std::io::Result<()> {
+    let Some(path) = path(id) else { return Ok(()) };
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
     std::fs::create_dir_all(path.parent().unwrap())?;
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, &Saved { ordinal, text: text.clone(), milliseconds: time.timestamp_millis() })?;
-    file.write_all(b"\n")
+    file.write_all(&line)
 }
 
 #[derive(Default)]

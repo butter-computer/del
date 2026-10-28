@@ -608,7 +608,12 @@ pub struct TerminalHost {
     terminal: Entity<TerminalView>,
     snapshot: TerminalHostSnapshot,
     fallback_title: String,
+    /// A trailing screen re-read is scheduled (output/keystroke bursts).
+    output_refresh_pending: bool,
 }
+
+/// Output and keystrokes re-read the screen at most this often.
+const OUTPUT_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
 impl EventEmitter<TerminalHostEvent> for TerminalHost {}
 impl Focusable for TerminalHost {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -669,29 +674,28 @@ impl TerminalHost {
     ) -> Self {
         let pid = session.pid();
         let terminal = cx.new(|cx| TerminalView::new(session, window, cx));
-        cx.subscribe(&terminal, |this, terminal, event: &TerminalEvent, cx| {
-            let output = screen_tail(terminal.read(cx).session());
-            this.snapshot.summary = output
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .map(str::to_owned);
-            this.snapshot.last_output = output;
+        cx.subscribe(&terminal, |this, _, event: &TerminalEvent, cx| {
+            cx.emit(TerminalHostEvent::Terminal(event.clone()));
+            let before = this.snapshot.clone();
             match event {
                 TerminalEvent::TitleChanged(title) => {
                     this.snapshot
                         .update_title(title.as_deref(), &this.fallback_title);
                 }
-                TerminalEvent::Exited { code }
-                    if this.snapshot.status != TerminalHostStatus::Closed =>
-                {
-                    this.snapshot.status = TerminalHostStatus::Exited { code: *code }
+                TerminalEvent::Exited { code } => {
+                    if this.snapshot.status != TerminalHostStatus::Closed {
+                        this.snapshot.status = TerminalHostStatus::Exited { code: *code };
+                    }
                 }
-                _ => {}
+                // Output and keystrokes arrive in bursts: walking the grid
+                // and republishing on each would run per byte, so coalesce.
+                _ => {
+                    this.schedule_output_refresh(cx);
+                    return;
+                }
             }
-            cx.emit(TerminalHostEvent::Terminal(event.clone()));
-            cx.emit(TerminalHostEvent::Changed(this.snapshot.clone()));
-            cx.notify();
+            // Exit consumers read the final screen; refresh it now.
+            this.refresh_output(before, cx);
         })
         .detach();
         if matches!(
@@ -747,6 +751,7 @@ impl TerminalHost {
         Self {
             terminal,
             fallback_title,
+            output_refresh_pending: false,
             snapshot: TerminalHostSnapshot {
                 kind: spec.kind,
                 cwd,
@@ -761,6 +766,37 @@ impl TerminalHost {
             },
         }
     }
+    fn schedule_output_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.output_refresh_pending {
+            return;
+        }
+        self.output_refresh_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OUTPUT_REFRESH).await;
+            let _ = this.update(cx, |this, cx| {
+                let before = this.snapshot.clone();
+                this.refresh_output(before, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read the screen tail; publish only when the snapshot changed.
+    fn refresh_output(&mut self, before: TerminalHostSnapshot, cx: &mut Context<Self>) {
+        self.output_refresh_pending = false;
+        let output = screen_tail(self.terminal.read(cx).session());
+        self.snapshot.summary = output
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(str::to_owned);
+        self.snapshot.last_output = output;
+        if self.snapshot != before {
+            cx.emit(TerminalHostEvent::Changed(self.snapshot.clone()));
+            cx.notify();
+        }
+    }
+
     /// Metadata reads never resume a thread or send a prompt. A completed lookup
     /// also ends the loading animation if the TUI leaves its progress title set.
     pub fn refresh_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {

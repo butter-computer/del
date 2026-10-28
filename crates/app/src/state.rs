@@ -105,6 +105,12 @@ pub struct ModelCatalog {
     pub error: Option<String>,
 }
 
+#[derive(Default)]
+struct RowsCache {
+    rows: Vec<Row>,
+    index: HashMap<SessionId, usize>,
+}
+
 pub struct AppState {
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
     project_loading: std::collections::HashSet<PathBuf>,
@@ -122,6 +128,10 @@ pub struct AppState {
     tx: UnboundedSender<Msg>,
     overrides: Overrides,
     records: Vec<SessionRecord>,
+    /// Sorted, titled chat rows derived from `records` + `overrides`. Rebuilt
+    /// lazily after either changes instead of on every sidebar/tab lookup.
+    rows_cache: std::cell::RefCell<Option<std::rc::Rc<RowsCache>>>,
+    overrides_writer: Arc<sessions::OverridesWriter>,
     pub selection: Selection,
     drafts: HashMap<u64, SessionConfig>,
     next_draft: u64,
@@ -291,14 +301,21 @@ impl AppState {
         Self::pump(rx, cx);
 
         let records = manager.list_sessions();
-        let mut overrides = sessions::overrides_path()
+        let (mut overrides, overrides_error) = sessions::overrides_path()
             .map(|p| Overrides::load(&p))
             .unwrap_or_default();
         overrides.initialize_pins(&records);
+        let (project_preferences, projects_error) = crate::projects::ProjectPreferences::load();
+        error = error.or(overrides_error).or(projects_error);
+
+        // Removed account profiles keep their credentials only for the recovery window.
+        if !cfg!(test) && let Some(removed) = del_agent::data_dir().map(|d| d.join("removed-accounts")) {
+            rt.spawn_blocking(move || crate::accounts::purge_removed_profiles(&removed, crate::accounts::REMOVED_RETENTION));
+        }
         Self {
             project_info: HashMap::new(),
             project_loading: Default::default(),
-            project_preferences: crate::projects::ProjectPreferences::load(),
+            project_preferences,
             launch_options: HashMap::new(),
             catalogs: HashMap::new(),
             accounts,
@@ -312,6 +329,8 @@ impl AppState {
             tx,
             overrides,
             records,
+            rows_cache: Default::default(),
+            overrides_writer: Default::default(),
             selection: Selection::Draft(0),
             drafts: HashMap::from([(
                 0,
@@ -411,7 +430,7 @@ impl AppState {
             }
             Msg::AccountSwitched(id, result) => {
                 self.switching_accounts.remove(&id);
-                self.records = self.manager.list_sessions();
+                self.set_records(self.manager.list_sessions());
                 if let Err(error) = result { self.error = Some(format!("Could not switch account: {error}")); }
                 self.load_models(true, cx);
             }
@@ -435,6 +454,8 @@ impl AppState {
                         self.refresh_account_usage(cx);
                         if let Err(e) = crate::accounts::save(&self.accounts) { self.error = Some(format!("Could not save account: {e}")); }
                     }
+                    // A slow check (e.g. at startup) says nothing about the login; keep the saved state.
+                    Err(error) if crate::accounts::identity_check_inconclusive(&error) => {}
                     Err(error) => {
                         if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) { account.requires_login = true; }
                         self.account_status.insert(id, error);
@@ -468,16 +489,16 @@ impl AppState {
                 } else {
                     self.chat_title_loading.remove(&id);
                 }
-                self.records = self.manager.list_sessions();
+                self.set_records(self.manager.list_sessions());
             }
-            Msg::Refresh => self.records = self.manager.list_sessions(),
+            Msg::Refresh => self.set_records(self.manager.list_sessions()),
             Msg::Unloaded(id) => {
                 self.unloading.remove(&id);
-                self.records = self.manager.list_sessions();
+                self.set_records(self.manager.list_sessions());
             }
             Msg::ReplyFinished(id) => {
                 self.reply_finished(&id, cx);
-                self.records = self.manager.list_sessions();
+                self.set_records(self.manager.list_sessions());
             }
             Msg::SigninFinished(provider) => {
                 if self.signin == Some(provider) {
@@ -536,7 +557,7 @@ impl AppState {
                     }
                     None => self.add_tab(&id),
                 }
-                self.records = self.manager.list_sessions();
+                self.set_records(self.manager.list_sessions());
                 if let Some(record) = self.records.iter().find(|r| r.id == id) { self.project_info.remove(&record.cwd); }
                 if self.selection == Selection::Draft(key) {
                     self.selection = Selection::Session(id);
@@ -602,29 +623,52 @@ impl AppState {
 
     /// Rows for the sidebar (not archived), most recent first.
     pub fn rows(&self) -> Vec<Row> {
-        self.overrides
-            .rows(&self.records)
-            .into_iter()
-            .filter(|r| !r.archived)
-            .collect()
+        self.all_rows().rows.iter().filter(|r| !r.archived).cloned().collect()
     }
 
     pub fn archived_rows(&self) -> Vec<Row> {
-        self.overrides
-            .rows(&self.records)
-            .into_iter()
-            .filter(|r| r.archived)
-            .collect()
+        self.all_rows().rows.iter().filter(|r| r.archived).cloned().collect()
+    }
+
+    pub fn has_archived_chats(&self) -> bool {
+        self.all_rows().rows.iter().any(|r| r.archived)
     }
 
     pub fn active_row(&self) -> Option<Row> {
         let Selection::Session(id) = &self.selection else {
             return None;
         };
-        self.overrides
-            .rows(&self.records)
-            .into_iter()
-            .find(|r| &r.id == id)
+        self.chat_row(id)
+    }
+
+    fn chat_row(&self, id: &SessionId) -> Option<Row> {
+        let cache = self.all_rows();
+        cache.index.get(id).map(|&at| cache.rows[at].clone())
+    }
+
+    fn all_rows(&self) -> std::rc::Rc<RowsCache> {
+        if let Some(cache) = self.rows_cache.borrow().as_ref() {
+            return cache.clone();
+        }
+        let rows = self.overrides.rows(&self.records);
+        let index = rows.iter().enumerate().map(|(at, row)| (row.id.clone(), at)).collect();
+        let cache = std::rc::Rc::new(RowsCache { rows, index });
+        *self.rows_cache.borrow_mut() = Some(cache.clone());
+        cache
+    }
+
+    fn invalidate_rows(&mut self) {
+        self.rows_cache.get_mut().take();
+    }
+
+    fn set_records(&mut self, records: Vec<SessionRecord>) {
+        self.records = records;
+        self.invalidate_rows();
+    }
+
+    fn overrides_mut(&mut self) -> &mut Overrides {
+        self.invalidate_rows();
+        &mut self.overrides
     }
 
     /// Provider, model and folder in effect: the open session's, or the draft's.
@@ -738,16 +782,18 @@ impl AppState {
             })
     }
 
-    fn set_unread(&mut self, id: &SessionId, unread: bool) {
+    /// Returns whether anything changed (and so needs saving).
+    fn set_unread(&mut self, id: &SessionId, unread: bool) -> bool {
         if self.overrides.unread(id) == unread {
-            return;
+            return false;
         }
         let (from, target, start) = self.unread_motion(id);
         let progress = start.map_or(1.0, |start| (start.elapsed().as_secs_f32() / 0.18).min(1.0));
         let current = from + (target - from) * (1.0 - (1.0 - progress).powi(3));
         self.unread_motion
             .insert(id.clone(), (current, std::time::Instant::now()));
-        self.overrides.set_unread(id, unread);
+        self.overrides_mut().set_unread(id, unread);
+        true
     }
 
     pub fn terminal_unread(&self, id: &SessionId) -> bool {
@@ -755,8 +801,9 @@ impl AppState {
     }
 
     pub fn select_terminal(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        self.set_unread(&id, false);
-        self.save_overrides();
+        if self.set_unread(&id, false) {
+            self.save_overrides();
+        }
         self.open_preview(Tab::Terminal(id.clone()));
         self.selection = Selection::Terminal(id);
         self.panel = Panel::Chat;
@@ -769,7 +816,8 @@ impl AppState {
         };
         row.pinned = !row.pinned;
         self.terminal_pin_changes.push((id.clone(), row.pinned));
-        self.overrides.set_pinned(id, row.pinned);
+        let pinned = row.pinned;
+        self.overrides_mut().set_pinned(id, pinned);
         self.sort_terminal_rows();
         self.save_overrides();
         cx.notify();
@@ -802,7 +850,7 @@ impl AppState {
             self.sidebar_drag.generation += 1;
             crate::haptics::tick();
         }
-        self.overrides.set_order(&ids);
+        self.overrides_mut().set_order(&ids);
         self.sort_terminal_rows();
         self.save_overrides();
         cx.notify();
@@ -816,8 +864,9 @@ impl AppState {
         let Some(row) = self.rows().into_iter().find(|row| &row.id == id) else {
             return;
         };
+        self.invalidate_rows();
         self.overrides.initialize_pins(&self.records);
-        self.overrides.set_pinned(id, !row.pinned);
+        self.overrides_mut().set_pinned(id, !row.pinned);
         self.save_overrides();
         cx.notify();
     }
@@ -855,8 +904,9 @@ impl AppState {
     }
 
     pub fn mark_session_unread(&mut self, id: &SessionId, cx: &mut Context<Self>) {
-        self.set_unread(id, true);
-        self.save_overrides();
+        if self.set_unread(id, true) {
+            self.save_overrides();
+        }
         cx.notify();
     }
 
@@ -1297,8 +1347,9 @@ impl AppState {
         if self.unloading.contains(&id) {
             return;
         }
-        self.set_unread(&id, false);
-        self.save_overrides();
+        if self.set_unread(&id, false) {
+            self.save_overrides();
+        }
         self.open_preview(Tab::Session(id.clone()));
         self.selection = Selection::Session(id.clone());
         self.panel = Panel::Chat;
@@ -1445,14 +1496,14 @@ impl AppState {
     /// child process). It can be restored and resumed later.
     pub fn archive(&mut self, id: SessionId, cx: &mut Context<Self>) {
         if self.terminal_rows.iter().any(|row| row.id == id) {
-            self.overrides.set_archived(&id, true);
+            self.overrides_mut().set_archived(&id, true);
             self.save_overrides();
             self.close_tab(&Tab::Terminal(id), cx);
             cx.notify();
             return;
         }
         let was_active = self.selection == Selection::Session(id.clone());
-        self.overrides.set_archived(&id, true);
+        self.overrides_mut().set_archived(&id, true);
         self.save_overrides();
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         let close_id = id.clone();
@@ -1476,7 +1527,7 @@ impl AppState {
             self.project_preferences.roots.insert(root);
             self.save_projects(cx);
         }
-        self.overrides.set_archived(&id, false);
+        self.overrides_mut().set_archived(&id, false);
         self.save_overrides();
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.select_terminal(id, cx);
@@ -1487,7 +1538,7 @@ impl AppState {
 
     pub fn permanently_delete(&mut self, id: SessionId, cx: &mut Context<Self>) {
         if self.terminal_rows.iter().any(|row| row.id == id) {
-            self.overrides.remove(&id);
+            self.overrides_mut().remove(&id);
             self.save_overrides();
             self.remove_terminal(&id, cx);
             return;
@@ -1498,8 +1549,9 @@ impl AppState {
             .copied()
             .unwrap_or(u64::MAX);
         self.close_tab(&Tab::Session(id.clone()), cx);
+        self.invalidate_rows();
         self.records.retain(|record| record.id != id);
-        self.overrides.remove(&id);
+        self.overrides_mut().remove(&id);
         self.save_overrides();
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         self.rt.spawn(async move {
@@ -1533,7 +1585,7 @@ impl AppState {
             return;
         }
         if let (Some(id), Some(title)) = (self.renaming.take(), title) {
-            self.overrides.rename(&id, &title);
+            self.overrides_mut().rename(&id, &title);
             self.save_overrides();
         }
         cx.notify();
@@ -1558,10 +1610,8 @@ impl AppState {
     }
 
     pub fn provider_of(&self, id: &SessionId) -> Option<Provider> {
-        self.records
-            .iter()
-            .find(|r| &r.id == id)
-            .map(|r| r.provider)
+        let cache = self.all_rows();
+        cache.index.get(id).map(|&at| cache.rows[at].provider)
     }
 
     pub fn title_loading(&self, id: &SessionId) -> bool {
@@ -1573,23 +1623,25 @@ impl AppState {
         if let Some(row) = self.terminal_rows.iter().find(|row| &row.id == id) {
             return self.overrides.title(id).unwrap_or(&row.title).to_owned();
         }
-        self.overrides
-            .rows(&self.records)
-            .into_iter()
-            .find(|r| &r.id == id)
-            .map(|r| r.title)
-            .unwrap_or_default()
+        let cache = self.all_rows();
+        cache.index.get(id).map(|&at| cache.rows[at].title.clone()).unwrap_or_default()
     }
 
+    /// Persist sidebar metadata off the UI thread; rapid changes coalesce.
     fn save_overrides(&mut self) {
         if cfg!(test) {
             return;
         }
-        if let Some(path) = sessions::overrides_path()
-            && let Err(e) = self.overrides.save(&path)
-        {
-            self.error = Some(format!("Could not save sidebar changes: {e}"));
-        }
+        let Some(path) = sessions::overrides_path() else {
+            return;
+        };
+        let generation = self.overrides_writer.request();
+        let (writer, snapshot, tx) = (self.overrides_writer.clone(), self.overrides.clone(), self.tx.clone());
+        self.rt.spawn_blocking(move || {
+            if let Err(e) = writer.write(generation, &snapshot, &path) {
+                let _ = tx.send(Msg::Error(format!("Could not save sidebar changes: {e}")));
+            }
+        });
     }
 
     // ---- composer pickers (a draft's choices; an open session's are fixed) ----
@@ -1733,11 +1785,13 @@ impl AppState {
         let result = (|| -> std::io::Result<()> {
             if cfg!(test) { return Ok(()); }
             let source = account.root();
-            let destination = del_agent::data_dir().unwrap().join("removed-accounts").join(format!("{}-{}", id, uuid::Uuid::new_v4()));
-            let moved = source.exists();
-            if moved { std::fs::create_dir_all(destination.parent().unwrap())?; std::fs::rename(&source, &destination)?; }
+            let removed = del_agent::data_dir().unwrap().join("removed-accounts");
+            let moved = crate::accounts::retire_profile(&source, &removed, id)?;
             if let Err(error) = crate::accounts::save(&accounts) {
-                if moved { let _ = std::fs::rename(destination, source); }
+                if let Some(destination) = moved {
+                    let _ = std::fs::remove_file(destination.join(crate::accounts::REMOVED_AT));
+                    let _ = std::fs::rename(destination, source);
+                }
                 return Err(error);
             }
             Ok(())
@@ -1804,23 +1858,33 @@ impl AppState {
                 Ok(Ok(marker)) => marker,
                 result => { let _ = tx.send(Msg::AccountChecked(account.id, Err(format!("Could not open sign-in: {result:?}")))); return; }
             };
+            let mut outcome = None;
             for _ in 0..100 {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
                 if status.is_empty() { continue; }
                 if status.trim() != "0" {
-                    let _ = std::fs::remove_file(&marker);
-                    let _ = tx.send(Msg::AccountChecked(account.id, Err("Sign-in failed or was cancelled. Check Terminal, then try Sign in again.".into()))); return;
+                    outcome = Some(Err("Sign-in failed or was cancelled. Check Terminal, then try Sign in again.".to_string()));
+                    break;
                 }
                 if let Ok(identity) = crate::accounts::identity(&account, &binary).await {
-                    let close_marker = marker.clone();
-                    let _ = tokio::task::spawn_blocking(move || crate::accounts::close_login_terminal(&close_marker)).await;
-                    let _ = std::fs::remove_file(&marker);
-                    let _ = tx.send(Msg::AccountChecked(account.id, Ok(identity))); return;
+                    outcome = Some(Ok(identity));
+                    break;
                 }
             }
-            let _ = std::fs::remove_file(&marker);
-            let _ = tx.send(Msg::AccountChecked(account.id, Err("Sign-in not confirmed. Try reconnecting.".into())));
+            // A slow but successful sign-in may finish right at the deadline: check once more.
+            let outcome = match outcome {
+                Some(outcome) => outcome,
+                None => crate::accounts::identity(&account, &binary).await
+                    .map_err(|_| "Sign-in not confirmed. Try reconnecting.".to_string()),
+            };
+            let close_marker = marker.clone();
+            let succeeded = outcome.is_ok();
+            let _ = tokio::task::spawn_blocking(move || {
+                if succeeded { crate::accounts::close_login_terminal(&close_marker); }
+                crate::accounts::cleanup_login(&close_marker);
+            }).await;
+            let _ = tx.send(Msg::AccountChecked(account.id, outcome));
         });
         cx.notify();
     }
@@ -1878,7 +1942,7 @@ impl AppState {
             return;
         };
         match self.manager.set_model_settings(id, model, effort, tier) {
-            Ok(()) => self.records = self.manager.list_sessions(),
+            Ok(()) => self.set_records(self.manager.list_sessions()),
             Err(error) => self.error = Some(format!("Could not save model settings: {error}")),
         }
         cx.notify();
@@ -1891,12 +1955,14 @@ impl AppState {
     }
 
     fn inspect_projects(&mut self) {
-        let mut paths: Vec<_> = self.records.iter().map(|r| r.cwd.clone())
-            .chain(self.terminal_rows.iter().map(|r| r.cwd.clone()))
-            .chain(self.drafts.values().map(|d| d.cwd.clone())).collect();
-        paths.sort(); paths.dedup();
+        // Runs on every state notification: clone only directories not yet inspected.
+        let paths: Vec<PathBuf> = self.records.iter().map(|r| &r.cwd)
+            .chain(self.terminal_rows.iter().map(|r| &r.cwd))
+            .chain(self.drafts.values().map(|d| &d.cwd))
+            .filter(|path| !self.project_info.contains_key(*path) && !self.project_loading.contains(*path))
+            .cloned().collect();
         for path in paths {
-            if self.project_info.contains_key(&path) || !self.project_loading.insert(path.clone()) { continue; }
+            if !self.project_loading.insert(path.clone()) { continue; }
             let tx = self.tx.clone();
             self.rt.spawn(async move {
                 let dir = path.clone();
@@ -1914,7 +1980,7 @@ impl AppState {
             cwd: r.cwd.clone(), title: self.current_title(&r.id), status: if self.session_working(&r.id) { SessionStatus::Running } else { SessionStatus::Idle },
             updated_secs: 0, archived: false, pinned: r.pinned, unread: self.terminal_unread(&r.id),
         }));
-        rows.sort_by_key(|r| (!r.pinned, self.overrides.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }), std::cmp::Reverse(r.updated_secs)));
+        rows.sort_by_cached_key(|r| (!r.pinned, self.overrides.order(&r.id).unwrap_or(if r.pinned { 0 } else { u64::MAX }), std::cmp::Reverse(r.updated_secs)));
         rows
     }
 
@@ -1925,15 +1991,28 @@ impl AppState {
         }).collect()
     }
 
+    #[cfg(test)]
     pub fn project_paths(&self) -> Vec<PathBuf> {
-        // Projects are directory groups, not independent visibility gates.
-        let mut paths: Vec<_> = if self.show_archived {
-            self.archived_rows().iter().map(|row| self.project_root(&row.cwd))
-                .chain(self.terminal_rows.iter().filter(|row| self.terminal_archived(&row.id)).map(|row| self.project_root(&row.cwd))).collect()
+        if self.show_archived {
+            let rows = self.archived_rows();
+            self.project_paths_for(rows.iter().map(|row| row.cwd.as_path())
+                .chain(self.terminal_rows.iter().filter(|row| self.terminal_archived(&row.id)).map(|row| row.cwd.as_path())))
         } else {
-            self.unified_rows().iter().map(|row| self.project_root(&row.cwd))
-                .chain(self.tabs.iter().filter_map(|tab| match tab { Tab::Draft(key) => self.drafts.get(key), _ => None }).map(|draft| self.project_root(&draft.cwd))).collect()
-        };
+            let rows = self.unified_rows();
+            self.project_paths_for(rows.iter().map(|row| row.cwd.as_path()))
+        }
+    }
+
+    /// Project groups for rows the sidebar already built, avoiding a second
+    /// pass over every session per frame. `cwds` are the visible rows' folders:
+    /// active sessions, or archived ones while the archive is shown.
+    /// Projects are directory groups, not independent visibility gates.
+    pub fn project_paths_for<'a>(&self, cwds: impl IntoIterator<Item = &'a std::path::Path>) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = cwds.into_iter().map(|cwd| self.project_root(cwd)).collect();
+        if !self.show_archived {
+            paths.extend(self.tabs.iter().filter_map(|tab| match tab { Tab::Draft(key) => self.drafts.get(key), _ => None })
+                .map(|draft| self.project_root(&draft.cwd)));
+        }
         paths.sort(); paths.dedup(); paths
     }
 
@@ -1985,7 +2064,7 @@ impl AppState {
         self.project_preferences.archived.remove(&path);
         let ids: Vec<_> = self.records.iter().map(|r| (&r.id, &r.cwd)).chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
             .filter(|(_, cwd)| self.project_root(cwd) == path).map(|(id, _)| id.clone()).collect();
-        for id in ids { self.overrides.set_archived(&id, false); }
+        for id in ids { self.overrides_mut().set_archived(&id, false); }
         self.save_overrides();
         self.save_projects(cx);
     }
@@ -2140,21 +2219,35 @@ impl AppState {
                 let launch_binary = binary.clone();
                 let marker = tokio::task::spawn_blocking(move || crate::accounts::launch_provider_login(provider, None, &launch_binary))
                     .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+                let mut finished = None;
                 for _ in 0..100 {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     let Ok(status) = std::fs::read_to_string(&marker) else { continue; };
                     if status.is_empty() { continue; }
-                    if status.trim() != "0" { return Err("Sign-in cancelled or failed. Try Sign in again.".to_string()); }
-                    let closing = marker.clone();
-                    let _ = tokio::task::spawn_blocking(move || crate::accounts::close_login_terminal(&closing)).await;
-                    let _ = std::fs::remove_file(&marker);
-                    if let Ok(Some(identity)) = crate::accounts::provider_identity(provider, None, &binary).await {
-                        let _ = tx.send(Msg::AccountIdentity(provider, None, identity));
-                    }
-                    let _ = tx.send(Msg::Checked(providers::detect(provider).await));
-                    return Ok(());
+                    finished = Some(status.trim() == "0");
+                    break;
                 }
-                Err("Sign-in timed out. Try Sign in again.".into())
+                let identity = match finished {
+                    Some(false) => None,
+                    _ => crate::accounts::provider_identity(provider, None, &binary).await.ok().flatten(),
+                };
+                // After the deadline, a confirmed identity still means the slow sign-in worked.
+                let succeeded = finished == Some(true) || identity.is_some();
+                let closing = marker.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if succeeded { crate::accounts::close_login_terminal(&closing); }
+                    crate::accounts::cleanup_login(&closing);
+                }).await;
+                match finished {
+                    Some(false) => return Err("Sign-in cancelled or failed. Try Sign in again.".to_string()),
+                    None if !succeeded => return Err("Sign-in timed out. Try Sign in again.".into()),
+                    _ => {}
+                }
+                if let Some(identity) = identity {
+                    let _ = tx.send(Msg::AccountIdentity(provider, None, identity));
+                }
+                let _ = tx.send(Msg::Checked(providers::detect(provider).await));
+                Ok(())
             }.await;
             if let Err(error) = result { let _ = tx.send(Msg::Error(error)); }
             let _ = tx.send(Msg::SigninFinished(provider));
@@ -2167,6 +2260,13 @@ impl AppState {
     pub fn shutdown(&self) {
         if let Some(readiness) = &self.readiness {
             readiness.stop();
+        }
+        // Background sidebar writes may still be queued; write the final state now.
+        if !cfg!(test) && self.overrides_writer.pending()
+            && let Some(path) = sessions::overrides_path()
+            && let Err(error) = self.overrides_writer.write(self.overrides_writer.request(), &self.overrides, &path)
+        {
+            eprintln!("Could not save sidebar changes: {error}");
         }
         let manager = self.manager.clone();
         self.rt.block_on(async move {
@@ -2247,6 +2347,8 @@ pub(crate) mod tests {
             tx,
             overrides: Overrides::default(),
             records: vec![],
+            rows_cache: Default::default(),
+            overrides_writer: Default::default(),
             selection: Selection::Draft(0),
             drafts: HashMap::from([(
                 0,
@@ -2774,7 +2876,7 @@ pub(crate) mod tests {
             let handle =
                 s.rt.block_on(s.manager.start_session(config.clone()))
                     .unwrap();
-            s.records = s.manager.list_sessions();
+            s.set_records(s.manager.list_sessions());
             s.selection = Selection::Session(handle.id.clone());
             s.tabs = vec![Tab::Session(handle.id.clone())];
             s.apply(
@@ -2949,7 +3051,7 @@ pub(crate) mod tests {
                 summary: "Saved output".into(),
                 pinned: true,
             });
-            s.overrides.rename(&id, "My name");
+            s.overrides_mut().rename(&id, "My name");
             s.select_terminal(id.clone(), cx);
             s.unload(id.clone(), cx);
             assert!(!s.tabs.contains(&Tab::Terminal(id.clone())));
@@ -3146,6 +3248,7 @@ pub(crate) mod tests {
         let state = draft(cx);
         state.update(cx, |s, cx| {
             let chat = SessionId::new("chat");
+            s.invalidate_rows();
             s.records.push(SessionRecord { id: chat.clone(), provider: Provider::Codex, account_id: None, cwd: "/repo/worktree".into(), model: None, reasoning_effort: None, service_tier: None, permission_mode: PermissionMode::FullAuto, title: Some("Chat".into()), title_turns: 0, created_at_ms: 1, updated_at_ms: 1, status: SessionStatus::Idle });
             for (name, cwd) in [("terminal", "/repo"), ("other", "/elsewhere")] {
                 s.terminal_rows.push(TerminalRow { id: SessionId::new(name), provider: None, account_id: None, cwd: cwd.into(), title: name.into(), summary: String::new(), active: false, pinned: false });

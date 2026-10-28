@@ -9,6 +9,12 @@ use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
+/// Responses carry browser results of up to 6 MiB before JSON escaping, which
+/// can double their size; ureq's default 10 MB limit would fail them.
+const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+/// In-flight requests; reading pauses (backpressure) once this many are open.
+const MAX_WORKERS: usize = 64;
+
 fn emit(output: &Mutex<impl Write>, line: &str) {
     let mut o = output.lock().unwrap();
     let _ = writeln!(o, "{line}");
@@ -31,6 +37,8 @@ fn forward(
     let status = resp.status().as_u16();
     let body = resp
         .into_body()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
         .read_to_string()
         .map_err(|e| e.to_string())?;
     match status {
@@ -51,11 +59,15 @@ where
         .build()
         .into();
     let output = Arc::new(Mutex::new(output));
-    let mut workers = Vec::new();
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for line in input.lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
+        }
+        workers.retain(|w| !w.is_finished());
+        if workers.len() >= MAX_WORKERS {
+            let _ = workers.remove(0).join();
         }
         let (agent, output) = (agent.clone(), output.clone());
         let (url, token) = (url.to_string(), token.to_string());

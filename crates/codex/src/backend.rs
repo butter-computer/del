@@ -10,11 +10,14 @@ use async_trait::async_trait;
 use del_agent::*;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 const CLIENT_NAME: &str = "del";
+/// Upper bound on spawning the app-server plus initialize and the auth check.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct CodexOptions {
@@ -49,6 +52,8 @@ struct SessionState {
     approvals: HashMap<String, PendingApproval>,
     /// A `turn/start` is in flight (guards double-submit).
     starting: bool,
+    /// Stop was requested while `turn/start` had not yet returned a turn id.
+    interrupt_pending: bool,
     turn_config: Option<SessionConfig>,
 }
 
@@ -69,11 +74,52 @@ struct Connection {
     client: CodexClient,
 }
 
+#[derive(Default)]
+struct ConnSlot {
+    live: Option<Arc<Connection>>,
+    /// A client still in its handshake, so `shutdown` can stop it instead of
+    /// waiting behind it.
+    handshaking: Option<CodexClient>,
+}
+
 pub struct CodexBackend {
     browser_tools: Mutex<Option<del_agent::backend::BrowserTools>>,
     opts: CodexOptions,
-    conn: tokio::sync::Mutex<Option<Arc<Connection>>>,
+    /// Held only briefly; never across an await.
+    conn: Mutex<ConnSlot>,
+    /// Serializes spawning so concurrent callers share one app-server.
+    connecting: tokio::sync::Mutex<()>,
+    /// Threads being started/resumed but not yet registered in `sessions`;
+    /// closing the last registered session must not stop the server under them.
+    opening: AtomicUsize,
     sessions: Sessions,
+}
+
+/// Counts one in-flight open for the guard's lifetime.
+struct OpeningGuard<'a>(&'a AtomicUsize);
+
+impl<'a> OpeningGuard<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for OpeningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Clears `starting` however `start_turn` ends (error, cancellation).
+struct StartingGuard<'a>(&'a Session);
+
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap();
+        st.starting = false;
+        st.interrupt_pending = false;
+    }
 }
 
 fn be(e: impl std::fmt::Display) -> AgentError {
@@ -133,7 +179,9 @@ impl CodexBackend {
         Self {
             opts,
             browser_tools: Mutex::new(None),
-            conn: tokio::sync::Mutex::new(None),
+            conn: Mutex::new(ConnSlot::default()),
+            connecting: tokio::sync::Mutex::new(()),
+            opening: AtomicUsize::new(0),
             sessions: Default::default(),
         }
     }
@@ -147,6 +195,7 @@ impl CodexBackend {
             }
             st.starting = true;
         }
+        let starting = StartingGuard(&s);
         let conn = self.connection().await?;
         let mut params = json!({ "threadId": session.as_str(), "input": items });
         if let Some(config) = &s.state.lock().unwrap().turn_config {
@@ -167,10 +216,19 @@ impl CodexBackend {
         }
         let result: std::result::Result<TurnResponse, ClientError> =
             conn.client.call("turn/start", params).await;
-        let mut st = s.state.lock().unwrap();
-        st.starting = false;
-        let resp = result.map_err(be)?;
-        st.mapper.note_turn(&resp.turn.id);
+        let interrupt = {
+            let mut st = s.state.lock().unwrap();
+            let resp = result.map_err(be)?;
+            st.mapper.note_turn(&resp.turn.id);
+            std::mem::take(&mut st.interrupt_pending)
+                .then(|| st.mapper.turn_id().map(str::to_owned))
+                .flatten()
+        };
+        drop(starting);
+        if let Some(turn) = interrupt {
+            // Stop arrived before the turn id was known; deliver it now.
+            send_interrupt(&conn.client, session, &turn).await?;
+        }
         Ok(())
     }
 
@@ -196,7 +254,7 @@ impl CodexBackend {
     ) -> std::result::Result<Self, CodexError> {
         let backend = Self::new(opts);
         let conn = backend.handshake(client, incoming).await?;
-        *backend.conn.lock().await = Some(conn);
+        backend.conn.lock().unwrap().live = Some(conn);
         Ok(backend)
     }
 
@@ -219,12 +277,22 @@ impl CodexBackend {
         Ok(Arc::new(Connection { client }))
     }
 
+    fn live_connection(&self) -> Option<Arc<Connection>> {
+        self.conn
+            .lock()
+            .unwrap()
+            .live
+            .clone()
+            .filter(|c| !c.client.is_closed())
+    }
+
     async fn connection(&self) -> std::result::Result<Arc<Connection>, CodexError> {
-        let mut guard = self.conn.lock().await;
-        if let Some(c) = guard.as_ref()
-            && !c.client.is_closed()
-        {
-            return Ok(c.clone());
+        if let Some(c) = self.live_connection() {
+            return Ok(c);
+        }
+        let _connecting = self.connecting.lock().await;
+        if let Some(c) = self.live_connection() {
+            return Ok(c);
         }
         let mut spawn = self.opts.spawn.clone();
         spawn
@@ -237,9 +305,24 @@ impl CodexBackend {
                 .ok_or(CodexError::NotInstalled)?;
         }
         let (client, rx) = CodexClient::spawn(&spawn)?;
-        let conn = self.handshake(client, rx).await?;
-        *guard = Some(conn.clone());
-        Ok(conn)
+        self.conn.lock().unwrap().handshaking = Some(client.clone());
+        let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(client.clone(), rx)).await;
+        let outcome = {
+            let mut slot = self.conn.lock().unwrap();
+            // `shutdown` takes the handshaking client to cancel it.
+            let wanted = slot.handshaking.take().is_some();
+            match result {
+                Ok(Ok(conn)) if wanted => {
+                    slot.live = Some(conn.clone());
+                    return Ok(conn);
+                }
+                Ok(Err(e)) => return Err(e),
+                Ok(Ok(_)) => ClientError::Disconnected("client shut down".into()),
+                Err(_) => ClientError::Timeout("initialize".into()),
+            }
+        };
+        client.shutdown(Duration::from_millis(500)).await;
+        Err(outcome.into())
     }
 
     fn session(&self, id: &SessionId) -> Result<Arc<Session>> {
@@ -271,6 +354,7 @@ impl CodexBackend {
         thread: Option<&SessionId>,
         provider: Provider,
     ) -> Result<SessionHandle> {
+        let opening = OpeningGuard::new(&self.opening);
         let conn = self.connection().await?;
         if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
             apply_browser_tools(&mut params, tools);
@@ -286,6 +370,7 @@ impl CodexBackend {
         let id = SessionId::new(resp.thread.id);
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
+        drop(opening);
         let mut history = if thread.is_some() {
             session
                 .state
@@ -314,7 +399,7 @@ impl CodexBackend {
 impl AgentBackend for CodexBackend {
     async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
         let _ = id;
-        let conn = self.conn.lock().await.as_ref()?.clone();
+        let conn = self.conn.lock().unwrap().live.clone()?;
         conn.client.process_id().await.map(|pid| (pid, true))
     }
     fn set_browser_tools(&self, tools: del_agent::backend::BrowserTools) {
@@ -434,6 +519,7 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn generate_title(&self, context: &str) -> Result<Option<String>> {
+        let opening = OpeningGuard::new(&self.opening);
         let conn = self.connection().await?;
         let response: Value = conn.client.request("thread/start", json!({
             "model":"gpt-5.6-luna", "ephemeral":true, "cwd":std::env::temp_dir(),
@@ -453,6 +539,7 @@ impl AgentBackend for CodexBackend {
                 state: Mutex::new(SessionState::default()),
             }),
         );
+        drop(opening);
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             conn.client
                 .request(
@@ -631,23 +718,18 @@ impl AgentBackend for CodexBackend {
 
     async fn interrupt(&self, session: &SessionId) -> Result<()> {
         let s = self.session(session)?;
-        let turn = s.state.lock().unwrap().mapper.turn_id().map(str::to_owned);
-        let Some(turn) = turn else { return Ok(()) }; // nothing running
+        let turn = {
+            let mut st = s.state.lock().unwrap();
+            let turn = st.mapper.turn_id().map(str::to_owned);
+            if turn.is_none() && st.starting {
+                // `turn/start` has not answered yet; start_turn sends it.
+                st.interrupt_pending = true;
+            }
+            turn
+        };
+        let Some(turn) = turn else { return Ok(()) }; // nothing running (yet)
         let conn = self.connection().await?;
-        match conn.client
-            .request(
-                "turn/interrupt",
-                json!({ "threadId": session.as_str(), "turnId": turn }),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            // The turn can finish (or another Stop can land) between reading
-            // its id and the interrupt request. It is already stopped then.
-            Err(ClientError::Rpc(error)) if error.code == -32600
-                && error.message == "no active turn to interrupt" => Ok(()),
-            Err(error) => Err(be(error)),
-        }
+        send_interrupt(&conn.client, session, &turn).await
     }
 
     async fn respond_approval(
@@ -681,15 +763,26 @@ impl AgentBackend for CodexBackend {
         }
         if last {
             // No session left: stop the app-server rather than leave it idle.
-            // The next session spawns a fresh one.
-            if let Some(conn) = self.conn.lock().await.take() {
-                conn.client.shutdown(self.opts.shutdown_grace).await;
+            // The next session spawns a fresh one. Checked under the slot lock
+            // so an open that has started counting is never cut off.
+            let idle = {
+                let mut slot = self.conn.lock().unwrap();
+                if self.opening.load(Ordering::SeqCst) == 0
+                    && self.sessions.lock().unwrap().is_empty()
+                {
+                    Some(slot.live.take())
+                } else {
+                    None
+                }
+            };
+            if let Some(conn) = idle {
+                if let Some(conn) = conn {
+                    conn.client.shutdown(self.opts.shutdown_grace).await;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
-        if let Some(conn) = self.conn.lock().await.clone()
-            && !conn.client.is_closed()
-        {
+        if let Some(conn) = self.live_connection() {
             let _ = conn
                 .client
                 .request(
@@ -702,11 +795,45 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        if let Some(conn) = self.conn.lock().await.take() {
-            conn.client.shutdown(self.opts.shutdown_grace).await;
-        }
+        let (live, handshaking) = {
+            let mut slot = self.conn.lock().unwrap();
+            (slot.live.take(), slot.handshaking.take())
+        };
+        let grace = self.opts.shutdown_grace;
+        tokio::join!(
+            async {
+                if let Some(client) = handshaking {
+                    client.shutdown(grace).await;
+                }
+            },
+            async {
+                if let Some(conn) = live {
+                    conn.client.shutdown(grace).await;
+                }
+            },
+        );
         self.sessions.lock().unwrap().clear();
         Ok(())
+    }
+}
+
+async fn send_interrupt(client: &CodexClient, session: &SessionId, turn: &str) -> Result<()> {
+    match client
+        .request(
+            "turn/interrupt",
+            json!({ "threadId": session.as_str(), "turnId": turn }),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        // The turn can finish (or another Stop can land) between reading
+        // its id and the interrupt request. It is already stopped then.
+        Err(ClientError::Rpc(error))
+            if error.code == -32600 && error.message == "no active turn to interrupt" =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(be(error)),
     }
 }
 
@@ -777,6 +904,7 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                         let mut st = s.state.lock().unwrap();
                         st.approvals.clear();
                         st.starting = false;
+                        st.interrupt_pending = false;
                         st.mapper = Mapper::default();
                     }
                     s.emit(AgentEvent::Error {

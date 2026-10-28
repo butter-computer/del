@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
@@ -22,6 +22,60 @@ use tokio::sync::{mpsc, oneshot};
 pub const OVERLOADED_CODE: i64 = -32001;
 /// Longest stderr tail kept for diagnostics.
 const STDERR_TAIL_LINES: usize = 40;
+/// Longest stdout line accepted; a larger one is skipped rather than buffered.
+pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// How long a request may wait for its response. Requests that create or
+/// resume threads and turns can wait on model/MCP startup, so they get far
+/// more room than metadata calls; both only guard against a hung server.
+pub fn request_timeout(method: &str) -> Duration {
+    match method {
+        "thread/start" | "thread/resume" | "thread/fork" | "turn/start" | "turn/steer"
+        | "account/login/start" => Duration::from_secs(600),
+        _ => Duration::from_secs(120),
+    }
+}
+
+/// Read one `\n`-terminated line of at most `max` bytes. `Ok(None)` is EOF;
+/// `Err(len)` inside reports a skipped oversized line. Invalid UTF-8 is
+/// replaced rather than treated as a read error.
+pub async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<Result<String, usize>>> {
+    let mut buf = Vec::new();
+    let mut skipped = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() && skipped == 0 {
+                return Ok(None);
+            }
+            break;
+        }
+        let (used, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if skipped > 0 || buf.len() + used > max {
+            skipped += buf.len() + used;
+            buf = Vec::new();
+        } else {
+            buf.extend_from_slice(&available[..used]);
+        }
+        reader.consume(used);
+        if done {
+            break;
+        }
+    }
+    if skipped > 0 {
+        return Ok(Some(Err(skipped)));
+    }
+    while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        buf.pop();
+    }
+    Ok(Some(Ok(String::from_utf8_lossy(&buf).into_owned())))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -199,8 +253,9 @@ impl CodexClient {
         *client.inner.child.try_lock().expect("fresh mutex") = Some(child);
         let inner = client.inner.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stderr = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_line_capped(&mut stderr, 64 * 1024).await {
+                let Ok(line) = line else { continue };
                 let mut tail = inner.stderr_tail.lock().unwrap();
                 if tail.len() == STDERR_TAIL_LINES {
                     tail.pop_front();
@@ -268,14 +323,17 @@ impl CodexClient {
         // Reader: demultiplex until EOF, then fail everything still pending.
         let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = BufReader::new(reader);
             let reason = loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
+                match read_line_capped(&mut reader, MAX_LINE_BYTES).await {
+                    Ok(Some(Ok(line))) => {
                         let Some(inner) = weak.upgrade() else { return };
                         if let Some(incoming) = inner.dispatch(&line) {
                             let _ = in_tx.send(incoming);
                         }
+                    }
+                    Ok(Some(Err(len))) => {
+                        eprintln!("codex: skipped a {len}-byte app-server line over the size limit");
                     }
                     Ok(None) => break "app-server closed its output".to_owned(),
                     Err(e) => break format!("read error: {e}"),
@@ -356,20 +414,26 @@ impl CodexClient {
             }
             pending.insert(id.clone(), tx);
         }
+        // Drop the pending entry however this future ends (timeout, caller
+        // cancelled, writer gone), so abandoned requests do not accumulate.
+        let _cleanup = PendingCleanup {
+            inner: &self.inner,
+            id: id.clone(),
+        };
         let mut msg = json!({ "id": id, "method": method });
         if !params.is_null() {
             msg["params"] = params.clone();
         }
         if self.inner.out.send(msg.to_string()).is_err() {
-            self.inner.pending.lock().unwrap().remove(&id);
             return Err(ClientError::Disconnected("writer stopped".into()));
         }
-        match rx.await {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(ClientError::Rpc(e)),
-            Err(_) => Err(ClientError::Disconnected(
+        match tokio::time::timeout(request_timeout(method), rx).await {
+            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Err(e))) => Err(ClientError::Rpc(e)),
+            Ok(Err(_)) => Err(ClientError::Disconnected(
                 self.inner.close_reason.lock().unwrap().clone(),
             )),
+            Err(_) => Err(ClientError::Timeout(method.to_owned())),
         }
     }
 
@@ -441,6 +505,17 @@ impl CodexClient {
     }
 }
 
+struct PendingCleanup<'a> {
+    inner: &'a Inner,
+    id: RequestId,
+}
+
+impl Drop for PendingCleanup<'_> {
+    fn drop(&mut self) {
+        self.inner.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
 impl Inner {
     /// Classify one stdout line. Responses are routed here; the rest is returned.
     fn dispatch(&self, line: &str) -> Option<Incoming> {
@@ -488,5 +563,43 @@ impl Inner {
         self.closed.store(true, Ordering::SeqCst);
         *self.close_reason.lock().unwrap() = reason.to_owned();
         pending.clear(); // dropping senders wakes awaiters with Disconnected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capped_lines_skip_oversized_and_tolerate_bad_utf8() {
+        let data: &[u8] = b"short\r\n0123456789abcdef\nbad\xff\nlast";
+        let mut reader = BufReader::with_capacity(4, data);
+        let mut got = Vec::new();
+        while let Some(line) = read_line_capped(&mut reader, 10).await.unwrap() {
+            got.push(line);
+        }
+        assert_eq!(
+            got,
+            vec![
+                Ok("short".to_owned()),
+                Err(17),
+                Ok("bad\u{fffd}".to_owned()),
+                Ok("last".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_requests_leave_no_pending_entry() {
+        let (client_io, _server_io) = tokio::io::duplex(1024);
+        let (r, w) = tokio::io::split(client_io);
+        let (client, _rx) = CodexClient::from_io(r, w);
+        let request = client.request("model/list", json!({}));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), request)
+                .await
+                .is_err()
+        );
+        assert!(client.inner.pending.lock().unwrap().is_empty());
     }
 }

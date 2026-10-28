@@ -24,6 +24,8 @@ const CARD_HOVER: u32 = 0xffffff14;
 const GREEN: u32 = 0x5fc27eff;
 const RED: u32 = 0xf0716bff;
 const MONO: &str = "Menlo";
+/// Diff lines drawn in an expanded file card; the rest are summarized.
+const MAX_DIFF_LINES: usize = 400;
 
 impl ChatView {
     /// One list row: the block, centered in the transcript column.
@@ -38,7 +40,9 @@ impl ChatView {
                     .child(assistant_message(ix, String::new(), Some(state), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), self.model.is_completed_response(ix), cx.reduce_motion())))
                 .into_any_element();
         }
-        let Some(block) = self.model.blocks.get(ix).cloned() else {
+        // Borrow the row; cloning every visible block each frame copies whole
+        // tool outputs and diffs that are usually collapsed.
+        let Some(block) = self.model.blocks.get(ix) else {
             return div().into_any_element();
         };
         if let Some(flash) = self.search_flash.as_mut().filter(|flash| flash.ix == ix) {
@@ -116,12 +120,14 @@ impl ChatView {
                 )
                 .into_any_element();
         }
-        if let Block::FileChange(change) = &block {
+        if let Block::FileChange(change) = block {
             if ix > 0 && matches!(&self.model.blocks[ix - 1], Block::Tool(tool) if super::activity::matches_file(tool, change)) {
                 return div().h_0().into_any_element();
             }
         }
-        if let Some(group) = super::activity::completed_group(&self.model.blocks, ix, self.model.is_running()) {
+        if let Some(group) = super::activity::group_at(&self.tool_groups, ix)
+            .filter(|group| group.end <= self.model.blocks.len())
+        {
             if ix != group.start { return div().h_0().into_any_element(); }
             let expanded = self.expanded_activity.contains(&group.start);
             let label = super::activity::group_label(&self.model.blocks[group.clone()]);
@@ -158,7 +164,7 @@ impl ChatView {
                     }));
             let mut children = v_flex().gap_1().pl(zpx(18.)).pt_1();
             for at in group {
-                if let Block::Tool(tool) = self.model.blocks[at].clone() {
+                if let Block::Tool(tool) = &self.model.blocks[at] {
                     children = children.child(self.tool_card(at, tool, cx));
                 }
             }
@@ -168,7 +174,7 @@ impl ChatView {
             return h_flex().w_full().justify_center().px_3().py_2()
                 .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(content)).into_any_element();
         }
-        let compact = matches!(&block, Block::Tool(_) | Block::FileChange(_) | Block::Reasoning { .. });
+        let compact = matches!(block, Block::Tool(_) | Block::FileChange(_) | Block::Reasoning { .. });
         let content = match block {
             Block::User {
                 text,
@@ -176,7 +182,7 @@ impl ChatView {
                 goal,
                 attachments,
             } => v_flex().w_full().gap_2()
-                .child(user_message(text, steer, goal, attachments))
+                .child(user_message(text.clone(), *steer, *goal, attachments.clone()))
                 .when_some(self.working_label(ix), |column, label| column.child(
                     h_flex().px_2().py_1().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff66))
                         .child(gpui_kit::component::shimmer::ShimmerText::new(label)
@@ -184,19 +190,19 @@ impl ChatView {
                             .flex_none().highlight_color(rgb(STRONG))
                             .spread(0.22).duration(std::time::Duration::from_millis(1200)))
                 )).into_any_element(),
-            Block::Assistant { text, .. } => assistant_message(ix, text, self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), self.model.is_completed_response(ix), cx.reduce_motion()).into_any_element(),
+            Block::Assistant { text, .. } => assistant_message(ix, text.clone(), self.assistant_text.get(&ix), cx.entity().downgrade(), self.response_times.get(&ix).copied(), self.response_hover.get(&ix).copied(), self.copied_responses.contains_key(&ix), self.model.is_completed_response(ix), cx.reduce_motion()).into_any_element(),
             Block::Reasoning {
                 text,
                 open,
                 expanded,
             } => self
-                .reasoning(ix, text, open, expanded, cx)
+                .reasoning(ix, text, *open, *expanded, cx)
                 .into_any_element(),
             Block::Tool(tool) => self.tool_card(ix, tool, cx).into_any_element(),
-            Block::FileChange(change) => self.file_card(ix, change, cx).into_any_element(),
+            Block::FileChange(change) => self.file_card(ix, change, change.expanded, cx).into_any_element(),
             Block::Approval(approval) => self.approval_card(approval, cx).into_any_element(),
             Block::Error { .. } => div().h_0().into_any_element(),
-            Block::TurnEnd { status } => turn_end(status).into_any_element(),
+            Block::TurnEnd { status } => turn_end(*status).into_any_element(),
         };
         h_flex()
             .w_full()
@@ -210,7 +216,7 @@ impl ChatView {
     fn reasoning(
         &self,
         ix: usize,
-        text: String,
+        text: &str,
         open: bool,
         expanded: bool,
         cx: &mut Context<Self>,
@@ -244,20 +250,21 @@ impl ChatView {
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
                         .text_color(rgba(MUTED))
-                        .child(text),
+                        .child(text.to_owned()),
                 )
             })
     }
 
-    fn tool_card(&self, ix: usize, tool: ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
-        let (kind, label) = super::activity::describe(&tool);
+    fn tool_card(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
+        let (kind, label) = super::activity::describe(tool);
         let color = rgba(MUTED);
         let file = match self.model.blocks.get(ix + 1) {
-            Some(Block::FileChange(file)) if super::activity::matches_file(&tool, file) => Some(file.clone()),
+            Some(Block::FileChange(file)) if tool.expanded && super::activity::matches_file(tool, file) => Some(file),
             _ => None,
         };
-        let details = if tool.output.is_empty() { tool.input.clone() }
-            else { format!("{}\n\n{}", tool.input, tool.output) };
+        // Only an expanded card shows the full input and output.
+        let details = tool.expanded.then(|| if tool.output.is_empty() { tool.input.clone() }
+            else { format!("{}\n\n{}", tool.input, tool.output) });
         v_flex().gap_1()
             .child(h_flex().id(("tool", ix)).h(zpx(26.)).px_2().gap_2().items_center()
                 .rounded_md().cursor_pointer().text_size(zpx(TEXT_MD)).text_color(color)
@@ -267,22 +274,20 @@ impl ChatView {
                 .child(div().flex_1().min_w_0().truncate().child(label))
 
                 .child(crate::icons::icon(if tool.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(zpx(12.)).text_color(rgba(FAINT))))
-            .when(tool.expanded, |card| card.child(
+            .when_some(details, |card, details| card.child(
                 div().id(("tool-output", ix)).mx_2().p_3().max_h(zpx(260.)).overflow_y_scroll()
                     .rounded_lg().bg(rgba(CARD)).font_family(MONO).text_size(zpx(TEXT_SM))
                     .line_height(relative(1.5)).text_color(rgba(MUTED)).whitespace_normal()
                     .child(if details.is_empty() { "No output".to_owned() } else { details }),
             ))
-            .when(tool.expanded, |card| card.when_some(file, |card, mut file| {
-                file.expanded = true;
-                card.child(self.file_card(ix + 1, file, cx))
-            }))
+            .when_some(file, |card, file| card.child(self.file_card(ix + 1, file, true, cx)))
     }
 
     fn file_card(
         &self,
         ix: usize,
-        change: FileChangeBlock,
+        change: &FileChangeBlock,
+        expanded: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let kind_label = match change.kind {
@@ -318,7 +323,7 @@ impl ChatView {
                             .text_color(rgba(MUTED))
                             .child(change.path.file_name().unwrap_or(change.path.as_os_str()).to_string_lossy().into_owned()),
                     )
-                    .when(has_diff, |row| row.child(crate::icons::icon(if change.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(zpx(12.)).text_color(rgba(FAINT))))
+                    .when(has_diff, |row| row.child(crate::icons::icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(zpx(12.)).text_color(rgba(FAINT))))
                     .when(change.added > 0 || change.removed > 0, |row| {
                         row.child(
                             h_flex()
@@ -338,14 +343,15 @@ impl ChatView {
                         )
                     }),
             )
-            .when(change.expanded && has_diff, |card| {
+            .when(expanded && has_diff, |card| {
+                let hidden = change.lines.len().saturating_sub(MAX_DIFF_LINES);
                 card.child(
                     v_flex()
                         .id(("diff", ix))
                         .pb_1()
                         .max_h(zpx(220.0))
                         .overflow_y_scroll()
-                        .children(change.lines.iter().map(|line| {
+                        .children(change.lines.iter().take(MAX_DIFF_LINES).map(|line| {
                             let (marker, fill, color) = match line.kind {
                                 DiffKind::Added => ("+", 0x5fc27e1f, GREEN),
                                 DiffKind::Removed => ("-", 0xf0716b1f, RED),
@@ -362,12 +368,20 @@ impl ChatView {
                                 .text_color(rgba(color))
                                 .child(div().w(zpx(8.0)).flex_none().child(marker))
                                 .child(div().whitespace_nowrap().child(line.text.clone()))
-                        })),
+                        }))
+                        .when(hidden > 0, |diff| diff.child(
+                            div()
+                                .px_2()
+                                .pt_1()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(rgba(FAINT))
+                                .child(format!("{hidden} more {}", if hidden == 1 { "line" } else { "lines" })),
+                        )),
                 )
             })
     }
 
-    fn approval_card(&self, approval: ApprovalBlock, cx: &mut Context<Self>) -> impl IntoElement {
+    fn approval_card(&self, approval: &ApprovalBlock, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match approval.kind {
             ApprovalKind::Command => "Run this command?",
             ApprovalKind::FileChange => "Apply these file changes?",
@@ -396,7 +410,7 @@ impl ChatView {
                     .font_family(MONO)
                     .text_size(zpx(TEXT_SM))
                     .text_color(rgb(TEXT))
-                    .child(approval.detail),
+                    .child(approval.detail.clone()),
             )
             .child(if pending {
                 h_flex()

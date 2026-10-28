@@ -98,6 +98,8 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     self.compositeState=[device newRenderPipelineStateWithDescriptor:display error:&error];
     if(!self.compositeState){NSLog(@"Del Metal composite: %@",error);return NO;}
     _scene=nil;_blurA=nil;_blurB=nil;
+    // The surface texture belongs to the old device's cache; recreate both.
+    if(_surface){CFRelease(_surface);_surface=NULL;}
     if(_cache)CFRelease(_cache);_cache=NULL;
     if(CVMetalTextureCacheCreate(kCFAllocatorDefault,NULL,device,NULL,&_cache)!=kCVReturnSuccess)return NO;
     self.displayPass=[MTLRenderPassDescriptor renderPassDescriptor];

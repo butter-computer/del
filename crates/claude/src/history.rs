@@ -33,12 +33,47 @@ pub fn path(cwd: &Path, id: &str) -> Option<PathBuf> {
     crate::titles::transcript_path(&root, cwd, id)
 }
 
-pub fn read(reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> {
+/// Transcript records larger than this (e.g. a huge pasted file) are skipped.
+const MAX_RECORD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Next `\n`-terminated line, without its terminator. Lines over `max`
+/// bytes are consumed and returned empty so they parse as nothing.
+fn next_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: u64) -> std::io::Result<bool> {
+    use std::io::Read;
+    buf.clear();
+    if reader.by_ref().take(max + 1).read_until(b'\n', buf)? == 0 {
+        return Ok(false);
+    }
+    if buf.last() != Some(&b'\n') && buf.len() as u64 > max {
+        // Oversized: discard the rest of it.
+        buf.clear();
+        loop {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            match available.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    reader.consume(i + 1);
+                    break;
+                }
+                None => {
+                    let len = available.len();
+                    reader.consume(len);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub fn read(mut reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> {
     let mut records = Vec::<Value>::new();
     let mut positions = HashMap::new();
-    for line in reader.lines() {
-        let line = line?;
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+    let mut line = Vec::new();
+    while next_line(&mut reader, &mut line, MAX_RECORD_BYTES)? {
+        // Lossy so one bad byte drops (at most) one record, not the whole transcript.
+        let Ok(record) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) else {
             continue;
         };
         if record["isSidechain"] == true || record["sessionId"].as_str().is_some_and(|s| s != id) {
@@ -115,7 +150,7 @@ pub fn read(reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> 
                 }
             }
         }
-        out.extend(translator.handle_line(&record.to_string()));
+        out.extend(translator.handle_value(record));
     }
     if let Some(turn_id) = turn {
         out.push(AgentEvent::TurnCompleted {
@@ -130,6 +165,26 @@ pub fn read(reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEvent>> 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn oversized_and_invalid_records_are_skipped_not_fatal() {
+        let ok = json!({"type":"user","uuid":"u","parentUuid":null,"message":{"content":"hello"}});
+        let mut input = b"\xff\xfe not json\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 64));
+        input.push(b'\n');
+        input.extend(ok.to_string().as_bytes());
+        input.push(b'\n');
+        let mut reader = std::io::BufReader::with_capacity(8, input.as_slice());
+        let mut line = Vec::new();
+        let mut lines = Vec::new();
+        while next_line(&mut reader, &mut line, 32).unwrap() {
+            lines.push(line.len());
+        }
+        assert_eq!(lines[1], 0, "oversized line is dropped");
+        assert_eq!(lines.len(), 3);
+        let events = read(input.as_slice(), "test").unwrap();
+        assert!(matches!(&events[0], AgentEvent::UserMessage { text } if text == "hello"));
+    }
+
     #[test]
     fn restores_messages_thinking_tools_and_latest_branch_once() {
         let records = [

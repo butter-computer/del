@@ -21,6 +21,10 @@ struct ToolInfo {
     /// Last output summary sent, to skip no-op updates.
     last_output: String,
     finished: bool,
+    /// Latest proposed diff per path. Reported as file changes only once the
+    /// call completes, so denied or failed edits and repeated updates of the
+    /// same diff are not counted.
+    diffs: Vec<Diff>,
 }
 
 #[derive(Default)]
@@ -31,6 +35,9 @@ pub struct Translator {
     plan_seq: u32,
     plan_open: bool,
     plan_text: String,
+    /// `session/load` replay: user text not yet emitted, and turns rebuilt.
+    replay_user: String,
+    replay_seq: u32,
 }
 
 fn truncate(s: &str) -> String {
@@ -183,6 +190,14 @@ fn file_change(d: &Diff, kind: ToolKind) -> AgentEvent {
     }
 }
 
+/// Report a finished call's diffs once, and only when it succeeded.
+fn finish_diffs(info: &mut ToolInfo, status: ToolStatus, out: &mut Vec<AgentEvent>) {
+    let diffs = std::mem::take(&mut info.diffs);
+    if status == ToolStatus::Completed {
+        out.extend(diffs.iter().map(|d| file_change(d, info.kind)));
+    }
+}
+
 fn tool_status(s: ToolCallStatus) -> Option<ToolStatus> {
     match s {
         ToolCallStatus::Completed => Some(ToolStatus::Completed),
@@ -305,6 +320,7 @@ impl Translator {
         self.apply_content(&id, &mut info, &tc.content, tc.raw_output.as_ref(), out);
         if let Some(status) = tool_status(tc.status) {
             info.finished = true;
+            finish_diffs(&mut info, status, out);
             out.push(AgentEvent::ToolCallFinished {
                 id: id.clone(),
                 status,
@@ -324,7 +340,10 @@ impl Translator {
     ) {
         for c in content {
             if let ToolCallContent::Diff(d) = c {
-                out.push(file_change(d, info.kind));
+                match info.diffs.iter_mut().find(|old| old.path == d.path) {
+                    Some(old) => *old = d.clone(),
+                    None => info.diffs.push(d.clone()),
+                }
             }
         }
         let summary = output_summary(content, raw_output);
@@ -363,6 +382,7 @@ impl Translator {
             && !info.finished
         {
             info.finished = true;
+            finish_diffs(&mut info, status, out);
             out.push(AgentEvent::ToolCallFinished {
                 id: id.clone(),
                 status,
@@ -370,6 +390,47 @@ impl Translator {
             });
         }
         self.tools.insert(id, info);
+    }
+
+    /// Rebuild history from a `session/load` replay, which arrives outside
+    /// any live turn. A user message starts a new synthetic turn; finish with
+    /// [`finish_replay`](Self::finish_replay).
+    pub fn replay(&mut self, u: &SessionUpdate) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        if let SessionUpdate::UserMessageChunk(c) = u {
+            out.extend(self.end_turn(TurnStatus::Completed));
+            if let ContentBlock::Text(t) = &c.content {
+                self.replay_user.push_str(&t.text);
+            }
+            return out;
+        }
+        self.flush_replay_user(&mut out);
+        if self.turn.is_none() {
+            self.replay_seq += 1;
+            out.extend(self.begin_turn(format!("replay-{}", self.replay_seq)));
+        }
+        // The full text follows as `AssistantMessage`; history needs no deltas.
+        out.extend(
+            self.update(u)
+                .into_iter()
+                .filter(|e| !matches!(e, AgentEvent::AssistantTextDelta { .. })),
+        );
+        out
+    }
+
+    pub fn finish_replay(&mut self) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        self.flush_replay_user(&mut out);
+        out.extend(self.end_turn(TurnStatus::Completed));
+        out
+    }
+
+    fn flush_replay_user(&mut self, out: &mut Vec<AgentEvent>) {
+        if !self.replay_user.is_empty() {
+            out.push(AgentEvent::UserMessage {
+                text: std::mem::take(&mut self.replay_user),
+            });
+        }
     }
 
     /// Translate one update. Updates outside a turn (late chunks, replay) yield nothing.
@@ -538,7 +599,7 @@ mod tests {
         let mut t = started();
         let evs = t.update(&upd(
             json!({"sessionUpdate":"tool_call","toolCallId":"e1","title":"Write",
-            "kind":"edit","content":[{"type":"diff","path":"/w/n.txt","newText":"hi\n"}]}),
+            "kind":"edit","status":"completed","content":[{"type":"diff","path":"/w/n.txt","newText":"hi\n"}]}),
         ));
         assert!(evs.iter().any(|e| matches!(
             e,
@@ -610,6 +671,80 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn diffs_are_reported_once_and_only_for_completed_calls() {
+        let changes = |evs: &[AgentEvent]| {
+            evs.iter()
+                .filter(|e| matches!(e, AgentEvent::FileChange { .. }))
+                .count()
+        };
+        let mut t = started();
+        let diff = json!([{"type":"diff","path":"/w/a.rs","oldText":"a\n","newText":"b\n"}]);
+        let mut evs = t.update(&upd(json!({"sessionUpdate":"tool_call","toolCallId":"e1",
+            "title":"Edit","kind":"edit","status":"pending","content":diff})));
+        evs.extend(t.update(&upd(json!({"sessionUpdate":"tool_call_update",
+            "toolCallId":"e1","status":"in_progress","content":diff}))));
+        assert_eq!(changes(&evs), 0);
+        let done = t.update(&upd(
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed"}),
+        ));
+        assert_eq!(changes(&done), 1);
+        let again = t.update(&upd(json!({"sessionUpdate":"tool_call_update",
+            "toolCallId":"e1","status":"completed","content":diff})));
+        assert_eq!(changes(&again), 0);
+
+        // A denied edit never reports its proposed diff.
+        let denied = t.update(&upd(json!({"sessionUpdate":"tool_call","toolCallId":"e2",
+            "title":"Edit","kind":"edit","status":"failed","content":diff})));
+        assert_eq!(changes(&denied), 0);
+    }
+
+    #[test]
+    fn load_replay_rebuilds_user_and_assistant_turns() {
+        let mut t = Translator::default();
+        let mut evs = Vec::new();
+        for u in [
+            json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}),
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hel"}}),
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"lo"}}),
+            json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"again"}}),
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}),
+        ] {
+            evs.extend(t.replay(&upd(u)));
+        }
+        evs.extend(t.finish_replay());
+        let completed = |id: &str| AgentEvent::TurnCompleted {
+            turn_id: id.into(),
+            status: TurnStatus::Completed,
+        };
+        assert_eq!(
+            evs,
+            vec![
+                AgentEvent::UserMessage { text: "hi".into() },
+                AgentEvent::TurnStarted {
+                    turn_id: "replay-1".into()
+                },
+                AgentEvent::AssistantMessage {
+                    turn_id: "replay-1".into(),
+                    text: "hello".into()
+                },
+                completed("replay-1"),
+                AgentEvent::UserMessage {
+                    text: "again".into()
+                },
+                AgentEvent::TurnStarted {
+                    turn_id: "replay-2".into()
+                },
+                AgentEvent::AssistantMessage {
+                    turn_id: "replay-2".into(),
+                    text: "ok".into()
+                },
+                completed("replay-2"),
+            ]
+        );
+        assert!(t.turn_id().is_none());
     }
 
     #[test]

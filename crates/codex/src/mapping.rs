@@ -468,7 +468,7 @@ impl Mapper {
 }
 
 fn decode<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
-    serde_json::from_value(v.clone()).ok()
+    T::deserialize(v).ok()
 }
 
 fn tool_status(s: ItemStatus) -> ToolStatus {

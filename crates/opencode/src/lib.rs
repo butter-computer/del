@@ -38,12 +38,40 @@ struct Live {
     forms: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
+/// Stream work queued for in-order delivery to subscribers.
+enum Queued {
+    /// A turn's file diff, fetched off the reader; delivered before the turn ends.
+    Diffs(tokio::task::JoinHandle<Vec<AgentEvent>>),
+    /// Mapped events and the durable sequence they advance to.
+    Events(Vec<AgentEvent>, Option<u64>),
+    Closed,
+}
 impl Live {
+    fn stop_tasks(&self) {
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+        for (_, task) in self.forms.lock().unwrap().drain() {
+            task.abort();
+        }
+    }
     fn emit(&self, events: impl IntoIterator<Item = AgentEvent>) {
         for event in events {
             let _ = self.events.send(event);
         }
     }
+}
+/// Percent-encode one URL path segment (provider ids are opaque strings).
+pub(crate) fn seg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 fn err(message: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {message}"))
@@ -54,10 +82,14 @@ impl OpenCodeBackend {
         let cwd = cwd.canonicalize()?;
         let mut servers = self.servers.lock().await;
         if let Some(server) = servers.get(&cwd) {
-            return Ok(server.clone());
+            if server.is_alive() {
+                return Ok(server.clone());
+            }
+            // Crashed: start a fresh server rather than reuse a dead address.
+            servers.remove(&cwd);
         }
-        let tools = self.tools.lock().unwrap().clone();
-        let server = Arc::new(Server::start(&cwd, tools.as_ref(), &self.environment).await?);
+        // Browser tools are installed per session by `install_tools`.
+        let server = Arc::new(Server::start(&cwd, &self.environment).await?);
         servers.insert(cwd, server.clone());
         Ok(server)
     }
@@ -138,14 +170,57 @@ impl OpenCodeBackend {
             .unwrap()
             .as_ref()
             .and_then(|t| t.question.clone());
+        // The reader never awaits HTTP: it parses SSE lines and queues their
+        // events; the emitter applies them in order, awaiting a turn's file
+        // diff before that turn's completion, so ordering is unchanged.
+        let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel::<Queued>();
+        let emit_live = live.clone();
+        let emitter = tokio::spawn(async move {
+            while let Some(item) = queued.recv().await {
+                match item {
+                    Queued::Diffs(diffs) => {
+                        if let Ok(events) = diffs.await {
+                            emit_live.emit(events);
+                        }
+                    }
+                    Queued::Events(mapped, seq) => {
+                        for event in &mapped {
+                            if matches!(event, AgentEvent::TurnStarted { .. }) {
+                                emit_live.busy.store(true, Ordering::SeqCst);
+                            }
+                            if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                                emit_live.busy.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        emit_live.emit(mapped);
+                        if let Some(seq) = seq {
+                            *emit_live.sequence.lock().unwrap() = Some(seq);
+                            emit_live.advanced.notify_one();
+                        }
+                    }
+                    Queued::Closed => {
+                        emit_live.busy.store(false, Ordering::SeqCst);
+                        emit_live.emit([AgentEvent::Error { message: "OpenCode event connection closed. Unload and reopen this chat to reconnect.".into(), recoverable: false }]);
+                        break;
+                    }
+                }
+            }
+        });
+        live.tasks.lock().unwrap().push(emitter);
         let stream_live = live.clone();
         let session_id = id.clone();
         let task = tokio::spawn(async move {
             let mut buffer = first.map(|b| b.to_vec()).unwrap_or_default();
+            // Bytes before `scanned` hold no newline; never rescan them.
+            let mut scanned = 0;
             let mut files_changed = false;
             loop {
-                while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                    let line: Vec<_> = buffer.drain(..=end).collect();
+                let mut start = 0;
+                while let Some(offset) = buffer[scanned..].iter().position(|b| *b == b'\n') {
+                    let end = scanned + offset;
+                    let line = &buffer[start..=end];
+                    start = end + 1;
+                    scanned = start;
                     if let Some(data) = line.strip_prefix(b"data:")
                         && let Ok(event) = serde_json::from_slice::<Value>(data)
                     {
@@ -165,8 +240,9 @@ impl OpenCodeBackend {
                                     None => Ok(None),
                                 };
                                 let path = format!(
-                                    "/api/session/{sid}/form/{}",
-                                    mapping::string(&form, "id")
+                                    "/api/session/{}/form/{}",
+                                    seg(sid.as_str()),
+                                    seg(&mapping::string(&form, "id"))
                                 );
                                 let result = match answer {
                                     Ok(Some(answer)) => {
@@ -232,54 +308,43 @@ impl OpenCodeBackend {
                                     .any(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
                             {
                                 let cwd = stream_live.config.lock().unwrap().cwd.clone();
-                                match stream_live
-                                    .server
-                                    .json(
-                                        Method::GET,
-                                        &format!("/api/session/{session_id}/diff"),
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    Ok(diffs) => stream_live.emit(mapping::diffs(&cwd, &diffs)),
-                                    Err(error) => stream_live.emit([AgentEvent::Error {
-                                        message: format!(
-                                            "Could not load OpenCode file changes: {error}"
-                                        ),
-                                        recoverable: true,
-                                    }]),
-                                }
+                                let server = stream_live.server.clone();
+                                let path = format!("/api/session/{}/diff", seg(session_id.as_str()));
+                                let diffs = tokio::spawn(async move {
+                                    match server.json(Method::GET, &path, None).await {
+                                        Ok(diffs) => mapping::diffs(&cwd, &diffs),
+                                        Err(error) => vec![AgentEvent::Error {
+                                            message: format!(
+                                                "Could not load OpenCode file changes: {error}"
+                                            ),
+                                            recoverable: true,
+                                        }],
+                                    }
+                                });
+                                let _ = queue.send(Queued::Diffs(diffs));
                                 files_changed = false;
                             }
-                            for event in &mapped {
-                                if matches!(event, AgentEvent::TurnStarted { .. }) {
-                                    stream_live.busy.store(true, Ordering::SeqCst);
-                                }
-                                if matches!(event, AgentEvent::TurnCompleted { .. }) {
-                                    stream_live.busy.store(false, Ordering::SeqCst);
-                                }
-                            }
-                            stream_live.emit(mapped);
-                            if let Some(seq) = event["durable"]["seq"].as_u64() {
-                                *stream_live.sequence.lock().unwrap() = Some(seq);
-                                stream_live.advanced.notify_one();
-                            }
+                            let _ = queue.send(Queued::Events(mapped, event["durable"]["seq"].as_u64()));
                         }
                     }
                 }
+                buffer.drain(..start);
+                scanned = buffer.len();
                 match response.chunk().await {
                     Ok(Some(bytes)) => buffer.extend_from_slice(&bytes),
                     _ => {
                         stream_live.connected.store(false, Ordering::SeqCst);
-                        stream_live.busy.store(false, Ordering::SeqCst);
-                        stream_live.emit([AgentEvent::Error { message: "OpenCode event connection closed. Unload and reopen this chat to reconnect.".into(), recoverable: false }]);
+                        let _ = queue.send(Queued::Closed);
                         break;
                     }
                 }
             }
         });
         live.tasks.lock().unwrap().push(task);
-        self.sessions.lock().unwrap().insert(id.clone(), live);
+        let previous = self.sessions.lock().unwrap().insert(id.clone(), live);
+        if let Some(previous) = previous {
+            previous.stop_tasks();
+        }
         Ok(SessionHandle::new(id, Provider::OpenCode, events).with_history(history))
     }
     async fn submit(
@@ -313,7 +378,8 @@ impl OpenCodeBackend {
             } else { None };
             let body = prompt_body(&input, command.as_ref(), steer)?;
             let path = format!(
-                "/api/session/{id}/{}",
+                "/api/session/{}/{}",
+                seg(id.as_str()),
                 if command.is_some() {
                     "command"
                 } else {
@@ -328,7 +394,7 @@ impl OpenCodeBackend {
                     let result = async {
                         // The native idle barrier owns command execution duration.
                         let response = command_live.server.request(Method::POST,
-                            &format!("/api/experimental/session/{sid}/wait")).send().await.map_err(err)?;
+                            &format!("/api/experimental/session/{}/wait", seg(sid.as_str()))).send().await.map_err(err)?;
                         server::decode(response).await?;
                         let target = command_live.server.watermark(&sid, before).await?;
                         if target != before {
@@ -419,7 +485,10 @@ async fn install_browser_instructions(server: &Server, id: &SessionId) -> Result
     server
         .json(
             Method::PUT,
-            &format!("/api/experimental/session/{id}/instructions/entries/del-browser"),
+            &format!(
+                "/api/experimental/session/{}/instructions/entries/del-browser",
+                seg(id.as_str())
+            ),
             Some(&json!({"value":instructions})),
         )
         .await?;
@@ -455,7 +524,7 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
     server
         .json(
             Method::PATCH,
-            &format!("/api/session/{id}"),
+            &format!("/api/session/{}", seg(id.as_str())),
             Some(&json!({"permissions":permissions(config.permission_mode)})),
         )
         .await?;
@@ -473,7 +542,7 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
     server
         .json(
             Method::POST,
-            &format!("/api/session/{id}/model"),
+            &format!("/api/session/{}/model", seg(id.as_str())),
             Some(&json!({"model":model})),
         )
         .await?;
@@ -527,6 +596,17 @@ impl AgentBackend for OpenCodeBackend {
             .await
     }
     async fn resume(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
+        if let Ok(live) = self.live(id) {
+            if live.connected.load(Ordering::SeqCst) && live.server.is_alive() {
+                return Ok(SessionHandle::new(
+                    id.clone(),
+                    Provider::OpenCode,
+                    live.events.clone(),
+                ));
+            }
+            // Its event stream or server is gone: stop it before re-attaching.
+            self.close(id).await?;
+        }
         let server = self.server(&config.cwd).await?;
         self.install_tools(&server).await?;
         configure(&server, id, &config).await?;
@@ -537,7 +617,7 @@ impl AgentBackend for OpenCodeBackend {
         let mut cursor: Option<String> = None;
         loop {
             let mut request = server
-                .request(Method::GET, &format!("/api/session/{id}/message"))
+                .request(Method::GET, &format!("/api/session/{}/message", seg(id.as_str())))
                 .query(&[("limit", "200")])
                 .timeout(std::time::Duration::from_secs(30));
             request = if let Some(cursor) = &cursor {
@@ -562,7 +642,7 @@ impl AgentBackend for OpenCodeBackend {
         }
         if let (Some(first), Some(last)) = (first_user, last_user) {
             let response = server
-                .request(Method::GET, &format!("/api/session/{id}/diff"))
+                .request(Method::GET, &format!("/api/session/{}/diff", seg(id.as_str())))
                 .query(&[("from", first), ("to", last)])
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
@@ -600,7 +680,7 @@ impl AgentBackend for OpenCodeBackend {
     async fn interrupt(&self, id: &SessionId) -> Result<()> {
         self.live(id)?
             .server
-            .json(Method::POST, &format!("/api/session/{id}/interrupt"), None)
+            .json(Method::POST, &format!("/api/session/{}/interrupt", seg(id.as_str())), None)
             .await?;
         Ok(())
     }
@@ -614,7 +694,7 @@ impl AgentBackend for OpenCodeBackend {
         if (previous_mode == PermissionMode::Plan)
             != (config.permission_mode == PermissionMode::Plan)
         {
-            live.server.json(Method::POST, &format!("/api/session/{id}/agent"),
+            live.server.json(Method::POST, &format!("/api/session/{}/agent", seg(id.as_str())),
                 Some(&json!({"agent":if config.permission_mode == PermissionMode::Plan {"plan"} else {"build"}}))).await?;
         }
         *live.config.lock().unwrap() = config;
@@ -630,7 +710,7 @@ impl AgentBackend for OpenCodeBackend {
         approval: &str,
         response: ApprovalResponse,
     ) -> Result<()> {
-        self.live(id)?.server.json(Method::POST,&format!("/api/session/{id}/permission/{approval}/reply"),Some(&json!({"decision":if response == ApprovalResponse::Approve {"once"} else {"reject"}}))).await?;
+        self.live(id)?.server.json(Method::POST,&format!("/api/session/{}/permission/{}/reply", seg(id.as_str()), seg(approval)),Some(&json!({"decision":if response == ApprovalResponse::Approve {"once"} else {"reject"}}))).await?;
         Ok(())
     }
     async fn generate_session_title(
@@ -643,7 +723,7 @@ impl AgentBackend for OpenCodeBackend {
             .server
             .json(
                 Method::POST,
-                &format!("/api/session/{id}/generate"),
+                &format!("/api/session/{}/generate", seg(id.as_str())),
                 Some(&json!({"prompt": format!("{}\n\nConversation to name:\n{context}", del_agent::titles::INSTRUCTIONS)})),
             )
             .await?;
@@ -654,25 +734,20 @@ impl AgentBackend for OpenCodeBackend {
         let value = self
             .server(cwd)
             .await?
-            .json(Method::GET, &format!("/api/session/{id}"), None)
+            .json(Method::GET, &format!("/api/session/{}", seg(id.as_str())), None)
             .await?;
         Ok(value["data"]["title"].as_str().map(str::to_owned))
     }
     async fn close(&self, id: &SessionId) -> Result<()> {
         let live = self.sessions.lock().unwrap().remove(id);
         if let Some(live) = live {
-            for task in live.tasks.lock().unwrap().drain(..) {
-                task.abort();
-            }
-            for (_, task) in live.forms.lock().unwrap().drain() {
-                task.abort();
-            }
+            live.stop_tasks();
             if live.busy.load(Ordering::SeqCst) {
                 let _ = live
                     .server
                     .json(
                         Method::POST,
-                        &format!("/api/session/{id}/interrupt"),
+                        &format!("/api/session/{}/interrupt", seg(id.as_str())),
                         Some(&json!({})),
                     )
                     .await;
@@ -692,12 +767,7 @@ impl AgentBackend for OpenCodeBackend {
 impl Drop for OpenCodeBackend {
     fn drop(&mut self) {
         for live in self.sessions.get_mut().unwrap().values() {
-            for task in live.tasks.lock().unwrap().drain(..) {
-                task.abort();
-            }
-            for (_, task) in live.forms.lock().unwrap().drain() {
-                task.abort();
-            }
+            live.stop_tasks();
         }
     }
 }
@@ -714,7 +784,7 @@ pub async fn create_terminal_session(
 
 pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<&str>, variant: Option<&str>, env: &[(String, String)]) -> Result<String> {
     let cwd = cwd.canonicalize()?;
-    let server = Server::start(&cwd, None, env).await?;
+    let server = Server::start(&cwd, env).await?;
     let mut body = json!({"location":{"directory":cwd}});
     if let Some(model) = model {
         let (provider, id) = model.split_once('/').ok_or_else(|| err("invalid model"))?;
@@ -1064,6 +1134,12 @@ export default Plugin.define({{
         let after = server.json(Method::GET, &path, None).await.unwrap();
         assert_eq!(after["data"]["agent"], "build");
         backend.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn path_segments_are_percent_encoded() {
+        assert_eq!(seg("ses_ABC-1.x~"), "ses_ABC-1.x~");
+        assert_eq!(seg("../a b/?#"), "..%2Fa%20b%2F%3F%23");
     }
 
     #[test]

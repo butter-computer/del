@@ -8,7 +8,11 @@ use tokio::{
 };
 
 pub struct Server {
-    child: Child,
+    child: std::sync::Mutex<Child>,
+    /// Held open for `--stdio` mode, which exits when it closes.
+    _stdin: Option<tokio::process::ChildStdin>,
+    /// The leader was reaped, so `pid` must no longer be signalled.
+    reaped: std::sync::atomic::AtomicBool,
     pub(crate) pid: u32,
     client: reqwest::Client,
     url: String,
@@ -18,84 +22,134 @@ pub struct Server {
 fn error(e: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {e}"))
 }
+enum StartError {
+    /// The process ended before announcing its address (e.g. unknown flag).
+    Exited(AgentError),
+    Other(AgentError),
+}
+impl StartError {
+    fn into_agent(self) -> AgentError {
+        match self {
+            StartError::Exited(e) | StartError::Other(e) => e,
+        }
+    }
+}
 impl Server {
-    pub async fn start(
+    /// Start `opencode serve` for `cwd`.
+    ///
+    /// `--stdio` mode removes the password from the server's environment after
+    /// reading it, so shells and tools the agent runs cannot inherit it and
+    /// call this API (e.g. to approve their own permissions). It also exits
+    /// when Del closes its stdin. Del's MCP config, which carries a bearer
+    /// token, is installed over the API rather than through the environment.
+    /// Builds without `--stdio` fall back to the plain listener.
+    pub async fn start(cwd: &Path, environment: &[(String, String)]) -> Result<Self> {
+        match Self::start_mode(cwd, environment, true).await {
+            Err(StartError::Exited(_)) => Self::start_mode(cwd, environment, false)
+                .await
+                .map_err(StartError::into_agent),
+            result => result.map_err(StartError::into_agent),
+        }
+    }
+
+    async fn start_mode(
         cwd: &Path,
-        tools: Option<&del_agent::backend::BrowserTools>,
         environment: &[(String, String)],
-    ) -> Result<Self> {
-        let binary = del_agent::detect::find_binary("opencode")
-            .ok_or_else(|| error("not installed; install OpenCode and refresh Providers"))?;
+        stdio: bool,
+    ) -> std::result::Result<Self, StartError> {
+        let binary = del_agent::detect::find_binary("opencode").ok_or_else(|| {
+            StartError::Other(error("not installed; install OpenCode and refresh Providers"))
+        })?;
         let password = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(binary);
         command.envs(environment.iter().cloned());
+        command.arg("serve");
+        if stdio {
+            command.arg("--stdio");
+        }
         command
-            .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
+            .args(["--hostname", "127.0.0.1", "--port", "0"])
             .current_dir(cwd)
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_SERVER_USERNAME", "opencode")
-            .stdin(Stdio::null())
+            .stdin(if stdio { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
         del_agent::environment::prepare_provider_command(command.as_std_mut());
-        if let Some(tools) = tools {
-            command.env(
-                "OPENCODE_CONFIG_CONTENT",
-                serde_json::json!({"mcp":{"del":{
-                    "type":"remote", "url":tools.url,
-                    "headers":{"Authorization":format!("Bearer {}", tools.token)}, "oauth":false
-                }}})
-                .to_string(),
-            );
-        }
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|e| StartError::Other(e.into()))?;
         let pid = child
             .id()
-            .ok_or_else(|| error("server exited during startup"))?;
+            .ok_or_else(|| StartError::Other(error("server exited during startup")))?;
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped stdout");
         let mut lines = BufReader::new(stdout).lines();
         let address = tokio::time::timeout(Duration::from_secs(20), async {
             while let Some(line) = lines.next_line().await? {
-                if let Some(url) = line.strip_prefix("server listening on ") {
+                let url = match serde_json::from_str::<Value>(line.trim()) {
+                    Ok(v) => v["url"].as_str().map(str::to_owned),
+                    Err(_) => line.strip_prefix("server listening on ").map(str::to_owned),
+                };
+                if let Some(url) = url {
                     let url = reqwest::Url::parse(url.trim()).map_err(std::io::Error::other)?;
                     if url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
                         && url.port().is_some()
                     {
-                        return Ok(url.as_str().trim_end_matches('/').to_owned());
+                        return Ok(Some(url.as_str().trim_end_matches('/').to_owned()));
                     }
                 }
             }
-            Err(std::io::Error::other(
-                "server exited before becoming ready; check opencode serve in Terminal",
-            ))
+            Ok::<_, std::io::Error>(None)
         })
         .await;
         let url = match address {
-            Ok(Ok(url)) => url,
+            Ok(Ok(Some(url))) => url,
             result => {
                 del_agent::procgroup::terminate_group(pid, &mut child, Duration::from_millis(200))
                     .await;
-                return Err(error(format!("startup failed: {result:?}")));
+                return Err(match result {
+                    Ok(Ok(None)) => StartError::Exited(error(
+                        "server exited before becoming ready; check opencode serve in Terminal",
+                    )),
+                    other => StartError::Other(error(format!("startup failed: {other:?}"))),
+                });
             }
         };
         // Drain logs without retaining potentially sensitive provider output.
         tokio::spawn(async move { while matches!(lines.next_line().await, Ok(Some(_))) {} });
         Ok(Self {
-            child,
+            child: std::sync::Mutex::new(child),
+            _stdin: stdin,
+            reaped: Default::default(),
             pid,
             client: reqwest::Client::builder()
                 .no_proxy()
                 .connect_timeout(Duration::from_secs(10))
                 .build()
-                .map_err(error)?,
+                .map_err(|e| StartError::Other(error(e)))?,
             url,
             password,
             directory: cwd.to_string_lossy().into_owned(),
         })
+    }
+    /// Whether `opencode serve` is still running.
+    pub fn is_alive(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.reaped.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.child.lock().unwrap().try_wait() {
+            Ok(None) => true,
+            _ => {
+                // Sweep anything it left in its group while the id is still ours.
+                del_agent::procgroup::signal_group(self.pid, true);
+                self.reaped.store(true, Ordering::SeqCst);
+                false
+            }
+        }
     }
     pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.client
@@ -124,7 +178,7 @@ impl Server {
         let mut request = self
             .request(
                 reqwest::Method::GET,
-                &format!("/api/experimental/session/{id}/log"),
+                &format!("/api/experimental/session/{}/log", crate::seg(id.as_str())),
             )
             .query(&[("follow", "false")])
             .timeout(Duration::from_secs(30));
@@ -177,7 +231,9 @@ pub async fn decode(response: reqwest::Response) -> Result<Value> {
 }
 impl Drop for Server {
     fn drop(&mut self) {
-        del_agent::procgroup::signal_group(self.pid, true);
-        let _ = self.child.start_kill();
+        if !*self.reaped.get_mut() {
+            del_agent::procgroup::signal_group(self.pid, true);
+        }
+        let _ = self.child.get_mut().unwrap().start_kill();
     }
 }

@@ -41,7 +41,8 @@ pub struct Source {
     pub cwd: PathBuf,
     pub conversation_id: Option<String>,
     pub archived: bool,
-    pub live: Option<Vec<Message>>,
+    /// Shared with the open chat view, which rebuilds it only after changes.
+    pub live: Option<Arc<Vec<Message>>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,37 @@ pub struct Hit {
     pub range: Range<usize>,
     pub snippet: String,
     pub snippet_range: Range<usize>,
+}
+
+/// One Codex sessions folder, indexed by the id that ends each rollout name.
+struct Rollouts {
+    paths: Vec<PathBuf>,
+    by_id: HashMap<String, usize>,
+}
+impl Rollouts {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        let by_id = paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .filter_map(|(ix, path)| {
+                let stem = path.file_stem()?.to_str()?;
+                Some((stem.get(stem.len().checked_sub(36)?..)?.to_owned(), ix))
+            })
+            .collect();
+        Self { paths, by_id }
+    }
+    fn find(&self, id: &str) -> Option<PathBuf> {
+        if let Some(&ix) = self.by_id.get(id) {
+            return Some(self.paths[ix].clone());
+        }
+        // Ids that are not 36-character UUIDs still match by name suffix.
+        let suffix = format!("{id}.jsonl");
+        self.paths
+            .iter()
+            .find(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|name| name.ends_with(&suffix)))
+            .cloned()
+    }
 }
 
 #[derive(Default)]
@@ -77,8 +109,9 @@ pub struct Snapshot {
 
 impl Index {
     pub fn refresh(&mut self, sources: Vec<Source>) -> Snapshot {
-        let rollouts =
-            crate::terminal_conversation::rollouts(&crate::terminal_conversation::codex_root());
+        // Each Codex sessions folder is walked at most once per refresh, and
+        // only when a Codex conversation needs it.
+        let mut rollouts: HashMap<PathBuf, Rollouts> = HashMap::new();
         let mut used = std::collections::HashSet::new();
         let mut snapshot = Snapshot {
             documents: vec![],
@@ -86,20 +119,15 @@ impl Index {
         };
         for source in sources {
             let id = source.conversation_id.as_deref();
-            let account_rollouts = source.account.as_ref().map(|a| crate::terminal_conversation::rollouts(&a.root()));
             let path = match (source.provider, id) {
                 (Some(Provider::Claude), Some(id)) => match &source.account {
                     Some(a) => del_claude::history::path_from(&a.root(), &source.cwd, id),
                     None => del_claude::history::path(&source.cwd, id),
                 },
-                (Some(Provider::Codex), Some(id)) => account_rollouts.as_ref().unwrap_or(&rollouts)
-                    .iter()
-                    .find(|p| {
-                        p.file_name()
-                            .and_then(|s| s.to_str())
-                            .is_some_and(|name| name.ends_with(&format!("{id}.jsonl")))
-                    })
-                    .cloned(),
+                (Some(Provider::Codex), Some(id)) => {
+                    let root = source.account.as_ref().map_or_else(crate::terminal_conversation::codex_root, |a| a.root());
+                    rollouts.entry(root).or_insert_with_key(|root| Rollouts::new(crate::terminal_conversation::rollouts(root))).find(id)
+                }
                 _ => None,
             };
             let mut saved = Arc::new(vec![]);
@@ -129,7 +157,7 @@ impl Index {
             if let Some(live) = &source.live
                 && !live.is_empty()
             {
-                saved = Arc::new(live.clone());
+                saved = live.clone();
             }
             snapshot.documents.push(Arc::new(Document {
                 source,
@@ -301,13 +329,27 @@ fn query_parts(query: &str) -> (Option<Scope>, String) {
     (scope, words.join(" "))
 }
 
+#[cfg(test)]
 pub fn search(documents: &[Arc<Document>], query: &str) -> Vec<Hit> {
+    search_until(documents, query, || false).unwrap_or_default()
+}
+
+/// Like [`search`], but gives up (returning `None`) once `superseded` reports
+/// that a newer query replaced this one.
+pub fn search_until(
+    documents: &[Arc<Document>],
+    query: &str,
+    superseded: impl Fn() -> bool,
+) -> Option<Vec<Hit>> {
     let mut hits = vec![];
     let (scope, query) = query_parts(query);
     if query.is_empty() && scope.is_none() {
-        return hits;
+        return Some(hits);
     }
     for document in documents {
+        if superseded() {
+            return None;
+        }
         let kind = if matches!(document.source.tab, Tab::Terminal(_)) {
             Scope::Terminal
         } else {
@@ -344,7 +386,7 @@ pub fn search(documents: &[Arc<Document>], query: &str) -> Vec<Hit> {
             }
         }
     }
-    hits
+    Some(hits)
 }
 
 #[cfg(test)]
@@ -513,12 +555,19 @@ mod tests {
         assert!(index.files.is_empty());
     }
     #[test]
+    fn superseded_searches_stop_early() {
+        let documents = vec![document(false, false, "needle")];
+        assert_eq!(search_until(&documents, "needle", || false).map(|hits| hits.len()), Some(1));
+        assert!(search_until(&documents, "needle", || true).is_none());
+    }
+
+    #[test]
     fn live_messages_are_searchable_without_a_provider_file_or_process() {
         let mut source = document(false, false, "").source.clone();
-        source.live = Some(vec![Message {
+        source.live = Some(Arc::new(vec![Message {
             role: "Assistant",
             text: "streaming now".into(),
-        }]);
+        }]));
         let snapshot = Index::default().refresh(vec![source]);
         assert_eq!(search(&snapshot.documents, "streaming").len(), 1);
         assert!(snapshot.errors.is_empty());

@@ -37,6 +37,11 @@ pub struct MockBackend {
     completion_delay: Duration,
     #[cfg(test)]
     pub title_response: Option<String>,
+    /// Provider-owned name and the sessions it was read for.
+    #[cfg(test)]
+    pub session_title: Option<String>,
+    #[cfg(test)]
+    pub session_title_reads: Arc<Mutex<Vec<SessionId>>>,
     sessions: Arc<Mutex<HashMap<SessionId, Arc<SessionState>>>>,
 }
 
@@ -48,6 +53,10 @@ impl MockBackend {
             completion_delay: Duration::ZERO,
             #[cfg(test)]
             title_response: None,
+            #[cfg(test)]
+            session_title: None,
+            #[cfg(test)]
+            session_title_reads: Default::default(),
             sessions: Default::default(),
         }
     }
@@ -278,6 +287,16 @@ impl AgentBackend for MockBackend {
     async fn generate_title(&self, context: &str) -> Result<Option<String>> {
         assert!(context.contains("User:"));
         Ok(self.title_response.clone())
+    }
+
+    #[cfg(test)]
+    async fn session_title(
+        &self,
+        session: &SessionId,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        self.session_title_reads.lock().unwrap().push(session.clone());
+        Ok(self.session_title.clone())
     }
 
     async fn start_session(&self, _config: SessionConfig) -> Result<SessionHandle> {

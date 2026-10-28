@@ -58,6 +58,8 @@ impl Translator {
     /// Note that an interrupt was requested so the aborted result maps to `Interrupted`.
     pub fn mark_interrupting(&mut self) {
         self.interrupting = true;
+        // The CLI abandons its permission prompts when interrupted.
+        self.approvals.clear();
     }
 
     /// Build the `control_response` line answering a pending `can_use_tool` request.
@@ -105,7 +107,12 @@ impl Translator {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
-        if let Some(event) = crate::goals::record(&v) {
+        self.handle_value(&v)
+    }
+
+    /// Translate one already-parsed stdout record.
+    pub fn handle_value(&mut self, v: &Value) -> Vec<AgentEvent> {
+        if let Some(event) = crate::goals::record(v) {
             return vec![event];
         }
         // Acknowledgements are native local-command records, never inferred
@@ -148,9 +155,16 @@ impl Translator {
             }
             Some("stream_event") => self.stream_event(&v["event"]),
             Some("assistant") => self.assistant(&v["message"]),
-            Some("user") => self.user(&v),
-            Some("control_request") => self.control_request(&v),
-            Some("result") => self.result(&v),
+            Some("user") => self.user(v),
+            Some("control_request") => self.control_request(v),
+            Some("control_cancel_request") => {
+                // The CLI withdrew a permission prompt; an answer would be stale.
+                if let Some(id) = v["request_id"].as_str() {
+                    self.approvals.remove(id);
+                }
+                vec![]
+            }
+            Some("result") => self.result(v),
             _ => vec![],
         });
         events
@@ -323,6 +337,8 @@ impl Translator {
         self.consumed_inputs = 0;
         self.interrupting = false;
         self.tools.clear();
+        // Prompts belong to the turn that just ended.
+        self.approvals.clear();
         if let Some(next) = self.turns.front() {
             out.push(AgentEvent::TurnStarted {
                 turn_id: next.clone(),
@@ -435,4 +451,32 @@ fn patch_text(patch: &Value) -> Option<String> {
         }
     }
     Some(s)
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    fn ask(t: &mut Translator, id: &str) {
+        t.handle_value(&json!({"type":"control_request","request_id":id,
+            "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}));
+    }
+
+    #[test]
+    fn withdrawn_finished_and_interrupted_prompts_cannot_be_answered() {
+        let mut t = Translator::new();
+        t.enqueue_turn("t".into());
+        ask(&mut t, "a");
+        t.handle_value(&json!({"type":"control_cancel_request","request_id":"a"}));
+        assert!(t.approval_reply("a", ApprovalResponse::Approve).is_none());
+
+        ask(&mut t, "b");
+        t.handle_value(&json!({"type":"result","usage":{}}));
+        assert!(t.approval_reply("b", ApprovalResponse::Approve).is_none());
+
+        t.enqueue_turn("u".into());
+        ask(&mut t, "c");
+        t.mark_interrupting();
+        assert!(t.approval_reply("c", ApprovalResponse::Deny).is_none());
+    }
 }

@@ -195,16 +195,20 @@ pub(crate) fn fading_title(text: String) -> impl IntoElement {
                         },
                     );
                     if overflow {
-                        for step in 0..48 {
-                            let start = solid + fade * (step as f32 / 48.);
-                            let end = solid + fade * ((step + 1) as f32 / 48.);
+                        // Each slice repaints the shaped line under its own clip. Twelve
+                        // 2px slices (24px fade) keep the ramp visually smooth at a
+                        // quarter of the previous paint cost; GPUI has no gradient text mask.
+                        const SLICES: usize = 12;
+                        for step in 0..SLICES {
+                            let start = solid + fade * (step as f32 / SLICES as f32);
+                            let end = solid + fade * ((step + 1) as f32 / SLICES as f32);
                             let clip = Bounds::new(
                                 point(bounds.left() + start, bounds.top()),
                                 size(end - start, bounds.size.height),
                             );
                             let decoration = DecorationRun {
                                 len: line.len() as u32,
-                                color: style.color.opacity(1. - (step as f32 + 0.5) / 48.),
+                                color: style.color.opacity(1. - (step as f32 + 0.5) / SLICES as f32),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -264,8 +268,9 @@ pub fn unread_dot(id: &del_agent::SessionId, state: &AppState, cx: &App) -> AnyE
         .into_any_element()
 }
 
-/// Keep the cup steady while two small wisps rise above it.
-fn coffee_icon(active: bool, cx: &App) -> AnyElement {
+/// Keep the cup steady while two small wisps rise above it. The wisps only
+/// move while the window is active, so an idle background Del draws no frames.
+fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
     let color = if active { rgb(0xf5a524) } else { rgba(MUTED) };
     div()
         .relative()
@@ -281,7 +286,7 @@ fn coffee_icon(active: bool, cx: &App) -> AnyElement {
                     .w(zpx(3.))
                     .h(zpx(7.))
                     .text_color(color);
-                if cx.reduce_motion() {
+                if cx.reduce_motion() || !animate {
                     steam.opacity(0.6).into_any_element()
                 } else {
                     steam.with_animation(
@@ -725,7 +730,8 @@ pub fn render(
 ) -> AnyElement {
     let s = state.read(cx);
     let mut rows = s.unified_rows();
-    let archived = s.archived_rows();
+    // Archived rows are only cloned while the archive is shown.
+    let archived = if s.show_archived { s.archived_rows() } else { Vec::new() };
     let archived_terminals: Vec<_> = s
         .terminal_rows
         .iter()
@@ -737,7 +743,7 @@ pub fn render(
     };
     let providers_open = s.panel == Panel::Providers;
     let show_archived = s.show_archived;
-    let archived_count = archived.len() + archived_terminals.len();
+    let has_archived = s.has_archived_chats() || !archived_terminals.is_empty();
     if show_archived {
         rows.clear();
         rows.extend(archived.iter().cloned());
@@ -787,7 +793,7 @@ pub fn render(
                 )
                 .child(
                     toolbar_button("caffeine-toggle", cx)
-                        .child(coffee_icon(s.caffeine_enabled, cx))
+                        .child(coffee_icon(s.caffeine_enabled, s.window_active, cx))
                         .tooltip(if s.caffeine_enabled {
                             "Allow Mac to sleep"
                         } else {
@@ -860,7 +866,7 @@ pub fn render(
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, _, cx| { cx.stop_propagation(); add_project_state.update(cx, |s, cx| s.add_project(cx)); }))))
                     .content(v_flex().w_full().gap_0p5()
-                .children(s.project_paths().into_iter().map(|path| {
+                .children(s.project_paths_for(rows.iter().map(|row| row.cwd.as_path())).into_iter().map(|path| {
                     let collapsed = s.project_preferences.collapsed.contains(&path);
                     let project_renaming = s.project_renaming.as_ref() == Some(&path);
                     let toggle_state = state.clone();
@@ -954,7 +960,7 @@ pub fn render(
                         .child(crate::icons::icon(IconName::Settings))
                         .child("Settings"),
                 )
-                .when(show_archived || archived_count > 0, |footer| footer.child(
+                .when(show_archived || has_archived, |footer| footer.child(
                     Button::new("show-archived").ghost().compact().icon(ActionIcon::Archive)
                         .selected(show_archived)
                         .when(show_archived, |button| button.bg(rgba(0xffffff20)).text_color(rgb(0xffffff)))
