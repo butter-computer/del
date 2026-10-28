@@ -20,6 +20,8 @@ serde_json = "1"
 url = "2"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
+# Verifies Ed25519-signed update manifests. Already in the lockfile, so no new crates.
+ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "macros"] }
 gpui-kit.workspace = true
 # Listed explicitly so the exact GPUI snapshot is a hard constraint of this

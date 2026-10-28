@@ -13,8 +13,15 @@ use std::{
 
 const RELEASES: &str =
     "https://github.com/butter-computer/del/releases/latest/download/latest.json";
-const CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// Automatic (startup, focus, tab change) checks; manual checks are not limited.
+const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const BUNDLE_ID: &str = "computer.butter.del";
+/// Ed25519 key that signs `latest.json` (see scripts/sign-update.py). Release
+/// assets alone cannot ship code: the private key never leaves the release machine.
+const UPDATE_PUBLIC_KEY: &str =
+    "f9ac5275c3a7d74f9703180bf312b7b16eb8fe83a90646b4c7d3423288beeb04";
+/// Leftover staging or retired bundles older than this are removed at startup.
+const STALE_BUNDLE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -29,12 +36,19 @@ struct Release {
     draft: bool,
     prerelease: bool,
     assets: Vec<Asset>,
+    /// SHA-256 of the DMG, covered by `signature`.
+    #[serde(default)]
+    sha256: Option<String>,
+    /// Hex Ed25519 signature over [`signed_message`].
+    #[serde(default)]
+    signature: Option<String>,
 }
 #[derive(Clone, Debug)]
 struct Update {
     version: String,
     dmg: Asset,
-    checksum: Asset,
+    /// Verified against the release signature before the update is offered.
+    sha256: String,
 }
 struct Staged {
     directory: tempfile::TempDir,
@@ -49,6 +63,8 @@ enum Status {
     Downloading(u8),
     Verifying,
     Ready(Staged),
+    /// Verifying and replacing the app on a worker after "Restart now".
+    Installing(String),
     Failed(String),
     Unsupported,
 }
@@ -57,6 +73,7 @@ enum Event {
     Progress(u8),
     Verifying,
     Staged(Result<Staged>),
+    Installed(Box<Staged>, Result<()>),
 }
 
 pub struct AppUpdater {
@@ -73,6 +90,9 @@ impl AppUpdater {
     pub fn new(_: &mut Context<Self>) -> Self {
         let bundle = public_bundle();
         let supported = bundle.is_some();
+        if let Some(parent) = bundle.as_ref().and_then(|b| b.parent()).map(Path::to_path_buf) {
+            std::thread::spawn(move || prune_stale_bundles(&parent, STALE_BUNDLE_AGE));
+        }
         Self {
             status: if supported {
                 Status::Idle
@@ -152,6 +172,16 @@ impl AppUpdater {
                                 Err(error) => Status::Failed(error),
                             }
                         }
+                        Event::Installed(staged, result) => {
+                            self.receiver = None;
+                            match result {
+                                Ok(()) => cx.quit(),
+                                // Keep a verified download when the directory is temporarily
+                                // locked or not writable; the user can retry without downloading.
+                                Err(error) => self.restart_error = Some(error),
+                            }
+                            Status::Ready(*staged)
+                        }
                     };
                     cx.notify();
                 }
@@ -214,19 +244,28 @@ impl AppUpdater {
         cx.notify();
     }
 
+    /// Validation runs several `codesign`/`plutil` checks; keep them off the UI thread.
     fn restart(&mut self, cx: &mut Context<Self>) {
-        let Status::Ready(staged) = &self.status else {
+        if self.receiver.is_some() || !matches!(self.status, Status::Ready(_)) {
+            return;
+        }
+        let Status::Ready(staged) = std::mem::replace(&mut self.status, Status::Idle) else {
             return;
         };
-        match install_and_relaunch(staged) {
-            Ok(()) => cx.quit(),
-            Err(error) => {
-                // Keep a verified download when the directory is temporarily locked
-                // or not writable; the user can retry without downloading again.
-                self.restart_error = Some(error);
-                cx.notify();
-            }
-        }
+        self.status = Status::Installing(staged.version.clone());
+        self.restart_error = None;
+        let (tx, rx) = mpsc::channel();
+        self.receiver = Some(rx);
+        Self::watch(cx);
+        std::thread::spawn(move || {
+            let result = install_and_relaunch(&staged);
+            let _ = tx.send(Event::Installed(Box::new(staged), result));
+        });
+        cx.notify();
+    }
+
+    fn installing(&self) -> bool {
+        matches!(self.status, Status::Installing(_))
     }
 }
 
@@ -272,6 +311,11 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
             ),
             false,
         ),
+        Status::Installing(version) => (
+            "Installing update…".into(),
+            format!("Verifying and installing Del {version}. Del restarts when it is done."),
+            true,
+        ),
         Status::Failed(error) => (
             "Retry update check".into(),
             format!("{error}\nClick to retry."),
@@ -298,14 +342,25 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                                 .child(Button::new("update-later").label("Later").on_click(|_, window, cx| window.close_dialog(cx)))
                                 .child(Button::new("update-restart").label("Restart now").on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    let error = updater.update(cx, |updater, cx| {
-                                        updater.restart(cx);
-                                        updater.restart_error.clone()
-                                    });
-                                    if let Some(error) = error {
-                                        window.push_notification(gpui_kit::component::notification::Notification::error(error)
-                                            .title("Could not restart Del").autohide(false), cx);
-                                    }
+                                    updater.update(cx, |updater, cx| updater.restart(cx));
+                                    // Report a failed installation once the worker finishes.
+                                    let updater = updater.clone();
+                                    window.spawn(cx, async move |cx| {
+                                        loop {
+                                            cx.background_executor().timer(Duration::from_millis(200)).await;
+                                            let Ok(result) = cx.update(|_, cx| {
+                                                let updater = updater.read(cx);
+                                                (!updater.installing()).then(|| updater.restart_error.clone())
+                                            }) else { break };
+                                            let Some(error) = result else { continue };
+                                            if let Some(error) = error {
+                                                let _ = cx.update(|window, cx| window.push_notification(
+                                                    gpui_kit::component::notification::Notification::error(error)
+                                                        .title("Could not restart Del").autohide(false), cx));
+                                            }
+                                            break;
+                                        }
+                                    }).detach();
                                 })))
                     });
                 } else {
@@ -421,14 +476,57 @@ fn check_release() -> Result<Option<Update>> {
     let bytes = output(curl(RELEASES).args(["--max-time", "30"]))?;
     let release: Release =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid release metadata: {e}"))?;
-    select_release(release, env!("CARGO_PKG_VERSION"))
+    select_release(release, env!("CARGO_PKG_VERSION"), &public_key()?)
 }
 
-fn select_release(release: Release, installed: &str) -> Result<Option<Update>> {
+fn public_key() -> Result<[u8; 32]> {
+    hex_bytes(UPDATE_PUBLIC_KEY).ok_or_else(|| "Invalid embedded update key".into())
+}
+
+fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let text = text.as_bytes();
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut bytes = [0; N];
+    for (byte, pair) in bytes.iter_mut().zip(text.chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// Exactly what scripts/sign-update.py signs. Binding the tag, file name and
+/// size prevents replaying an older signed DMG as a newer release.
+fn signed_message(tag: &str, name: &str, size: u64, sha256: &str) -> String {
+    format!("del-update-v1\n{tag}\n{name}\n{size}\n{sha256}\n")
+}
+
+fn verify_signature(release: &Release, dmg: &Asset, key: &[u8; 32]) -> Result<String> {
+    let (Some(sha256), Some(signature)) = (&release.sha256, &release.signature) else {
+        return Err("This release is not signed. Del only installs signed updates.".into());
+    };
+    let rejected = || "Update signature verification failed. Del will not install this release.";
+    if sha256.len() != 64 || !sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(rejected().into());
+    }
+    let signature = hex_bytes::<64>(signature).ok_or_else(rejected)?;
+    let message = signed_message(&release.tag_name, &dmg.name, dmg.size, sha256);
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| rejected())?;
+    Ok(sha256.clone())
+}
+
+fn select_release(release: Release, installed: &str, key: &[u8; 32]) -> Result<Option<Update>> {
     if release.draft || release.prerelease {
         return Ok(None);
     }
-    let latest = version(&release.tag_name).ok_or("Unsupported release version")?;
+    // Tags this build cannot compare (pre-release suffixes, four parts) are
+    // not offered, rather than leaving the control in a permanent error.
+    let Some(latest) = version(&release.tag_name) else {
+        eprintln!("[del update] ignoring release with unsupported version {:?}", release.tag_name);
+        return Ok(None);
+    };
     let current = version(installed).ok_or("Unsupported installed version")?;
     if latest <= current {
         return Ok(None);
@@ -459,9 +557,11 @@ fn select_release(release: Release, installed: &str) -> Result<Option<Update>> {
         }
         Ok(asset.clone())
     };
+    let dmg = asset(&filename)?;
+    let sha256 = verify_signature(&release, &dmg, key)?;
     Ok(Some(Update {
-        dmg: asset(&filename)?,
-        checksum: asset(&format!("{filename}.sha256"))?,
+        dmg,
+        sha256,
         version,
     }))
 }
@@ -486,15 +586,6 @@ fn public_bundle() -> Option<PathBuf> {
         return None;
     }
     Some(bundle.to_owned())
-}
-
-fn checksum_matches(sidecar: &str, filename: &str, actual: &str) -> bool {
-    let fields: Vec<_> = sidecar.split_whitespace().collect();
-    fields.len() == 2
-        && fields[1] == filename
-        && fields[0].len() == 64
-        && fields[0].bytes().all(|b| b.is_ascii_hexdigit())
-        && fields[0].eq_ignore_ascii_case(actual)
 }
 
 struct Mounted(PathBuf);
@@ -547,18 +638,18 @@ fn stage_update(update: Update, destination: PathBuf, tx: &mpsc::Sender<Event>) 
     if std::fs::metadata(&dmg).map_err(|e| e.to_string())?.len() != update.dmg.size {
         return Err("Downloaded update has the wrong size".into());
     }
-    let sidecar = output(&mut curl(&update.checksum.browser_download_url))?;
     let hash = output(
         Command::new("/usr/bin/shasum")
             .args(["-a", "256"])
             .arg(&dmg),
     )?;
     let hash = String::from_utf8_lossy(&hash);
-    if !checksum_matches(
-        &String::from_utf8_lossy(&sidecar),
-        &update.dmg.name,
-        hash.split_whitespace().next().unwrap_or(""),
-    ) {
+    // The expected digest came from the signed manifest, not a sidecar file.
+    if !hash
+        .split_whitespace()
+        .next()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(&update.sha256))
+    {
         return Err("Update checksum verification failed".into());
     }
     let mount = download.path().join("mounted");
@@ -634,6 +725,80 @@ fn validate_installation(staged: &Staged, current_version: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove Del-created leftovers beside the installation: bundles retired by
+/// earlier updates (`.del-retired/del-<uuid>.app`) and abandoned staging
+/// directories (`.del-update-*`). Only exact Del names older than `age`,
+/// never symlinks, never a running bundle, and only Del's own bundle identity.
+fn prune_stale_bundles(parent: &Path, age: Duration) {
+    let old = |path: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            // A rename updates ctime; use the newest of mtime/ctime as "retired at".
+            let changed = meta.ctime().max(meta.mtime());
+            meta.file_type().is_dir()
+                && std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .is_ok_and(|now| now.as_secs() as i64 - changed >= age.as_secs() as i64)
+        })
+    };
+    // Without a process list we cannot prove a bundle is unused; prune nothing.
+    let Some(running) = running_executables() else {
+        return;
+    };
+    let removable_bundle = |bundle: &Path| {
+        old(bundle)
+            && !running.iter().any(|exe| exe.starts_with(bundle))
+            && plist_value(bundle, "CFBundleIdentifier").is_ok_and(|id| id == BUNDLE_ID)
+    };
+    if let Ok(entries) = std::fs::read_dir(parent.join(".del-retired")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let retired_name = name
+                .strip_prefix("del-")
+                .and_then(|rest| rest.strip_suffix(".app"))
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+            if retired_name && removable_bundle(&path) {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry.file_name().to_string_lossy().starts_with(".del-update-") || !old(&path) {
+            continue;
+        }
+        // Staging holds at most one Del.app; anything else means it is not ours to delete.
+        let Ok(children) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        let children: Vec<_> = children.flatten().map(|c| c.file_name()).collect();
+        let ours = match children.as_slice() {
+            [] => true,
+            [only] => only == "Del.app" && removable_bundle(&path.join("Del.app")),
+            _ => false,
+        };
+        if ours {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+fn running_executables() -> Option<Vec<PathBuf>> {
+    let bytes = output(Command::new("/bin/ps").args(["-axo", "comm="])).ok()?;
+    let mut paths: Vec<PathBuf> = std::env::current_exe().into_iter().collect();
+    paths.extend(
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|line| line.starts_with('/'))
+            .map(|line| PathBuf::from(line.trim())),
+    );
+    Some(paths)
+}
+
 fn install_and_relaunch(staged: &Staged) -> Result<()> {
     let parent = staged
         .destination
@@ -684,17 +849,37 @@ fn install_and_relaunch(staged: &Staged) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppUpdater, Asset, Event, RELEASES, Release, Status, checksum_matches, curl, output,
-        replace_bundle, select_release, stage_update, verify_bundle, version,
+        AppUpdater, Asset, Event, RELEASES, Release, Status, curl, output, replace_bundle,
+        stage_update, verify_bundle, version,
     };
     use gpui::AppContext;
+    use ring::signature::KeyPair;
     use std::{path::PathBuf, sync::mpsc, time::Instant};
+    const TEST_SEED: [u8; 32] = [7; 32];
+    fn test_key() -> [u8; 32] {
+        let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&TEST_SEED).unwrap();
+        pair.public_key().as_ref().try_into().unwrap()
+    }
+    fn sign(release: &mut Release) {
+        let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&TEST_SEED).unwrap();
+        let digest = "ab".repeat(32);
+        let dmg = &release.assets[0];
+        let message = super::signed_message(&release.tag_name, &dmg.name, dmg.size, &digest);
+        let signature = pair.sign(message.as_bytes());
+        release.signature = Some(signature.as_ref().iter().map(|b| format!("{b:02x}")).collect());
+        release.sha256 = Some(digest);
+    }
+    fn select_release(release: Release, installed: &str) -> super::Result<Option<super::Update>> {
+        super::select_release(release, installed, &test_key())
+    }
     fn release(tag: &str) -> Release {
         let v = tag.trim_start_matches('v');
-        Release {
+        let mut release = Release {
             tag_name: tag.into(),
             draft: false,
             prerelease: false,
+            sha256: None,
+            signature: None,
             assets: [
                 format!("Del-{v}-arm64.dmg"),
                 format!("Del-{v}-arm64.dmg.sha256"),
@@ -708,14 +893,18 @@ mod tests {
                 size: 10,
             })
             .collect(),
-        }
+        };
+        sign(&mut release);
+        release
     }
     #[test]
     #[ignore = "downloads and verifies the public DMG; does not replace an installed app"]
     fn public_release_download_and_staging() {
         let bytes = output(&mut curl(RELEASES)).unwrap();
         let release = serde_json::from_slice(&bytes).unwrap();
-        let update = select_release(release, "0.0.0").unwrap().unwrap();
+        let update = super::select_release(release, "0.0.0", &super::public_key().unwrap())
+            .unwrap()
+            .unwrap();
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("Del.app");
         let (tx, rx) = mpsc::channel();
@@ -821,6 +1010,7 @@ mod tests {
             Status::Available(pending),
             Status::Downloading(42),
             Status::Verifying,
+            Status::Installing("0.2.0".into()),
             Status::Ready(super::Staged {
                 directory: tempfile::tempdir().unwrap(),
                 destination: PathBuf::from("/fake/Del.app"),
@@ -881,6 +1071,15 @@ mod tests {
                 version: "0.2.0".into(),
             });
             updater.restart(cx);
+            assert!(matches!(updater.status, Status::Installing(_)));
+            // Validation runs on a worker; the UI thread only drains its result.
+            for _ in 0..500 {
+                updater.drain(cx);
+                if !updater.installing() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             assert!(matches!(updater.status, Status::Ready(_)));
             assert!(
                 updater
@@ -922,14 +1121,12 @@ mod tests {
         let mut draft = release("v0.2.0");
         draft.draft = true;
         assert!(select_release(draft, "0.1.0").unwrap().is_none());
-        for index in [0, 1] {
-            let mut oversized = release("v0.2.0");
-            oversized.assets[index].size = u64::MAX;
-            assert!(select_release(oversized, "0.1.0").is_err());
-            let mut empty = release("v0.2.0");
-            empty.assets[index].size = 0;
-            assert!(select_release(empty, "0.1.0").is_err());
-        }
+        let mut oversized = release("v0.2.0");
+        oversized.assets[0].size = u64::MAX;
+        assert!(select_release(oversized, "0.1.0").is_err());
+        let mut empty = release("v0.2.0");
+        empty.assets[0].size = 0;
+        assert!(select_release(empty, "0.1.0").is_err());
     }
 
     #[gpui::test]
@@ -1111,7 +1308,7 @@ mod tests {
         r.prerelease = true;
         assert!(select_release(r, "0.1.0").unwrap().is_none());
         let mut r = release("v0.2.0");
-        r.assets.pop();
+        r.assets.remove(0);
         assert!(select_release(r, "0.1.0").is_err());
         let mut r = release("v0.2.0");
         r.assets[0].browser_download_url = "https://example.org/app.dmg".into();
@@ -1119,25 +1316,97 @@ mod tests {
         assert!(version("0.2.0/../app").is_none());
     }
     #[test]
-    fn checksum_requires_matching_digest_and_filename() {
-        let digest = "a".repeat(64);
-        assert!(checksum_matches(
-            &format!("{digest}  Del.dmg\n"),
-            "Del.dmg",
-            &digest
-        ));
-        assert!(!checksum_matches(
-            &format!("{digest}  Other.dmg"),
-            "Del.dmg",
-            &digest
-        ));
-        assert!(!checksum_matches(
-            &format!("{digest}  Del.dmg"),
-            "Del.dmg",
-            &"b".repeat(64)
-        ));
-        assert!(!checksum_matches("bad Del.dmg", "Del.dmg", "bad"));
+    fn signed_manifest_is_required_and_bound_to_the_dmg() {
+        // Valid signature: the signed digest is what the download must match.
+        let update = select_release(release("v0.2.0"), "0.1.0").unwrap().unwrap();
+        assert_eq!(update.sha256, "ab".repeat(32));
+        // Tampered digest.
+        let mut r = release("v0.2.0");
+        r.sha256 = Some("cd".repeat(32));
+        assert!(select_release(r, "0.1.0").unwrap_err().contains("signature verification failed"));
+        // Missing signature or digest.
+        let mut r = release("v0.2.0");
+        r.signature = None;
+        assert!(select_release(r, "0.1.0").unwrap_err().contains("not signed"));
+        let mut r = release("v0.2.0");
+        r.sha256 = None;
+        assert!(select_release(r, "0.1.0").unwrap_err().contains("not signed"));
+        // Size, name or tag changes invalidate the signature.
+        let mut r = release("v0.2.0");
+        r.assets[0].size = 11;
+        assert!(select_release(r, "0.1.0").is_err());
+        let mut r = release("v0.2.0");
+        r.tag_name = "v0.3.0".into();
+        for asset in &mut r.assets {
+            asset.browser_download_url = asset.browser_download_url.replace("v0.2.0", "v0.3.0");
+            asset.name = asset.name.replace("0.2.0", "0.3.0");
+        }
+        assert!(select_release(r, "0.1.0").is_err(), "a signed old release cannot be relabelled");
+        // Malformed signatures and another key are rejected.
+        let mut r = release("v0.2.0");
+        r.signature = Some("zz".repeat(64));
+        assert!(select_release(r, "0.1.0").is_err());
+        assert!(super::select_release(release("v0.2.0"), "0.1.0", &super::public_key().unwrap()).is_err());
     }
+
+    #[test]
+    fn release_script_signatures_verify_in_the_app() {
+        // Produced by scripts/sign-update.py with seed 00 01 .. 1f; keeps both
+        // implementations of the signed message byte-for-byte identical.
+        let key = super::hex_bytes::<32>("03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8").unwrap();
+        let mut r = release("v0.2.0");
+        r.sha256 = Some("ab".repeat(32));
+        r.signature = Some("045adebbdc71b4f23a3015c1232cf748241e6176de5b28d9dc93052904f00cc2ceb8e856ef5f5256737d554c1fa4981ee5cedd8042728a95801e34399c67d603".into());
+        assert!(super::select_release(r, "0.1.0", &key).unwrap().is_some());
+        // A manifest from scripts/make-dmg.sh (for a throwaway file) verifies with the
+        // embedded production key, proving the release key and the app agree.
+        let manifest: Release = serde_json::from_str(r#"{"tag_name":"v9.9.9","draft":false,"prerelease":false,
+            "assets":[{"name":"Del-9.9.9-arm64.dmg","size":100000,"browser_download_url":"https://github.com/butter-computer/del/releases/download/v9.9.9/Del-9.9.9-arm64.dmg"}],
+            "sha256":"a0c5f8112e3aa24ec7b4466080bd9179033792a433662c31142dab691da0758d",
+            "signature":"fc9f7fe582d9e57d6e5fbf8d9b5f046fc246c28679169319fb38281edc5cce6509e9f8fe2c196c3a6246daa9634d87b0f156ce415c8d2090e275d8b986798208"}"#).unwrap();
+        let update = super::select_release(manifest, "0.1.0", &super::public_key().unwrap()).unwrap().unwrap();
+        assert_eq!(update.version, "9.9.9");
+    }
+
+    #[test]
+    fn unsupported_release_versions_are_not_an_error() {
+        for tag in ["v0.2.0-beta.1", "v0.2.0.1", "nightly"] {
+            assert!(select_release(release(tag), "0.1.0").unwrap().is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn startup_prunes_only_old_del_leftovers() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path();
+        let bundle = |path: &std::path::Path, id: &str| {
+            std::fs::create_dir_all(path.join("Contents")).unwrap();
+            std::fs::write(path.join("Contents/Info.plist"), format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string></dict></plist>"#)).unwrap();
+        };
+        let retired = parent.join(".del-retired");
+        let ours = retired.join(format!("del-{}.app", uuid::Uuid::new_v4()));
+        let foreign = retired.join(format!("del-{}.app", uuid::Uuid::new_v4()));
+        let unexpected_name = retired.join("Other.app");
+        bundle(&ours, super::BUNDLE_ID);
+        bundle(&foreign, "com.example.other");
+        bundle(&unexpected_name, super::BUNDLE_ID);
+        let staged = parent.join(".del-update-abc");
+        bundle(&staged.join("Del.app"), super::BUNDLE_ID);
+        let mixed = parent.join(".del-update-def");
+        bundle(&mixed.join("Del.app"), super::BUNDLE_ID);
+        std::fs::write(mixed.join("notes.txt"), "keep").unwrap();
+        let unrelated = parent.join("Del.app");
+        bundle(&unrelated, super::BUNDLE_ID);
+        // Nothing is old enough yet.
+        super::prune_stale_bundles(parent, std::time::Duration::from_secs(3600));
+        assert!(ours.exists() && staged.exists());
+        super::prune_stale_bundles(parent, std::time::Duration::ZERO);
+        assert!(!ours.exists(), "retired Del bundle is pruned");
+        assert!(!staged.exists(), "abandoned staging is pruned");
+        assert!(foreign.exists() && unexpected_name.exists() && mixed.exists() && unrelated.exists());
+    }
+
     #[test]
     fn replacement_preserves_old_bundle_and_rolls_back_failed_install() {
         let root = tempfile::tempdir().unwrap();

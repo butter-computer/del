@@ -6,8 +6,9 @@
 //! desktop is not an image they chose themselves.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use del_core::wallpaper::current_wallpaper;
 use gpui_kit::RenderImage;
@@ -24,27 +25,40 @@ const FALLBACK_WEBP: &[u8] = include_bytes!("../assets/wallpaper-fallback.webp")
 /// otherwise occupy.
 const MAX_EDGE_PX: u32 = 2560;
 
+/// Longest the window waits for the user's wallpaper (e.g. on a slow or
+/// unresponsive network volume) before opening with the bundled image.
+const PRELOAD_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Start resolving and decoding the wallpaper on a worker thread.
 ///
 /// Call this first thing in `main` so the work overlaps GPUI's own startup,
 /// then [`Preload::finish`] right before opening the window.
 pub fn preload() -> Preload {
-    Preload(thread::spawn(|| {
-        current_wallpaper()
-            .and_then(|path| decode_file(&path))
-            .or_else(|| decode_bytes(FALLBACK_WEBP))
-            .map(Arc::new)
-    }))
+    let (tx, rx) = mpsc::sync_channel(1);
+    // Detached: a wallpaper read stuck on I/O must never hold up startup.
+    thread::spawn(move || {
+        let _ = tx.send(
+            current_wallpaper()
+                .and_then(|path| decode_file(&path))
+                .or_else(|| decode_bytes(FALLBACK_WEBP))
+                .map(Arc::new),
+        );
+    });
+    Preload(rx)
 }
 
 /// Handle to an in-flight wallpaper decode.
-pub struct Preload(JoinHandle<Option<Arc<RenderImage>>>);
+pub struct Preload(mpsc::Receiver<Option<Arc<RenderImage>>>);
 
 impl Preload {
-    /// Block until the wallpaper is decoded. `None` only if even the bundled
-    /// fallback failed to decode, which indicates a broken build.
+    /// Wait up to [`PRELOAD_TIMEOUT`] for the wallpaper, then fall back to the
+    /// bundled image. `None` only if even the bundled fallback failed to
+    /// decode, which indicates a broken build.
     pub fn finish(self) -> Option<Arc<RenderImage>> {
-        self.0.join().ok().flatten()
+        match self.0.recv_timeout(PRELOAD_TIMEOUT) {
+            Ok(image) => image,
+            Err(_) => decode_bytes(FALLBACK_WEBP).map(Arc::new),
+        }
     }
 }
 

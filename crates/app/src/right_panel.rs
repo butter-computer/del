@@ -19,6 +19,30 @@ pub const PANEL_WIDTH: f32 = 340.0;
 const MONO: &str = "Menlo";
 /// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
+/// Changed files whose diffs a refresh loads; the rest are only counted.
+const MAX_REVIEW_FILES: usize = 500;
+/// Diff rows rendered for one expanded file.
+const MAX_REVIEW_LINES: usize = 2000;
+
+/// A file's diff parsed once per load, not on every render.
+struct ChangeReview {
+    lines: Vec<crate::workspace_files::ReviewLine>,
+    added: usize,
+    removed: usize,
+}
+
+impl ChangeReview {
+    fn parse(text: &str) -> Self {
+        let lines = crate::workspace_files::review_lines(text);
+        let added = lines.iter().filter(|line| line.kind == '+').count();
+        let removed = lines.iter().filter(|line| line.kind == '-').count();
+        Self {
+            lines,
+            added,
+            removed,
+        }
+    }
+}
 /// Generated dependency/build trees stay out of the lightweight file viewer.
 const NEVER_LIST: &[&str] = &["target", "node_modules"];
 const DEFAULT_TREE_HEIGHT: f32 = 220.0;
@@ -229,6 +253,9 @@ pub struct RightPanel {
     change_files: Vec<crate::workspace_files::ChangedFile>,
     change_root: PathBuf,
     change_diffs: HashMap<PathBuf, String>,
+    change_reviews: HashMap<PathBuf, Rc<ChangeReview>>,
+    /// Changed files beyond MAX_REVIEW_FILES.
+    change_omitted: usize,
     change_expanded: HashSet<PathBuf>,
     change_error: Option<String>,
     change_request: u64,
@@ -255,6 +282,21 @@ pub struct RightPanel {
 
 impl RightPanel {
     pub fn is_changes(&self) -> bool { self.pane == Pane::Changes }
+
+    /// Free everything a panel for a closed tab still holds: shells, web views,
+    /// and the polling tasks. The panel's saved state is the caller's business.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        for (_, terminal) in self.terminals.drain() {
+            terminal.update(cx, |terminal, cx| terminal.close(cx));
+        }
+        if let Some(browser) = self.browser.take() {
+            browser.hide();
+        }
+        self.browsers.clear();
+        self.browser_watch = None;
+        self.changes_watch = None;
+        self.document_preview = None;
+    }
 
     pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if !visible && let Some(preview) = &self.document_preview {
@@ -392,6 +434,8 @@ impl RightPanel {
             change_files: Vec::new(),
             change_root: PathBuf::new(),
             change_diffs: HashMap::new(),
+            change_reviews: HashMap::new(),
+            change_omitted: 0,
             change_expanded: HashSet::new(),
             change_error: None,
             change_request: 0,
@@ -429,6 +473,8 @@ impl RightPanel {
             self.change_request += 1;
             self.change_files.clear();
             self.change_diffs.clear();
+            self.change_reviews.clear();
+            self.change_omitted = 0;
             self.change_expanded.clear();
             self.changes_loading = false;
             self.root = root;
@@ -542,14 +588,25 @@ impl RightPanel {
         self.ensure_browser(cx);
         cx.notify();
     }
+    /// Run an agent browser action on this panel's session. `reveal` switches
+    /// the pane to Browser; background sessions run without changing layout.
     pub fn browser_command(
         &mut self,
         request: del_mcp::BrowserRequest,
+        reveal: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<crate::browser::BrowserReply, String> {
         request.validate()?;
-        self.pane = Pane::Browser;
+        if request.action == "new_tab" && self.browser_tabs.len() >= del_mcp::browser::MAX_AGENT_TABS {
+            return Err(format!(
+                "This session already has {} browser tabs; close one first",
+                del_mcp::browser::MAX_AGENT_TABS
+            ));
+        }
+        if reveal {
+            self.pane = Pane::Browser;
+        }
         if let Some(id) = &request.tab_id {
             let index = self
                 .browser_tabs
@@ -1472,18 +1529,21 @@ impl RightPanel {
         let request = self.change_request;
         let root = self.root.clone();
         let work = cx.background_executor().spawn(async move {
-            let (root, files) = crate::workspace_files::changes(&root)?;
+            let (root, mut files) = crate::workspace_files::changes(&root)?;
+            let omitted = files.len().saturating_sub(MAX_REVIEW_FILES);
+            files.truncate(MAX_REVIEW_FILES);
+            let head = crate::workspace_files::has_head(&root);
             let diffs = files
                 .iter()
                 .map(|file| {
                     (
                         file.path.clone(),
-                        crate::workspace_files::diff(&root, file)
+                        crate::workspace_files::diff(&root, file, head)
                             .unwrap_or_else(|error| format!("Unable to read diff: {error}")),
                     )
                 })
                 .collect::<HashMap<_, _>>();
-            Ok::<_, String>((root, files, diffs))
+            Ok::<_, String>((root, files, omitted, diffs))
         });
         cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -1492,33 +1552,69 @@ impl RightPanel {
                     return;
                 }
                 this.changes_loading = false;
+                // "Loading changes…" shows only while the list is empty.
+                let mut changed = this.change_files.is_empty();
                 match result {
-                    Ok((root, files, diffs)) => {
-                        this.change_root = root;
-                        this.change_error = None;
-                        this.change_expanded.retain(|path| diffs.contains_key(path));
-                        this.change_files = files;
-                        this.change_diffs = diffs;
+                    Ok((root, files, omitted, diffs)) => {
+                        if this.change_error.is_none()
+                            && this.change_root == root
+                            && this.change_files == files
+                            && this.change_omitted == omitted
+                            && this.change_diffs == diffs
+                        {
+                            // The 2-second poll found nothing new.
+                        } else {
+                            changed = true;
+                            this.change_reviews = diffs
+                                .iter()
+                                .map(|(path, text)| {
+                                    let review = match this.change_diffs.get(path) {
+                                        Some(old) if old == text => {
+                                            this.change_reviews.get(path).cloned()
+                                        }
+                                        _ => None,
+                                    };
+                                    (
+                                        path.clone(),
+                                        review.unwrap_or_else(|| Rc::new(ChangeReview::parse(text))),
+                                    )
+                                })
+                                .collect();
+                            this.change_root = root;
+                            this.change_error = None;
+                            this.change_expanded.retain(|path| diffs.contains_key(path));
+                            this.change_files = files;
+                            this.change_omitted = omitted;
+                            this.change_diffs = diffs;
+                        }
                     }
                     Err(error) => {
+                        changed |= this.change_error.as_ref() != Some(&error);
                         this.change_error = Some(error);
                         this.change_files.clear();
                         this.change_diffs.clear();
+                        this.change_reviews.clear();
+                        this.change_omitted = 0;
                         this.change_expanded.clear();
                     }
                 }
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
-        cx.notify();
+        if self.change_files.is_empty() {
+            cx.notify();
+        }
     }
     fn render_changes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let (total_added, total_removed) = self.change_diffs.values()
-            .flat_map(|text| crate::workspace_files::review_lines(text))
-            .fold((0usize, 0usize), |(added, removed), line| {
-                (added + usize::from(line.kind == '+'), removed + usize::from(line.kind == '-'))
+        let (total_added, total_removed) = self.change_reviews.values()
+            .fold((0usize, 0usize), |(added, removed), review| {
+                (added + review.added, removed + review.removed)
             });
+        let shown = self.change_files.len();
+        let total_files = shown + self.change_omitted;
         v_flex()
             .id("changes-review")
             .size_full()
@@ -1557,7 +1653,7 @@ impl RightPanel {
                         .gap_2()
                         .text_size(zpx(11.))
                         .text_color(rgba(0xffffff8c))
-                        .child(format!("{} {}", self.change_files.len(), if self.change_files.len() == 1 { "file" } else { "files" }))
+                        .child(format!("{} {}", total_files, if total_files == 1 { "file" } else { "files" }))
                         .child(div().text_color(rgb(0x5fc27e)).child(format!("+{total_added}")))
                         .child(div().text_color(rgb(0xf0716b)).child(format!("−{total_removed}"))),
                 )
@@ -1565,10 +1661,8 @@ impl RightPanel {
             .children(self.change_files.iter().enumerate().map(|(index, file)| {
                 let path = file.path.clone();
                 let expanded = self.change_expanded.contains(&path);
-                let text = self.change_diffs.get(&path).cloned().unwrap_or_default();
-                let lines = crate::workspace_files::review_lines(&text);
-                let added = lines.iter().filter(|line| line.kind == '+').count();
-                let removed = lines.iter().filter(|line| line.kind == '-').count();
+                let review = self.change_reviews.get(&path).cloned();
+                let (added, removed) = review.as_ref().map_or((0, 0), |r| (r.added, r.removed));
                 v_flex()
                     .w_full()
                     .flex_none()
@@ -1626,14 +1720,15 @@ impl RightPanel {
                                 cx.notify();
                             })),
                     )
-                    .when(expanded, |view| {
+                    .when_some(review.filter(|_| expanded), |view, review| {
+                        let hidden = review.lines.len().saturating_sub(MAX_REVIEW_LINES);
                         view.child(
                             v_flex()
                                 .id(("file-diff", index))
                                 .overflow_x_scroll()
                                 .max_h(zpx(600.))
                                 .overflow_y_scroll()
-                                .children(lines.into_iter().map(|line| {
+                                .children(review.lines.iter().take(MAX_REVIEW_LINES).map(|line| {
                                     let fill = match line.kind {
                                         '+' => 0x45cf7845,
                                         '-' => 0xff6b6b45,
@@ -1674,10 +1769,40 @@ impl RightPanel {
                                                 .flex_none()
                                                 .child(format!("{} {}", line.kind, line.text)),
                                         )
-                                })),
+                                }))
+                                .when(hidden > 0, |list| {
+                                    list.child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .flex_none()
+                                            .text_size(zpx(11.))
+                                            .text_color(rgba(0xffffff8c))
+                                            .child(format!(
+                                                "{hidden} more {} not shown",
+                                                if hidden == 1 { "line" } else { "lines" }
+                                            )),
+                                    )
+                                }),
                         )
                     })
             }))
+            .when(self.change_omitted > 0, |view| {
+                view.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgba(0xffffff14))
+                        .text_size(zpx(11.))
+                        .text_color(rgba(0xffffff8c))
+                        .child(format!(
+                            "{} more changed {} not shown",
+                            self.change_omitted,
+                            if self.change_omitted == 1 { "file" } else { "files" }
+                        )),
+                )
+            })
             .into_any_element()
     }
 
@@ -1830,12 +1955,22 @@ fn read_viewer(path: PathBuf) -> Viewer {
         return Viewer::Document { path };
     }
     match std::fs::metadata(&path) {
+        // Devices, FIFOs and sockets report no useful size and can block or
+        // stream forever; only regular files are previewed.
+        Ok(m) if !m.is_file() => Viewer::Note {
+            path,
+            message: "Not a regular file".into(),
+        },
         Ok(m) if m.len() > MAX_FILE_BYTES => Viewer::Note {
             path,
             message: format!("{} KB: too large to show", m.len() / 1024),
         },
-        Ok(_) => match std::fs::read(&path) {
-            Ok(bytes) => match String::from_utf8(bytes) {
+        Ok(_) => match read_capped(&path, MAX_FILE_BYTES) {
+            Ok(None) => Viewer::Note {
+                path,
+                message: "File grew too large to show".into(),
+            },
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(text) => {
                     let markdown = path
                         .extension()
@@ -1865,6 +2000,17 @@ fn read_viewer(path: PathBuf) -> Viewer {
             message: e.to_string(),
         },
     }
+}
+
+/// Read at most `max` bytes; `None` when the file holds more (it may have
+/// grown since its size was checked).
+fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max + 1)
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
 #[cfg(test)]
@@ -1899,6 +2045,29 @@ mod tests {
         let text = dir.path().join("large.txt");
         std::fs::write(&text, vec![b'a'; MAX_FILE_BYTES as usize + 1]).unwrap();
         assert!(matches!(read_viewer(text), Viewer::Note { .. }));
+    }
+
+    #[test]
+    fn special_files_are_not_read_and_reads_are_capped() {
+        // Character devices report size 0 but stream forever.
+        assert!(matches!(
+            read_viewer(PathBuf::from("/dev/zero")),
+            Viewer::Note { message, .. } if message == "Not a regular file"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(matches!(read_viewer(fifo), Viewer::Note { .. }));
+        let path = dir.path().join("grown.txt");
+        std::fs::write(&path, b"12345").unwrap();
+        assert!(read_capped(&path, 4).unwrap().is_none());
+        assert_eq!(read_capped(&path, 5).unwrap().unwrap(), b"12345");
     }
 
     #[::gpui::test]
@@ -1996,7 +2165,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            std::process::Command::new("git")
+            std::process::Command::new(crate::projects::git_program().expect("git installed"))
                 .args(["init", "-q"])
                 .arg(dir.path())
                 .status()

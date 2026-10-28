@@ -10,7 +10,7 @@ mod native {
     use objc2_core_video::CVPixelBuffer;
     use std::{ffi::c_void, ptr::NonNull};
     unsafe extern "C" {
-        fn del_fluid_create(bytes: *const u8, length: usize) -> *mut c_void;
+        fn del_fluid_create(bytes: *const u8, length: usize, source: *const u8, source_length: usize) -> *mut c_void;
         fn del_fluid_release(renderer: *mut c_void);
         fn del_fluid_running(renderer: *mut c_void, running: bool);
         fn del_fluid_frame(renderer: *mut c_void, width: f64, height: f64, scale: f64,
@@ -23,7 +23,9 @@ mod native {
         pub fn new() -> Self {
             gpui_apple::metal_renderer::set_surface_prepare_callback(Some(del_fluid_prepare));
             let library = include_bytes!(concat!(env!("OUT_DIR"), "/del-fluid.metallib"));
-            Self(unsafe { del_fluid_create(library.as_ptr(), library.len()) })
+            // Empty when the build host lacked `xcrun metal`; the source compiles at runtime.
+            let source = include_str!("fluid.metal");
+            Self(unsafe { del_fluid_create(library.as_ptr(), library.len(), source.as_ptr(), source.len()) })
         }
         pub fn running(&self, running: bool) { unsafe { del_fluid_running(self.0, running) }; }
         pub fn region(&self, slot: u32, bounds: Bounds<Pixels>, radius: Pixels) {

@@ -27,9 +27,9 @@ const MAX_BODY_BYTES: usize = 1 << 20;
 pub struct ServerOptions {
     /// How long `ask_user` waits for the user before failing the tool call.
     pub ask_timeout: Duration,
-    /// Sessions one session may spawn.
+    /// Live sessions one session may have spawned at once.
     pub max_spawn_per_session: usize,
-    /// Sessions the whole server will spawn.
+    /// Live spawned sessions across the whole server.
     pub max_spawn_total: usize,
     /// Log one stderr line per JSON-RPC request (method, session). Never logs tokens or arguments.
     pub trace: bool,
@@ -70,12 +70,84 @@ struct Scope {
     /// token -> session it authenticates as.
     tokens: HashMap<String, SessionId>,
     browser_only: HashSet<SessionId>,
+    /// Browser-only callers that stand for several chats (a provider process
+    /// serving one MCP config to all of them) -> those chats.
+    shared_browser: HashMap<SessionId, HashSet<SessionId>>,
     chat_tools: HashSet<SessionId>,
     children: HashMap<SessionId, HashSet<SessionId>>,
     parent: HashMap<SessionId, SessionId>,
-    spawned_total: usize,
-    /// Spawn quota used per session (reserved before the host call).
-    spawned_by: HashMap<SessionId, usize>,
+    /// Spawns reserved before the host call and not yet answered, per caller.
+    pending_spawns: HashMap<SessionId, usize>,
+}
+
+impl Scope {
+    /// A session is live while it holds a credential; exited children are
+    /// revoked, so they stop counting against spawn quotas.
+    fn live(&self, session: &SessionId) -> bool {
+        self.tokens.values().any(|s| s == session)
+    }
+
+    /// The caller, the sessions it spawned, and the session that spawned it.
+    fn family(&self, caller: &SessionId) -> Vec<SessionId> {
+        let mut family = vec![caller.clone()];
+        family.extend(self.children.get(caller).into_iter().flatten().cloned());
+        family.extend(self.parent.get(caller).cloned());
+        family
+    }
+
+    /// (caller's live children + pending spawns, all live children + pending spawns).
+    fn spawn_counts(&self, caller: &SessionId) -> (usize, usize) {
+        let mine = self
+            .children
+            .get(caller)
+            .into_iter()
+            .flatten()
+            .filter(|child| self.live(child))
+            .count()
+            + self.pending_spawns.get(caller).copied().unwrap_or(0);
+        let total = self.parent.keys().filter(|child| self.live(child)).count()
+            + self.pending_spawns.values().sum::<usize>();
+        (mine, total)
+    }
+
+    fn revoke(&mut self, session: &SessionId) {
+        self.tokens.retain(|_, v| v != session);
+        // Registration re-adds these, so rotation keeps the credential kind.
+        self.browser_only.remove(session);
+        self.chat_tools.remove(session);
+        self.shared_browser.remove(session);
+    }
+
+    /// Which browsers a browser call from `caller` may touch.
+    fn browser_access(&self, caller: &SessionId) -> crate::BrowserAccess {
+        match self.shared_browser.get(caller) {
+            Some(members) => {
+                let mut members: Vec<_> = members.iter().cloned().collect();
+                members.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                crate::BrowserAccess::Shared(members)
+            }
+            None => crate::BrowserAccess::Sessions(self.family(caller)),
+        }
+    }
+}
+
+/// Releases a spawn reservation however the call ends, including when the
+/// client disconnects and the handler future is dropped mid-spawn.
+struct SpawnReservation<'a> {
+    scope: &'a Mutex<Scope>,
+    caller: SessionId,
+}
+
+impl Drop for SpawnReservation<'_> {
+    fn drop(&mut self) {
+        let mut s = self.scope.lock().unwrap();
+        if let Some(n) = s.pending_spawns.get_mut(&self.caller) {
+            *n -= 1;
+            if *n == 0 {
+                s.pending_spawns.remove(&self.caller);
+            }
+        }
+    }
 }
 
 struct Inner {
@@ -161,7 +233,7 @@ impl McpServer {
         }
     }
 
-    /// Invalidate every token of `session`.
+    /// Mint a browser-only credential for `session` (no coordination tools).
     pub fn register_browser_client(&self, session: &SessionId) -> Credentials {
         self.inner
             .scope
@@ -170,6 +242,53 @@ impl McpServer {
             .browser_only
             .insert(session.clone());
         self.register_session(session)
+    }
+
+    /// Authenticate `from`'s tokens as `to` from now on, keeping their kind.
+    /// Used when a chat's real session id is known only after its provider
+    /// started it with a provisional credential.
+    pub fn rebind_session(&self, from: &SessionId, to: &SessionId) {
+        let mut s = self.inner.scope.lock().unwrap();
+        if from == to {
+            return;
+        }
+        for session in s.tokens.values_mut() {
+            if session == from {
+                *session = to.clone();
+            }
+        }
+        if s.browser_only.remove(from) {
+            s.browser_only.insert(to.clone());
+        }
+        if s.chat_tools.remove(from) {
+            s.chat_tools.insert(to.clone());
+        }
+    }
+
+    /// Mint a browser-only credential for `group`, a provider process that
+    /// serves one MCP config to several chats. Its browser calls may touch
+    /// exactly the chats added with [`set_shared_browser_member`](Self::set_shared_browser_member).
+    pub fn register_shared_browser_client(&self, group: &SessionId) -> Credentials {
+        self.inner
+            .scope
+            .lock()
+            .unwrap()
+            .shared_browser
+            .entry(group.clone())
+            .or_default();
+        self.register_browser_client(group)
+    }
+
+    /// Add or remove `session` from the chats `group`'s credential reaches.
+    pub fn set_shared_browser_member(&self, group: &SessionId, session: &SessionId, member: bool) {
+        let mut s = self.inner.scope.lock().unwrap();
+        if let Some(members) = s.shared_browser.get_mut(group) {
+            if member {
+                members.insert(session.clone());
+            } else {
+                members.remove(session);
+            }
+        }
     }
 
     /// Browser and own-goal tools only, authenticated as the real chat session.
@@ -183,9 +302,27 @@ impl McpServer {
         self.register_session(session)
     }
 
+    /// Invalidate every token of `session`. Spawn relationships survive so a
+    /// restarted session keeps its parent/children; see [`forget_session`](Self::forget_session).
     pub fn revoke_session(&self, session: &SessionId) {
+        self.inner.scope.lock().unwrap().revoke(session);
+    }
+
+    /// Revoke `session` and drop its spawn relationships for good (deleted session).
+    pub fn forget_session(&self, session: &SessionId) {
         let mut s = self.inner.scope.lock().unwrap();
-        s.tokens.retain(|_, v| v != session);
+        s.revoke(session);
+        if let Some(parent) = s.parent.remove(session)
+            && let Some(siblings) = s.children.get_mut(&parent)
+        {
+            siblings.remove(session);
+            if siblings.is_empty() {
+                s.children.remove(&parent);
+            }
+        }
+        for child in s.children.remove(session).unwrap_or_default() {
+            s.parent.remove(&child);
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -216,6 +353,15 @@ fn host_is_loopback(authority: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
+/// Explicit port of `host[:port]` or `[v6][:port]`, if any.
+fn authority_port(authority: &str) -> Option<u16> {
+    let tail = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']')?.1,
+        None => authority.find(':').map_or("", |i| &authority[i..]),
+    };
+    tail.strip_prefix(':')?.parse().ok()
+}
+
 /// Rejects DNS-rebinding and browser cross-origin calls.
 fn origin_ok(h: &HeaderMap, port: u16) -> bool {
     match h.get(header::HOST).and_then(|v| v.to_str().ok()) {
@@ -230,13 +376,23 @@ fn origin_ok(h: &HeaderMap, port: u16) -> bool {
         }
         _ => return false,
     }
+    // A page on another loopback port (any local dev server) is still a
+    // different origin; only our own origin may call us from a browser.
     match h.get(header::ORIGIN) {
         None => true,
         Some(o) => o
             .to_str()
             .ok()
-            .and_then(|o| o.split_once("://").map(|(_, a)| a))
-            .is_some_and(host_is_loopback),
+            .and_then(|o| o.split_once("://"))
+            .is_some_and(|(scheme, authority)| {
+                let default = match scheme {
+                    "http" => Some(80),
+                    "https" => Some(443),
+                    _ => None,
+                };
+                host_is_loopback(authority)
+                    && authority_port(authority).or(default) == Some(port)
+            }),
     }
 }
 
@@ -431,10 +587,30 @@ impl Inner {
                 if let Err(error) = request.validate() {
                     return Ok(tool_err(error));
                 }
+                let access = self.scope.lock().unwrap().browser_access(caller);
+                if let Some(target) = &request.session_id {
+                    match &access {
+                        crate::BrowserAccess::Sessions(allowed)
+                            if !allowed.iter().any(|s| s.as_str() == target) =>
+                        {
+                            return Ok(tool_err(
+                                "session_id must be your own session, one you spawned, or the session that spawned you",
+                            ));
+                        }
+                        crate::BrowserAccess::Shared(allowed)
+                            if !allowed.iter().any(|s| s.as_str() == target) =>
+                        {
+                            return Ok(tool_err(
+                                "session_id must be one of the chats this credential serves",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 Ok(
                     match tokio::time::timeout(
                         Duration::from_secs(30),
-                        host.browser(caller, request),
+                        host.browser(caller, access, request),
                     )
                     .await
                     {
@@ -442,7 +618,9 @@ impl Inner {
                             if let Some(image) = value.get("image").and_then(Value::as_str) {
                                 json!({"content":[{"type":"image","data":image,"mimeType":"image/png"}],"isError":false})
                             } else {
-                                tool_text(value.to_string(), Some(value), false)
+                                // Page results can be megabytes; send them once,
+                                // as text every MCP client reads.
+                                tool_text(value.to_string(), None, false)
                             }
                         }
                         Ok(Err(error)) => tool_err(error.to_string()),
@@ -512,10 +690,12 @@ impl Inner {
             }
             "list_sessions" => {
                 let _: ListSessionsArgs = parse(args)?;
+                let family = self.scope.lock().unwrap().family(caller);
                 Ok(match host.list_sessions(caller).await {
                     Ok(list) => {
                         let rows: Vec<Value> = list
                             .iter()
+                            .filter(|s| family.contains(&s.id))
                             .map(|s| {
                                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                                 v["is_self"] = json!(&s.id == caller);
@@ -530,6 +710,11 @@ impl Inner {
             "get_session_summary" => {
                 let a: SessionArg = parse(args)?;
                 let target = SessionId::new(a.session_id);
+                if !self.scope.lock().unwrap().family(caller).contains(&target) {
+                    return Ok(tool_err(
+                        "you can only read your own session, sessions you spawned, and the session that spawned you",
+                    ));
+                }
                 Ok(match host.session_summary(caller, &target).await {
                     Ok(s) => tool_json(serde_json::to_value(s).unwrap_or(Value::Null)),
                     Err(e) => tool_err(e.to_string()),
@@ -541,23 +726,33 @@ impl Inner {
                     return Ok(tool_err(e));
                 }
                 let cwd = Path::new(&a.cwd);
-                if !cwd.is_absolute() || !cwd.is_dir() {
+                let is_dir = {
+                    let probe = cwd.to_path_buf();
+                    tokio::task::spawn_blocking(move || probe.is_dir())
+                        .await
+                        .unwrap_or(false)
+                };
+                if !cwd.is_absolute() || !is_dir {
                     return Ok(tool_err(
                         "cwd must be an absolute path of an existing directory",
                     ));
                 }
-                // Reserve the quota up front so concurrent calls cannot overshoot it.
-                {
+                // Reserve the quota up front so concurrent calls cannot overshoot
+                // it. Quotas count live children; exited ones free their slot.
+                let _reservation = {
                     let mut s = self.scope.lock().unwrap();
-                    let mine = s.spawned_by.get(caller).copied().unwrap_or(0);
+                    let (mine, total) = s.spawn_counts(caller);
                     if mine >= self.opts.max_spawn_per_session
-                        || s.spawned_total >= self.opts.max_spawn_total
+                        || total >= self.opts.max_spawn_total
                     {
                         return Ok(tool_err("spawn limit reached"));
                     }
-                    s.spawned_total += 1;
-                    *s.spawned_by.entry(caller.clone()).or_default() += 1;
-                }
+                    *s.pending_spawns.entry(caller.clone()).or_default() += 1;
+                    SpawnReservation {
+                        scope: &self.scope,
+                        caller: caller.clone(),
+                    }
+                };
                 let req = SpawnRequest {
                     provider: a.provider,
                     cwd: cwd.to_path_buf(),
@@ -574,15 +769,7 @@ impl Inner {
                         drop(s);
                         Ok(tool_json(serde_json::to_value(info).unwrap_or(Value::Null)))
                     }
-                    Err(e) => {
-                        let mut s = self.scope.lock().unwrap();
-                        s.spawned_total -= 1;
-                        if let Some(n) = s.spawned_by.get_mut(caller) {
-                            *n -= 1;
-                        }
-                        drop(s);
-                        Ok(tool_err(e.to_string()))
-                    }
+                    Err(e) => Ok(tool_err(e.to_string())),
                 }
             }
             "send_to_session" => {

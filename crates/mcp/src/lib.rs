@@ -2,7 +2,7 @@
 
 pub mod browser;
 pub mod host;
-pub use browser::BrowserRequest;
+pub use browser::{BrowserAccess, BrowserRequest};
 pub mod launch;
 pub mod manager_host;
 pub mod mock;

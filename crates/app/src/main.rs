@@ -291,13 +291,7 @@ impl SidebarWidths {
 
     fn save(mut self) -> std::io::Result<()> {
         self.left = self.left.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX);
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&self)?)?;
-        std::fs::rename(tmp, path)
+        sessions::write_atomic(&Self::path(), &serde_json::to_vec(&self)?, 0o644)
     }
 }
 
@@ -354,6 +348,14 @@ mod sidebar_width_tests {
     }
 }
 
+/// A right panel kept alive for an open tab that is not currently selected.
+struct CachedRight {
+    panel: Entity<RightPanel>,
+    open: bool,
+    /// Store key (`chat:…`/`terminal:…`); drafts have none.
+    key: Option<String>,
+}
+
 struct AppShell {
     updater: Entity<app_updates::AppUpdater>,
     shell_focus: FocusHandle,
@@ -370,6 +372,9 @@ struct AppShell {
     renaming_loaded: Option<SessionId>,
     project_renaming_loaded: Option<std::path::PathBuf>,
     sidebar_widths: SidebarWidths,
+    sidebar_widths_generation: u64,
+    /// A one-second repaint runs only while the open chat has an active goal.
+    goal_ticking: bool,
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
     tab_drag_origin: std::rc::Rc<std::cell::Cell<Pixels>>,
     tab_strip_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
@@ -382,7 +387,9 @@ struct AppShell {
     right: Entity<RightPanel>,
     right_owner: u64,
     right_key: Option<String>,
-    right_cache: HashMap<u64, (Entity<RightPanel>, bool)>,
+    right_cache: HashMap<u64, CachedRight>,
+    /// The panel last shown; only it needs hiding when the selection changes.
+    right_previous: Option<Entity<RightPanel>>,
     right_store: right_panel::PanelStore,
     right_store_path: std::path::PathBuf,
     right_save_generation: u64,
@@ -672,6 +679,8 @@ impl AppShell {
             renaming_loaded: None,
             project_renaming_loaded: None,
             sidebar_widths: SidebarWidths::load(),
+            sidebar_widths_generation: 0,
+            goal_ticking: false,
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
             tab_strip_bounds: Default::default(),
@@ -685,6 +694,7 @@ impl AppShell {
             right_owner: 0,
             right_key: None,
             right_cache: HashMap::new(),
+            right_previous: None,
             right_store,
             right_store_path,
             right_save_generation: 0,
@@ -729,28 +739,6 @@ impl AppShell {
             drag_target: None,
             previous_drag_target: None,
         };
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.open_chat(cx).is_some_and(|chat| {
-                            chat.read(cx)
-                                .goal()
-                                .is_some_and(|goal| goal.status == del_agent::GoalStatus::Active)
-                        }) {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -774,6 +762,64 @@ impl AppShell {
         })
         .detach();
         shell
+    }
+
+    fn goal_active(&self, cx: &App) -> bool {
+        self.open_chat(cx).is_some_and(|chat| {
+            chat.read(cx)
+                .goal()
+                .is_some_and(|goal| goal.status == del_agent::GoalStatus::Active)
+        })
+    }
+
+    /// Refresh the goal's elapsed time each second, only while one is active.
+    fn ensure_goal_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.goal_ticking || !self.goal_active(cx) {
+            return;
+        }
+        self.goal_ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let active = this.update(cx, |this, cx| {
+                    let active = this.goal_active(cx);
+                    if active {
+                        cx.notify();
+                    } else {
+                        this.goal_ticking = false;
+                    }
+                    active
+                });
+                if !matches!(active, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Divider drags update widths every frame; coalesce disk writes like the right panel.
+    fn save_sidebar_widths_soon(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_widths_generation += 1;
+        let generation = self.sidebar_widths_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.sidebar_widths_generation == generation
+                    && let Err(error) = this.sidebar_widths.save()
+                {
+                    this.state.update(cx, |state, cx| {
+                        state.error = Some(format!("Could not save sidebar widths: {error}"));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     /// Make sure the open session has a live chat view.
@@ -814,11 +860,19 @@ impl AppShell {
         .detach();
         cx.subscribe(&chat, |this, _, event: &chat::OpenLink, cx| {
             let cwd = this.state.read(cx).effective().2;
-            if let Some(path) = chat::links::local_path(&event.0, &cwd) {
-                this.set_right(true, cx);
-                this.right.update(cx, |right, cx| right.preview_file(path, cx));
-            } else {
-                cx.open_url(&event.0);
+            match chat::links::classify(&event.0, &cwd) {
+                chat::links::LinkTarget::Local(path) => {
+                    this.set_right(true, cx);
+                    this.right.update(cx, |right, cx| right.preview_file(path, cx));
+                }
+                chat::links::LinkTarget::External(url) => cx.open_url(&url),
+                chat::links::LinkTarget::Blocked => this.state.update(cx, |state, cx| {
+                    state.error = Some(format!(
+                        "Del did not open {}. Only web (http, https) and mail links open outside Del.",
+                        event.0.chars().take(200).collect::<String>()
+                    ));
+                    cx.notify();
+                }),
             }
         }).detach();
         self.chats.insert(id, chat);
@@ -886,8 +940,14 @@ impl AppShell {
     }
 
     fn remember_right(&mut self, cx: &mut Context<Self>) {
-        self.right_cache
-            .insert(self.right_owner, (self.right.clone(), self.right_open));
+        self.right_cache.insert(
+            self.right_owner,
+            CachedRight {
+                panel: self.right.clone(),
+                open: self.right_open,
+                key: self.right_key.clone(),
+            },
+        );
         let Some(key) = self.right_key.clone() else {
             return;
         };
@@ -909,6 +969,23 @@ impl AppShell {
                 });
             })
             .detach();
+        }
+    }
+
+    /// Drop the panel cached for a tab that is no longer open: persist its state,
+    /// then free its shells, web views and watch loops.
+    fn evict_right(&mut self, uid: u64, cx: &mut Context<Self>) {
+        let Some(cached) = self.right_cache.remove(&uid) else {
+            return;
+        };
+        if let Some(key) = cached.key
+            && self.right_store.set(key, cached.panel.read(cx).snapshot(cached.open))
+        {
+            self.persist_right(cx);
+        }
+        cached.panel.update(cx, |panel, cx| panel.release(cx));
+        if self.right_previous.as_ref() == Some(&cached.panel) {
+            self.right_previous = None;
         }
     }
 
@@ -960,10 +1037,11 @@ impl AppShell {
             .state
             .update(cx, |state, _| std::mem::take(&mut state.deleted_panels));
         for (key, uid) in deleted {
-            let cached = self
-                .right_cache
-                .remove(&uid)
-                .map(|(panel, _)| panel.read(cx).snapshot(false));
+            let cached = self.right_cache.remove(&uid).map(|cached| {
+                let snapshot = cached.panel.read(cx).snapshot(false);
+                cached.panel.update(cx, |panel, cx| panel.release(cx));
+                snapshot
+            });
             let saved = self.right_store.remove(&key).or(cached);
             if self.right_key.as_ref() == Some(&key) {
                 self.right_key = None;
@@ -990,11 +1068,13 @@ impl AppShell {
         };
         let owner = state.uid_of(&tab);
         let root = state.effective().2;
+        let open_uids: std::collections::HashSet<u64> =
+            state.tabs.iter().map(|tab| state.uid_of(tab)).collect();
         if self.right_owner != owner {
             self.remember_right(cx);
             let newly_created = !self.right_cache.contains_key(&owner);
             let (panel, open) = if let Some(cached) = self.right_cache.get(&owner) {
-                (cached.0.clone(), cached.1 && !cached.0.read(cx).is_changes())
+                (cached.panel.clone(), cached.open && !cached.panel.read(cx).is_changes())
             } else {
                 let saved = key
                     .as_deref()
@@ -1022,6 +1102,18 @@ impl AppShell {
         if self.right_key != key {
             self.right_key = key;
             self.remember_right(cx);
+        }
+        // Panels for closed tabs would otherwise keep PTYs, WKWebViews and their
+        // 2 s Changes watch alive for the rest of the run. Uid 0 is the unlisted
+        // startup composer, which has no tab and is reused.
+        let stale: Vec<u64> = self
+            .right_cache
+            .keys()
+            .copied()
+            .filter(|uid| *uid != 0 && *uid != self.right_owner && !open_uids.contains(uid))
+            .collect();
+        for uid in stale {
+            self.evict_right(uid, cx);
         }
         self.right.update(cx, |panel, cx| {
             panel.set_root(root, window, cx);
@@ -1891,6 +1983,7 @@ impl Drop for AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_goal_ticker(cx);
         let zoom = del_core::zoom::percent();
         if self.zoom_percent != zoom {
             self.zoom_percent = zoom;
@@ -2028,10 +2121,12 @@ impl Render for AppShell {
         self.right.update(cx, |panel, cx| {
             panel.set_preview_visible(right_visible && !self.search_open, cx)
         });
-        for (panel, _) in self.right_cache.values() {
-            if panel != &self.right {
-                panel.update(cx, |panel, cx| panel.set_preview_visible(false, cx));
-            }
+        // Only the panel that just stopped being shown needs hiding; every other
+        // cached panel was hidden when it was replaced.
+        if self.right_previous.as_ref() != Some(&self.right)
+            && let Some(previous) = self.right_previous.replace(self.right.clone())
+        {
+            previous.update(cx, |panel, cx| panel.set_preview_visible(false, cx));
         }
 
         // Load the title into the rename field when a rename starts.
@@ -2203,6 +2298,7 @@ impl Render for AppShell {
                             } else {
                                 this.sidebar_widths.left = width;
                             }
+                            this.save_sidebar_widths_soon(cx);
                             cx.notify();
                         },
                     ))

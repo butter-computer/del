@@ -28,6 +28,8 @@ pub struct Palette {
     indexing: bool,
     errors: Vec<String>,
     generation: u64,
+    /// The newest search's generation, read by running searches to stop early.
+    latest_search: std::sync::Arc<std::sync::atomic::AtomicU64>,
     runtime: tokio::runtime::Handle,
     chosen_action: Option<PaletteAction>,
 }
@@ -107,6 +109,7 @@ impl Palette {
             indexing: true,
             errors: vec![],
             generation: 0,
+            latest_search: Default::default(),
             runtime,
             chosen_action: None,
         }
@@ -121,31 +124,46 @@ impl Palette {
         }
         self.generation += 1;
         let generation = self.generation;
+        // Older keystrokes' searches see this and stop instead of finishing.
+        self.latest_search.store(generation, std::sync::atomic::Ordering::Relaxed);
+        let latest = self.latest_search.clone();
         let query = self.input.read(cx).value().to_string();
         let documents = self.documents.clone();
         self.loading = true;
         self.hits.clear();
         self.previews.clear();
         self.reset_scroll(cx);
-        let task = self.runtime.spawn_blocking(move || {
-            if query.trim().is_empty() {
-                documents
-                    .iter()
-                    .filter(|document| !document.source.archived)
-                    .take(8)
-                    .map(|document| search::Hit {
-                        document: document.clone(),
-                        message: None,
-                        range: 0..0,
-                        snippet: document.source.cwd.to_string_lossy().into_owned(),
-                        snippet_range: 0..0,
-                    })
-                    .collect()
-            } else {
-                search::search(&documents, &query)
-            }
-        });
+        let runtime = self.runtime.clone();
+        // Keystrokes settle for ~100 ms before a search starts; the recent list is immediate.
+        let debounce = !query.trim().is_empty();
         cx.spawn(async move |this, cx| {
+            if debounce {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                if latest.load(std::sync::atomic::Ordering::Relaxed) != generation {
+                    return;
+                }
+            }
+            let task = runtime.spawn_blocking(move || {
+                if query.trim().is_empty() {
+                    documents
+                        .iter()
+                        .filter(|document| !document.source.archived)
+                        .take(8)
+                        .map(|document| search::Hit {
+                            document: document.clone(),
+                            message: None,
+                            range: 0..0,
+                            snippet: document.source.cwd.to_string_lossy().into_owned(),
+                            snippet_range: 0..0,
+                        })
+                        .collect()
+                } else {
+                    search::search_until(&documents, &query, || {
+                        latest.load(std::sync::atomic::Ordering::Relaxed) != generation
+                    })
+                    .unwrap_or_default()
+                }
+            });
             if let Ok(hits) = task.await {
                 let _ = this.update(cx, |this, cx| {
                     if this.generation != generation {
@@ -893,6 +911,7 @@ impl AppShell {
         let generation = self.terminal_search_generation;
         cx.spawn_in(window, async move |this, cx| {
             let mut restore_wait = None;
+            let mut scanned = None;
             // Resuming a CLI paints asynchronously. Retry while it restores its history.
             for attempt in 0..120 {
                 cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
@@ -917,8 +936,13 @@ impl AppShell {
                             }
                         }
                         let terminal = host.read(cx).terminal_view();
-                        if terminal.update(cx, |terminal, cx| terminal.reveal_search_match(&context, range.clone(), cx)) {
-                            return true;
+                        // Rescanning unchanged scrollback cannot find anything new.
+                        let output = terminal.read(cx).session().output_generation();
+                        if scanned != Some(output) {
+                            scanned = Some(output);
+                            if terminal.update(cx, |terminal, cx| terminal.reveal_search_match(&context, range.clone(), cx)) {
+                                return true;
+                            }
                         }
                     }
                     if attempt == 119 {
@@ -1027,6 +1051,7 @@ mod tests {
                         archived: false,
                         live: None,
                     },
+                    folded: Default::default(),
                     messages: Arc::new(vec![search::Message {
                         role: "Assistant",
                         text: "**Cats** and *purrs*, `code`, [a link](https://example.com).".into(),
@@ -1086,6 +1111,7 @@ mod tests {
                         archived: false,
                         live: None,
                     },
+                    folded: Default::default(),
                     messages: Arc::new(vec![search::Message {
                         role: "You",
                         text: "match second match".into(),

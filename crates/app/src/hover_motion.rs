@@ -28,6 +28,8 @@ struct Motion {
     bases: HashMap<String, Rgba>,
     presentation: HashMap<String, RowPresentation>,
     divider: Option<Bounds<Pixels>>,
+    /// Views that paint this group's layer. Hover changes redraw only them.
+    owners: std::collections::HashSet<EntityId>,
 }
 struct RowPresentation {
     visible: Bounds<Pixels>,
@@ -44,6 +46,17 @@ impl Motion {
     }
 }
 impl HoverMotion {
+    /// Redraw the views showing this group; every window only before the first paint.
+    fn refresh(&self, cx: &mut App) {
+        let owners: Vec<_> = self.0.borrow().owners.iter().copied().collect();
+        if owners.is_empty() {
+            cx.refresh_windows();
+        }
+        for owner in owners {
+            cx.notify(owner);
+        }
+    }
+
     pub fn is_hovered(&self, key: &str) -> bool {
         self.0.borrow().current.as_deref() == Some(key)
     }
@@ -108,7 +121,8 @@ impl HoverMotion {
             if !in_width || mouse.y.as_f32() < min_y || mouse.y.as_f32() > max_y {
                 state.current = None;
                 state.started = None;
-                cx.refresh_windows();
+                drop(state);
+                self.refresh(cx);
             }
             return;
         }
@@ -129,7 +143,8 @@ impl HoverMotion {
         state.current = Some(key.to_owned());
         state.started = Some(Instant::now());
         state.generation += 1;
-        cx.refresh_windows();
+        drop(state);
+        self.refresh(cx);
     }
 
     pub fn clicked(&self, event: &ClickEvent) -> Option<String> {
@@ -222,8 +237,9 @@ impl HoverMotion {
         let generation = self.0.borrow().generation;
         div().absolute().inset_0().child(
             canvas(
-                move |_, _, _| {
+                move |_, window, _| {
                     let mut state = capture.0.borrow_mut();
+                    state.owners.insert(window.current_view());
                     state.bounds.clear();
                     state.bases.clear();
                     state.presentation.clear();

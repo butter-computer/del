@@ -29,6 +29,8 @@ struct State {
     cancelled: bool,
     closed: bool,
     closing: bool,
+    /// While `session/load` runs: replayed updates rebuilt as history.
+    replay: Option<(Translator, Vec<AgentEvent>)>,
 }
 
 struct Client {
@@ -75,9 +77,17 @@ impl Client {
                 recoverable: true,
             }]);
         }
-        state.approvals.clear();
+        self.emit(retire_approvals(&mut state.approvals));
         self.emit(state.translator.end_turn(status));
     }
+}
+
+/// Forget unanswered approvals, retiring their cards.
+fn retire_approvals(approvals: &mut HashMap<String, PendingApproval>) -> Vec<AgentEvent> {
+    approvals
+        .drain()
+        .map(|(id, _)| AgentEvent::ApprovalResolved { id })
+        .collect()
 }
 
 fn cancelled() -> Value {
@@ -94,8 +104,13 @@ impl Handler for Client {
             return;
         };
         let mut state = self.state.lock().unwrap();
-        if state.remote.as_deref() == Some(update.session_id.to_string().as_str()) {
-            self.emit(state.translator.update(&update.update));
+        let state = &mut *state;
+        if state.remote.as_deref() != Some(update.session_id.to_string().as_str()) {
+            return;
+        }
+        match state.replay.as_mut() {
+            Some((translator, history)) => history.extend(translator.replay(&update.update)),
+            None => self.emit(state.translator.update(&update.update)),
         }
     }
 
@@ -163,7 +178,7 @@ impl Handler for Client {
     fn closed(&self, exit: Option<i32>, stderr_tail: String) {
         let mut state = self.state.lock().unwrap();
         state.closed = true;
-        state.approvals.clear();
+        self.emit(retire_approvals(&mut state.approvals));
         self.emit(state.translator.end_turn(TurnStatus::Failed));
         if !state.closing {
             self.emit(vec![AgentEvent::Error {
@@ -205,11 +220,159 @@ impl Drop for SetupGuard {
     }
 }
 
+impl Live {
+    fn alive(&self) -> bool {
+        let state = self.client.state.lock().unwrap();
+        !state.closed && !state.closing
+    }
+
+    /// End any turn and terminate the agent.
+    async fn retire(&self) {
+        {
+            let mut state = self.client.state.lock().unwrap();
+            state.closing = true;
+            self.client.emit(retire_approvals(&mut state.approvals));
+            self.client
+                .emit(state.translator.end_turn(TurnStatus::Interrupted));
+        }
+        self.rpc.kill(CLOSE_GRACE).await;
+    }
+}
+
+/// Launch `agent` and open (or load) one session on it.
+async fn spawn_live(
+    agent: &AcpAgentConfig,
+    config: &SessionConfig,
+    saved: Option<&(String, String)>,
+    model: Option<&str>,
+) -> Result<(SessionId, Arc<Live>, Vec<AgentEvent>)> {
+    let program = agent
+        .resolve()
+        .ok_or_else(|| AgentError::Backend(format!("{} is not installed", agent.name)))?;
+    let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    let client = Arc::new(Client {
+        state: Mutex::default(),
+        events: events.clone(),
+        permission_mode: config.permission_mode,
+    });
+    let env = agent
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<Vec<_>>();
+    let rpc = Rpc::spawn(&program, &agent.args, &env, &config.cwd, client.clone())?;
+    let mut guard = SetupGuard(Some(rpc.clone()));
+    let setup = async {
+        let init = rpc.request("initialize", json!({
+            "protocolVersion":1,
+            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},
+            "clientInfo":{"name":"del","version":env!("CARGO_PKG_VERSION")}
+        }), Some(SETUP_TIMEOUT)).await?;
+        if init["protocolVersion"] != 1 { return Err(RpcError::new(-32603, "Agent did not negotiate ACP v1")); }
+        let mut params = json!({"cwd":config.cwd,"mcpServers":[]});
+        let mut history = Vec::new();
+        let mut response = if let Some((_, remote)) = saved {
+            if init["agentCapabilities"]["loadSession"] != true {
+                return Err(RpcError::new(-32601, "This ACP agent does not support session/load"));
+            }
+            params["sessionId"] = json!(remote);
+            // The agent replays the conversation as updates before answering;
+            // collect them as the handle's history.
+            {
+                let mut state = client.state.lock().unwrap();
+                state.remote = Some(remote.clone());
+                state.replay = Some(Default::default());
+            }
+            let response = rpc.request("session/load", params, Some(SETUP_TIMEOUT)).await?;
+            if let Some((mut translator, events)) = client.state.lock().unwrap().replay.take() {
+                history = events;
+                history.extend(translator.finish_replay());
+            }
+            response
+        } else {
+            rpc.request("session/new", params, Some(SETUP_TIMEOUT)).await?
+        };
+        let remote = saved.map(|s| s.1.clone()).or_else(|| response["sessionId"].as_str().map(str::to_owned))
+            .ok_or_else(|| RpcError::invalid_params("session/new returned no sessionId"))?;
+        client.state.lock().unwrap().remote = Some(remote.clone());
+        if config.permission_mode == PermissionMode::Plan {
+            let plan = response["modes"]["availableModes"].as_array()
+                .and_then(|m| m.iter().find(|m| m["id"] == "plan"));
+            if plan.is_none() { return Err(RpcError::new(-32601, "This ACP agent does not advertise plan mode")); }
+            rpc.request("session/set_mode", json!({"sessionId":remote,"modeId":"plan"}), Some(SETUP_TIMEOUT)).await?;
+        }
+        if let Some(model) = model {
+            if let Some(option) = crate::models::option(&response, "model") {
+                let updated = rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":model}), Some(SETUP_TIMEOUT)).await?;
+                if updated["configOptions"].is_array() { response["configOptions"] = updated["configOptions"].clone(); }
+            } else {
+                rpc.request("session/set_model", json!({"sessionId":remote,"modelId":model}), Some(SETUP_TIMEOUT)).await?;
+            }
+        }
+        if let Some(effort) = &config.reasoning_effort {
+            let option = crate::models::option(&response, "thought_level")
+                .ok_or_else(|| RpcError::invalid_params("This agent does not advertise reasoning effort"))?;
+            if !crate::models::choices(option).iter().any(|o| o["value"].as_str() == Some(effort)) {
+                return Err(RpcError::invalid_params("Unsupported reasoning effort for this agent/model"));
+            }
+            rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":effort}), Some(SETUP_TIMEOUT)).await?;
+        }
+        Ok::<_, RpcError>((remote, crate::models::catalog(&agent.id, &agent.name, &response), history))
+    }.await;
+    let (remote, models, history) = match setup {
+        Ok(result) => result,
+        Err(e) => {
+            client.state.lock().unwrap().closing = true;
+            rpc.kill(CLOSE_GRACE).await;
+            let hint = if e.is_auth_required() {
+                " Sign in using the agent's own CLI, then retry."
+            } else {
+                ""
+            };
+            return Err(AgentError::Backend(format!("{}: {e}.{hint}", agent.name)));
+        }
+    };
+    let id = SessionId::new(format!(
+        "acp:{}",
+        serde_json::to_string(&(&agent.id, &remote)).unwrap()
+    ));
+    guard.0 = None;
+    Ok((
+        id,
+        Arc::new(Live {
+            models,
+            rpc,
+            client,
+            remote,
+        }),
+        history,
+    ))
+}
+
+/// Start a throwaway session on `agent` just to read its model catalog.
+async fn probe_models(agent: AcpAgentConfig, cwd: std::path::PathBuf) -> Result<Vec<ModelInfo>> {
+    let config = SessionConfig {
+        cwd,
+        model: Some(agent.id.clone()),
+        reasoning_effort: None,
+        service_tier: None,
+        provider: Provider::Acp,
+        permission_mode: PermissionMode::Ask,
+    };
+    let (_, live, _) = spawn_live(&agent, &config, None, None).await?;
+    live.retire().await;
+    Ok(live.models.clone())
+}
+
 #[derive(Default)]
 pub struct AcpBackend {
     agents: Option<Vec<AcpAgentConfig>>,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
     opening: tokio::sync::Mutex<()>,
+    /// Successful model probes for this backend's lifetime, keyed by the
+    /// agent's config and resolved executable so edits or reinstalls re-probe.
+    /// Failures are not cached, so signing in later is picked up.
+    model_cache: Mutex<HashMap<String, Vec<ModelInfo>>>,
 }
 
 impl AcpBackend {
@@ -218,6 +381,7 @@ impl AcpBackend {
             agents: Some(agents),
             sessions: Mutex::default(),
             opening: tokio::sync::Mutex::default(),
+            model_cache: Mutex::default(),
         }
     }
 
@@ -239,11 +403,21 @@ impl AcpBackend {
         if let Some(id) = resume
             && let Ok(live) = self.live(id)
         {
-            return Ok(SessionHandle::new(
-                id.clone(),
-                Provider::Acp,
-                live.client.events.clone(),
-            ));
+            if live.alive() {
+                return Ok(SessionHandle::new(
+                    id.clone(),
+                    Provider::Acp,
+                    live.client.events.clone(),
+                ));
+            }
+            // The agent exited (or is being retired): load the session afresh.
+            {
+                let mut sessions = self.sessions.lock().unwrap();
+                if sessions.get(id).is_some_and(|l| Arc::ptr_eq(l, &live)) {
+                    sessions.remove(id);
+                }
+            }
+            live.rpc.kill(CLOSE_GRACE).await;
         }
         let saved: Option<(String, String)> = resume
             .map(|id| {
@@ -261,93 +435,10 @@ impl AcpBackend {
         .ok_or_else(|| {
             AgentError::Backend("No matching installed ACP agent; configure acp-agents.json".into())
         })?;
-        let program = agent
-            .resolve()
-            .ok_or_else(|| AgentError::Backend(format!("{} is not installed", agent.name)))?;
-        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let client = Arc::new(Client {
-            state: Mutex::default(),
-            events: events.clone(),
-            permission_mode: config.permission_mode,
-        });
-        let env = agent
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>();
-        let rpc = Rpc::spawn(&program, &agent.args, &env, &config.cwd, client.clone())?;
-        let mut guard = SetupGuard(Some(rpc.clone()));
-        let setup = async {
-            let init = rpc.request("initialize", json!({
-                "protocolVersion":1,
-                "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},
-                "clientInfo":{"name":"del","version":env!("CARGO_PKG_VERSION")}
-            }), Some(SETUP_TIMEOUT)).await?;
-            if init["protocolVersion"] != 1 { return Err(RpcError::new(-32603, "Agent did not negotiate ACP v1")); }
-            let mut params = json!({"cwd":config.cwd,"mcpServers":[]});
-            let mut response = if let Some((_, remote)) = &saved {
-                if init["agentCapabilities"]["loadSession"] != true {
-                    return Err(RpcError::new(-32601, "This ACP agent does not support session/load"));
-                }
-                params["sessionId"] = json!(remote);
-                // History replay occurs before the handle can be subscribed to.
-                rpc.request("session/load", params, Some(SETUP_TIMEOUT)).await?
-            } else {
-                rpc.request("session/new", params, Some(SETUP_TIMEOUT)).await?
-            };
-            let remote = saved.as_ref().map(|s| s.1.clone()).or_else(|| response["sessionId"].as_str().map(str::to_owned))
-                .ok_or_else(|| RpcError::invalid_params("session/new returned no sessionId"))?;
-            client.state.lock().unwrap().remote = Some(remote.clone());
-            if config.permission_mode == PermissionMode::Plan {
-                let plan = response["modes"]["availableModes"].as_array()
-                    .and_then(|m| m.iter().find(|m| m["id"] == "plan"));
-                if plan.is_none() { return Err(RpcError::new(-32601, "This ACP agent does not advertise plan mode")); }
-                rpc.request("session/set_mode", json!({"sessionId":remote,"modeId":"plan"}), Some(SETUP_TIMEOUT)).await?;
-            }
-            if let Some(model) = model {
-                if let Some(option) = crate::models::option(&response, "model") {
-                    let updated = rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":model}), Some(SETUP_TIMEOUT)).await?;
-                    if updated["configOptions"].is_array() { response["configOptions"] = updated["configOptions"].clone(); }
-                } else {
-                    rpc.request("session/set_model", json!({"sessionId":remote,"modelId":model}), Some(SETUP_TIMEOUT)).await?;
-                }
-            }
-            if let Some(effort) = &config.reasoning_effort {
-                let option = crate::models::option(&response, "thought_level")
-                    .ok_or_else(|| RpcError::invalid_params("This agent does not advertise reasoning effort"))?;
-                if !crate::models::choices(option).iter().any(|o| o["value"].as_str() == Some(effort)) {
-                    return Err(RpcError::invalid_params("Unsupported reasoning effort for this agent/model"));
-                }
-                rpc.request("session/set_config_option", json!({"sessionId":remote,"configId":option["id"],"value":effort}), Some(SETUP_TIMEOUT)).await?;
-            }
-            Ok::<_, RpcError>((remote, crate::models::catalog(&agent.id, &agent.name, &response)))
-        }.await;
-        let (remote, models) = match setup {
-            Ok(result) => result,
-            Err(e) => {
-                client.state.lock().unwrap().closing = true;
-                rpc.kill(CLOSE_GRACE).await;
-                let hint = if e.is_auth_required() {
-                    " Sign in using the agent's own CLI, then retry."
-                } else {
-                    ""
-                };
-                return Err(AgentError::Backend(format!("{}: {e}.{hint}", agent.name)));
-            }
-        };
-        let id = SessionId::new(format!(
-            "acp:{}",
-            serde_json::to_string(&(&agent.id, &remote)).unwrap()
-        ));
-        let live = Arc::new(Live {
-            models,
-            rpc,
-            client,
-            remote,
-        });
+        let (id, live, history) = spawn_live(agent, &config, saved.as_ref(), model).await?;
+        let events = live.client.events.clone();
         self.sessions.lock().unwrap().insert(id.clone(), live);
-        guard.0 = None;
-        Ok(SessionHandle::new(id, Provider::Acp, events))
+        Ok(SessionHandle::new(id, Provider::Acp, events).with_history(history))
     }
 }
 
@@ -367,22 +458,35 @@ impl AgentBackend for AcpBackend {
     }
     async fn list_models(&self, cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
         let agents = self.agents.clone().unwrap_or_else(|| registry::load().0);
-        let mut models = Vec::new();
-        for agent in agents.into_iter().filter(|a| a.resolve().is_some()) {
-            let config = SessionConfig {
-                cwd: cwd.into(),
-                model: Some(agent.id.clone()),
-                reasoning_effort: None,
-                service_tier: None,
-                provider: Provider::Acp,
-                permission_mode: PermissionMode::Ask,
-            };
-            match self.open(config, None).await {
-                Ok(handle) => {
-                    models.extend(self.live(&handle.id)?.models.clone());
-                    self.close(&handle.id).await?;
+        let mut slots: Vec<Option<Vec<ModelInfo>>> = Vec::new();
+        // Probes run in parallel and do not hold `opening`, so a slow agent
+        // never delays opening a chat.
+        let mut probes = tokio::task::JoinSet::new();
+        for agent in agents {
+            let Some(program) = agent.resolve() else { continue };
+            let key = format!(
+                "{}\0{}",
+                serde_json::to_string(&agent).unwrap_or_default(),
+                program.display()
+            );
+            let index = slots.len();
+            slots.push(self.model_cache.lock().unwrap().get(&key).cloned());
+            if slots[index].is_none() {
+                let cwd = cwd.to_path_buf();
+                probes.spawn(async move {
+                    let result = probe_models(agent.clone(), cwd).await;
+                    (index, key, agent, result)
+                });
+            }
+        }
+        while let Some(joined) = probes.join_next().await {
+            let (index, key, agent, result) = joined.map_err(|e| AgentError::Backend(e.to_string()))?;
+            slots[index] = Some(match result {
+                Ok(models) => {
+                    self.model_cache.lock().unwrap().insert(key, models.clone());
+                    models
                 }
-                Err(error) => models.push(ModelInfo {
+                Err(error) => vec![ModelInfo {
                     id: agent.id,
                     name: agent.name,
                     description: format!("Agent default · {error}"),
@@ -390,9 +494,10 @@ impl AgentBackend for AcpBackend {
                     default_effort: None,
                     is_default: false,
                     fast_tier: None,
-                }),
-            }
+                }],
+            });
         }
+        let mut models: Vec<ModelInfo> = slots.into_iter().flatten().flatten().collect();
         if let Some(first) = models.first_mut() {
             first.is_default = true;
         }
@@ -462,7 +567,7 @@ impl AgentBackend for AcpBackend {
                 return Ok(());
             };
             state.cancelled = true;
-            state.approvals.clear();
+            live.client.emit(retire_approvals(&mut state.approvals));
             live.rpc
                 .notify("session/cancel", json!({"sessionId":live.remote}));
             turn
@@ -510,14 +615,7 @@ impl AgentBackend for AcpBackend {
     async fn close(&self, id: &SessionId) -> Result<()> {
         let live = self.sessions.lock().unwrap().remove(id);
         if let Some(live) = live {
-            {
-                let mut state = live.client.state.lock().unwrap();
-                state.closing = true;
-                state.approvals.clear();
-                live.client
-                    .emit(state.translator.end_turn(TurnStatus::Interrupted));
-            }
-            live.rpc.kill(CLOSE_GRACE).await;
+            live.retire().await;
         }
         Ok(())
     }

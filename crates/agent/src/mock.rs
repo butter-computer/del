@@ -37,6 +37,11 @@ pub struct MockBackend {
     completion_delay: Duration,
     #[cfg(test)]
     pub title_response: Option<String>,
+    /// Provider-owned name and the sessions it was read for.
+    #[cfg(test)]
+    pub session_title: Option<String>,
+    #[cfg(test)]
+    pub session_title_reads: Arc<Mutex<Vec<SessionId>>>,
     sessions: Arc<Mutex<HashMap<SessionId, Arc<SessionState>>>>,
 }
 
@@ -48,6 +53,10 @@ impl MockBackend {
             completion_delay: Duration::ZERO,
             #[cfg(test)]
             title_response: None,
+            #[cfg(test)]
+            session_title: None,
+            #[cfg(test)]
+            session_title_reads: Default::default(),
             sessions: Default::default(),
         }
     }
@@ -140,6 +149,28 @@ async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, del
             },
         );
         status = TurnStatus::Failed;
+    } else if lower.contains("withdraw") {
+        // The provider settles both requests itself, without our answer.
+        for n in 1..=2 {
+            emit(
+                &state,
+                AgentEvent::ApprovalRequested {
+                    id: format!("appr-{turn_id}-{n}"),
+                    kind: ApprovalKind::Command,
+                    detail: "ls".into(),
+                },
+            );
+        }
+        for n in 1..=2 {
+            pause().await;
+            emit(
+                &state,
+                AgentEvent::ApprovalResolved {
+                    id: format!("appr-{turn_id}-{n}"),
+                },
+            );
+        }
+        full.push_str("Never mind.");
     } else if lower.contains("approve") {
         let id = format!("call-{turn_id}");
         let approval = format!("appr-{turn_id}");
@@ -280,6 +311,16 @@ impl AgentBackend for MockBackend {
         Ok(self.title_response.clone())
     }
 
+    #[cfg(test)]
+    async fn session_title(
+        &self,
+        session: &SessionId,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<String>> {
+        self.session_title_reads.lock().unwrap().push(session.clone());
+        Ok(self.session_title.clone())
+    }
+
     async fn start_session(&self, _config: SessionConfig) -> Result<SessionHandle> {
         let id = SessionId::new(format!("mock-{}", uuid::Uuid::new_v4()));
         let handle = self.register(id.clone());
@@ -293,7 +334,7 @@ impl AgentBackend for MockBackend {
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
         let state = self.get(session)?;
         let mut inner = state.inner.lock().unwrap();
-        if inner.task.is_some() {
+        if inner.task.as_ref().is_some_and(|t| !t.is_finished()) {
             return Err(AgentError::Busy("a turn is already running".into()));
         }
         inner.turns += 1;

@@ -14,6 +14,7 @@ pub struct Readiness {
 impl Readiness {
     pub fn new(runtime: &tokio::runtime::Handle, manager: SessionManager) -> Self {
         let (config, mut rx) = watch::channel::<Option<SessionConfig>>(None);
+        let manager_for_updates = manager.clone();
         let mut update_rx = rx.clone();
         let preparation = runtime.spawn(async move {
             loop {
@@ -36,20 +37,29 @@ impl Readiness {
         let updates = runtime.spawn(async move {
             loop {
                 let selected = update_rx.borrow_and_update().clone();
-                if let Some(config) = selected
-                    && let Err(error) = crate::provider_updates::ensure_provider(
+                let mut wait = Duration::from_secs(30 * 60);
+                if let Some(config) = selected {
+                    // Replacing a harness under a running chat or terminal can
+                    // break it mid-turn. Try again later.
+                    if crate::provider_updates::provider_in_use(
+                        &manager_for_updates,
+                        config.provider,
+                    ) {
+                        wait = Duration::from_secs(5 * 60);
+                    } else if let Err(error) = crate::provider_updates::ensure_provider(
                         config.provider,
                         config.model,
                         |_| {},
                     )
                     .await
-                {
-                    // Update failures must not prevent a working CLI from chatting.
-                    eprintln!("[del update] background check failed: {error}");
+                    {
+                        // Update failures must not prevent a working CLI from chatting.
+                        eprintln!("[del update] background check failed: {error}");
+                    }
                 }
                 tokio::select! {
                     result = update_rx.changed() => if result.is_err() { break; },
-                    _ = tokio::time::sleep(Duration::from_secs(30 * 60)) => {},
+                    _ = tokio::time::sleep(wait) => {},
                 }
             }
         });

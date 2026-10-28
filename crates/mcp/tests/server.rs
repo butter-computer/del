@@ -88,9 +88,23 @@ async fn binds_loopback_and_rejects_foreign_origin_and_host() {
     let mut h = auth(&e.me);
     h.push(("Origin".into(), "https://evil.example".into()));
     assert_eq!(post(&e.me.url, h, body.clone()).await.0, 403);
+    // Another loopback port (a local dev server page) is a foreign origin.
     let mut h = auth(&e.me);
     h.push(("Origin".into(), "http://localhost:3000".into()));
-    assert_eq!(post(&e.me.url, h, body.clone()).await.0, 200);
+    assert_eq!(post(&e.me.url, h, body.clone()).await.0, 403);
+    let mut h = auth(&e.me);
+    h.push(("Origin".into(), "http://localhost".into()));
+    assert_eq!(post(&e.me.url, h, body.clone()).await.0, 403);
+    let port = e.server.addr().port();
+    for origin in [
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://[::1]:{port}"),
+    ] {
+        let mut h = auth(&e.me);
+        h.push(("Origin".into(), origin.clone()));
+        assert_eq!(post(&e.me.url, h, body.clone()).await.0, 200, "{origin}");
+    }
     let mut h = auth(&e.me);
     h.push(("Host".into(), "evil.example".into()));
     assert_eq!(post(&e.me.url, h, body).await.0, 403);
@@ -239,21 +253,20 @@ async fn list_and_summary() {
     let e = env().await;
     e.host.add_session("other", Provider::Codex);
     let r = call(&e.me, "list_sessions", json!({})).await;
+    // Sessions outside the caller's spawn family are neither listed nor readable.
     let rows = r["result"]["structuredContent"]["sessions"]
         .as_array()
         .unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["is_self"], true);
-    assert_eq!(rows[1]["is_self"], false);
-    assert_eq!(rows[1]["provider"], "codex");
-    let r = call(&e.me, "get_session_summary", json!({"session_id":"other"})).await;
-    assert_eq!(
-        r["result"]["structuredContent"]["last_output"],
-        "output of other"
-    );
+    assert!(is_error(
+        &call(&e.me, "get_session_summary", json!({"session_id":"other"})).await
+    ));
     assert!(is_error(
         &call(&e.me, "get_session_summary", json!({"session_id":"ghost"})).await
     ));
+    let r = call(&e.me, "get_session_summary", json!({"session_id":"me"})).await;
+    assert_eq!(r["result"]["structuredContent"]["last_output"], "output of me");
 }
 
 #[tokio::test]
@@ -341,9 +354,86 @@ async fn spawn_limit_enforced() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let args = json!({"provider":"claude","cwd":dir.path(),"prompt":"x"});
-    assert!(!is_error(&call(&e.me, "spawn_session", args.clone()).await));
-    assert!(!is_error(&call(&e.me, "spawn_session", args.clone()).await));
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        let r = call(&e.me, "spawn_session", args.clone()).await;
+        assert!(!is_error(&r));
+        // The launcher registers each live child.
+        let child = SessionId::new(r["result"]["structuredContent"]["id"].as_str().unwrap());
+        e.server.register_session(&child);
+        children.push(child);
+    }
+    assert!(is_error(&call(&e.me, "spawn_session", args.clone()).await));
+    // An exited (revoked) child frees its slot; quotas count live children.
+    e.server.revoke_session(&children[0]);
+    let r = call(&e.me, "spawn_session", args.clone()).await;
+    assert!(!is_error(&r));
+    let third = SessionId::new(r["result"]["structuredContent"]["id"].as_str().unwrap());
+    e.server.register_session(&third);
     assert!(is_error(&call(&e.me, "spawn_session", args).await));
+}
+
+#[tokio::test]
+async fn forgotten_sessions_lose_family_access() {
+    let e = env().await;
+    let dir = tempfile::tempdir().unwrap();
+    let r = call(
+        &e.me,
+        "spawn_session",
+        json!({"provider":"codex","cwd":dir.path(),"prompt":"x"}),
+    )
+    .await;
+    let child = SessionId::new(r["result"]["structuredContent"]["id"].as_str().unwrap());
+    let child_creds = e.server.register_session(&child);
+    let rows = call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]
+        ["sessions"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(rows, 2);
+    assert!(!is_error(
+        &call(&child_creds, "get_session_summary", json!({"session_id":"me"})).await
+    ));
+    e.server.forget_session(&child);
+    let rows = call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]
+        ["sessions"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(rows, 1);
+    assert!(is_error(
+        &call(
+            &e.me,
+            "send_to_session",
+            json!({"session_id":child.as_str(),"text":"x"})
+        )
+        .await
+    ));
+}
+
+#[tokio::test]
+async fn browser_targets_are_limited_to_the_spawn_family() {
+    let e = env().await;
+    e.host.add_session("other", Provider::Codex);
+    let r = call(
+        &e.me,
+        "browser",
+        json!({"action":"snapshot","session_id":"other"}),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("session_id must be your own session")
+    );
+    // Own session passes the server check and reaches the host.
+    let r = call(&e.me, "browser", json!({"action":"snapshot","session_id":"me"})).await;
+    assert_eq!(
+        r["result"]["content"][0]["text"],
+        "This host has no browser"
+    );
 }
 
 #[tokio::test]
@@ -669,6 +759,44 @@ async fn chat_browser_credentials_cannot_call_session_or_notification_tools() {
     e.server.revoke_session(&id);
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
     assert_eq!(post(&credential.url, auth(&credential), body).await.0, 401);
+}
+
+#[tokio::test]
+async fn chat_browser_credentials_are_bound_to_their_chat() {
+    let e = env().await;
+    let text = |r: &Value| r["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+    let snapshot = |session: &str| json!({"action":"snapshot","session_id":session});
+    let a = e.server.register_browser_client(&SessionId::new("chat-a"));
+    let denied = call(&a, "browser", snapshot("chat-b")).await;
+    assert!(text(&denied).contains("session_id must be your own session"));
+    assert_eq!(text(&call(&a, "browser", snapshot("chat-a")).await), "This host has no browser");
+
+    // A provisional credential becomes the chat's once its id is known.
+    let pending = SessionId::new("pending");
+    let b = e.server.register_browser_client(&pending);
+    e.server.rebind_session(&pending, &SessionId::new("chat-b"));
+    assert_eq!(text(&call(&b, "browser", snapshot("chat-b")).await), "This host has no browser");
+    assert!(text(&call(&b, "browser", snapshot("pending")).await).contains("own session"));
+    assert!(text(&call(&b, "browser", snapshot("chat-a")).await).contains("own session"));
+    let list = rpc(&b, "tools/list", json!({})).await;
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
+    e.server.revoke_session(&SessionId::new("chat-b"));
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(post(&b.url, auth(&b), body.clone()).await.0, 401);
+    assert_eq!(post(&a.url, auth(&a), body).await.0, 200);
+
+    // A shared credential reaches exactly its member chats.
+    let group = SessionId::new("workspace");
+    let shared = e.server.register_shared_browser_client(&group);
+    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), true);
+    assert_eq!(
+        text(&call(&shared, "browser", snapshot("chat-a")).await),
+        "This host has no browser"
+    );
+    assert!(text(&call(&shared, "browser", snapshot("chat-b")).await).contains("chats this credential serves"));
+    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), false);
+    assert!(text(&call(&shared, "browser", snapshot("chat-a")).await).contains("chats this credential serves"));
+    assert!(is_error(&call(&shared, "list_sessions", json!({})).await));
 }
 
 #[tokio::test]

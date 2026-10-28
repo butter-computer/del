@@ -56,8 +56,24 @@ impl Translator {
     }
 
     /// Note that an interrupt was requested so the aborted result maps to `Interrupted`.
-    pub fn mark_interrupting(&mut self) {
+    pub fn mark_interrupting(&mut self) -> Vec<AgentEvent> {
         self.interrupting = true;
+        // The CLI abandons its permission prompts when interrupted.
+        self.drop_approvals()
+    }
+
+    /// The interrupt never reached the CLI; forget it.
+    pub fn unmark_interrupting(&mut self) {
+        self.interrupting = false;
+    }
+
+    /// Forget every pending prompt, retiring its card.
+    fn drop_approvals(&mut self) -> Vec<AgentEvent> {
+        let mut ids: Vec<String> = self.approvals.drain().map(|(id, _)| id).collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| AgentEvent::ApprovalResolved { id })
+            .collect()
     }
 
     /// Build the `control_response` line answering a pending `can_use_tool` request.
@@ -83,17 +99,18 @@ impl Translator {
 
     /// The process died: fail the running turn so consumers do not hang.
     pub fn abort(&mut self) -> Vec<AgentEvent> {
-        let out = self
-            .turns
-            .pop_front()
-            .map(|turn_id| AgentEvent::TurnCompleted {
-                turn_id,
-                status: TurnStatus::Failed,
-            });
+        let mut out = self.drop_approvals();
+        out.extend(
+            self.turns
+                .pop_front()
+                .map(|turn_id| AgentEvent::TurnCompleted {
+                    turn_id,
+                    status: TurnStatus::Failed,
+                }),
+        );
         self.turns.clear();
         self.consumed_inputs = 0;
-        self.approvals.clear();
-        out.into_iter().collect()
+        out
     }
 
     fn turn(&self) -> String {
@@ -105,7 +122,12 @@ impl Translator {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
-        if let Some(event) = crate::goals::record(&v) {
+        self.handle_value(&v)
+    }
+
+    /// Translate one already-parsed stdout record.
+    pub fn handle_value(&mut self, v: &Value) -> Vec<AgentEvent> {
+        if let Some(event) = crate::goals::record(v) {
             return vec![event];
         }
         // Acknowledgements are native local-command records, never inferred
@@ -148,9 +170,18 @@ impl Translator {
             }
             Some("stream_event") => self.stream_event(&v["event"]),
             Some("assistant") => self.assistant(&v["message"]),
-            Some("user") => self.user(&v),
-            Some("control_request") => self.control_request(&v),
-            Some("result") => self.result(&v),
+            Some("user") => self.user(v),
+            Some("control_request") => self.control_request(v),
+            Some("control_cancel_request") => {
+                // The CLI withdrew a permission prompt; an answer would be stale.
+                match v["request_id"].as_str() {
+                    Some(id) if self.approvals.remove(id).is_some() => {
+                        vec![AgentEvent::ApprovalResolved { id: id.to_owned() }]
+                    }
+                    _ => vec![],
+                }
+            }
+            Some("result") => self.result(v),
             _ => vec![],
         });
         events
@@ -312,6 +343,8 @@ impl Translator {
                 recoverable: true,
             });
         }
+        // Prompts belong to the turn that is ending.
+        out.extend(self.drop_approvals());
         out.push(AgentEvent::TurnCompleted {
             turn_id: self.turn(),
             status,
@@ -435,4 +468,41 @@ fn patch_text(patch: &Value) -> Option<String> {
         }
     }
     Some(s)
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    fn ask(t: &mut Translator, id: &str) {
+        t.handle_value(&json!({"type":"control_request","request_id":id,
+            "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}));
+    }
+
+    #[test]
+    fn withdrawn_finished_and_interrupted_prompts_cannot_be_answered() {
+        let mut t = Translator::new();
+        t.enqueue_turn("t".into());
+        let resolved = |id: &str| AgentEvent::ApprovalResolved { id: id.into() };
+        ask(&mut t, "a");
+        let cancel = json!({"type":"control_cancel_request","request_id":"a"});
+        assert_eq!(t.handle_value(&cancel), vec![resolved("a")]);
+        assert!(t.approval_reply("a", ApprovalResponse::Approve).is_none());
+        // A repeated or unknown cancel retires nothing.
+        assert!(t.handle_value(&cancel).is_empty());
+
+        ask(&mut t, "b");
+        let evs = t.handle_value(&json!({"type":"result","usage":{}}));
+        let at = evs.iter().position(|e| *e == resolved("b")).unwrap();
+        assert!(matches!(evs[at + 1], AgentEvent::TurnCompleted { .. }));
+        assert!(t.approval_reply("b", ApprovalResponse::Approve).is_none());
+
+        t.enqueue_turn("u".into());
+        ask(&mut t, "c");
+        assert_eq!(t.mark_interrupting(), vec![resolved("c")]);
+        assert!(t.approval_reply("c", ApprovalResponse::Deny).is_none());
+
+        ask(&mut t, "d");
+        assert_eq!(t.abort()[0], resolved("d"));
+    }
 }

@@ -179,6 +179,8 @@ async fn replays_command_and_file_change_with_approvals() {
         seen.iter()
             .any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "done"))
     );
+    // Both were answered before the server reported them resolved.
+    assert!(!seen.iter().any(|e| matches!(e, AgentEvent::ApprovalResolved { .. })));
     assert!(matches!(
         seen.last(),
         Some(AgentEvent::TurnCompleted {
@@ -252,12 +254,19 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         HANDSHAKE[2],
         ACCOUNT_OK[0],
         ACCOUNT_OK[1],
-        r#"> {"id":3,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":3,"result":{"thread":{"id":"saved","name":"Build a smooth sidebar","preview":"hello"}}}"#,
+        r#"> {"id":3,"method":"thread/resume","params":{"threadId":"saved"}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[]}}}"#,
+        r#"> {"id":30,"method":"thread/goal/get","params":{"threadId":"saved"}}"#,
+        r#"< {"id":30,"result":{"goal":null}}"#,
         r#"> {"id":4,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":4,"result":{"thread":{"id":"saved","name":"Renamed in Codex","preview":"hello"}}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"saved","name":"Build a smooth sidebar","preview":"hello"}}}"#,
+        // New activity, after which the provider's name is worth asking for again.
+        r#"> {"id":40,"method":"turn/start","params":{"threadId":"saved","input":[{"type":"text","text":"next"}]}}"#,
+        r#"< {"id":40,"result":{"turn":{"id":"next"}}}"#,
+        r#"< {"method":"turn/started","params":{"threadId":"saved","turn":{"id":"next"}}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"saved","turn":{"id":"next","status":"completed"}}}"#,
         r#"> {"id":5,"method":"thread/read","params":{"threadId":"saved","includeTurns":false}}"#,
-        r#"< {"id":5,"result":{"thread":{"id":"saved","name":null,"preview":"hello"}}}"#,
+        r#"< {"id":5,"result":{"thread":{"id":"saved","name":"Renamed in Codex","preview":"hello"}}}"#,
     ]);
     let (client, rx, server) = replay(lines);
     let backend = std::sync::Arc::new(CodexBackend::attach(opts(), client, rx).await.unwrap());
@@ -285,19 +294,41 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         .unwrap();
     let manager =
         SessionManager::new(&path, [backend as std::sync::Arc<dyn AgentBackend>]).unwrap();
+    // Titles are only read for live sessions; never resume one just for its name.
+    manager.resume(&id).await.unwrap();
+    let (_, mut events) = manager.subscribe_with_history(&id).unwrap();
+    let order = |m: &SessionManager| {
+        m.list_sessions()
+            .iter()
+            .map(|r| (r.id.clone(), r.updated_at_ms))
+            .collect::<Vec<_>>()
+    };
+    let before = order(&manager);
     assert!(manager.refresh_titles().await.unwrap());
     assert_eq!(
         manager.list_sessions()[0].title.as_deref(),
         Some("Build a smooth sidebar")
     );
-    assert!(manager.refresh_titles().await.unwrap());
+    assert_eq!(order(&manager), before, "a rename must not reorder chats");
+    // Without new activity the provider is not asked again.
     assert!(!manager.refresh_titles().await.unwrap());
+    manager
+        .send_prompt(&id, UserInput::text("next"))
+        .await
+        .unwrap();
+    until_turn_end(&mut events).await;
+    manager.flush_index().await;
+    let before = order(&manager);
+    assert!(manager.refresh_titles().await.unwrap());
+    assert_eq!(order(&manager), before, "a rename must not reorder chats");
+    assert!(!manager.refresh_titles().await.unwrap());
+    manager.flush_index().await;
     let saved = del_agent::index::SessionIndex::open(&path)
         .unwrap()
         .list()
         .remove(0);
     assert_eq!(saved.title.as_deref(), Some("Renamed in Codex"));
-    assert_eq!(saved.updated_at_ms, record.updated_at_ms);
+    assert_eq!(saved.updated_at_ms, before[0].1);
     assert_eq!(saved.status, SessionStatus::Idle);
     manager.shutdown().await;
     server.await.unwrap().unwrap();
@@ -506,6 +537,121 @@ async fn steer_and_interrupt_use_the_active_turn_id() {
     server.await.unwrap().unwrap();
 }
 
+#[derive(Default)]
+struct RecordedCredentials(std::sync::Mutex<Vec<String>>);
+
+impl del_agent::backend::BrowserCredentials for RecordedCredentials {
+    fn mint(&self, session: &SessionId) -> std::io::Result<String> {
+        self.0.lock().unwrap().push(format!("mint {session}"));
+        Ok(format!("token-{session}"))
+    }
+    fn rebind(&self, from: &SessionId, to: &SessionId) {
+        self.0.lock().unwrap().push(format!("rebind {from} {to}"));
+    }
+    fn revoke(&self, session: &SessionId) {
+        self.0.lock().unwrap().push(format!("revoke {session}"));
+    }
+    fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+        unreachable!("Codex binds every credential to one thread")
+    }
+    fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+}
+
+#[tokio::test]
+async fn browser_credentials_are_bound_to_each_thread() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"thread/start","params":{}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"t2"}}}"#,
+        r#"> {"id":5,"method":"thread/unsubscribe","params":{"threadId":"t1"}}"#,
+        r#"< {"id":5,"result":{}}"#,
+        r#"> {"id":6,"method":"thread/resume","params":{"threadId":"t1"}}"#,
+        r#"< {"id":6,"result":{"thread":{"id":"t1","turns":[]}}}"#,
+        r#"> {"id":7,"method":"thread/goal/get","params":{"threadId":"t1"}}"#,
+        r#"< {"id":7,"result":{"goal":null}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let credentials = std::sync::Arc::new(RecordedCredentials::default());
+    backend.set_browser_tools(del_agent::backend::BrowserTools {
+        url: "http://127.0.0.1:1/mcp".into(),
+        credentials: credentials.clone(),
+        claude_session_config: None,
+        question: None,
+    });
+    let first = backend.start_session(config()).await.unwrap();
+    let second = backend.start_session(config()).await.unwrap();
+    backend.close(&first.id).await.unwrap();
+    // A resumed thread's id is known up front.
+    backend.resume(config(), &first.id).await.unwrap();
+    let log = credentials.0.lock().unwrap().clone();
+    assert_eq!(log.len(), 6, "{log:?}");
+    assert_eq!(log[5], "mint t1");
+    // Each new thread gets its own provisional credential, rebound to its id.
+    let provisional: Vec<_> = log[..5]
+        .iter()
+        .filter_map(|line| line.strip_prefix("mint "))
+        .collect();
+    assert_eq!(provisional.len(), 2);
+    assert_ne!(provisional[0], provisional[1]);
+    assert_eq!(log[1], format!("rebind {} {}", provisional[0], first.id));
+    assert_eq!(log[3], format!("rebind {} {}", provisional[1], second.id));
+    assert_eq!(log[4], "revoke t1");
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn server_resolved_approval_retires_the_card() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":4,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+        r#"< {"id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}}"#,
+        r#"< {"method":"serverRequest/resolved","params":{"threadId":"t1","requestId":7}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"interrupted","items":[]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let h = backend.start_session(config()).await.unwrap();
+    let mut ev = h.subscribe();
+    backend
+        .send_prompt(&h.id, UserInput::text("go"))
+        .await
+        .unwrap();
+    let evs = until_turn_end(&mut ev).await;
+    let requested = evs
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ApprovalRequested { id, .. } if id == "7"))
+        .expect("approval requested");
+    let resolved = evs
+        .iter()
+        .position(|e| *e == AgentEvent::ApprovalResolved { id: "7".into() })
+        .expect("approval resolved");
+    assert!(requested < resolved);
+    // The request is gone, so a late answer is refused instead of sent.
+    assert!(
+        backend
+            .respond_approval(&h.id, "7", ApprovalResponse::Approve)
+            .await
+            .is_err()
+    );
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn failed_turn_and_unsupported_request() {
     let lines = script(&[
@@ -552,6 +698,33 @@ async fn failed_turn_and_unsupported_request() {
             ..
         }
     ));
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn rejected_turn_start_does_not_block_the_next_prompt() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":4,"error":{"code":-32600,"message":"nope"}}"#,
+        r#"> {"id":5,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":5,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let h = backend.start_session(config()).await.unwrap();
+    assert!(backend.send_prompt(&h.id, UserInput::text("go")).await.is_err());
+    backend
+        .send_prompt(&h.id, UserInput::text("go"))
+        .await
+        .unwrap();
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

@@ -94,8 +94,10 @@ fn edit_transcript_maps_tools_approvals_and_file_changes() {
         evs.iter()
             .any(|e| matches!(e, E::AssistantMessage { text, .. } if text.contains("world")))
     );
+    // The replay never answers the prompts, so the result retires both.
     let n = evs.len();
-    assert!(matches!(evs[n - 2], E::TokenUsage { output, .. } if output > 0));
+    assert!(matches!(evs[n - 4], E::TokenUsage { output, .. } if output > 0));
+    assert!(evs[n - 3..n - 1].iter().all(|e| matches!(e, E::ApprovalResolved { .. })));
     assert_eq!(
         evs[n - 1],
         E::TurnCompleted {

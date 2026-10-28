@@ -5,11 +5,35 @@ use del_agent::{Provider, SessionRecord};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, VecDeque}, io::{BufRead, Write}, path::PathBuf};
 
+/// One journal line. Older lines carried the whole reply; new lines identify it by
+/// ordinal plus a short prefix and a stable fingerprint of the text.
 #[derive(Serialize, Deserialize)]
 pub struct Saved {
     ordinal: usize,
-    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash: Option<u64>,
     milliseconds: i64,
+}
+
+impl Saved {
+    fn matches(&self, text: &str) -> bool {
+        match (&self.text, self.hash) {
+            (Some(saved), _) => saved == text,
+            (None, Some(hash)) => {
+                hash == fingerprint(text) && self.prefix.as_deref().is_none_or(|prefix| text.starts_with(prefix))
+            }
+            (None, None) => false,
+        }
+    }
+}
+
+/// FNV-1a: stable across builds, unlike `DefaultHasher`.
+fn fingerprint(text: &str) -> u64 {
+    text.bytes().fold(0xcbf29ce484222325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3))
 }
 
 fn path(id: &str) -> Option<PathBuf> {
@@ -17,14 +41,27 @@ fn path(id: &str) -> Option<PathBuf> {
     Some(del_agent::data_dir()?.join("reply-times").join(format!("{name}.jsonl")))
 }
 
-pub fn save(id: &str, model: &ChatModel, ix: usize, time: DateTime<Local>) -> std::io::Result<()> {
-    let Some(path) = path(id) else { return Ok(()) };
-    let Some(Block::Assistant { text, .. }) = model.blocks.get(ix) else { return Ok(()) };
+/// The record for reply `ix`; cheap enough for the UI thread. Write it with [`append`].
+pub fn entry(model: &ChatModel, ix: usize, time: DateTime<Local>) -> Option<Saved> {
+    let Some(Block::Assistant { text, .. }) = model.blocks.get(ix) else { return None };
     let ordinal = model.blocks[..ix].iter().filter(|b| matches!(b, Block::Assistant { .. })).count();
+    Some(Saved {
+        ordinal,
+        text: None,
+        prefix: Some(text.chars().take(48).collect()),
+        hash: Some(fingerprint(text)),
+        milliseconds: time.timestamp_millis(),
+    })
+}
+
+/// File IO; run off the UI thread. One write per record keeps concurrent appends whole.
+pub fn append(id: &str, entry: &Saved) -> std::io::Result<()> {
+    let Some(path) = path(id) else { return Ok(()) };
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
     std::fs::create_dir_all(path.parent().unwrap())?;
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, &Saved { ordinal, text: text.clone(), milliseconds: time.timestamp_millis() })?;
-    file.write_all(b"\n")
+    file.write_all(&line)
 }
 
 #[derive(Default)]
@@ -39,7 +76,7 @@ impl History {
             if let Block::Assistant { text, .. } = block { Some((ix, text)) } else { None }
         }).enumerate() {
             let native = self.native.get_mut(text).and_then(VecDeque::pop_front);
-            let saved = self.saved.iter().rev().find(|entry| entry.ordinal == ordinal && &entry.text == text)
+            let saved = self.saved.iter().rev().find(|entry| entry.ordinal == ordinal && entry.matches(text))
                 .and_then(|entry| DateTime::from_timestamp_millis(entry.milliseconds)).map(|time| time.with_timezone(&Local));
             if let Some(time) = saved.or(native) { times.insert(ix, time); }
         }
@@ -135,10 +172,21 @@ mod tests {
         let times = History { native: read_native(input.as_bytes()), ..Default::default() }.restore(&model);
         assert_eq!(times.len(), 2);
         assert_eq!((times[&1] - times[&0]).num_seconds(), 3600);
-        let saved = Saved { ordinal: 1, text: "Hi".into(), milliseconds: times[&1].timestamp_millis() };
+        let saved = entry(&model, 1, times[&1]).unwrap();
         let encoded = serde_json::to_string(&saved).unwrap();
+        assert!(!encoded.contains("\"text\""), "journal lines no longer carry the reply: {encoded}");
         let restored = History { saved: vec![serde_json::from_str(&encoded).unwrap()], ..Default::default() }.restore(&model);
         assert_eq!(restored.get(&1), times.get(&1));
         assert!(!restored.contains_key(&0));
+        // Older journals stored the whole reply and remain readable.
+        let legacy: Saved = serde_json::from_str(&format!("{{\"ordinal\":0,\"text\":\"Hi\",\"milliseconds\":{}}}", times[&0].timestamp_millis())).unwrap();
+        let restored = History { saved: vec![legacy], ..Default::default() }.restore(&model);
+        assert_eq!(restored.get(&0), times.get(&0));
+        // A fingerprint for different text never matches.
+        let other: Saved = serde_json::from_str(&serde_json::to_string(&entry(&model, 0, times[&0]).unwrap()).unwrap().replace("\"ordinal\":0", "\"ordinal\":1")).unwrap();
+        let mut changed = ChatModel::default();
+        changed.apply(&del_agent::AgentEvent::AssistantMessage { turn_id: "a".into(), text: "Hi".into() });
+        changed.apply(&del_agent::AgentEvent::AssistantMessage { turn_id: "b".into(), text: "Hi there".into() });
+        assert!(History { saved: vec![other], ..Default::default() }.restore(&changed).is_empty());
     }
 }

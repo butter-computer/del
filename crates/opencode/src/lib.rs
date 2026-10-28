@@ -16,12 +16,22 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::sync::{OnceCell, broadcast};
+
+/// Event-stream reconnection: first delay, ceiling, and attempts before giving up.
+const RECONNECT_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+const RECONNECT_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+const RECONNECT_ATTEMPTS: u32 = 10;
+/// Resume pagination stops after this many pages even if the server keeps paging.
+const MAX_HISTORY_PAGES: usize = 500;
 
 #[derive(Default)]
 pub struct OpenCodeBackend {
     environment: Vec<(String, String)>,
-    servers: AsyncMutex<HashMap<PathBuf, Arc<Server>>>,
+    /// One server per workspace. The cell lets concurrent callers for the same
+    /// workspace share a single startup without holding the map lock across it
+    /// (or blocking other workspaces).
+    servers: Mutex<HashMap<PathBuf, Arc<OnceCell<Arc<Server>>>>>,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
     tools: Mutex<Option<backend::BrowserTools>>,
 }
@@ -38,33 +48,111 @@ struct Live {
     forms: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
+/// Stream work queued for in-order delivery to subscribers.
+enum Queued {
+    /// A turn's file diff, fetched off the reader; delivered before the turn ends.
+    Diffs(tokio::task::JoinHandle<Vec<AgentEvent>>),
+    /// Mapped events and the durable sequence they advance to.
+    Events(Vec<AgentEvent>, Option<u64>),
+    Closed,
+}
 impl Live {
+    fn stop_tasks(&self) {
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+        for (_, task) in self.forms.lock().unwrap().drain() {
+            task.abort();
+        }
+    }
     fn emit(&self, events: impl IntoIterator<Item = AgentEvent>) {
         for event in events {
             let _ = self.events.send(event);
         }
     }
 }
+/// Percent-encode one URL path segment (provider ids are opaque strings).
+pub(crate) fn seg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
 fn err(message: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {message}"))
+}
+/// `Path::canonicalize` off the async runtime's worker threads.
+async fn canonicalize(path: &Path) -> Result<PathBuf> {
+    let path = path.to_path_buf();
+    Ok(tokio::task::spawn_blocking(move || path.canonicalize())
+        .await
+        .map_err(|e| err(format!("canonicalize task failed: {e}")))??)
 }
 impl OpenCodeBackend {
     pub fn with_environment(environment: Vec<(String, String)>) -> Self { { let mut backend = Self::default(); backend.environment = environment; backend } }
     async fn server(&self, cwd: &Path) -> Result<Arc<Server>> {
-        let cwd = cwd.canonicalize()?;
-        let mut servers = self.servers.lock().await;
-        if let Some(server) = servers.get(&cwd) {
-            return Ok(server.clone());
+        let cwd = canonicalize(cwd).await?;
+        let cell = {
+            let mut servers = self.servers.lock().unwrap();
+            let crashed = servers
+                .get(&cwd)
+                .and_then(|cell| cell.get())
+                .is_some_and(|server| !server.is_alive());
+            if crashed {
+                // Crashed: start a fresh server rather than reuse a dead address.
+                if let Some(server) = servers.remove(&cwd).and_then(|cell| cell.get().cloned()) {
+                    self.retire_browser(&server);
+                }
+            }
+            servers.entry(cwd.clone()).or_default().clone()
+        };
+        // Browser tools are installed per session by `install_tools`.
+        cell.get_or_try_init(|| async {
+            Ok(Arc::new(Server::start(&cwd, &self.environment).await?))
+        })
+        .await
+        .cloned()
+    }
+    /// The workspace's server only if it is already running; never starts one.
+    async fn running_server(&self, cwd: &Path) -> Option<Arc<Server>> {
+        let cwd = canonicalize(cwd).await.ok()?;
+        let cell = self.servers.lock().unwrap().get(&cwd).cloned()?;
+        cell.get().filter(|server| server.is_alive()).cloned()
+    }
+    /// Revoke the browser credential of a server that is going away.
+    fn retire_browser(&self, server: &Server) {
+        let group = server.browser.lock().unwrap().take();
+        if let (Some((group, _)), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
+            tools.credentials.revoke(&group);
         }
-        let tools = self.tools.lock().unwrap().clone();
-        let server = Arc::new(Server::start(&cwd, tools.as_ref(), &self.environment).await?);
-        servers.insert(cwd, server.clone());
-        Ok(server)
     }
     async fn install_tools(&self, server: &Server) -> Result<()> {
         let tools = self.tools.lock().unwrap().clone();
         if let Some(tools) = tools {
-            server.json(Method::PUT,"/api/experimental/mcp/del",Some(&json!({"config":{"type":"remote","url":tools.url,"headers":{"Authorization":format!("Bearer {}",tools.token)},"oauth":false}}))).await?;
+            // OpenCode configures MCP per workspace server, not per session, so
+            // its chats share one credential that reaches exactly those chats.
+            let token = {
+                let mut browser = server.browser.lock().unwrap();
+                match browser.as_ref() {
+                    Some((_, token)) => token.clone(),
+                    None => {
+                        let group = SessionId::new(format!(
+                            "opencode-workspace-{}-{}",
+                            std::process::id(),
+                            uuid::Uuid::new_v4()
+                        ));
+                        let token = tools.credentials.mint_shared(&group).map_err(err)?;
+                        *browser = Some((group, token.clone()));
+                        token
+                    }
+                }
+            };
+            server.json(Method::PUT,"/api/experimental/mcp/del",Some(&json!({"config":{"type":"remote","url":tools.url,"headers":{"Authorization":format!("Bearer {token}")},"oauth":false}}))).await?;
             tokio::time::timeout(std::time::Duration::from_secs(20), async {
                 loop {
                     let servers = server.json(Method::GET, "/api/mcp", None).await?;
@@ -92,6 +180,13 @@ impl OpenCodeBackend {
             .map_err(|_| err("Del MCP connection timed out"))??;
         }
         Ok(())
+    }
+    /// Let (or stop letting) the server's shared browser credential reach `id`.
+    fn set_browser_member(&self, server: &Server, id: &SessionId, member: bool) {
+        let group = server.browser.lock().unwrap().as_ref().map(|(group, _)| group.clone());
+        if let (Some(group), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
+            tools.credentials.set_shared_member(&group, id, member);
+        }
     }
     fn live(&self, id: &SessionId) -> Result<Arc<Live>> {
         self.sessions
@@ -138,14 +233,58 @@ impl OpenCodeBackend {
             .unwrap()
             .as_ref()
             .and_then(|t| t.question.clone());
+        // The reader never awaits HTTP: it parses SSE lines and queues their
+        // events; the emitter applies them in order, awaiting a turn's file
+        // diff before that turn's completion, so ordering is unchanged.
+        let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel::<Queued>();
+        let emit_live = live.clone();
+        let emitter = tokio::spawn(async move {
+            while let Some(item) = queued.recv().await {
+                match item {
+                    Queued::Diffs(diffs) => {
+                        if let Ok(events) = diffs.await {
+                            emit_live.emit(events);
+                        }
+                    }
+                    Queued::Events(mapped, seq) => {
+                        for event in &mapped {
+                            if matches!(event, AgentEvent::TurnStarted { .. }) {
+                                emit_live.busy.store(true, Ordering::SeqCst);
+                            }
+                            if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                                emit_live.busy.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        emit_live.emit(mapped);
+                        if let Some(seq) = seq {
+                            *emit_live.sequence.lock().unwrap() = Some(seq);
+                            emit_live.advanced.notify_one();
+                        }
+                    }
+                    Queued::Closed => {
+                        emit_live.busy.store(false, Ordering::SeqCst);
+                        emit_live.emit([AgentEvent::Error { message: "OpenCode event connection closed. Unload and reopen this chat to reconnect.".into(), recoverable: false }]);
+                        break;
+                    }
+                }
+            }
+        });
+        live.tasks.lock().unwrap().push(emitter);
         let stream_live = live.clone();
         let session_id = id.clone();
         let task = tokio::spawn(async move {
             let mut buffer = first.map(|b| b.to_vec()).unwrap_or_default();
+            // Bytes before `scanned` hold no newline; never rescan them.
+            let mut scanned = 0;
             let mut files_changed = false;
+            let mut attempts = 0u32;
             loop {
-                while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                    let line: Vec<_> = buffer.drain(..=end).collect();
+                let mut start = 0;
+                while let Some(offset) = buffer[scanned..].iter().position(|b| *b == b'\n') {
+                    let end = scanned + offset;
+                    let line = &buffer[start..=end];
+                    start = end + 1;
+                    scanned = start;
                     if let Some(data) = line.strip_prefix(b"data:")
                         && let Ok(event) = serde_json::from_slice::<Value>(data)
                     {
@@ -165,8 +304,9 @@ impl OpenCodeBackend {
                                     None => Ok(None),
                                 };
                                 let path = format!(
-                                    "/api/session/{sid}/form/{}",
-                                    mapping::string(&form, "id")
+                                    "/api/session/{}/form/{}",
+                                    seg(sid.as_str()),
+                                    seg(&mapping::string(&form, "id"))
                                 );
                                 let result = match answer {
                                     Ok(Some(answer)) => {
@@ -232,54 +372,71 @@ impl OpenCodeBackend {
                                     .any(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
                             {
                                 let cwd = stream_live.config.lock().unwrap().cwd.clone();
-                                match stream_live
-                                    .server
-                                    .json(
-                                        Method::GET,
-                                        &format!("/api/session/{session_id}/diff"),
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    Ok(diffs) => stream_live.emit(mapping::diffs(&cwd, &diffs)),
-                                    Err(error) => stream_live.emit([AgentEvent::Error {
-                                        message: format!(
-                                            "Could not load OpenCode file changes: {error}"
-                                        ),
-                                        recoverable: true,
-                                    }]),
-                                }
+                                let server = stream_live.server.clone();
+                                let path = format!("/api/session/{}/diff", seg(session_id.as_str()));
+                                let diffs = tokio::spawn(async move {
+                                    match server.json(Method::GET, &path, None).await {
+                                        Ok(diffs) => mapping::diffs(&cwd, &diffs),
+                                        Err(error) => vec![AgentEvent::Error {
+                                            message: format!(
+                                                "Could not load OpenCode file changes: {error}"
+                                            ),
+                                            recoverable: true,
+                                        }],
+                                    }
+                                });
+                                let _ = queue.send(Queued::Diffs(diffs));
                                 files_changed = false;
                             }
-                            for event in &mapped {
-                                if matches!(event, AgentEvent::TurnStarted { .. }) {
-                                    stream_live.busy.store(true, Ordering::SeqCst);
-                                }
-                                if matches!(event, AgentEvent::TurnCompleted { .. }) {
-                                    stream_live.busy.store(false, Ordering::SeqCst);
-                                }
-                            }
-                            stream_live.emit(mapped);
-                            if let Some(seq) = event["durable"]["seq"].as_u64() {
-                                *stream_live.sequence.lock().unwrap() = Some(seq);
-                                stream_live.advanced.notify_one();
-                            }
+                            let _ = queue.send(Queued::Events(mapped, event["durable"]["seq"].as_u64()));
                         }
                     }
                 }
+                buffer.drain(..start);
+                scanned = buffer.len();
                 match response.chunk().await {
-                    Ok(Some(bytes)) => buffer.extend_from_slice(&bytes),
+                    Ok(Some(bytes)) => {
+                        attempts = 0;
+                        buffer.extend_from_slice(&bytes);
+                    }
                     _ => {
-                        stream_live.connected.store(false, Ordering::SeqCst);
-                        stream_live.busy.store(false, Ordering::SeqCst);
-                        stream_live.emit([AgentEvent::Error { message: "OpenCode event connection closed. Unload and reopen this chat to reconnect.".into(), recoverable: false }]);
-                        break;
+                        // Resubscribe with backoff, replaying from the last durable
+                        // sequence when the server honours `after`. Give up only when
+                        // the server process is gone or the attempts are exhausted.
+                        let mut delay = RECONNECT_INITIAL;
+                        let mut reconnected = None;
+                        while attempts < RECONNECT_ATTEMPTS && stream_live.server.is_alive() {
+                            attempts += 1;
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(RECONNECT_MAX);
+                            let after = *stream_live.sequence.lock().unwrap();
+                            if let Ok(next) = stream_live.server.events_after(after).await {
+                                reconnected = Some(next);
+                                break;
+                            }
+                        }
+                        match reconnected {
+                            Some(next) => {
+                                response = next;
+                                buffer.clear();
+                                scanned = 0;
+                            }
+                            None => {
+                                stream_live.connected.store(false, Ordering::SeqCst);
+                                let _ = queue.send(Queued::Closed);
+                                break;
+                            }
+                        }
                     }
                 }
             }
         });
         live.tasks.lock().unwrap().push(task);
-        self.sessions.lock().unwrap().insert(id.clone(), live);
+        self.set_browser_member(&live.server, &id, true);
+        let previous = self.sessions.lock().unwrap().insert(id.clone(), live);
+        if let Some(previous) = previous {
+            previous.stop_tasks();
+        }
         Ok(SessionHandle::new(id, Provider::OpenCode, events).with_history(history))
     }
     async fn submit(
@@ -303,7 +460,13 @@ impl OpenCodeBackend {
         {
             return Err(AgentError::Busy(id.to_string()));
         }
-        let generation = live.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // A steer joins the current execution; bumping the generation for it
+        // would orphan a running local command's completion and leave `busy` set.
+        let generation = if steer {
+            live.generation.load(Ordering::SeqCst)
+        } else {
+            live.generation.fetch_add(1, Ordering::SeqCst) + 1
+        };
         let result = async {
             // A native command can complete locally without starting an execution.
             // Capture its boundary so completion can be reconciled with the event stream.
@@ -311,9 +474,14 @@ impl OpenCodeBackend {
                 let previous = *live.sequence.lock().unwrap();
                 live.server.watermark(id, previous).await?
             } else { None };
-            let body = prompt_body(&input, command.as_ref(), steer)?;
+            let mut attachments = Vec::with_capacity(input.attachments.len());
+            for attachment in &input.attachments {
+                attachments.push(canonicalize(&attachment.path).await?);
+            }
+            let body = prompt_body(&input, &attachments, command.as_ref(), steer)?;
             let path = format!(
-                "/api/session/{id}/{}",
+                "/api/session/{}/{}",
+                seg(id.as_str()),
                 if command.is_some() {
                     "command"
                 } else {
@@ -328,7 +496,7 @@ impl OpenCodeBackend {
                     let result = async {
                         // The native idle barrier owns command execution duration.
                         let response = command_live.server.request(Method::POST,
-                            &format!("/api/experimental/session/{sid}/wait")).send().await.map_err(err)?;
+                            &format!("/api/experimental/session/{}/wait", seg(sid.as_str()))).send().await.map_err(err)?;
                         server::decode(response).await?;
                         let target = command_live.server.watermark(&sid, before).await?;
                         if target != before {
@@ -372,7 +540,13 @@ impl OpenCodeBackend {
         result
     }
 }
-fn prompt_body(input: &UserInput, command: Option<&ComposerCommand>, steer: bool) -> Result<Value> {
+/// `attachments` are the already-canonicalized paths of `input.attachments`, in order.
+fn prompt_body(
+    input: &UserInput,
+    attachments: &[PathBuf],
+    command: Option<&ComposerCommand>,
+    steer: bool,
+) -> Result<Value> {
     let mut text = input.text.trim().to_owned();
     for skill in &input.skills {
         if let Some(rest) = text
@@ -396,9 +570,8 @@ fn prompt_body(input: &UserInput, command: Option<&ComposerCommand>, steer: bool
             .collect::<Result<Vec<_>>>()?
             .into();
     }
-    body["files"]=input.attachments.iter().map(|a|{
-        let path=a.path.canonicalize()?;
-        let uri=reqwest::Url::from_file_path(&path).map_err(|_|err("invalid attachment path"))?;
+    body["files"]=attachments.iter().map(|path|{
+        let uri=reqwest::Url::from_file_path(path).map_err(|_|err("invalid attachment path"))?;
         Ok(json!({"uri":uri.as_str(),"name":path.file_name().unwrap_or_default().to_string_lossy()}))
     }).collect::<Result<Vec<_>>>()?.into();
     if let Some(c) = command {
@@ -419,7 +592,10 @@ async fn install_browser_instructions(server: &Server, id: &SessionId) -> Result
     server
         .json(
             Method::PUT,
-            &format!("/api/experimental/session/{id}/instructions/entries/del-browser"),
+            &format!(
+                "/api/experimental/session/{}/instructions/entries/del-browser",
+                seg(id.as_str())
+            ),
             Some(&json!({"value":instructions})),
         )
         .await?;
@@ -455,7 +631,7 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
     server
         .json(
             Method::PATCH,
-            &format!("/api/session/{id}"),
+            &format!("/api/session/{}", seg(id.as_str())),
             Some(&json!({"permissions":permissions(config.permission_mode)})),
         )
         .await?;
@@ -473,7 +649,7 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
     server
         .json(
             Method::POST,
-            &format!("/api/session/{id}/model"),
+            &format!("/api/session/{}/model", seg(id.as_str())),
             Some(&json!({"model":model})),
         )
         .await?;
@@ -507,7 +683,7 @@ impl AgentBackend for OpenCodeBackend {
         Ok(mapping::commands(&commands, &skills))
     }
     async fn start_session(&self, mut config: SessionConfig) -> Result<SessionHandle> {
-        config.cwd = config.cwd.canonicalize()?;
+        config.cwd = canonicalize(&config.cwd).await?;
         let server = self.server(&config.cwd).await?;
         self.install_tools(&server).await?;
         let mut body = json!({"location":{"directory":config.cwd},"permissions":permissions(config.permission_mode)});
@@ -527,6 +703,17 @@ impl AgentBackend for OpenCodeBackend {
             .await
     }
     async fn resume(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
+        if let Ok(live) = self.live(id) {
+            if live.connected.load(Ordering::SeqCst) && live.server.is_alive() {
+                return Ok(SessionHandle::new(
+                    id.clone(),
+                    Provider::OpenCode,
+                    live.events.clone(),
+                ));
+            }
+            // Its event stream or server is gone: stop it before re-attaching.
+            self.close(id).await?;
+        }
         let server = self.server(&config.cwd).await?;
         self.install_tools(&server).await?;
         configure(&server, id, &config).await?;
@@ -535,9 +722,9 @@ impl AgentBackend for OpenCodeBackend {
         let mut first_user: Option<String> = None;
         let mut last_user: Option<String> = None;
         let mut cursor: Option<String> = None;
-        loop {
+        for _ in 0..MAX_HISTORY_PAGES {
             let mut request = server
-                .request(Method::GET, &format!("/api/session/{id}/message"))
+                .request(Method::GET, &format!("/api/session/{}/message", seg(id.as_str())))
                 .query(&[("limit", "200")])
                 .timeout(std::time::Duration::from_secs(30));
             request = if let Some(cursor) = &cursor {
@@ -555,14 +742,16 @@ impl AgentBackend for OpenCodeBackend {
                 }
                 history.extend(mapping.message(message));
             }
-            cursor = page["cursor"]["next"].as_str().map(str::to_owned);
-            if cursor.is_none() {
+            let next = page["cursor"]["next"].as_str().map(str::to_owned);
+            // A repeated cursor would page forever; treat it as the end.
+            if next.is_none() || next == cursor {
                 break;
             }
+            cursor = next;
         }
         if let (Some(first), Some(last)) = (first_user, last_user) {
             let response = server
-                .request(Method::GET, &format!("/api/session/{id}/diff"))
+                .request(Method::GET, &format!("/api/session/{}/diff", seg(id.as_str())))
                 .query(&[("from", first), ("to", last)])
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
@@ -600,7 +789,7 @@ impl AgentBackend for OpenCodeBackend {
     async fn interrupt(&self, id: &SessionId) -> Result<()> {
         self.live(id)?
             .server
-            .json(Method::POST, &format!("/api/session/{id}/interrupt"), None)
+            .json(Method::POST, &format!("/api/session/{}/interrupt", seg(id.as_str())), None)
             .await?;
         Ok(())
     }
@@ -614,7 +803,7 @@ impl AgentBackend for OpenCodeBackend {
         if (previous_mode == PermissionMode::Plan)
             != (config.permission_mode == PermissionMode::Plan)
         {
-            live.server.json(Method::POST, &format!("/api/session/{id}/agent"),
+            live.server.json(Method::POST, &format!("/api/session/{}/agent", seg(id.as_str())),
                 Some(&json!({"agent":if config.permission_mode == PermissionMode::Plan {"plan"} else {"build"}}))).await?;
         }
         *live.config.lock().unwrap() = config;
@@ -630,7 +819,7 @@ impl AgentBackend for OpenCodeBackend {
         approval: &str,
         response: ApprovalResponse,
     ) -> Result<()> {
-        self.live(id)?.server.json(Method::POST,&format!("/api/session/{id}/permission/{approval}/reply"),Some(&json!({"decision":if response == ApprovalResponse::Approve {"once"} else {"reject"}}))).await?;
+        self.live(id)?.server.json(Method::POST,&format!("/api/session/{}/permission/{}/reply", seg(id.as_str()), seg(approval)),Some(&json!({"decision":if response == ApprovalResponse::Approve {"once"} else {"reject"}}))).await?;
         Ok(())
     }
     async fn generate_session_title(
@@ -643,7 +832,7 @@ impl AgentBackend for OpenCodeBackend {
             .server
             .json(
                 Method::POST,
-                &format!("/api/session/{id}/generate"),
+                &format!("/api/session/{}/generate", seg(id.as_str())),
                 Some(&json!({"prompt": format!("{}\n\nConversation to name:\n{context}", del_agent::titles::INSTRUCTIONS)})),
             )
             .await?;
@@ -651,28 +840,28 @@ impl AgentBackend for OpenCodeBackend {
     }
 
     async fn session_title(&self, id: &SessionId, cwd: &Path) -> Result<Option<String>> {
-        let value = self
-            .server(cwd)
-            .await?
-            .json(Method::GET, &format!("/api/session/{id}"), None)
+        // Title refresh runs for recorded sessions; starting a server per
+        // workspace just to read a name is not worth it. Answer only from a
+        // server that is already running for other reasons.
+        let Some(server) = self.running_server(cwd).await else {
+            return Ok(None);
+        };
+        let value = server
+            .json(Method::GET, &format!("/api/session/{}", seg(id.as_str())), None)
             .await?;
         Ok(value["data"]["title"].as_str().map(str::to_owned))
     }
     async fn close(&self, id: &SessionId) -> Result<()> {
         let live = self.sessions.lock().unwrap().remove(id);
         if let Some(live) = live {
-            for task in live.tasks.lock().unwrap().drain(..) {
-                task.abort();
-            }
-            for (_, task) in live.forms.lock().unwrap().drain() {
-                task.abort();
-            }
+            live.stop_tasks();
+            self.set_browser_member(&live.server, id, false);
             if live.busy.load(Ordering::SeqCst) {
                 let _ = live
                     .server
                     .json(
                         Method::POST,
-                        &format!("/api/session/{id}/interrupt"),
+                        &format!("/api/session/{}/interrupt", seg(id.as_str())),
                         Some(&json!({})),
                     )
                     .await;
@@ -685,19 +874,19 @@ impl AgentBackend for OpenCodeBackend {
         for id in ids {
             self.close(&id).await?;
         }
-        self.servers.lock().await.clear();
+        let servers: Vec<_> = self.servers.lock().unwrap().drain().collect();
+        for (_, cell) in servers {
+            if let Some(server) = cell.get() {
+                self.retire_browser(server);
+            }
+        }
         Ok(())
     }
 }
 impl Drop for OpenCodeBackend {
     fn drop(&mut self) {
         for live in self.sessions.get_mut().unwrap().values() {
-            for task in live.tasks.lock().unwrap().drain(..) {
-                task.abort();
-            }
-            for (_, task) in live.forms.lock().unwrap().drain() {
-                task.abort();
-            }
+            live.stop_tasks();
         }
     }
 }
@@ -713,8 +902,8 @@ pub async fn create_terminal_session(
 }
 
 pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<&str>, variant: Option<&str>, env: &[(String, String)]) -> Result<String> {
-    let cwd = cwd.canonicalize()?;
-    let server = Server::start(&cwd, None, env).await?;
+    let cwd = canonicalize(cwd).await?;
+    let server = Server::start(&cwd, env).await?;
     let mut body = json!({"location":{"directory":cwd}});
     if let Some(model) = model {
         let (provider, id) = model.split_once('/').ok_or_else(|| err("invalid model"))?;
@@ -735,6 +924,18 @@ pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NoCredentials;
+    impl backend::BrowserCredentials for NoCredentials {
+        fn mint(&self, _: &SessionId) -> std::io::Result<String> {
+            Err(std::io::Error::other("no browser in this fixture"))
+        }
+        fn rebind(&self, _: &SessionId, _: &SessionId) {}
+        fn revoke(&self, _: &SessionId) {}
+        fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+            Err(std::io::Error::other("no browser in this fixture"))
+        }
+        fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+    }
     #[tokio::test]
     #[ignore = "requires installed OpenCode 2.x; use isolated XDG data directories"]
     async fn real_native_form_answer_and_cancellation() {
@@ -756,8 +957,7 @@ mod tests {
         let ask_closed = closed.clone();
         *backend.tools.lock().unwrap() = Some(backend::BrowserTools {
             url: String::new(),
-            token: String::new(),
-            claude_config: PathBuf::new(),
+            credentials: Arc::new(NoCredentials),
             claude_session_config: None,
             question: Some(Arc::new(move |_, prompt, _| {
                 let started = ask_started.clone();
@@ -1067,6 +1267,12 @@ export default Plugin.define({{
     }
 
     #[test]
+    fn path_segments_are_percent_encoded() {
+        assert_eq!(seg("ses_ABC-1.x~"), "ses_ABC-1.x~");
+        assert_eq!(seg("../a b/?#"), "..%2Fa%20b%2F%3F%23");
+    }
+
+    #[test]
     fn native_skills_and_steering_are_structured() {
         let mut input = UserInput::text("/review Inspect changes");
         input.skills.push(ComposerCommand {
@@ -1077,7 +1283,7 @@ export default Plugin.define({{
             source: "OpenCode".into(),
             target: Some("opaque-id".into()),
         });
-        let body = prompt_body(&input, None, true).unwrap();
+        let body = prompt_body(&input, &[], None, true).unwrap();
         assert_eq!(body["text"], "Inspect changes");
         assert_eq!(body["skills"], json!([{"id":"opaque-id"}]));
         assert_eq!(body["delivery"], "steer");

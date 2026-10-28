@@ -16,7 +16,7 @@ use del_agent::{
     AgentBackend, AgentError, AgentEvent, ApprovalResponse, EVENT_CHANNEL_CAPACITY, PermissionMode,
     Provider, Result, SessionConfig, SessionHandle, SessionId, UserInput,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
@@ -55,6 +55,54 @@ impl ClaudeOptions {
 
 /// How long `claude` gets to exit after SIGTERM before its group is killed.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long `claude auth status` may take.
+const AUTH_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Goal transcript polling interval, and the slowest retry while it is missing.
+const GOAL_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const GOAL_SEARCH_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+/// Longest stdout line accepted; a larger one is skipped rather than buffered.
+const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one `\n`-terminated line of at most `max` bytes. `Ok(None)` is EOF;
+/// `Err(len)` inside reports a skipped oversized line. Invalid UTF-8 is
+/// replaced rather than treated as a read error.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<std::result::Result<String, usize>>> {
+    let mut buf = Vec::new();
+    let mut skipped = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() && skipped == 0 {
+                return Ok(None);
+            }
+            break;
+        }
+        let (used, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if skipped > 0 || buf.len() + used > max {
+            skipped += buf.len() + used;
+            buf = Vec::new();
+        } else {
+            buf.extend_from_slice(&available[..used]);
+        }
+        reader.consume(used);
+        if done {
+            break;
+        }
+    }
+    if skipped > 0 {
+        return Ok(Some(Err(skipped)));
+    }
+    while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        buf.pop();
+    }
+    Ok(Some(Ok(String::from_utf8_lossy(&buf).into_owned())))
+}
 
 struct Live {
     events: broadcast::Sender<AgentEvent>,
@@ -74,6 +122,18 @@ impl Live {
                 *self.goal.lock().unwrap() = goal.clone();
             }
             let _ = self.events.send(e);
+        }
+    }
+
+    /// Terminate the process group (SIGTERM, then SIGKILL after the grace).
+    async fn terminate(&self) {
+        self.closing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut child = self.child.lock().await;
+        match self.pid {
+            Some(pid) => del_agent::procgroup::terminate_group(pid, &mut child, CLOSE_GRACE).await,
+            None => {
+                let _ = child.start_kill();
+            }
         }
     }
 
@@ -154,10 +214,9 @@ impl ClaudeBackend {
         if let Some(s) = &self.options.setting_sources {
             a.extend(["--setting-sources".into(), s.clone()]);
         }
-        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
+        // The per-chat `--mcp-config` is added at spawn, once the id is known.
+        if self.browser_tools.lock().unwrap().is_some() {
             a.extend([
-                "--mcp-config".into(),
-                tools.claude_config.to_string_lossy().into_owned(),
                 "--append-system-prompt".into(),
                 del_agent::backend::BROWSER_INSTRUCTIONS.into(),
             ]);
@@ -172,12 +231,19 @@ impl ClaudeBackend {
         id: SessionId,
         session_flag: [&str; 2],
     ) -> Result<SessionHandle> {
-        if let Some(live) = self.sessions.lock().unwrap().get(&id) {
-            return Ok(SessionHandle::new(
-                id,
-                Provider::Claude,
-                live.events.clone(),
-            ));
+        // Held until the new process is registered: two concurrent resumes of
+        // one id must share a single `claude`, never start two.
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(live) = sessions.get(&id) {
+            if !live.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(SessionHandle::new(
+                    id,
+                    Provider::Claude,
+                    live.events.clone(),
+                ));
+            }
+            // That process exited; start a fresh one for the session.
+            sessions.remove(&id);
         }
         let mut command = Command::new(&self.options.binary);
         self.options.prepare(&mut command);
@@ -190,9 +256,7 @@ impl ClaudeBackend {
             .and_then(|tools| tools.claude_session_config.clone())
         {
             let path = factory(&id)?;
-            if let Some(index) = args.iter().position(|arg| arg == "--mcp-config") {
-                args[index + 1] = path.to_string_lossy().into_owned();
-            }
+            args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned()]);
             if let Some(index) = args.iter().position(|arg| arg == "--append-system-prompt") {
                 args[index + 1].push_str("\n\n");
                 args[index + 1].push_str(del_agent::backend::GOAL_INSTRUCTIONS);
@@ -232,8 +296,9 @@ impl ClaudeBackend {
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         let tail = stderr_tail.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut stderr = BufReader::new(stderr);
+            while let Ok(Some(l)) = read_line_capped(&mut stderr, 64 * 1024).await {
+                let Ok(l) = l else { continue };
                 let mut t = tail.lock().unwrap();
                 if t.len() > 2000 {
                     t.clear();
@@ -245,20 +310,42 @@ impl ClaudeBackend {
 
         let reader = live.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let evs = reader.translator.lock().unwrap().handle_line(&line);
-                reader.emit(evs);
+            let mut stdout = BufReader::new(stdout);
+            while let Ok(Some(line)) = read_line_capped(&mut stdout, MAX_LINE_BYTES).await {
+                match line {
+                    Ok(line) => {
+                        let evs = reader.translator.lock().unwrap().handle_line(&line);
+                        reader.emit(evs);
+                    }
+                    Err(len) => {
+                        eprintln!("claude: skipped a {len}-byte stdout line over the size limit")
+                    }
+                }
             }
-            // stdout closed: the process exited.
-            let code = reader
-                .child
-                .lock()
-                .await
-                .wait()
-                .await
-                .ok()
-                .and_then(|s| s.code());
+            // stdout closed (or failed): the process is exiting or unusable.
+            // Poll rather than hold the child lock across `wait`, so close()
+            // can still take it; kill a process that lingers without stdout.
+            let started = std::time::Instant::now();
+            let mut killed = false;
+            let code = loop {
+                match reader.child.lock().await.try_wait() {
+                    Ok(Some(status)) => break status.code(),
+                    Ok(None) => {}
+                    Err(_) => break None,
+                }
+                if !killed && started.elapsed() > CLOSE_GRACE {
+                    killed = true;
+                    match reader.pid {
+                        Some(pid) => {
+                            del_agent::procgroup::signal_group(pid, true);
+                        }
+                        None => {
+                            let _ = reader.child.lock().await.start_kill();
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
             let evs = reader.translator.lock().unwrap().abort();
             reader.emit(evs);
             if !reader.closing.load(std::sync::atomic::Ordering::SeqCst) {
@@ -287,34 +374,57 @@ impl ClaudeBackend {
         let goal_root = self.options.config_dir.clone();
         let goal_id = id.as_str().to_owned();
         tokio::spawn(async move {
-            let mut reader = crate::goals::Reader::new();
-            let mut path = None;
+            // The first read starts at offset 0 on purpose: it restores the
+            // newest goal state from every session record, which the history
+            // (latest message branch only) does not guarantee to include.
+            let mut state = Some((crate::goals::Reader::new(), None::<PathBuf>));
             let mut last = None;
+            let mut delay = GOAL_POLL;
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(delay).await;
                 if watcher.closing.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                if path.is_none() {
-                    path = match &goal_root {
-                        Some(root) => crate::titles::transcript_path(root, &goal_cwd, &goal_id),
-                        None => crate::history::path(&goal_cwd, &goal_id),
-                    };
-                }
-                if let Some(path) = &path
-                    && let Ok(events) = reader.read(path, &goal_id)
-                {
-                    // Only the newest state matters on initial restore.
-                    if let Some(event) = events.last()
-                        && last.as_ref() != Some(event)
-                    {
-                        watcher.emit(vec![event.clone()]);
-                        last = Some(event.clone());
+                let Some((mut reader, mut path)) = state.take() else {
+                    break;
+                };
+                let (root, cwd, id) = (goal_root.clone(), goal_cwd.clone(), goal_id.clone());
+                // File IO stays off the async workers.
+                let Ok((reader, path, events)) = tokio::task::spawn_blocking(move || {
+                    if path.is_none() {
+                        path = match &root {
+                            Some(root) => crate::titles::transcript_path(root, &cwd, &id),
+                            None => crate::history::path(&cwd, &id),
+                        };
                     }
+                    let events = path
+                        .as_ref()
+                        .and_then(|path| reader.read(path, &id).ok())
+                        .unwrap_or_default();
+                    (reader, path, events)
+                })
+                .await
+                else {
+                    break;
+                };
+                // Until Claude writes the transcript, searching for it scans
+                // every project directory; back off instead of doing that twice a second.
+                delay = if path.is_some() {
+                    GOAL_POLL
+                } else {
+                    (delay * 2).min(GOAL_SEARCH_MAX)
+                };
+                state = Some((reader, path));
+                // Only the newest state matters on initial restore.
+                if let Some(event) = events.last()
+                    && last.as_ref() != Some(event)
+                {
+                    watcher.emit(vec![event.clone()]);
+                    last = Some(event.clone());
                 }
             }
         });
-        self.sessions.lock().unwrap().insert(id.clone(), live);
+        sessions.insert(id.clone(), live);
         Ok(SessionHandle::new(id, Provider::Claude, tx))
     }
 
@@ -550,9 +660,16 @@ impl AgentBackend for ClaudeBackend {
         if !live.translator.lock().unwrap().is_busy() {
             return Ok(());
         }
-        live.translator.lock().unwrap().mark_interrupting();
-        live.write_line(&interrupt_line(&uuid::Uuid::new_v4().to_string()))
-            .await
+        let evs = live.translator.lock().unwrap().mark_interrupting();
+        live.emit(evs);
+        let written = live
+            .write_line(&interrupt_line(&uuid::Uuid::new_v4().to_string()))
+            .await;
+        if written.is_err() {
+            // The CLI never saw the interrupt; the next result is not ours.
+            live.translator.lock().unwrap().unmark_interrupting();
+        }
+        written
     }
 
     async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
@@ -597,24 +714,40 @@ impl AgentBackend for ClaudeBackend {
             .unwrap()
             .remove(session)
             .ok_or_else(|| AgentError::UnknownSession(session.clone()))?;
-        live.closing
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let mut child = live.child.lock().await;
-        match live.pid {
-            Some(pid) => del_agent::procgroup::terminate_group(pid, &mut child, CLOSE_GRACE).await,
-            None => {
-                let _ = child.start_kill();
-            }
-        }
+        live.terminate().await;
         Ok(())
     }
 
+    /// Stop every session at once: SIGTERM all groups first, then wait for
+    /// them in parallel, so quitting costs one grace period, not one each.
     async fn shutdown(&self) -> Result<()> {
-        let ids: Vec<_> = self.sessions.lock().unwrap().keys().cloned().collect();
-        for id in ids {
-            let _ = self.close(&id).await;
+        let lives: Vec<_> = self.sessions.lock().unwrap().drain().map(|(_, l)| l).collect();
+        let mut waits = tokio::task::JoinSet::new();
+        for live in lives {
+            if !live.closing.swap(true, std::sync::atomic::Ordering::SeqCst)
+                && let Some(pid) = live.pid
+            {
+                del_agent::procgroup::signal_group(pid, false);
+            }
+            waits.spawn(async move { live.terminate().await });
         }
+        while waits.join_next().await.is_some() {}
         Ok(())
+    }
+}
+
+impl Drop for ClaudeBackend {
+    /// Last resort when the app exits without `shutdown`: `kill_on_drop`
+    /// only reaches the leader, so take down each group's tools and MCP servers.
+    fn drop(&mut self) {
+        for live in self.sessions.get_mut().unwrap().values() {
+            // `closing` is set once the process was reaped; its pid may be reused.
+            if !live.closing.load(std::sync::atomic::Ordering::SeqCst)
+                && let Some(pid) = live.pid
+            {
+                del_agent::procgroup::signal_group(pid, true);
+            }
+        }
     }
 }
 
@@ -632,14 +765,19 @@ pub async fn auth_status(options: &ClaudeOptions) -> Result<AuthStatus> {
     let mut command = Command::new(&options.binary);
     options.prepare(&mut command);
     del_agent::environment::prepare_provider_command(command.as_std_mut());
-    let out = command
-        .args(["auth", "status"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| {
-            AgentError::Backend(format!("failed to run `{}`: {e}", options.binary.display()))
-        })?;
+    let out = tokio::time::timeout(
+        AUTH_STATUS_TIMEOUT,
+        command
+            .args(["auth", "status"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| AgentError::Backend("`claude auth status` timed out".into()))?
+    .map_err(|e| {
+        AgentError::Backend(format!("failed to run `{}`: {e}", options.binary.display()))
+    })?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| AgentError::Backend(format!("unexpected `claude auth status` output: {e}")))?;
     Ok(AuthStatus {
@@ -677,13 +815,25 @@ mod model_config_tests {
                 .any(|pair| pair == ["--settings", "{\"fastMode\":false}"])
         );
     }
+    struct Unused;
+    impl del_agent::backend::BrowserCredentials for Unused {
+        fn mint(&self, _: &SessionId) -> std::io::Result<String> {
+            unreachable!("Claude chats use their per-chat config file")
+        }
+        fn rebind(&self, _: &SessionId, _: &SessionId) {}
+        fn revoke(&self, _: &SessionId) {}
+        fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+            unreachable!("Claude chats use their per-chat config file")
+        }
+        fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+    }
+
     #[test]
     fn browser_routing_is_appended_for_new_and_resumed_chats() {
         let backend = ClaudeBackend::new(ClaudeOptions::default());
         backend.set_browser_tools(del_agent::backend::BrowserTools {
             url: "http://127.0.0.1:1234/mcp".into(),
-            token: "fixture".into(),
-            claude_config: "/tmp/browser.json".into(),
+            credentials: std::sync::Arc::new(Unused),
             claude_session_config: None,
             question: None,
         });
@@ -702,10 +852,8 @@ mod model_config_tests {
                     "--append-system-prompt",
                     del_agent::backend::BROWSER_INSTRUCTIONS
                 ]));
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--mcp-config", "/tmp/browser.json"])
-            );
+            // Claude chats get their own MCP config at spawn, never a shared one.
+            assert!(!args.contains(&"--mcp-config".into()));
             assert!(!args.contains(&"--system-prompt".into()));
         }
     }

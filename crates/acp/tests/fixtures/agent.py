@@ -49,6 +49,8 @@ for line in sys.stdin:
         else:
             if method == 'session/load':
                 assert params['sessionId'] == remote
+                update(dict(sessionUpdate='user_message_chunk', content=dict(type='text', text='earlier')))
+                text('reply')
             result(id, dict(sessionId=remote))
     elif method == 'session/set_model':
         result(id, {})
@@ -67,6 +69,8 @@ for line in sys.stdin:
             active = None
         elif prompt == 'stop-error':
             finish('error')
+        elif prompt == 'exit':
+            sys.exit(0)
         elif prompt == 'close-stdout':
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             os.close(1)

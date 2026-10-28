@@ -240,6 +240,12 @@ pub enum AgentEvent {
         kind: ApprovalKind,
         detail: String,
     },
+    /// The provider settled or withdrew `ApprovalRequested { id }` itself
+    /// (answered elsewhere, cancelled, or dropped with its turn); it no longer
+    /// accepts a response.
+    ApprovalResolved {
+        id: String,
+    },
     TokenUsage {
         input: u64,
         output: u64,

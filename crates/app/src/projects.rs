@@ -20,14 +20,99 @@ pub struct LaunchOptions {
     pub token: String,
 }
 
+/// The Git executable, resolved once. `/usr/bin/git` is only Apple's
+/// `xcode-select` shim: without Command Line Tools it pops an install dialog,
+/// so it is used only when a developer directory is actually installed.
+pub fn git_program() -> Option<&'static Path> {
+    static GIT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let candidates = std::env::split_paths(&path)
+            .chain(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from))
+            .map(|dir| dir.join("git"));
+        let mut shim_checked = None;
+        for candidate in candidates {
+            if !candidate.is_file() {
+                continue;
+            }
+            let real = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+            if real == Path::new("/usr/bin/git")
+                && !*shim_checked.get_or_insert_with(developer_tools_installed)
+            {
+                continue;
+            }
+            return Some(candidate);
+        }
+        None
+    })
+    .as_deref()
+}
+
+fn developer_tools_installed() -> bool {
+    let mut command = Command::new("/usr/bin/xcode-select");
+    command.arg("-p");
+    bounded(&mut command, std::time::Duration::from_secs(5))
+        .is_ok_and(|output| {
+            output.status.success()
+                && Path::new(String::from_utf8_lossy(&output.stdout).trim()).is_dir()
+        })
+}
+
+/// Run with a deadline. Output goes through files so a full pipe cannot
+/// deadlock the child while we wait.
+fn bounded(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{} timed out", command.get_program().to_string_lossy()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    stdout.rewind()?;
+    stdout.read_to_end(&mut out)?;
+    stderr.rewind()?;
+    stderr.take(64 * 1024).read_to_end(&mut err)?;
+    Ok(std::process::Output { status, stdout: out, stderr: err })
+}
+
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| e.to_string())?;
+    let program = git_program().ok_or("Git is not installed.")?;
+    // Checkouts can be slow on large repositories; metadata queries are not.
+    let timeout = match args.first() {
+        Some(&"worktree") | Some(&"switch") => std::time::Duration::from_secs(300),
+        _ => std::time::Duration::from_secs(20),
+    };
+    let output = bounded(
+        Command::new(program)
+            // Read-only inspection must not take index locks or start an
+            // fsmonitor daemon configured by the repository.
+            .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
+            .arg(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0"),
+        timeout,
+    )
+    .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
@@ -136,9 +221,10 @@ pub fn prepare(cwd: &Path, options: &LaunchOptions, storage: &Path) -> Result<Pa
             &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
         )?;
         std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-        std::fs::write(
+        crate::sessions::write_atomic(
             &manifest,
-            serde_json::to_vec_pretty(&owned).map_err(|e| e.to_string())?,
+            &serde_json::to_vec_pretty(&owned).map_err(|e| e.to_string())?,
+            0o644,
         )
         .map_err(|e| e.to_string())?;
         git(
@@ -180,26 +266,28 @@ pub struct ProjectPreferences {
     pub directories: std::collections::HashMap<PathBuf, PathBuf>,
     #[serde(default)]
     pub roots: std::collections::HashSet<PathBuf>,
+    #[serde(default)]
     pub collapsed: std::collections::HashSet<PathBuf>,
     #[serde(default)]
     pub collapsed_sections: std::collections::HashSet<String>,
 }
 impl ProjectPreferences {
-    pub fn load() -> Self {
-        del_agent::data_dir()
-            .and_then(|p| std::fs::read(p.join("projects.json")).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// Unreadable preferences are preserved aside and reported, never overwritten.
+    pub fn load() -> (Self, Option<String>) {
+        match del_agent::data_dir() {
+            Some(dir) => crate::sessions::load_or_set_aside(&dir.join("projects.json"), "project preferences"),
+            None => Default::default(),
+        }
     }
     pub fn save(&self) -> std::io::Result<()> {
         let Some(dir) = del_agent::data_dir() else {
             return Ok(());
         };
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("projects.json");
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(tmp, path)
+        crate::sessions::write_atomic(
+            &dir.join("projects.json"),
+            &serde_json::to_vec_pretty(self)?,
+            crate::sessions::PRIVATE,
+        )
     }
 }
 
@@ -288,6 +376,18 @@ mod tests {
             worktree: true,
             token: uuid::Uuid::new_v4().to_string(),
         }
+    }
+    #[test]
+    fn preferences_without_newer_fields_still_load() {
+        let saved: ProjectPreferences = serde_json::from_str(r#"{"names":{"/repo":"Repo"}}"#).unwrap();
+        assert_eq!(saved.names.len(), 1);
+        assert!(saved.collapsed.is_empty());
+    }
+    #[test]
+    fn git_runs_with_a_deadline() {
+        let error = bounded(Command::new("/bin/sleep").arg("5"), std::time::Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(git_program().is_some());
     }
     #[test]
     fn worktree_is_isolated_retryable_and_belongs_to_source_project() {

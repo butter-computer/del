@@ -13,6 +13,11 @@ tier or goal loop: the inspected 2.1.4 protocol exposes no native goals API.
 
 Chat uses structured prompts, file URIs, native skill IDs, streaming events,
 permission replies, and native steering. Native forms use Del's question surface.
+If the event stream drops while the workspace server is still running, Del
+resubscribes with backoff (asking the server to replay from the last durable
+event) before reporting the connection closed. Concurrent chats in different
+workspaces start their servers independently, and title refresh only reads from a
+server that is already running.
 Model changes apply between turns; resetting the model resolves OpenCode's current
 default. Saved chats reload native paginated message history. Conversation search
 reads native session exports on its background worker.
@@ -24,7 +29,9 @@ Terminal launch allocates a native session before opening the TUI and persists
 its exact ID. Model and variant are set on that session; they are not passed as
 unsupported TUI flags. The terminal uses a standalone server so the launch's
 session-scoped Del MCP configuration is applied. Chat receives browser-only MCP
-access; terminal sessions receive Del's coordination tools.
+access; OpenCode configures MCP per workspace server, so the chats of one
+workspace share a credential that reaches only those chats (and of them, only
+the ones running a turn). Terminal sessions receive Del's coordination tools.
 Del disables OpenCode's shared inner tab strip for its terminal launches, so a
 fresh terminal cannot restore unrelated tabs from earlier OpenCode runs. Saved
 Del terminals still reopen their exact native conversation ID.

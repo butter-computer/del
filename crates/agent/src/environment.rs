@@ -34,13 +34,15 @@ pub fn prepare_provider_command(command: &mut std::process::Command) {
         .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
     let mut paths = Vec::new();
     let program = std::path::Path::new(command.get_program());
-    if program.is_absolute() {
-        if let Some(parent) = program.parent() {
-            paths.push(parent.to_path_buf());
-        }
+    if program.is_absolute()
+        && let Some(parent) = program.parent()
+    {
+        paths.push(parent.to_path_buf());
     }
-    paths.extend(std::env::split_paths(&inherited).filter(|path| !path.as_os_str().is_empty()));
-    paths.extend(crate::detect::common_dirs());
+    // Children run in the project directory: a relative entry such as
+    // `node_modules/.bin` would let an untrusted repository supply `node`.
+    paths.extend(std::env::split_paths(&inherited).filter(|path| path.is_absolute()));
+    paths.extend(crate::detect::common_dirs().iter().cloned());
     let mut seen = std::collections::HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
     if let Ok(path) = std::env::join_paths(paths) {
@@ -89,6 +91,17 @@ mod tests {
         let output = command.output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "provider-ready");
+    }
+
+    #[test]
+    fn relative_path_entries_are_dropped() {
+        let mut command = std::process::Command::new("provider");
+        command.env("PATH", ".:node_modules/.bin:/usr/bin::bin");
+        prepare_provider_command(&mut command);
+        let path = command.get_envs().find(|(key, _)| *key == "PATH").unwrap().1.unwrap().to_owned();
+        let entries: Vec<_> = std::env::split_paths(&path).collect();
+        assert!(entries.iter().all(|entry| entry.is_absolute()), "{entries:?}");
+        assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
     }
 
     #[test]

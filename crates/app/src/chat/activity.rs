@@ -83,14 +83,28 @@ pub fn matches_file(tool: &ToolCall, file: &FileChangeBlock) -> bool {
 }
 
 /// Group consecutive calls immediately; messages and approvals remain boundaries.
-/// Live and failed states are surfaced in the group header.
-pub fn completed_group(blocks: &[Block], ix: usize, _running: bool) -> Option<Range<usize>> {
-    if !matches!(blocks.get(ix), Some(Block::Tool(_))) { return None; }
-    let mut start = ix;
-    let mut end = ix + 1;
-    while start > 0 && matches!(blocks[start - 1], Block::Tool(_)) { start -= 1; }
-    while end < blocks.len() && matches!(blocks[end], Block::Tool(_)) { end += 1; }
-    (end - start >= 2).then_some(start..end)
+/// Live and failed states are surfaced in the group header. One pass over the
+/// transcript; look rows up with [`group_at`] instead of rescanning per row.
+pub fn tool_groups(blocks: &[Block]) -> Vec<Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = None;
+    for ix in 0..=blocks.len() {
+        match (start, matches!(blocks.get(ix), Some(Block::Tool(_)))) {
+            (None, true) => start = Some(ix),
+            (Some(first), false) => {
+                if ix - first >= 2 { groups.push(first..ix); }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    groups
+}
+
+/// The group from [`tool_groups`] containing row `ix`, if any.
+pub fn group_at(groups: &[Range<usize>], ix: usize) -> Option<Range<usize>> {
+    let at = groups.partition_point(|group| group.end <= ix);
+    groups.get(at).filter(|group| group.contains(&ix)).cloned()
 }
 
 pub fn group_label(blocks: &[Block]) -> String {
@@ -140,6 +154,21 @@ mod tests {
         assert_eq!(describe(&call).1, "Running echo first");
         assert_eq!(call.input, "echo first\necho second");
         assert_eq!(group_label(&[Block::Tool(call)]), "Running echo first · 1 tools");
+    }
+
+    fn completed_group(blocks: &[Block], ix: usize, _running: bool) -> Option<Range<usize>> {
+        group_at(&tool_groups(blocks), ix)
+    }
+
+    #[test]
+    fn groups_are_found_for_every_member_in_one_pass() {
+        let call = || Block::Tool(tool("shell", "pwd", ToolState::Ok));
+        let user = Block::User { text: "hi".into(), steer: false, goal: false, attachments: Default::default() };
+        let blocks = vec![call(), call(), user.clone(), call(), user, call(), call(), call()];
+        assert_eq!(tool_groups(&blocks), [0..2, 5..8]);
+        assert_eq!(group_at(&tool_groups(&blocks), 3), None);
+        assert_eq!(group_at(&tool_groups(&blocks), 7), Some(5..8));
+        assert_eq!(group_at(&tool_groups(&blocks), 8), None);
     }
 
     #[test]

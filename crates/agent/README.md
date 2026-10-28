@@ -16,7 +16,8 @@ through the types below. Tokio-based; no UI dependencies.
 - `AgentEvent` (serde, `{"type": "snake_case", ...}`): `SessionStarted`,
   `TurnStarted`, `AssistantTextDelta`, `AssistantMessage`, `ReasoningDelta`,
   `ToolCallStarted/Updated/Finished`, `FileChange{path,kind,diff?}`,
-  `ApprovalRequested{id,kind,detail}`, `TokenUsage{input,output,cached}`,
+  `ApprovalRequested{id,kind,detail}`, `ApprovalResolved{id}` (provider settled
+  or withdrew it), `TokenUsage{input,output,cached}`,
   `TurnCompleted{turn_id,status}`, `Error{message,recoverable}`.
   Ordering per turn: `TurnStarted` … `TurnCompleted`. Deltas of a message are
   followed by its `AssistantMessage` with the full text.
@@ -41,8 +42,12 @@ through the types below. Tokio-based; no UI dependencies.
   `ManagerEvent::{Event, StatusChanged, PromptSent, TitleLoading}`), `shutdown()`. Status is
   `Idle | Running | WaitingApproval | Error` (`Error` after a non-recoverable
   `Error` event, cleared by the next prompt). The index is JSON lines at
-  `default_index_path()` (`<data dir>/del/sessions.jsonl`), written atomically;
-  in-flight sessions load as `Idle` after a restart. Call `resume(id)` to reattach.
+  `default_index_path()` (`<data dir>/del/sessions.jsonl`), written atomically
+  (private temp file, fsync, rename) by a background writer; `flush_index()`/
+  `shutdown()` wait for it; unreadable lines are preserved. In-flight sessions
+  load as `Idle` after a restart. Call `resume(id)` to reattach. `refresh_titles`
+  only asks live providers (live sessions, and saved ones whose provider process
+  is already running for the same account and folder); it never starts one.
 - `detect_all()` / `detect(provider)` → `ProviderStatus { installed, path, version,
   login: LoggedIn | LoggedOut | Unknown }`. Uses `codex login status` and
   `claude auth status`; only the exit code / `loggedIn` flag is read, never tokens.

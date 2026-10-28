@@ -58,6 +58,8 @@ pub enum ApprovalState {
     Pending,
     Approved,
     Denied,
+    /// The provider settled or withdrew the request without our answer.
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +157,16 @@ impl ChatModel {
         self.blocks
             .iter()
             .any(|b| matches!(b, Block::Approval(a) if a.state == ApprovalState::Pending))
+    }
+
+    /// Remove one row. Index-keyed state after it moves up with the rows.
+    pub fn remove_block(&mut self, ix: usize) -> Block {
+        let block = self.blocks.remove(ix);
+        self.completed_responses = std::mem::take(&mut self.completed_responses)
+            .into_iter()
+            .filter_map(|key| shifted_after_removal(key, ix))
+            .collect();
+        block
     }
 
     fn push(&mut self, block: Block) -> Change {
@@ -413,6 +425,15 @@ impl ChatModel {
                     state: ApprovalState::Pending,
                 })))
             }
+            AgentEvent::ApprovalResolved { id } => {
+                let ix = self.blocks.iter().position(|b| {
+                    matches!(b, Block::Approval(a) if a.id == *id && a.state == ApprovalState::Pending)
+                })?;
+                if let Block::Approval(a) = &mut self.blocks[ix] {
+                    a.state = ApprovalState::Closed;
+                }
+                Some(Change::Updated(ix))
+            }
             AgentEvent::TokenUsage { .. } => None,
             AgentEvent::TurnCompleted { turn_id, status } => {
                 self.seal();
@@ -433,6 +454,15 @@ impl ChatModel {
                 recoverable,
             } => Some(self.push_error(message.clone(), *recoverable)),
         }
+    }
+}
+
+/// Where row `key` lands after row `removed` is deleted; `None` for the removed row.
+pub fn shifted_after_removal(key: usize, removed: usize) -> Option<usize> {
+    match key.cmp(&removed) {
+        std::cmp::Ordering::Less => Some(key),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(key - 1),
     }
 }
 
@@ -479,6 +509,35 @@ mod tests {
             name: "bash".into(),
             input_summary: "ls".into(),
         }
+    }
+
+    #[test]
+    fn removing_a_row_shifts_completed_responses_with_it() {
+        let mut model = ChatModel::default();
+        model.push_user("first".into(), false);
+        model.apply(&AgentEvent::TurnStarted { turn_id: "t1".into() });
+        model.apply(&delta("one"));
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "t1".into(),
+            status: TurnStatus::Completed,
+        });
+        model.push_user("rejected".into(), false);
+        model.push_user("second".into(), false);
+        model.apply(&AgentEvent::TurnStarted { turn_id: "t2".into() });
+        model.apply(&AgentEvent::AssistantTextDelta {
+            turn_id: "t2".into(),
+            text: "two".into(),
+        });
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "t2".into(),
+            status: TurnStatus::Completed,
+        });
+        assert!(model.is_completed_response(1) && model.is_completed_response(4));
+        model.remove_block(2);
+        assert!(model.is_completed_response(1));
+        assert!(model.is_completed_response(3));
+        assert!(!model.is_completed_response(4));
+        assert_eq!(shifted_after_removal(2, 2), None);
     }
 
     #[test]
@@ -795,6 +854,38 @@ mod tests {
             panic!()
         };
         assert_eq!(a.state, ApprovalState::Denied);
+    }
+
+    #[test]
+    fn provider_resolved_approval_closes_card() {
+        let mut m = ChatModel::default();
+        for id in ["a1", "a2"] {
+            m.apply(&AgentEvent::ApprovalRequested {
+                id: id.into(),
+                kind: ApprovalKind::Command,
+                detail: "ls".into(),
+            });
+        }
+        let resolved = AgentEvent::ApprovalResolved { id: "a1".into() };
+        assert_eq!(m.apply(&resolved), Some(Change::Updated(0)));
+        assert_eq!(m.apply(&resolved), None);
+        let Block::Approval(a) = &m.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(a.state, ApprovalState::Closed);
+        // A closed card no longer accepts an answer; the other stays pending.
+        assert_eq!(m.resolve_approval("a1", ApprovalResponse::Approve), None);
+        assert!(m.has_pending_approval());
+        m.apply(&AgentEvent::ApprovalResolved { id: "a2".into() });
+        assert!(!m.has_pending_approval());
+        // An answer the user already gave is kept.
+        m.apply(&AgentEvent::ApprovalRequested {
+            id: "a3".into(),
+            kind: ApprovalKind::Command,
+            detail: "ls".into(),
+        });
+        m.resolve_approval("a3", ApprovalResponse::Approve);
+        assert_eq!(m.apply(&AgentEvent::ApprovalResolved { id: "a3".into() }), None);
     }
 
     #[test]

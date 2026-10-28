@@ -14,9 +14,53 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
+
+/// Longest stdout line accepted; a larger one is skipped rather than buffered.
+const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one `\n`-terminated line of at most `max` bytes. `Ok(None)` is EOF;
+/// `Err(len)` inside reports a skipped oversized line. Invalid UTF-8 is
+/// replaced rather than treated as a read error.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<Result<String, usize>>> {
+    let mut buf = Vec::new();
+    let mut skipped = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() && skipped == 0 {
+                return Ok(None);
+            }
+            break;
+        }
+        let (used, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if skipped > 0 || buf.len() + used > max {
+            skipped += buf.len() + used;
+            buf = Vec::new();
+        } else {
+            buf.extend_from_slice(&available[..used]);
+        }
+        reader.consume(used);
+        if done {
+            break;
+        }
+    }
+    if skipped > 0 {
+        return Ok(Some(Err(skipped)));
+    }
+    while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        buf.pop();
+    }
+    Ok(Some(Ok(String::from_utf8_lossy(&buf).into_owned())))
+}
 
 /// JSON-RPC error object.
 #[derive(Debug, Clone, PartialEq)]
@@ -137,8 +181,9 @@ impl Rpc {
         let tail = Arc::new(Mutex::new(String::new()));
         let t = tail.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut stderr = BufReader::new(stderr);
+            while let Ok(Some(l)) = read_line_capped(&mut stderr, 64 * 1024).await {
+                let Ok(l) = l else { continue };
                 let mut t = t.lock().unwrap();
                 if t.len() > 2000 {
                     t.clear();
@@ -150,9 +195,12 @@ impl Rpc {
 
         let r = rpc.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                r.dispatch(&line, &handler);
+            let mut stdout = BufReader::new(stdout);
+            while let Ok(Some(line)) = read_line_capped(&mut stdout, MAX_LINE_BYTES).await {
+                match line {
+                    Ok(line) => r.dispatch(&line, &handler),
+                    Err(len) => eprintln!("acp: skipped a {len}-byte agent line over the size limit"),
+                }
             }
             r.closed.store(true, Ordering::SeqCst);
             let waiters: Vec<_> = r.pending.lock().unwrap().drain().collect();
@@ -160,9 +208,14 @@ impl Rpc {
                 let _ = w.send(Err(closed_error()));
             }
             let tail = tail.lock().unwrap().trim().to_owned();
-            // Do not hold the child lock while waiting: a process can close
-            // stdout yet ignore SIGTERM, and close() still needs to kill it.
-            handler.closed(None, tail);
+            // Report the real exit code when the process has already gone; do
+            // not wait for it here: a process can close stdout yet ignore
+            // SIGTERM, and close() still needs to kill it.
+            let exit = match r.child.try_lock() {
+                Ok(mut child) => child.try_wait().ok().flatten().and_then(|s| s.code()),
+                Err(_) => None,
+            };
+            handler.closed(exit, tail);
             r.kill(Duration::from_secs(2)).await;
         });
         Ok(rpc)
@@ -279,5 +332,24 @@ struct RequestCleanup {
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
         self.rpc.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capped_lines_skip_oversized_and_tolerate_bad_utf8() {
+        let data: &[u8] = b"ok\n0123456789abcdef\nbad\xff\n";
+        let mut reader = BufReader::with_capacity(4, data);
+        let mut got = Vec::new();
+        while let Some(line) = read_line_capped(&mut reader, 10).await.unwrap() {
+            got.push(line);
+        }
+        assert_eq!(
+            got,
+            vec![Ok("ok".to_owned()), Err(17), Ok("bad\u{fffd}".to_owned())]
+        );
     }
 }

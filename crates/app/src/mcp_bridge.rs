@@ -26,8 +26,10 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot, watch};
 /// Handle these on the GPUI thread. Keep reply senders with the visible prompt
 /// or launch task; dropping a sender fails the tool instead of hanging it.
 pub enum BridgeEvent {
+    /// `allowed` lists the only sessions whose browsers this request may use.
     Browser {
         caller: SessionId,
+        allowed: Vec<SessionId>,
         request: del_mcp::BrowserRequest,
         reply: oneshot::Sender<HostResult<serde_json::Value>>,
     },
@@ -210,6 +212,86 @@ impl Drop for McpBridge {
     }
 }
 
+/// Browser-only credentials bound to each Codex/OpenCode chat, so the server
+/// scopes every chat to its own browser.
+struct ChatBrowserCredentials {
+    service: std::sync::Weak<Service>,
+}
+
+impl ChatBrowserCredentials {
+    fn with_server<T>(&self, f: impl FnOnce(&Service, &McpServer) -> T) -> io::Result<T> {
+        let service = self
+            .service
+            .upgrade()
+            .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+        let server = service.server.lock().unwrap();
+        let server = server
+            .as_ref()
+            .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
+        Ok(f(&service, server))
+    }
+}
+
+impl Service {
+    /// Pending host replies of `id` are cancelled through this entry when its
+    /// credentials are revoked; keep the existing one across extra tokens.
+    fn track(&self, id: &SessionId) {
+        self.host
+            .revocations
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_insert_with(|| watch::channel(false).0);
+    }
+}
+
+impl del_agent::backend::BrowserCredentials for ChatBrowserCredentials {
+    fn mint(&self, session: &SessionId) -> io::Result<String> {
+        self.with_server(|service, server| {
+            let token = server.register_browser_client(session).token;
+            service.track(session);
+            token
+        })
+    }
+
+    fn rebind(&self, from: &SessionId, to: &SessionId) {
+        let _ = self.with_server(|service, server| {
+            server.rebind_session(from, to);
+            let moved = service.host.revocations.lock().unwrap().remove(from);
+            if let Some(cancel) = moved {
+                service
+                    .host
+                    .revocations
+                    .lock()
+                    .unwrap()
+                    .entry(to.clone())
+                    .or_insert(cancel);
+            }
+        });
+    }
+
+    fn revoke(&self, session: &SessionId) {
+        let _ = self.with_server(|service, server| {
+            server.revoke_session(session);
+            if let Some(cancel) = service.host.revocations.lock().unwrap().remove(session) {
+                cancel.send_replace(true);
+            }
+        });
+    }
+
+    fn mint_shared(&self, group: &SessionId) -> io::Result<String> {
+        self.with_server(|service, server| {
+            let token = server.register_shared_browser_client(group).token;
+            service.track(group);
+            token
+        })
+    }
+
+    fn set_shared_member(&self, group: &SessionId, session: &SessionId, member: bool) {
+        let _ = self.with_server(|_, server| server.set_shared_browser_member(group, session, member));
+    }
+}
+
 fn remove_files(files: Vec<PathBuf>) {
     for file in files {
         let _ = std::fs::remove_file(file);
@@ -223,41 +305,14 @@ fn tail(text: String) -> String {
 
 impl BridgeHandle {
     pub fn chat_browser_tools(&self) -> io::Result<del_agent::backend::BrowserTools> {
-        let server = self.service.server.lock().unwrap();
-        let server = server
-            .as_ref()
+        let url = self
+            .endpoint()
             .ok_or_else(|| io::Error::other("MCP bridge stopped"))?;
-        let id = SessionId::new(format!(
-            "browser-chat-{}-{}",
-            std::process::id(),
-            self.service
-                .host
-                .next_question
-                .fetch_add(1, Ordering::Relaxed)
-        ));
-        let credentials = server.register_browser_client(&id);
-        let config = launch::claude(&credentials, &Transport::Http, &self.service.config_dir)?;
-        let file = config
-            .files
-            .first()
-            .cloned()
-            .ok_or_else(|| io::Error::other("Missing browser MCP config"))?;
-        self.service
-            .files
-            .lock()
-            .unwrap()
-            .insert(id.clone(), config.files);
-        let (cancel, _) = watch::channel(false);
-        self.service
-            .host
-            .revocations
-            .lock()
-            .unwrap()
-            .insert(id, cancel);
         Ok(del_agent::backend::BrowserTools {
-            url: credentials.url,
-            token: credentials.token,
-            claude_config: file,
+            url,
+            credentials: Arc::new(ChatBrowserCredentials {
+                service: Arc::downgrade(&self.service),
+            }),
             question: Some({
                 let service = Arc::downgrade(&self.service);
                 Arc::new(move |caller, question, options| {
@@ -341,7 +396,7 @@ impl BridgeHandle {
     }
 
     /// Call on session creation/metadata changes; shell/custom terminals use
-    /// provider None and are visible in tools without receiving agent tokens.
+    /// provider None and never receive agent tokens.
     pub fn upsert_terminal(&self, info: SessionInfo, last_output: Option<String>) {
         self.service.host.terminals.lock().unwrap().insert(
             info.id.clone(),
@@ -360,6 +415,9 @@ impl BridgeHandle {
 
     pub fn remove_terminal(&self, id: &SessionId) {
         self.revoke(id);
+        if let Some(server) = self.service.server.lock().unwrap().as_ref() {
+            server.forget_session(id);
+        }
         self.service.host.terminals.lock().unwrap().remove(id);
         self.service.host.reported.lock().unwrap().remove(id);
     }
@@ -367,7 +425,7 @@ impl BridgeHandle {
     /// Prepare metadata and a process-lifetime lease for the terminal launcher.
     /// Run on the runtime launch task; clone lease.config().args/env into the
     /// prepared spec and pass the lease boxed to the host. Shell/custom
-    /// terminals are visible but return None because they need no MCP token.
+    /// terminals are recorded but return None because they need no MCP token.
     pub fn register_terminal(&self, info: SessionInfo) -> io::Result<Option<TerminalLease>> {
         if info.mode != SessionMode::Terminal {
             return Err(io::Error::other(
@@ -586,11 +644,33 @@ impl McpHost for AppHost {
     async fn browser(
         &self,
         caller: &SessionId,
+        access: del_mcp::BrowserAccess,
         request: del_mcp::BrowserRequest,
     ) -> HostResult<serde_json::Value> {
+        let allowed = match access {
+            del_mcp::BrowserAccess::Sessions(sessions) => sessions,
+            // One OpenCode workspace server shares a credential among its
+            // chats, so it cannot name its caller. A browser call happens
+            // during the calling chat's turn: limit it to members running one.
+            del_mcp::BrowserAccess::Shared(members) => members
+                .into_iter()
+                .filter(|id| {
+                    matches!(
+                        self.manager.status(id),
+                        Some(SessionStatus::Running | SessionStatus::WaitingApproval)
+                    )
+                })
+                .collect(),
+        };
+        if allowed.is_empty() {
+            return Err(failed(
+                "No running chat can use this browser credential",
+            ));
+        }
         let (reply, rx) = oneshot::channel();
         self.emit(BridgeEvent::Browser {
             caller: caller.clone(),
+            allowed,
             request,
             reply,
         })?;
@@ -720,14 +800,7 @@ impl McpHost for AppHost {
             })?;
             self.reply(caller, rx).await?
         } else {
-            if self.manager.list_sessions().iter().any(|record| {
-                &record.id == target
-                    && matches!(record.provider, Provider::Codex | Provider::Claude)
-            }) {
-                self.manager
-                    .set_permission_mode(target, del_agent::PermissionMode::FullAuto)
-                    .map_err(|e| failed(e.to_string()))?;
-            }
+            // Messaging a chat never changes its permission mode.
             self.manager
                 .resume(target)
                 .await

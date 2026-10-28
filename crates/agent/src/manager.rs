@@ -4,7 +4,7 @@ use crate::backend::*;
 use crate::index::*;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,6 +35,32 @@ pub enum ManagerEvent {
 /// Most events kept per session for late subscribers.
 const HISTORY_LIMIT: usize = 50_000;
 
+/// Drop the oldest tenth of an over-long history, keeping `SessionStarted`
+/// and the first user message so the history still opens the conversation.
+fn trim_history(history: &mut Vec<AgentEvent>) {
+    if history.len() < HISTORY_LIMIT {
+        return;
+    }
+    let start = usize::from(matches!(
+        history.first(),
+        Some(AgentEvent::SessionStarted { .. })
+    ));
+    let end = (start + HISTORY_LIMIT / 10).min(history.len());
+    match history[start..end]
+        .iter()
+        .position(|e| matches!(e, AgentEvent::UserMessage { .. }))
+    {
+        Some(first_user) => {
+            let pinned = start + first_user;
+            history.drain(pinned + 1..end);
+            history.drain(start..pinned);
+        }
+        None => {
+            history.drain(start..end);
+        }
+    }
+}
+
 struct Live {
     handle: SessionHandle,
     config: SessionConfig,
@@ -45,6 +71,9 @@ struct Live {
     /// exactly once: first in the history, then on the receiver.
     fanout: broadcast::Sender<AgentEvent>,
     history: Vec<AgentEvent>,
+    /// Approval requests still waiting for an answer, so settling one of
+    /// several does not report the session Running too early.
+    pending_approvals: HashSet<String>,
 }
 
 const STANDBY_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -66,6 +95,9 @@ struct Shared {
     standby: Mutex<Option<Standby>>,
     preparation: tokio::sync::Mutex<()>,
     title_generation: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Activity marker (live history length, or `usize::MAX` when not live) at
+    /// the last provider title read, so unchanged sessions are not re-polled.
+    title_polls: Mutex<HashMap<SessionId, usize>>,
 }
 
 /// Cheap to clone; all clones share state.
@@ -74,10 +106,16 @@ pub struct SessionManager {
     shared: Arc<Shared>,
 }
 
-fn next_status(current: SessionStatus, ev: &AgentEvent) -> SessionStatus {
+/// `approvals_pending`: whether any approval is still unanswered after `ev`.
+fn next_status(current: SessionStatus, ev: &AgentEvent, approvals_pending: bool) -> SessionStatus {
     match ev {
         AgentEvent::TurnStarted { .. } => SessionStatus::Running,
         AgentEvent::ApprovalRequested { .. } => SessionStatus::WaitingApproval,
+        AgentEvent::ApprovalResolved { .. }
+            if current == SessionStatus::WaitingApproval && !approvals_pending =>
+        {
+            SessionStatus::Running
+        }
         AgentEvent::Error {
             recoverable: false, ..
         } => SessionStatus::Error,
@@ -88,13 +126,34 @@ fn next_status(current: SessionStatus, ev: &AgentEvent) -> SessionStatus {
 
 impl Shared {
     fn set_status(&self, id: &SessionId, status: SessionStatus) {
-        {
-            let mut live = self.live.lock().unwrap();
-            match live.get_mut(id) {
-                Some(l) if l.status != status => l.status = status,
-                _ => return,
+        self.transition(id, |_| Some(status));
+    }
+
+    /// Compare-and-set the live status under the `live` lock, so a decision
+    /// based on the current status can never write back a stale one. Returns
+    /// whether the status changed.
+    fn transition(
+        &self,
+        id: &SessionId,
+        decide: impl FnOnce(SessionStatus) -> Option<SessionStatus>,
+    ) -> bool {
+        let mut live = self.live.lock().unwrap();
+        let Some(l) = live.get_mut(id) else {
+            return false;
+        };
+        match decide(l.status) {
+            Some(next) if next != l.status => {
+                l.status = next;
+                self.publish_status(id, next);
+                true
             }
+            _ => false,
         }
+    }
+
+    /// Persist and broadcast a status. Callers hold the `live` lock so
+    /// concurrent changes are published in the order they were applied.
+    fn publish_status(&self, id: &SessionId, status: SessionStatus) {
         let _ = self.index.lock().unwrap().update(id, |r| {
             r.status = status;
             r.updated_at_ms = now_ms();
@@ -142,10 +201,38 @@ impl SessionManager {
     }
 
     /// Refresh provider-owned names without changing session order or live state.
+    ///
+    /// Never starts a provider just to read a name: only live sessions, and
+    /// saved ones sharing a live session's provider, account and folder (whose
+    /// provider process is already running), are asked. A session is asked
+    /// again only after new activity, so idle or nameless sessions are not
+    /// polled forever.
     pub async fn refresh_titles(&self) -> Result<bool> {
+        let records = self.list_sessions();
+        let activity: HashMap<SessionId, usize> = self
+            .shared
+            .live
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, l)| (id.clone(), l.history.len()))
+            .collect();
+        let warm: std::collections::HashSet<_> = records
+            .iter()
+            .filter(|r| activity.contains_key(&r.id))
+            .map(|r| (r.provider, r.account_id.clone(), r.cwd.clone()))
+            .collect();
         let mut changed = false;
-        for record in self.list_sessions() {
+        for record in records {
             if record.title_turns > 0 {
+                continue;
+            }
+            let marker = match activity.get(&record.id) {
+                Some(&len) => len,
+                None if warm.contains(&(record.provider, record.account_id.clone(), record.cwd.clone())) => usize::MAX,
+                None => continue,
+            };
+            if self.shared.title_polls.lock().unwrap().insert(record.id.clone(), marker) == Some(marker) {
                 continue;
             }
             let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref()) else {
@@ -159,16 +246,15 @@ impl SessionManager {
             else {
                 continue;
             };
-            let title = title.trim();
-            if title.is_empty() {
+            let Some(title) = crate::titles::clean_provider(&title) else {
                 continue;
-            }
+            };
             let mut index = self.shared.index.lock().unwrap();
             if index
                 .get(&record.id)
-                .is_some_and(|r| r.title_turns == 0 && r.title.as_deref() != Some(title))
+                .is_some_and(|r| r.title_turns == 0 && r.title.as_deref() != Some(title.as_str()))
             {
-                index.update(&record.id, |r| r.title = Some(title.to_owned()))?;
+                index.update(&record.id, |r| r.title = Some(title))?;
                 changed = true;
             }
         }
@@ -252,6 +338,7 @@ impl SessionManager {
                 standby: Mutex::new(None),
                 preparation: tokio::sync::Mutex::new(()),
                 title_generation: Mutex::new(HashMap::new()),
+                title_polls: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -310,10 +397,12 @@ impl SessionManager {
     /// Start pumping a backend's events. Backends cannot emit `SessionStarted`
     /// to anyone (no subscriber exists yet), so the manager emits the canonical
     /// one here, first in the session's history; any the backend emits itself
-    /// is dropped.
-    fn attach(&self, handle: SessionHandle, config: SessionConfig) {
+    /// is dropped. Returns the handle without its restored snapshot, which now
+    /// lives only in the session history.
+    fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> SessionHandle {
         let id = handle.id.clone();
         let mut rx = handle.subscribe();
+        let restored = handle.take_history();
         // Publish the attachment before the pump can consume its first event.
         let mut live = self.shared.live.lock().unwrap();
         let old = live.remove(&id);
@@ -326,54 +415,115 @@ impl SessionManager {
         } else {
             let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
             let mut history = vec![started.clone()];
-            history.extend_from_slice(handle.history());
+            history.extend_from_slice(&restored);
             let _ = self.shared.all_tx.send(ManagerEvent::Event {
                 session: id.clone(),
                 event: started,
             });
             (fanout, history)
         };
+        drop(restored);
         let shared = self.shared.clone();
         let pump_id = id.clone();
         let pump = tokio::spawn(async move {
+            // Set after events were lost: the turn state is unknown until the
+            // stream shows whether a turn is still running.
+            let mut resyncing = false;
             loop {
-                match rx.recv().await {
-                    Ok(AgentEvent::SessionStarted { .. }) => {}
+                let (event, status) = match rx.recv().await {
+                    Ok(AgentEvent::SessionStarted { .. }) => continue,
                     Ok(event) => {
-                        let mut live = shared.live.lock().unwrap();
-                        let Some(l) = live.get_mut(&pump_id) else {
-                            continue;
-                        };
-                        if l.history.len() >= HISTORY_LIMIT {
-                            l.history.drain(..HISTORY_LIMIT / 10);
+                        let mut status = None;
+                        if resyncing {
+                            match event {
+                                AgentEvent::TurnStarted { .. }
+                                | AgentEvent::TurnCompleted { .. } => resyncing = false,
+                                AgentEvent::AssistantTextDelta { .. }
+                                | AgentEvent::ReasoningDelta { .. }
+                                | AgentEvent::ToolCallStarted { .. }
+                                | AgentEvent::ToolCallUpdated { .. } => {
+                                    status = Some(SessionStatus::Running);
+                                }
+                                _ => {}
+                            }
                         }
-                        l.history.push(event.clone());
-                        let _ = l.fanout.send(event.clone());
-                        let next = next_status(l.status, &event);
-                        drop(live);
-                        // Status first so a listener seeing the event sees a consistent status.
-                        shared.set_status(&pump_id, next);
-                        let _ = shared.all_tx.send(ManagerEvent::Event {
-                            session: pump_id.clone(),
-                            event,
-                        });
+                        (event, status)
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        // A lost `TurnCompleted` would leave the session stuck
+                        // Running. Assume the turn ended; streaming output that
+                        // follows marks it Running again.
+                        resyncing = true;
+                        (
+                            AgentEvent::Error {
+                                message: format!(
+                                    "Del fell behind and skipped {skipped} updates from this session. Some output may be missing."
+                                ),
+                                recoverable: true,
+                            },
+                            Some(SessionStatus::Idle),
+                        )
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
+                };
+                {
+                    let mut live = shared.live.lock().unwrap();
+                    let Some(l) = live.get_mut(&pump_id) else {
+                        continue;
+                    };
+                    trim_history(&mut l.history);
+                    match &event {
+                        AgentEvent::ApprovalRequested { id, .. } => {
+                            l.pending_approvals.insert(id.clone());
+                        }
+                        AgentEvent::ApprovalResolved { id } => {
+                            l.pending_approvals.remove(id);
+                        }
+                        AgentEvent::TurnCompleted { .. } => l.pending_approvals.clear(),
+                        _ => {}
+                    }
+                    l.history.push(event.clone());
+                    let _ = l.fanout.send(event.clone());
+                    let next = match status {
+                        Some(SessionStatus::Idle)
+                            if !matches!(
+                                l.status,
+                                SessionStatus::Running | SessionStatus::WaitingApproval
+                            ) =>
+                        {
+                            l.status
+                        }
+                        Some(SessionStatus::Running) if l.status != SessionStatus::Idle => {
+                            l.status
+                        }
+                        Some(status) => status,
+                        None => next_status(l.status, &event, !l.pending_approvals.is_empty()),
+                    };
+                    // Status first so a listener seeing the event sees a consistent status.
+                    if next != l.status {
+                        l.status = next;
+                        shared.publish_status(&pump_id, next);
+                    }
                 }
+                let _ = shared.all_tx.send(ManagerEvent::Event {
+                    session: pump_id.clone(),
+                    event,
+                });
             }
         });
         live.insert(
             id,
             Live {
-                handle,
+                handle: handle.clone(),
                 config,
                 status: SessionStatus::Idle,
                 pump,
                 fanout,
                 history,
+                pending_approvals: HashSet::new(),
             },
         );
+        handle
     }
 
     /// Keep one unused session ready, without publishing a chat or sending a prompt.
@@ -429,33 +579,43 @@ impl SessionManager {
 
     pub async fn start_account_session(&self, config: SessionConfig, account_id: Option<String>) -> Result<SessionHandle> {
         let applied_config = config.clone();
-        let prepared = {
+        let (prepared, expired) = {
             let mut slot = self.shared.standby.lock().unwrap();
             if account_id.is_none() && slot
                 .as_ref()
                 .is_some_and(|s| s.config == config && s.created.elapsed() < STANDBY_LIFETIME)
             {
-                slot.take().map(|s| s.handle)
+                (slot.take().map(|s| s.handle), None)
+            } else if slot
+                .as_ref()
+                .is_some_and(|s| s.created.elapsed() >= STANDBY_LIFETIME)
+            {
+                (None, slot.take())
             } else {
-                None
+                (None, None)
             }
         };
+        // Release an expired standby's process without delaying this start.
+        if let Some(expired) = expired
+            && let Ok(backend) = self.backend(expired.config.provider)
+        {
+            tokio::spawn(async move {
+                let _ = backend.close(&expired.handle.id).await;
+            });
+        }
         let started = Instant::now();
         let warm = prepared.is_some();
+        let backend = self.account_backend(config.provider, account_id.as_deref())?;
         let handle = match prepared {
             Some(handle) => handle,
-            None => {
-                self.account_backend(config.provider, account_id.as_deref())?
-                    .start_session(config.clone())
-                    .await?
-            }
+            None => backend.start_session(config.clone()).await?,
         };
         eprintln!(
             "[del startup] session ready warm={warm} elapsed={}ms",
             started.elapsed().as_millis()
         );
         let now = now_ms();
-        self.shared.index.lock().unwrap().upsert(SessionRecord {
+        let recorded = self.shared.index.lock().unwrap().upsert(SessionRecord {
             id: handle.id.clone(),
             provider: config.provider,
             account_id,
@@ -469,9 +629,13 @@ impl SessionManager {
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
-        })?;
-        self.attach(handle.clone(), applied_config);
-        Ok(handle)
+        });
+        if let Err(error) = recorded {
+            // Never leave a provider process running for a session nobody can reach.
+            let _ = backend.close(&handle.id).await;
+            return Err(error);
+        }
+        Ok(self.attach(handle, applied_config))
     }
 
     /// Reattach a session from the index (or return the live one).
@@ -500,8 +664,12 @@ impl SessionManager {
             .account_backend(record.provider, record.account_id.as_deref())?
             .resume(record.config(), id)
             .await?;
-        self.attach(handle.clone(), record.config());
-        self.shared.set_status(id, SessionStatus::Idle);
+        let handle = self.attach(handle, record.config());
+        // `attach` starts live sessions Idle; clear a persisted Error too.
+        if record.status != SessionStatus::Idle {
+            let _live = self.shared.live.lock().unwrap();
+            self.shared.publish_status(id, SessionStatus::Idle);
+        }
         Ok(handle)
     }
 
@@ -608,8 +776,20 @@ impl SessionManager {
                     "settings apply after the current turn finishes".into(),
                 ));
             }
-            let handle = self.session_backend(id)?.reconfigure(config.clone(), id).await?;
-            self.attach(handle, config.clone());
+            match self.session_backend(id)?.reconfigure(config.clone(), id).await {
+                Ok(handle) => {
+                    self.attach(handle, config.clone());
+                }
+                Err(error) => {
+                    // The old process may already be closed. Keep the history,
+                    // mark the session failed, and retry on the next send (a
+                    // default reconfigure tolerates the missing session).
+                    if !matches!(error, AgentError::Busy(_)) {
+                        self.shared.set_status(id, SessionStatus::Error);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let title: String = input.text.trim().chars().take(60).collect();
         let backend = self.session_backend(id)?;
@@ -641,7 +821,9 @@ impl SessionManager {
             {
                 session.history.remove(title_position);
             }
-            self.shared.set_status(id, previous);
+            // Only undo our own Running; events may already have moved on.
+            self.shared
+                .transition(id, |current| (current == SessionStatus::Running).then_some(previous));
             return Err(error);
         }
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
@@ -688,7 +870,9 @@ impl SessionManager {
             Err(error) => {
                 let _ = target.close(id).await;
                 match old.resume(record.config(), id).await {
-                    Ok(handle) => self.attach(handle, record.config()),
+                    Ok(handle) => {
+                        self.attach(handle, record.config());
+                    }
                     Err(restore) => return Err(AgentError::Backend(format!("{error}; could not reconnect the original account: {restore}"))),
                 }
                 Err(error)
@@ -779,7 +963,16 @@ impl SessionManager {
         self.session_backend(id)?
             .respond_approval(id, approval_id, response)
             .await?;
-        self.shared.set_status(id, SessionStatus::Running);
+        // The turn may already have finished (or failed) while we awaited, and
+        // other requests may still be waiting.
+        let mut live = self.shared.live.lock().unwrap();
+        if let Some(l) = live.get_mut(id) {
+            l.pending_approvals.remove(approval_id);
+            if l.status == SessionStatus::WaitingApproval && l.pending_approvals.is_empty() {
+                l.status = SessionStatus::Running;
+                self.shared.publish_status(id, SessionStatus::Running);
+            }
+        }
         Ok(())
     }
 
@@ -794,20 +987,43 @@ impl SessionManager {
             .or_default()
             .clone();
         let _closing = lock.lock().await;
-        if !self.is_live(id) {
+        // Detach first so a failing backend lookup or close cannot leak the pump.
+        let Some(live) = self.shared.live.lock().unwrap().remove(id) else {
             return Ok(());
+        };
+        live.pump.abort();
+        let provider = live.handle.provider;
+        drop(live);
+        // A live session must always be closable, even when its index record
+        // is gone: fall back to the provider the live handle was started on.
+        let backend = match self.session_backend(id) {
+            Err(AgentError::UnknownSession(_)) => self.backend(provider),
+            other => other,
+        };
+        let res = match backend {
+            Ok(backend) => match backend.close(id).await {
+                // Already gone on the provider side: closing is done.
+                Err(AgentError::UnknownSession(_)) => Ok(()),
+                other => other,
+            },
+            Err(e) => Err(e),
+        };
+        let changed = {
+            let mut index = self.shared.index.lock().unwrap();
+            let changed = index
+                .get(id)
+                .is_some_and(|r| r.status != SessionStatus::Idle);
+            if changed {
+                let _ = index.update(id, |r| r.status = SessionStatus::Idle);
+            }
+            changed
+        };
+        if changed {
+            let _ = self.shared.all_tx.send(ManagerEvent::StatusChanged {
+                session: id.clone(),
+                status: SessionStatus::Idle,
+            });
         }
-        self.live_provider(id)?;
-        let res = self.session_backend(id)?.close(id).await;
-        if let Some(l) = self.shared.live.lock().unwrap().remove(id) {
-            l.pump.abort();
-        }
-        let _ = self
-            .shared
-            .index
-            .lock()
-            .unwrap()
-            .update(id, |r| r.status = SessionStatus::Idle);
         res
     }
 
@@ -816,6 +1032,9 @@ impl SessionManager {
         if self.is_live(id) {
             let _ = self.close(id).await;
         }
+        self.shared.resume_locks.lock().unwrap().remove(id);
+        self.shared.title_generation.lock().unwrap().remove(id);
+        self.shared.title_polls.lock().unwrap().remove(id);
         self.shared.index.lock().unwrap().remove(id)
     }
 
@@ -866,16 +1085,31 @@ impl SessionManager {
     }
 
     /// Close every session and kill all backend child processes. Idempotent.
+    /// Sessions close concurrently: each may wait out a provider's grace period.
     pub async fn shutdown(&self) {
+        // Save first: the caller may stop waiting on a slow provider.
+        self.flush_index().await;
         self.clear_prepared_session().await;
         let ids: Vec<SessionId> = self.shared.live.lock().unwrap().keys().cloned().collect();
+        let mut closing = tokio::task::JoinSet::new();
         for id in ids {
-            let _ = self.close(&id).await;
+            let manager = self.clone();
+            closing.spawn(async move {
+                let _ = manager.close(&id).await;
+            });
         }
+        while closing.join_next().await.is_some() {}
         let accounts: Vec<_> = self.shared.account_backends.lock().unwrap().values().cloned().collect();
         for b in accounts.into_iter().chain(self.shared.backends.values().cloned()) {
             let _ = b.shutdown().await;
         }
+        self.flush_index().await;
+    }
+
+    /// Wait until every index change made so far has reached disk.
+    pub async fn flush_index(&self) {
+        let flush = self.shared.index.lock().unwrap().flusher();
+        let _ = tokio::task::spawn_blocking(move || flush.wait()).await;
     }
 }
 
@@ -1068,6 +1302,7 @@ mod tests {
             }
         }
         assert_eq!(loading, [true, false]);
+        m.flush_index().await;
         let saved = SessionIndex::open(&path)
             .unwrap()
             .get(&h.id)
@@ -1214,13 +1449,20 @@ mod tests {
         m.prepare_session(config).await.unwrap();
         assert!(m.is_live(&active.id));
         assert!(m.is_live(&fresh.id));
-        assert!(
-            m.backend(Provider::Codex)
-                .unwrap()
-                .send_prompt(&expired, UserInput::text("unused"))
-                .await
-                .is_err()
-        );
+        // The expired standby is closed in the background.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                m.backend(Provider::Codex)
+                    .unwrap()
+                    .interrupt(&expired)
+                    .await,
+                Err(AgentError::UnknownSession(_))
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expired standby must be closed");
         m.shutdown().await;
     }
 
@@ -1436,6 +1678,7 @@ mod tests {
             }
         }
         m.delete(&id).await.unwrap();
+        m.flush_index().await;
         assert!(manager(&path).list_sessions().is_empty());
     }
 
@@ -1464,6 +1707,170 @@ mod tests {
     }
 
     #[test]
+    fn trimming_keeps_session_start_and_first_prompt() {
+        let delta = |i: usize| AgentEvent::AssistantTextDelta {
+            turn_id: "t".into(),
+            text: i.to_string(),
+        };
+        let mut history = vec![
+            AgentEvent::SessionStarted {
+                session_id: SessionId::new("s"),
+            },
+            delta(0),
+            AgentEvent::UserMessage {
+                text: "first".into(),
+            },
+        ];
+        history.extend((1..HISTORY_LIMIT).map(delta));
+        for _ in 0..3 {
+            let len = history.len();
+            trim_history(&mut history);
+            assert!(history.len() < len);
+            assert!(matches!(history[0], AgentEvent::SessionStarted { .. }));
+            assert!(matches!(&history[1], AgentEvent::UserMessage { text } if text == "first"));
+            history.extend((0..HISTORY_LIMIT).map(delta));
+        }
+        assert_eq!(history.last(), Some(&delta(HISTORY_LIMIT - 1)));
+    }
+
+    #[tokio::test]
+    async fn provider_resolved_approvals_resume_running_once_none_pend() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let mut all = m.subscribe_all();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("withdraw")).await.unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
+        let mut resolved = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match all.recv().await.unwrap() {
+                    ManagerEvent::Event {
+                        event: AgentEvent::ApprovalResolved { .. },
+                        ..
+                    } => resolved += 1,
+                    // The status is published just before the event that caused it.
+                    ManagerEvent::StatusChanged {
+                        status: SessionStatus::Running,
+                        ..
+                    } => {
+                        assert_eq!(resolved, 1, "Running only once both are settled");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn approval_reply_never_overwrites_a_finished_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        assert!(!m.shared.transition(&h.id, |current| {
+            (current == SessionStatus::WaitingApproval).then_some(SessionStatus::Running)
+        }));
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Idle));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn close_broadcasts_idle_and_detaches_even_without_a_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let mut all = m.subscribe_all();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("approve")).await.unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
+        m.close(&h.id).await.unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        assert_eq!(m.list_sessions()[0].status, SessionStatus::Idle);
+
+        let account: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        m.register_account("gone".into(), account);
+        let a = m
+            .start_account_session(cfg(Provider::Codex), Some("gone".into()))
+            .await
+            .unwrap();
+        m.unregister_account(Provider::Codex, "gone");
+        assert!(m.close(&a.id).await.is_err());
+        assert!(!m.is_live(&a.id));
+        m.delete(&a.id).await.unwrap();
+        assert!(!m.shared.resume_locks.lock().unwrap().contains_key(&a.id));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_session_closes_even_without_an_index_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.shared.index.lock().unwrap().remove(&h.id).unwrap();
+        m.close(&h.id).await.unwrap();
+        assert!(!m.is_live(&h.id));
+        assert!(m.backend(Provider::Codex).unwrap().send_prompt(&h.id, UserInput::text("x")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_clears_a_persisted_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i.jsonl");
+        let id = {
+            let m = manager(&path);
+            let h = m.start_session(cfg(Provider::Claude)).await.unwrap();
+            m.shutdown().await;
+            h.id
+        };
+        {
+            let mut index = SessionIndex::open(&path).unwrap();
+            index.update(&id, |r| r.status = SessionStatus::Error).unwrap();
+        }
+        let m = manager(&path);
+        let mut all = m.subscribe_all();
+        m.resume(&id).await.unwrap();
+        wait_status(&mut all, &id, SessionStatus::Idle).await;
+        assert_eq!(m.list_sessions()[0].status, SessionStatus::Idle);
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn provider_titles_are_read_only_from_running_providers_and_only_after_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i.jsonl");
+        let mut backend = MockBackend::new(Provider::Codex);
+        backend.session_title = Some("Named\u{202E} by provider".into());
+        let reads = backend.session_title_reads.clone();
+        let m = SessionManager::new(&path, [Arc::new(backend) as Arc<dyn AgentBackend>]).unwrap();
+        let saved = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.close(&saved.id).await.unwrap();
+        let mut elsewhere = cfg(Provider::Codex);
+        elsewhere.cwd = "/elsewhere".into();
+        let other = m.start_session(elsewhere).await.unwrap();
+        m.close(&other.id).await.unwrap();
+        // Nothing is live: no provider may be started to read names.
+        assert!(!m.refresh_titles().await.unwrap());
+        assert!(reads.lock().unwrap().is_empty());
+
+        let live = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        assert!(m.refresh_titles().await.unwrap());
+        let mut read = reads.lock().unwrap().clone();
+        read.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let mut expected = vec![live.id.clone(), saved.id.clone()];
+        expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(read, expected, "same provider and folder only");
+        assert!(m.list_sessions().iter().filter(|r| r.id != other.id).all(|r| r.title.as_deref() == Some("Named by provider")));
+        // No new activity: not asked again.
+        assert!(!m.refresh_titles().await.unwrap());
+        assert_eq!(reads.lock().unwrap().len(), 2);
+        m.shutdown().await;
+    }
+
+    #[test]
     fn status_machine_keeps_error_until_next_prompt() {
         let done = AgentEvent::TurnCompleted {
             turn_id: "t".into(),
@@ -1478,15 +1885,20 @@ mod tests {
             recoverable: true,
         };
         assert_eq!(
-            next_status(SessionStatus::Running, &soft),
+            next_status(SessionStatus::Running, &soft, false),
             SessionStatus::Running
         );
-        let e = next_status(SessionStatus::Running, &fatal);
+        let e = next_status(SessionStatus::Running, &fatal, false);
         assert_eq!(e, SessionStatus::Error);
-        assert_eq!(next_status(e, &done), SessionStatus::Error);
+        assert_eq!(next_status(e, &done, false), SessionStatus::Error);
         assert_eq!(
-            next_status(SessionStatus::Running, &done),
+            next_status(SessionStatus::Running, &done, false),
             SessionStatus::Idle
         );
+        let resolved = AgentEvent::ApprovalResolved { id: "a".into() };
+        let waiting = SessionStatus::WaitingApproval;
+        assert_eq!(next_status(waiting, &resolved, false), SessionStatus::Running);
+        assert_eq!(next_status(waiting, &resolved, true), waiting);
+        assert_eq!(next_status(SessionStatus::Idle, &resolved, false), SessionStatus::Idle);
     }
 }

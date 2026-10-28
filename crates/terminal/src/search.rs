@@ -6,9 +6,12 @@ use alacritty_terminal::{
 };
 use std::ops::{Range, RangeInclusive};
 
+/// Normalized text with one entry per source cell instead of one per byte:
+/// `offsets[i]` is the byte offset where cell `points[i]` begins.
 #[derive(Default)]
 struct Text {
     value: String,
+    offsets: Vec<usize>,
     points: Vec<Point>,
 }
 impl Text {
@@ -17,10 +20,11 @@ impl Text {
         if ch == ' ' && self.value.ends_with(' ') {
             return;
         }
-        for ch in ch.to_lowercase() {
-            self.value.push(ch);
-            self.points
-                .extend(std::iter::repeat_n(point, ch.len_utf8()));
+        let start = self.value.len();
+        self.value.extend(ch.to_lowercase());
+        if self.value.len() > start {
+            self.offsets.push(start);
+            self.points.push(point);
         }
     }
     fn normalized(text: &str) -> String {
@@ -30,20 +34,43 @@ impl Text {
         }
         out.value
     }
+    /// Cell containing the byte at `offset`.
+    fn point_at(&self, offset: usize) -> Point {
+        let index = self.offsets.partition_point(|&start| start <= offset);
+        self.points[index.saturating_sub(1)]
+    }
 }
 
+#[cfg(test)]
 pub fn locate(
     grid: &Grid<Cell>,
     source: &str,
     range: Range<usize>,
 ) -> Option<RangeInclusive<Point>> {
-    let query = Text::normalized(source.get(range.clone())?);
-    if query.trim().is_empty() {
+    if !searchable(source, range.clone()) {
         return None;
     }
-    let before = Text::normalized(&source[..range.start]);
-    let after = Text::normalized(&source[range.end..]);
-    let mut text = Text::default();
+    snapshot(grid).locate(source, range)
+}
+
+/// Whether `range` of `source` is a non-blank query worth scanning for.
+pub fn searchable(source: &str, range: Range<usize>) -> bool {
+    source
+        .get(range)
+        .is_some_and(|query| !Text::normalized(query).trim().is_empty())
+}
+
+/// Normalized grid text. Build it under the terminal lock, then search it
+/// after releasing the lock.
+pub struct Snapshot(Text);
+
+pub fn snapshot(grid: &Grid<Cell>) -> Snapshot {
+    let lines = (grid.bottommost_line().0 - grid.topmost_line().0 + 1).max(0) as usize;
+    let mut text = Text {
+        value: String::with_capacity(lines * 32),
+        offsets: Vec::with_capacity(lines * 32),
+        points: Vec::with_capacity(lines * 32),
+    };
     for line in grid.topmost_line().0..=grid.bottommost_line().0 {
         let row = &grid[Line(line)];
         let wrapped = row[grid.last_column()].flags.contains(Flags::WRAPLINE);
@@ -73,24 +100,37 @@ pub fn locate(
             text.push(' ', Point::new(Line(line), grid.last_column()));
         }
     }
-    // Nearby text disambiguates repeated short queries without depending on TUI decorations.
-    let (start, _) = text.value.match_indices(&query).max_by_key(|(start, _)| {
-        let prefix = text.value[..*start]
-            .chars()
-            .rev()
-            .zip(before.chars().rev())
-            .take_while(|(a, b)| a == b)
-            .take(120)
-            .count();
-        let suffix = text.value[*start + query.len()..]
-            .chars()
-            .zip(after.chars())
-            .take_while(|(a, b)| a == b)
-            .take(120)
-            .count();
-        prefix + suffix
-    })?;
-    Some(text.points[start]..=text.points[start + query.len() - 1])
+    Snapshot(text)
+}
+
+impl Snapshot {
+    pub fn locate(&self, source: &str, range: Range<usize>) -> Option<RangeInclusive<Point>> {
+        let query = Text::normalized(source.get(range.clone())?);
+        if query.trim().is_empty() {
+            return None;
+        }
+        let before = Text::normalized(&source[..range.start]);
+        let after = Text::normalized(&source[range.end..]);
+        let text = &self.0;
+        // Nearby text disambiguates repeated short queries without depending on TUI decorations.
+        let (start, _) = text.value.match_indices(&query).max_by_key(|(start, _)| {
+            let prefix = text.value[..*start]
+                .chars()
+                .rev()
+                .zip(before.chars().rev())
+                .take_while(|(a, b)| a == b)
+                .take(120)
+                .count();
+            let suffix = text.value[*start + query.len()..]
+                .chars()
+                .zip(after.chars())
+                .take_while(|(a, b)| a == b)
+                .take(120)
+                .count();
+            prefix + suffix
+        })?;
+        Some(text.point_at(start)..=text.point_at(start + query.len() - 1))
+    }
 }
 
 #[cfg(test)]

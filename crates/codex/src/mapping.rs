@@ -59,6 +59,8 @@ pub enum RequestAction {
 pub struct Mapper {
     turn_id: Option<String>,
     last_completed: Option<String>,
+    /// Replaying persisted turns: errors are not re-raised.
+    history_mode: bool,
     /// itemId -> one-line description, so approvals (which only carry an
     /// itemId for file changes) can show what is being approved.
     item_detail: HashMap<String, String>,
@@ -69,6 +71,7 @@ impl Mapper {
     /// User/reasoning items are snapshot-only here: the live composer already
     /// inserts its user messages and reasoning arrives as deltas.
     pub fn history(&mut self, turns: &[Value]) -> Vec<AgentEvent> {
+        self.history_mode = true;
         let mut events = Vec::new();
         for turn in turns {
             let Some(id) = turn["id"].as_str() else {
@@ -120,10 +123,15 @@ impl Mapper {
                     }
                 }
             }
-            if turn["status"].as_str() != Some("inProgress") {
-                events.extend(self.notification("turn/completed", &json!({"turn": turn})));
+            // A persisted turn still marked `inProgress` was cut off (restart,
+            // crash); close it as interrupted so the session is not Busy.
+            let mut turn = turn.clone();
+            if turn["status"].as_str() == Some("inProgress") {
+                turn["status"] = json!("interrupted");
             }
+            events.extend(self.notification("turn/completed", &json!({"turn": turn})));
         }
+        self.history_mode = false;
         events
     }
 
@@ -162,6 +170,7 @@ impl Mapper {
                         _ => del_agent::TurnStatus::Completed,
                     };
                     if status == del_agent::TurnStatus::Failed
+                        && !self.history_mode
                         && let Some(e) = n.turn.error
                     {
                         out.push(AgentEvent::Error {
@@ -468,7 +477,7 @@ impl Mapper {
 }
 
 fn decode<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
-    serde_json::from_value(v.clone()).ok()
+    T::deserialize(v).ok()
 }
 
 fn tool_status(s: ItemStatus) -> ToolStatus {
@@ -515,4 +524,29 @@ fn truncate(s: &str) -> String {
         end -= 1;
     }
     format!("{}… [truncated]", &s[..end])
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn stale_in_progress_turns_are_closed_as_interrupted_and_errors_stay_quiet() {
+        let turns = vec![
+            json!({"id":"t1","status":"failed","error":{"message":"boom"},"items":[]}),
+            json!({"id":"t2","status":"inProgress","items":[
+                {"type":"agentMessage","id":"a","text":"partial"}]}),
+        ];
+        let mut mapper = Mapper::default();
+        let events = mapper.history(&turns);
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        assert!(events.iter().any(|e| matches!(e,
+            AgentEvent::TurnCompleted { turn_id, status: del_agent::TurnStatus::Failed } if turn_id == "t1")));
+        assert!(matches!(events.last(), Some(AgentEvent::TurnCompleted {
+            turn_id, status: del_agent::TurnStatus::Interrupted }) if turn_id == "t2"));
+        assert_eq!(mapper.turn_id(), None);
+        // Live notifications after history are not muted.
+        let live = mapper.notification("turn/completed", &json!({"turn":{"id":"t3","status":"failed","error":{"message":"live"}}}));
+        assert!(live.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "live")));
+    }
 }

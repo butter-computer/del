@@ -1,10 +1,15 @@
 //! Local file editing and read-only Git review used by the workspace sidebar.
 use serde::{Deserialize, Serialize};
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
+
+/// Largest diff or new-file preview kept per file.
+const MAX_PREVIEW_BYTES: usize = 512 * 1024;
+/// Largest `git status` listing read; huge untracked trees are cut off here.
+const MAX_STATUS_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileDraft {
@@ -44,17 +49,105 @@ pub struct ChangedFile {
     pub status: String,
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new("git")
+/// Read-only Git for the review pane, which polls while visible. It must not
+/// take `index.lock` (an agent's concurrent commit would fail) or run commands
+/// named by repository config such as `core.fsmonitor`.
+fn git_command(root: &Path) -> Result<Command, String> {
+    let program = crate::projects::git_program().ok_or("Git is not installed.")?;
+    let mut command = Command::new(program);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+        ])
         .arg("-C")
-        .arg(root)
+        .arg(root);
+    Ok(command)
+}
+
+/// Longest a review-pane Git command may run, as for project metadata queries.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run Git, keeping at most `limit` bytes of stdout. Returns the output and
+/// whether it was cut off (the process is then stopped).
+fn git_bounded(root: &Path, args: &[&std::ffi::OsStr], limit: usize) -> Result<(Vec<u8>, bool), String> {
+    let mut child = git_command(root)?
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    // Drain stderr concurrently so a chatty Git can't block on a full pipe.
+    let mut errors = child.stderr.take().expect("piped stderr");
+    let stderr = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let _ = (&mut errors).take(64 * 1024).read_to_end(&mut kept);
+        let _ = std::io::copy(&mut errors, &mut std::io::sink());
+        kept
+    });
+    let output = child.stdout.take().expect("piped stdout");
+    // A hung Git (e.g. a network filesystem) is stopped at the deadline,
+    // which also ends the read below.
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let (finished, deadline) = std::sync::mpsc::channel::<()>();
+    let watchdog = {
+        let child = child.clone();
+        std::thread::spawn(move || {
+            let expired = deadline.recv_timeout(GIT_TIMEOUT)
+                == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+            if expired {
+                let _ = child.lock().unwrap().kill();
+            }
+            expired
+        })
+    };
+    let mut stdout = Vec::new();
+    let read = output.take(limit as u64 + 1).read_to_end(&mut stdout);
+    let truncated = stdout.len() > limit;
+    if truncated {
+        let _ = child.lock().unwrap().kill();
     }
-    Ok(output.stdout)
+    // Poll rather than block in wait() so the watchdog can still take the lock.
+    let status = loop {
+        match child.lock().unwrap().try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(error) => break Err(error.to_string()),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let _ = finished.send(());
+    let timed_out = watchdog.join().unwrap_or(false);
+    let stderr = stderr.join().unwrap_or_default();
+    if timed_out {
+        return Err("Git timed out".into());
+    }
+    read.map_err(|e| e.to_string())?;
+    if truncated {
+        stdout.truncate(limit);
+        return Ok((stdout, true));
+    }
+    let status = status?;
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).trim().to_owned());
+    }
+    Ok((stdout, false))
+}
+
+fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let args: Vec<_> = args.iter().map(std::ffi::OsStr::new).collect();
+    git_bounded(root, &args, MAX_STATUS_BYTES).map(|(out, _)| out)
+}
+
+/// Whether the repository has a commit to diff against. Resolve once per refresh.
+pub fn has_head(root: &Path) -> bool {
+    git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok()
 }
 
 pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
@@ -69,8 +162,12 @@ pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
         &base,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
-    let status =
+    let mut status =
         String::from_utf8(status).map_err(|_| "Git paths contain unsupported text encoding")?;
+    // A listing cut off at the size cap ends mid-record; drop the partial one.
+    if !status.is_empty() && !status.ends_with('\0') {
+        status.truncate(status.rfind('\0').map_or(0, |i| i + 1));
+    }
     let mut records = status.split('\0').filter(|s| !s.is_empty());
     let mut files = Vec::new();
     while let Some(record) = records.next() {
@@ -90,7 +187,8 @@ pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
     Ok((base, files))
 }
 
-pub fn diff(root: &Path, file: &ChangedFile) -> Result<String, String> {
+/// `head` comes from [`has_head`], resolved once for all files of a refresh.
+pub fn diff(root: &Path, file: &ChangedFile, head: bool) -> Result<String, String> {
     if file.status == "??" {
         let path = root.join(&file.path);
         let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
@@ -99,11 +197,20 @@ pub fn diff(root: &Path, file: &ChangedFile) -> Result<String, String> {
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .into_owned()
+        } else if !meta.is_file() {
+            return Ok("Not a regular file".into());
         } else {
-            if meta.len() > 512 * 1024 {
+            if meta.len() > MAX_PREVIEW_BYTES as u64 {
                 return Ok("New file is too large to preview.".into());
             }
-            match std::fs::read_to_string(&path) {
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)
+                .and_then(|f| f.take(MAX_PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes))
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > MAX_PREVIEW_BYTES {
+                return Ok("New file is too large to preview.".into());
+            }
+            match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => return Ok("New binary file".into()),
             }
@@ -116,49 +223,42 @@ pub fn diff(root: &Path, file: &ChangedFile) -> Result<String, String> {
                 .collect::<String>()
         ));
     }
-    let head = git(root, &["rev-parse", "--verify", "HEAD"]).is_ok();
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color"]);
-    if head {
-        command.arg("HEAD");
-    } else {
-        command.arg("--cached");
-    }
-    command.arg("--").arg(&file.path);
-    if let Some(previous) = &file.previous {
-        command.arg(previous);
-    }
-    let output = command.output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !head {
-        let extra = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--"])
-            .arg(&file.path)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !extra.status.success() {
-            return Err(String::from_utf8_lossy(&extra.stderr).into_owned());
+    fn diff_args<'a>(file: &'a ChangedFile, base: Option<&'a str>) -> Vec<&'a std::ffi::OsStr> {
+        let mut args: Vec<&std::ffi::OsStr> = ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+            .into_iter()
+            .chain(base)
+            .chain(["--"])
+            .map(std::ffi::OsStr::new)
+            .collect();
+        args.push(file.path.as_os_str());
+        if base.is_some()
+            && let Some(previous) = &file.previous
+        {
+            args.push(previous.as_os_str());
         }
-        text.push_str(&String::from_utf8_lossy(&extra.stdout));
+        args
     }
+    let (mut bytes, mut truncated) = git_bounded(
+        root,
+        &diff_args(file, Some(if head { "HEAD" } else { "--cached" })),
+        MAX_PREVIEW_BYTES,
+    )?;
+    if !head && !truncated {
+        let (extra, cut) =
+            git_bounded(root, &diff_args(file, None), MAX_PREVIEW_BYTES - bytes.len())?;
+        bytes.extend(extra);
+        truncated = cut;
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if text.is_empty() {
         text = "No textual diff (the index or file metadata may have changed).".into();
     }
-    if text.len() > 512 * 1024 {
-        let mut end = 512 * 1024;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    if truncated {
+        // Lossy decoding may have replaced a split final character; drop the partial line.
+        if let Some(end) = text.rfind('\n') {
+            text.truncate(end + 1);
         }
-        text.truncate(end);
-        text.push_str("\n… Diff preview truncated.\n");
+        text.push_str("… Diff preview truncated.\n");
     }
     Ok(text)
 }
@@ -304,8 +404,9 @@ mod tests {
         let name = "first file.txt";
         std::fs::write(root.join(name), "old\n").unwrap();
         git(root, &["add", "--", name]).unwrap();
+        assert!(!has_head(root));
         assert!(
-            diff(root, &changes(root).unwrap().1[0])
+            diff(root, &changes(root).unwrap().1[0], false)
                 .unwrap()
                 .contains("+old")
         );
@@ -332,10 +433,34 @@ mod tests {
             .find(|file| file.path == Path::new("renamed.txt"))
             .unwrap();
         assert_eq!(renamed.previous.as_deref(), Some(Path::new(name)));
-        assert!(diff(root, renamed).unwrap().contains("+new"));
+        assert!(has_head(root));
+        assert!(diff(root, renamed, true).unwrap().contains("+new"));
         let untracked = files.iter().find(|file| file.status == "??").unwrap();
         assert_eq!(untracked.path, Path::new("new\nfile.txt"));
-        assert!(diff(root, untracked).unwrap().contains("+new content"));
+        assert!(diff(root, untracked, true).unwrap().contains("+new content"));
         assert!(changes(&tempfile::tempdir().unwrap().path()).is_err());
+    }
+
+    #[test]
+    fn review_ignores_repo_fsmonitor_takes_no_lock_and_bounds_diffs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]).unwrap();
+        let marker = root.join("fsmonitor-ran");
+        let hook = root.join("hook.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(root, &["config", "core.fsmonitor", hook.to_str().unwrap()]).unwrap();
+        std::fs::write(root.join("big.txt"), "x\n".repeat(400_000)).unwrap();
+        git(root, &["add", "big.txt"]).unwrap();
+        let (_, files) = changes(root).unwrap();
+        assert!(!marker.exists(), "repository fsmonitor command must not run");
+        assert!(!root.join(".git/index.lock").exists());
+        let big = files.iter().find(|f| f.path == Path::new("big.txt")).unwrap();
+        let text = diff(root, big, false).unwrap();
+        assert!(text.len() <= MAX_PREVIEW_BYTES + 64);
+        assert!(text.ends_with("… Diff preview truncated.\n"));
+        assert!(!marker.exists());
     }
 }

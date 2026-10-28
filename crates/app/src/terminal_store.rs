@@ -92,13 +92,11 @@ impl TerminalStore {
         if let Some(error) = &self.error {
             return Err(std::io::Error::other(error.clone()));
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        let data = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(tmp, path)
+        crate::sessions::write_atomic(
+            path,
+            &serde_json::to_vec_pretty(self)?,
+            crate::sessions::PRIVATE,
+        )
     }
 }
 

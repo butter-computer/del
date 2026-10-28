@@ -34,14 +34,20 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.5-arm64.dmg and its .sha256 sidecar
+# target/release/Del-0.1.5-arm64.dmg, its .sha256 sidecar, and a signed latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
-and verifies the app signature and DMG before producing the checksum. It does not
-publish a GitHub release or modify the local development signing keychain. Upload
-the DMG, `.sha256` sidecar, and `target/release/latest.json` together to a draft
-GitHub release, then publish it only after all three assets are uploaded.
+and verifies the app signature and DMG before producing the checksum. It then signs
+`target/release/latest.json` (release tag, DMG name, size, and SHA-256) with the
+release Ed25519 key from `$DEL_UPDATE_SIGNING_KEY` (default
+`~/.config/del/update-signing.key`, mode 0600, never stored in the repository). The
+script stops before building if the key is missing or does not match the key
+embedded in Del. It does not publish a GitHub release or modify the local
+development signing keychain. Upload the DMG, `.sha256` sidecar, and
+`target/release/latest.json` together to a draft GitHub release, then publish it
+only after all three assets are uploaded. Keep a private backup of the signing key:
+installed copies of Del accept only updates signed with it.
 
 ## Multiple provider accounts
 
@@ -57,7 +63,8 @@ a sign-in in progress; complete it or cancel in Terminal before adding another.
 Use **Make default** for the account new chats should use, or the red trash icon
 to remove an unused saved account. Accounts referenced by saved chats or terminals
 cannot be deleted; switch chats away and remove terminal references first. Sign in appears only when reconnecting is needed. Removed profiles are
-kept locally under `removed-accounts/` for recovery.
+kept locally under `removed-accounts/` for 30 days for recovery; after that Del
+deletes them, including their saved credentials, at the next launch.
 Successful sign-in closes only its own idle Terminal window. Duplicate email
 identities appear once. Codex and Claude accounts show a slim usage bar and percentage
 remaining, using the most constrained reported allowance. The account picker shows
@@ -108,6 +115,12 @@ open target/release/del.app
 
 After rebuilding, reopen Del to run the new binary. Building does not replace
 an already-running process. Keep using the same bundle path for local upgrades.
+
+The background shaders are precompiled with Xcode's Metal compiler (`xcrun metal`).
+On a Mac with only the Command Line Tools, debug builds still succeed with a
+warning and compile the shaders from source at first use. Release builds require
+the Metal compiler (install Xcode or point `DEVELOPER_DIR` at it); set
+`DEL_ALLOW_RUNTIME_SHADERS=1` to build a release without it anyway.
 
 ### Running on another Mac
 
@@ -356,14 +369,17 @@ conversation. Unloading a running session also stops its current work.
 - Hover the final reply of a completed response to reveal Copy and its local reply time
   in 24-hour `HH:MM` format. Intermediate updates and streaming replies have no copy footer.
   Reply times are saved across reopening; older Codex and Claude replies recover their
-  timestamps from local transcripts. If no timestamp exists, only Copy is shown.
+  timestamps from local transcripts. The reply-time journal stores a short prefix and
+  fingerprint of each reply rather than its text; older journals stay readable. If no timestamp exists, only Copy is shown.
   The 13 px overlapping-squares Copy icon and 11 px time text fade in and out over
   160 ms on hover, without shifting the transcript. The square-proportioned glyph
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
   the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
   again restarts that confirmation.
 - Local file links in replies open in Del’s file viewer; relative links resolve
-  against the conversation’s project folder. Web links use the system browser.
+  against the conversation’s project folder. Only http, https, and mailto links
+  open in your browser or mail app; other link types (custom app links, network
+  shares, remote `file://` hosts) are not opened, and Del shows a notice instead.
 - Assistant text appears as it arrives, without streaming fades or animation
   delays. Deltas append to a persistent Markdown view; already-received adjacent
   chunks coalesce without waiting or crossing tool/turn boundaries. Native Markdown
@@ -536,7 +552,8 @@ Cards form a single horizontal scrolling row with no scrollbar. Wide, subtle
 edge fades appear only on sides with more offscreen content. Each card reveals
 a bright **×** on hover that remains visible while hovered or pressed. Click
 a card to preview its original file in the Files sidebar. Attachments survive
-queue editing, reordering, and retry. Codex receives local image references;
+queue editing, reordering, and retry. Permanently deleting a session also removes
+its queued follow-ups and the imported copies they still reference. Codex receives local image references;
 Claude and ACP receive encoded image content. Other files
 are supplied as local paths for the harness's tools to read. This does not embed
 PDF/spreadsheet contents in the prompt or transcode video; interpretation and
@@ -681,8 +698,15 @@ create, select, close, and navigate tabs, inspect page text/elements, click, fil
 send keys, evaluate page JavaScript, and take screenshots. These actions target the
 same visible browser and saved profiles. Del is the default browser for agent
 requests; external browsers are used only when explicitly requested by the user.
-Agents can choose any saved session's browser with its session/tab ID; chat
-credentials expose only browser operations.
+Agents can use only their own session's browser and the browsers of sessions they
+spawned or that spawned them. Claude and Codex chats each get a browser credential
+bound to their own chat. OpenCode configures tools per workspace rather than per
+chat, so the chats of one OpenCode workspace share a credential that reaches only
+those chats, and of them only the ones currently running a turn. Actions on a
+session you aren't viewing run in its hidden browser without changing your
+selection; in the session you're viewing, page-changing actions open the Browser
+pane. Page dialogs name their origin, and repeated dialogs are blocked. Chat
+credentials expose only browser operations (plus goal controls for Claude chats).
 Page content is treated as untrusted data. ACP browser-tool injection is not yet
 implemented.
 
@@ -690,24 +714,32 @@ implemented.
 
 Public Apple Silicon builds check GitHub's latest stable release at startup,
 when the selected session/tab changes, and when the window becomes active.
-Automatic checks are limited to once every 60 seconds and never block sessions.
+Automatic checks are limited to once every 30 minutes and never block sessions;
+manual checks run immediately.
 Discovery reads the release-hosted `latest.json` manifest, avoiding GitHub API quotas.
+The manifest must carry an Ed25519 signature from Del's release key over the tag,
+DMG name, size, and SHA-256. Del rejects unsigned or incorrectly signed releases,
+and ignores releases whose version it cannot compare (such as pre-release tags).
 The control above **Settings** also lets you check manually and retry failures.
 Failed restarts keep the staged download so you can retry without downloading again.
 
 Click **Update to …** to download the existing release DMG. The control shows
-percentage progress, then verifies its SHA-256 sidecar, bundle identity, version,
-and code signature before staging the app beside the current installation.
-**Restart to update** offers **Restart now** and **Later**. Later keeps the staged
+percentage progress, then verifies it against the signed SHA-256, bundle identity,
+version, and code signature before staging the app beside the current installation.
+**Restart to update** offers **Restart now** and **Later**. **Restart now** verifies
+and installs in the background (the control shows **Installing update…**). Later keeps the staged
 update ready for this run; quitting without applying it discards the staged copy.
 Restart stops running agents/terminals through the normal quit flow and preserves
 saved sessions. A failed replacement restores the previous app; its bundle is
-retained in `.del-retired` so a running process never loses its signed resources.
+retained in `.del-retired` so a running process never loses its signed resources;
+retired bundles and abandoned staging folders more than a day old are removed at a
+later launch.
 
 Updates require a writable installation directory. Move a read-only or
 translocated app to Applications first. Local development bundles and raw Cargo
 runs do not self-update or replace their development signing identity. Releases
-continue to use the existing DMG/checksum publishing mechanism and its documented
+continue to use the existing DMG/checksum publishing mechanism, plus the signed
+`latest.json`, and its documented
 ad-hoc signing status. This feature becomes available after installing a build
 that includes it; older builds need that first upgrade manually.
 
@@ -724,7 +756,10 @@ for 30 minutes; concurrent checks share an updater.
 - Installed ACP agents use the same npm/Homebrew ownership detection.
 - Custom or unmanaged binaries are left alone; registry install hints are not run.
 
-Update failures are logged without blocking chat. Recognized successful CLI
+Update failures are logged without blocking chat. Failed checks back off
+(5 minutes, doubling up to 6 hours) instead of retrying on every change. Del does
+not upgrade a harness while a chat session or terminal using it is open; it tries
+again every 5 minutes. Recognized successful CLI
 self-update exits reopen the saved conversation automatically. This updates
 supported harness installations, not Del itself or arbitrary applications.
 

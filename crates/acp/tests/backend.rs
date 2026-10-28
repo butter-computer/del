@@ -291,6 +291,39 @@ async fn resume_checks_load_capability_and_preserves_agent_identity() {
 }
 
 #[tokio::test]
+async fn resume_after_agent_exit_respawns_with_replayed_history() {
+    let backend = backend(&[]);
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut rx = handle.subscribe();
+    backend
+        .send_prompt(&handle.id, UserInput::text("exit"))
+        .await
+        .unwrap();
+    completed(&mut rx).await;
+    let resumed = backend.resume(config(), &handle.id).await.unwrap();
+    assert_eq!(resumed.id, handle.id);
+    let history = resumed.history();
+    assert!(matches!(&history[0], AgentEvent::UserMessage { text } if text == "earlier"));
+    assert!(history.iter().any(
+        |e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "reply")
+    ));
+    assert!(!history.iter().any(|e| matches!(e, AgentEvent::AssistantTextDelta { .. })));
+    let mut rx = resumed.subscribe();
+    backend
+        .send_prompt(&resumed.id, UserInput::text("hello"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        completed(&mut rx).await.last(),
+        Some(AgentEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        })
+    ));
+    backend.close(&handle.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn authentication_error_is_actionable() {
     let backend = backend(&[("AUTH_REQUIRED", "1")]);
     let error = backend.start_session(config()).await.unwrap_err();

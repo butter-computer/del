@@ -82,12 +82,13 @@ impl Usage {
                     return Err("Could not read process memory.".to_owned());
                 }
                 let processes = parse_processes(&String::from_utf8_lossy(&output.stdout));
+                let children = child_map(&processes);
                 let mut entries: Vec<_> = roots
                     .into_iter()
                     .map(|(id, terminal, process)| Entry {
                         id,
                         terminal,
-                        bytes: process.and_then(|(pid, _)| tree_bytes(pid, &processes)),
+                        bytes: process.and_then(|(pid, _)| tree_bytes(pid, &processes, &children)),
                     })
                     .collect();
                 entries.sort_by_key(|entry| std::cmp::Reverse(entry.bytes));
@@ -141,7 +142,19 @@ fn parse_processes(text: &str) -> HashMap<u32, (u32, u64)> {
         })
         .collect()
 }
-fn tree_bytes(root: u32, processes: &HashMap<u32, (u32, u64)>) -> Option<u64> {
+/// Parent -> children, built once per refresh rather than rescanned per process.
+fn child_map(processes: &HashMap<u32, (u32, u64)>) -> HashMap<u32, Vec<u32>> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, (parent, _)) in processes {
+        children.entry(*parent).or_default().push(*pid);
+    }
+    children
+}
+fn tree_bytes(
+    root: u32,
+    processes: &HashMap<u32, (u32, u64)>,
+    children: &HashMap<u32, Vec<u32>>,
+) -> Option<u64> {
     processes.get(&root)?;
     let mut pending = vec![root];
     let mut visited = HashSet::new();
@@ -153,12 +166,7 @@ fn tree_bytes(root: u32, processes: &HashMap<u32, (u32, u64)>) -> Option<u64> {
         if let Some((_, rss)) = processes.get(&pid) {
             bytes += rss;
         }
-        pending.extend(
-            processes
-                .iter()
-                .filter(|(_, (parent, _))| *parent == pid)
-                .map(|(pid, _)| *pid),
-        );
+        pending.extend(children.get(&pid).into_iter().flatten().copied());
     }
     Some(bytes)
 }
@@ -382,7 +390,8 @@ mod tests {
     #[test]
     fn sums_only_root_and_descendants() {
         let rows = parse_processes("10 1 100\n11 10 30\n12 11 20\n20 1 900\ninvalid");
-        assert_eq!(tree_bytes(10, &rows), Some(150 * 1024));
-        assert_eq!(tree_bytes(99, &rows), None);
+        let children = child_map(&rows);
+        assert_eq!(tree_bytes(10, &rows, &children), Some(150 * 1024));
+        assert_eq!(tree_bytes(99, &rows, &children), None);
     }
 }

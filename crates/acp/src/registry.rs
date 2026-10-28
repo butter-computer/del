@@ -60,7 +60,7 @@ fn is_executable(p: &Path) -> bool {
 
 /// The agents del knows about out of the box.
 pub fn default_agents() -> Vec<AcpAgentConfig> {
-    let mut agents = vec![
+    vec![
         AcpAgentConfig::builtin(
             "claude-acp",
             "Claude Code (ACP)",
@@ -97,17 +97,7 @@ pub fn default_agents() -> Vec<AcpAgentConfig> {
             &["acp"],
             "build deepseek-harness and put `dsh` on PATH",
         ),
-    ];
-    if let Some(bin) = dirs::home_dir()
-        .map(|h| h.join("dev/harness-eval/deepseek/apps/cli/lib/bin.js"))
-        .filter(|p| p.is_file())
-        && let Some(dsh) = agents.iter_mut().find(|a| a.id == "dsh")
-        && find_binary("dsh").is_none()
-    {
-        dsh.command = "node".into();
-        dsh.args = vec![bin.to_string_lossy().into_owned(), "acp".into()];
-    }
-    agents
+    ]
 }
 
 /// Defaults overlaid with the user's list; entries with an existing `id` replace it.

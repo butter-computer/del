@@ -6,11 +6,28 @@
 use crate::types::Provider;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long install locations and lookups are reused. A CLI installed while
+/// the app runs is found after at most this long, or at the next detection.
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static COMMON_DIRS: Mutex<Option<(Instant, Arc<[PathBuf]>)>> = Mutex::new(None);
+/// Binary name → when it was looked up and where it was found.
+type Lookups = HashMap<String, (Instant, Option<PathBuf>)>;
+static FOUND: Mutex<Option<Lookups>> = Mutex::new(None);
+
+/// Forget cached install locations and lookups so the next search rescans.
+pub fn refresh_search_cache() {
+    *COMMON_DIRS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +49,7 @@ pub struct ProviderStatus {
 
 /// Probe every provider concurrently.
 pub async fn detect_all() -> Vec<ProviderStatus> {
+    refresh_search_cache();
     let (a, b, c) = tokio::join!(
         detect(Provider::Codex),
         detect(Provider::Claude),
@@ -68,14 +86,34 @@ pub async fn detect(provider: Provider) -> ProviderStatus {
 }
 
 /// Search `PATH` first, then common install locations (GUI apps often get a minimal PATH).
+/// Results are cached briefly; a cached hit is rechecked so removal is noticed at once.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
-    find_in(name, &search_dirs())
+    {
+        let mut found = FOUND.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, path)) = found.get_or_insert_with(HashMap::new).get(name)
+            && at.elapsed() < SEARCH_CACHE_TTL
+            && path.as_deref().is_none_or(is_executable)
+        {
+            return path.clone();
+        }
+    }
+    let path = find_in(name, &search_dirs());
+    FOUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(name.to_owned(), (Instant::now(), path.clone()));
+    path
 }
 
+/// Absolute `PATH` entries, then common install locations. Relative entries
+/// (`.`, `node_modules/.bin`) would resolve against an untrusted project.
 fn search_dirs() -> Vec<PathBuf> {
     let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
-    dirs.extend(common_dirs());
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    dirs.extend(common_dirs().iter().cloned());
     dirs
 }
 
@@ -99,7 +137,20 @@ async fn find_working_in(name: &str, dirs: &[PathBuf]) -> Option<(PathBuf, Strin
     None
 }
 
-pub(crate) fn common_dirs() -> Vec<PathBuf> {
+/// Common install locations, rescanned at most every [`SEARCH_CACHE_TTL`].
+pub(crate) fn common_dirs() -> Arc<[PathBuf]> {
+    let mut cached = COMMON_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, dirs)) = cached.as_ref()
+        && at.elapsed() < SEARCH_CACHE_TTL
+    {
+        return dirs.clone();
+    }
+    let dirs: Arc<[PathBuf]> = scan_common_dirs().into();
+    *cached = Some((Instant::now(), dirs.clone()));
+    dirs
+}
+
+fn scan_common_dirs() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
         .map(PathBuf::from)
         .into();
@@ -148,35 +199,52 @@ fn is_executable(p: &Path) -> bool {
 
 struct Output {
     ok: bool,
+    stdout: String,
+    /// stdout followed by stderr.
     text: String,
 }
 
 async fn run(bin: &Path, args: &[&str]) -> Option<Output> {
     let mut command = Command::new(bin);
     crate::environment::prepare_provider_command(command.as_std_mut());
+    // Own group: a Node wrapper's native grandchild must die with it on timeout.
     let child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .ok()?;
-    let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let pid = child.id();
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    let out = match tokio::time::timeout(PROBE_TIMEOUT, &mut output).await {
+        Ok(out) => out.ok()?,
+        Err(_) => {
+            // The leader is still unreaped (owned by `output`), so its group id is ours.
+            if let Some(pid) = pid {
+                crate::procgroup::signal_group(pid, true);
+            }
+            return None;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut text = stdout.clone();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     Some(Output {
         ok: out.status.success(),
+        stdout,
         text,
     })
 }
 
 async fn probe_version(bin: &Path) -> Option<String> {
     let out = run(bin, &["--version"]).await?;
-    out.ok.then(|| parse_version(&out.text)).flatten()
+    out.ok
+        .then(|| parse_version(&out.stdout).or_else(|| parse_version(&out.text)))
+        .flatten()
 }
 
 async fn probe_login(provider: Provider, bin: &Path) -> LoginState {
@@ -186,7 +254,7 @@ async fn probe_login(provider: Provider, bin: &Path) -> LoginState {
         Provider::Acp | Provider::OpenCode => return LoginState::Unknown,
     };
     match run(bin, args).await {
-        Some(o) => parse_login(provider, o.ok, &o.text),
+        Some(o) => parse_login(provider, o.ok, &o.stdout, &o.text),
         None => LoginState::Unknown,
     }
 }
@@ -199,14 +267,17 @@ pub(crate) fn parse_version(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) fn parse_login(provider: Provider, exit_ok: bool, text: &str) -> LoginState {
+/// `stdout` alone carries Claude's JSON; `text` is stdout followed by stderr.
+pub(crate) fn parse_login(provider: Provider, exit_ok: bool, stdout: &str, text: &str) -> LoginState {
     let lower = text.to_lowercase();
     if provider == Provider::Claude {
-        // Only the boolean is read from the JSON; everything else is discarded.
-        if let Some(v) = text
-            .find('{')
-            .and_then(|i| serde_json::from_str::<serde_json::Value>(&text[i..]).ok())
-        {
+        // Only the boolean is read from the first JSON value; everything else is discarded.
+        if let Some(v) = stdout.find('{').and_then(|i| {
+            serde_json::Deserializer::from_str(&stdout[i..])
+                .into_iter::<serde_json::Value>()
+                .next()?
+                .ok()
+        }) {
             return match v.get("loggedIn").and_then(|b| b.as_bool()) {
                 Some(true) => LoginState::LoggedIn,
                 Some(false) => LoginState::LoggedOut,
@@ -216,7 +287,7 @@ pub(crate) fn parse_login(provider: Provider, exit_ok: bool, text: &str) -> Logi
     }
     if lower.contains("not logged in") || lower.contains("not authenticated") {
         LoginState::LoggedOut
-    } else if exit_ok && (lower.contains("logged in") || provider == Provider::Claude) {
+    } else if exit_ok && lower.contains("logged in") {
         LoginState::LoggedIn
     } else if !exit_ok {
         LoginState::LoggedOut
@@ -244,25 +315,45 @@ mod tests {
         assert_eq!(parse_version("no digits"), None);
     }
 
+    fn login(provider: Provider, ok: bool, text: &str) -> LoginState {
+        parse_login(provider, ok, text, text)
+    }
+
+    #[test]
+    fn claude_login_ignores_stderr_and_trailing_output() {
+        use LoginState::*;
+        let stdout = "{\"loggedIn\": false}\n{\"extra\": 1}\n";
+        let text = format!("{stdout}Warning: {{noise}} logged in elsewhere\n");
+        assert_eq!(parse_login(Provider::Claude, true, stdout, &text), LoggedOut);
+        // No JSON and no explicit text: exit 0 alone is not proof of a login.
+        assert_eq!(parse_login(Provider::Claude, true, "", "{bad json"), Unknown);
+    }
+
+    #[test]
+    fn search_skips_relative_path_entries() {
+        assert!(search_dirs().iter().all(|dir| dir.is_absolute()));
+        assert!(Arc::ptr_eq(&common_dirs(), &common_dirs()));
+    }
+
     #[test]
     fn login_parsing() {
         use LoginState::*;
         assert_eq!(
-            parse_login(Provider::Codex, true, "Logged in using ChatGPT"),
+            login(Provider::Codex, true, "Logged in using ChatGPT"),
             LoggedIn
         );
         assert_eq!(
-            parse_login(Provider::Codex, false, "Not logged in"),
+            login(Provider::Codex, false, "Not logged in"),
             LoggedOut
         );
         assert_eq!(
-            parse_login(Provider::Codex, true, "Not logged in"),
+            login(Provider::Codex, true, "Not logged in"),
             LoggedOut
         );
-        assert_eq!(parse_login(Provider::Codex, false, "boom"), LoggedOut);
-        assert_eq!(parse_login(Provider::Codex, true, ""), Unknown);
+        assert_eq!(login(Provider::Codex, false, "boom"), LoggedOut);
+        assert_eq!(login(Provider::Codex, true, ""), Unknown);
         assert_eq!(
-            parse_login(
+            login(
                 Provider::Claude,
                 true,
                 "{\"loggedIn\": true, \"email\": \"x\"}"
@@ -270,11 +361,11 @@ mod tests {
             LoggedIn
         );
         assert_eq!(
-            parse_login(Provider::Claude, false, "{\"loggedIn\": false}"),
+            login(Provider::Claude, false, "{\"loggedIn\": false}"),
             LoggedOut
         );
         assert_eq!(
-            parse_login(Provider::Claude, true, "{\"other\": 1}"),
+            login(Provider::Claude, true, "{\"other\": 1}"),
             Unknown
         );
     }

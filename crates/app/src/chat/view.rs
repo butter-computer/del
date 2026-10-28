@@ -75,18 +75,39 @@ fn escaped_search_text(
 /// Combine only adjacent, already-received chunks for the same turn. Never wait
 /// for a newline, timer, or a later event, and never cross tool/status boundaries.
 fn coalesce_deltas(events: impl IntoIterator<Item = AgentEvent>) -> Vec<AgentEvent> {
-    let mut ready = Vec::new();
+    let mut ready: Vec<AgentEvent> = Vec::new();
     for event in events {
-        if let AgentEvent::AssistantTextDelta { turn_id, text } = &event
-            && let Some(AgentEvent::AssistantTextDelta { turn_id: previous, text: accumulated }) = ready.last_mut()
-            && previous == turn_id
-        {
-            accumulated.push_str(text);
-        } else {
+        let merged = match (&event, ready.last_mut()) {
+            (
+                AgentEvent::AssistantTextDelta { turn_id, text },
+                Some(AgentEvent::AssistantTextDelta { turn_id: previous, text: accumulated }),
+            )
+            | (
+                AgentEvent::ReasoningDelta { turn_id, text },
+                Some(AgentEvent::ReasoningDelta { turn_id: previous, text: accumulated }),
+            ) if previous == turn_id => {
+                accumulated.push_str(text);
+                true
+            }
+            _ => false,
+        };
+        if !merged {
             ready.push(event);
         }
     }
     ready
+}
+
+/// Every non-overlapping match of `needle`, as (text index, byte offset).
+/// Counting earlier occurrences and locating the hit must share this walk:
+/// otherwise a repeated short message lands inside a longer one containing it.
+fn substring_matches<'a>(
+    texts: impl IntoIterator<Item = &'a str>,
+    needle: &'a str,
+) -> impl Iterator<Item = (usize, usize)> {
+    texts.into_iter().enumerate().flat_map(move |(ix, text)| {
+        text.match_indices(needle).map(move |(offset, _)| (ix, offset))
+    })
 }
 
 pub struct PromptSubmitted;
@@ -98,6 +119,17 @@ pub struct ChatView {
     jump: Option<MessageJump>,
     rail_hover: Option<usize>,
     rail_previous_hover: Option<usize>,
+    /// Rows holding user messages, in order: the message rail's ticks.
+    prompt_rows: Vec<usize>,
+    /// Cached `search_messages`; cleared whenever the transcript changes.
+    search_messages: std::cell::RefCell<Option<std::sync::Arc<Vec<crate::conversation_search::Message>>>>,
+    /// Consecutive tool rows shown as one group; refreshed once per render.
+    pub(super) tool_groups: Vec<std::ops::Range<usize>>,
+    /// History is folded without per-event list updates; one reset follows.
+    replaying: bool,
+    /// Optimistic user rows awaiting delivery, by queue item id. Row removal
+    /// renumbers these, so a failed delivery never removes the wrong row.
+    optimistic_rows: std::collections::HashMap<String, usize>,
     backend: Backend,
     pub queue: crate::followups::Queue,
     session: Option<SessionId>,
@@ -159,6 +191,11 @@ impl ChatView {
             jump: None,
             rail_hover: None,
             rail_previous_hover: None,
+            prompt_rows: Vec::new(),
+            search_messages: Default::default(),
+            tool_groups: Vec::new(),
+            replaying: false,
+            optimistic_rows: Default::default(),
             backend,
             session: session.clone(),
             closed: false,
@@ -187,8 +224,12 @@ impl ChatView {
         view
     }
 
-    pub fn search_messages(&self) -> Vec<crate::conversation_search::Message> {
-        crate::conversation_search::messages(&self.model)
+    /// Shared with the search palette; rebuilt only after the transcript changed.
+    pub fn search_messages(&self) -> std::sync::Arc<Vec<crate::conversation_search::Message>> {
+        self.search_messages
+            .borrow_mut()
+            .get_or_insert_with(|| std::sync::Arc::new(crate::conversation_search::messages(&self.model)))
+            .clone()
     }
 
     #[cfg(test)]
@@ -196,6 +237,7 @@ impl ChatView {
         let mut view = Self::new(backend, None, None, cx);
         view.scroller.reset(model.blocks.len());
         view.model = model;
+        view.refresh_prompt_rows();
         view
     }
 
@@ -222,29 +264,28 @@ impl ChatView {
             return;
         };
         let message = &hit.document.messages[message_ix];
-        let occurrence = hit.document.messages[..message_ix]
-            .iter()
-            .filter(|m| *m == message)
-            .count();
-        let found = self
+        let occurrence = substring_matches(
+            hit.document.messages[..message_ix]
+                .iter()
+                .filter(|m| m.role == message.role)
+                .map(|m| m.text.as_str()),
+            &message.text,
+        )
+        .count();
+        let rows: Vec<(usize, &String)> = self
             .model
             .blocks
             .iter()
             .enumerate()
-            .flat_map(|(ix, block)| {
-                let (role, text) = match block {
-                    Block::User { text, .. } => ("You", text),
-                    Block::Assistant { text, .. } => ("Assistant", text),
-                    _ => return Vec::new(),
-                };
-                if role != message.role {
-                    return Vec::new();
-                }
-                text.match_indices(&message.text)
-                    .map(move |(offset, _)| (ix, offset, text.clone()))
-                    .collect::<Vec<_>>()
+            .filter_map(|(ix, block)| match block {
+                Block::User { text, .. } if message.role == "You" => Some((ix, text)),
+                Block::Assistant { text, .. } if message.role == "Assistant" => Some((ix, text)),
+                _ => None,
             })
-            .nth(occurrence);
+            .collect();
+        let found = substring_matches(rows.iter().map(|(_, text)| text.as_str()), &message.text)
+            .nth(occurrence)
+            .map(|(row, offset)| (rows[row].0, offset, rows[row].1.clone()));
         let Some((ix, offset, text)) = found else {
             self.pending_errors.push(
                 "That message changed since the search. Search again to find its current location."
@@ -285,7 +326,8 @@ impl ChatView {
             cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
             let _ = this.update(cx, |this, cx| {
                 // A second click restarts the confirmation instead of being cleared by this timer.
-                if this.copied_responses.get(&ix) == Some(&copied_at) {
+                // Rows may have shifted since the click; find the entry by its stamp.
+                if let Some(ix) = this.copied_responses.iter().find_map(|(ix, at)| (*at == copied_at).then_some(*ix)) {
                     this.copied_responses.remove(&ix);
                     this.scroller.remeasure_items(ix..ix + 1);
                     cx.notify();
@@ -307,10 +349,19 @@ impl ChatView {
             {
                 let time = chrono::Local::now();
                 self.response_times.insert(ix, time);
-                if let Some(id) = &self.session {
-                    if let Err(error) = super::reply_times::save(&id.0, &self.model, ix, time) {
-                        self.pending_errors.push(format!("Could not save reply time: {error}"));
-                    }
+                if let Some(id) = &self.session
+                    && let Some(entry) = super::reply_times::entry(&self.model, ix, time)
+                {
+                    let id = id.0.clone();
+                    let write = cx.background_executor().spawn(async move { super::reply_times::append(&id, &entry) });
+                    cx.spawn(async move |this, cx| {
+                        if let Err(error) = write.await {
+                            let _ = this.update(cx, |this, cx| {
+                                this.pending_errors.push(format!("Could not save reply time: {error}"));
+                                cx.notify();
+                            });
+                        }
+                    }).detach();
                 }
                 self.scroller.remeasure_items(ix..ix + 1);
             }
@@ -338,6 +389,7 @@ impl ChatView {
     }
 
     fn sync_text(&mut self, change: Option<Change>, delta: Option<&str>, cx: &mut Context<Self>) {
+        self.search_messages.get_mut().take();
         if self.model.is_running() && self.working_since.is_none() && !self.loading {
             let started = std::time::Instant::now();
             self.working_since = Some(started);
@@ -369,15 +421,23 @@ impl ChatView {
                     });
                 } else {
                     let view = cx.new(|cx| text::TextViewState::markdown(text, cx));
-                    cx.observe(&view, move |this, _, cx| {
-                        this.scroller.remeasure_items(ix..ix + 1);
+                    // Look the row up on each notification: rows shift when one is removed.
+                    cx.observe(&view, |this, view, cx| {
+                        if let Some(ix) = this.assistant_text.iter().find_map(|(ix, text)| (*text == view).then_some(*ix)) {
+                            this.scroller.remeasure_items(ix..ix + 1);
+                        }
                         cx.notify();
                     }).detach();
                     self.assistant_text.insert(ix, view);
                 }
             }
+            if self.replaying {
+                // One `scroller.reset` and notify follow the whole replay.
+                return;
+            }
             match change {
                 Change::Pushed(_) => {
+                    if matches!(self.model.blocks.get(ix), Some(Block::User { .. })) { self.prompt_rows.push(ix); }
                     let count = self.scroller.item_count();
                     self.scroller.splice(count..count, 1);
                 }
@@ -388,6 +448,8 @@ impl ChatView {
             let mut end = ix + 1;
             while end < self.model.blocks.len() && matches!(self.model.blocks[end], Block::Tool(_)) { end += 1; }
             self.scroller.remeasure_items(start..end);
+        } else if self.replaying {
+            return;
         } else if !self.model.is_running() {
             // A successful final tool sequence can collapse when the turn settles.
             let end = self.model.blocks.len();
@@ -469,7 +531,7 @@ impl ChatView {
         self.save_queue();
         let backend = self.backend.clone();
         let displayed_input = input.clone();
-        let row_index = self.model.blocks.len();
+        let queued_id = item_id.clone();
         let delivery = self.backend.runtime.spawn(async move {
             backend.resume(&session).await?;
             if steer {
@@ -496,6 +558,7 @@ impl ChatView {
                 }
                 this.save_queue();
                 if result.is_ok() {
+                    this.optimistic_rows.remove(&item_id);
                     // Backend events may already have arrived. Add the user row
                     // before dispatch below, rather than changing phase on ack.
                     if !this.model.is_running()
@@ -504,9 +567,10 @@ impl ChatView {
                         this.send_next(cx);
                     }
                 } else {
-                    if matches!(this.model.blocks.get(row_index), Some(Block::User { .. })) {
-                        this.model.blocks.remove(row_index);
-                        this.scroller.splice(row_index..row_index + 1, 0);
+                    if let Some(row) = this.optimistic_rows.remove(&item_id)
+                        && matches!(this.model.blocks.get(row), Some(Block::User { .. }))
+                    {
+                        this.remove_row(row);
                     }
                     this.model.reject_input();
                     if busy {
@@ -527,8 +591,56 @@ impl ChatView {
         })
         .detach();
         let change = self.model.push_input(&displayed_input, steer);
+        if let Change::Pushed(row) = change {
+            self.optimistic_rows.insert(queued_id, row);
+        }
         self.sync(Some(change), cx);
         self.scroller.scroll_to_end();
+    }
+
+    /// Remove one transcript row, moving every row-keyed piece of view state
+    /// after it up by one so it stays attached to its row.
+    fn remove_row(&mut self, ix: usize) {
+        use super::model::shifted_after_removal as shift;
+        fn remap<V>(map: &mut std::collections::HashMap<usize, V>, removed: usize) {
+            *map = std::mem::take(map)
+                .into_iter()
+                .filter_map(|(key, value)| Some((shift(key, removed)?, value)))
+                .collect();
+        }
+        self.model.remove_block(ix);
+        self.scroller.splice(ix..ix + 1, 0);
+        remap(&mut self.assistant_text, ix);
+        remap(&mut self.response_times, ix);
+        remap(&mut self.copied_responses, ix);
+        remap(&mut self.response_hover, ix);
+        self.expanded_activity = std::mem::take(&mut self.expanded_activity)
+            .into_iter()
+            .filter_map(|key| shift(key, ix))
+            .collect();
+        self.working_message = self.working_message.and_then(|key| shift(key, ix));
+        self.optimistic_rows.retain(|_, row| *row != ix);
+        for row in self.optimistic_rows.values_mut() {
+            if *row > ix {
+                *row -= 1;
+            }
+        }
+        self.search_flash = self.search_flash.take().and_then(|mut flash| {
+            flash.ix = shift(flash.ix, ix)?;
+            Some(flash)
+        });
+        self.jump = self.jump.take().and_then(|mut jump| {
+            jump.target = shift(jump.target, ix)?;
+            Some(jump)
+        });
+        self.refresh_prompt_rows();
+    }
+
+    fn refresh_prompt_rows(&mut self) {
+        self.search_messages.get_mut().take();
+        self.prompt_rows = self.model.blocks.iter().enumerate()
+            .filter_map(|(ix, block)| matches!(block, Block::User { .. }).then_some(ix))
+            .collect();
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -547,8 +659,12 @@ impl ChatView {
         response: ApprovalResponse,
         cx: &mut Context<Self>,
     ) {
-        let change = self.model.resolve_approval(&id, response);
-        self.sync(change, cx);
+        // Only a still-pending card is answered; the provider may have
+        // settled it already.
+        let Some(change) = self.model.resolve_approval(&id, response) else {
+            return;
+        };
+        self.sync(Some(change), cx);
         let Some(session) = self.session.clone() else {
             return;
         };
@@ -566,6 +682,35 @@ impl ChatView {
     /// Reattach the session if it is not live, replay its history into the
     /// model, then pump new events until the stream closes.
     fn follow(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.follow_from(id, false, cx);
+    }
+
+    /// Clear the transcript before replaying history. Used after the live
+    /// stream lagged and dropped events, which may include turn completion.
+    fn reset_for_resync(&mut self) {
+        // Keep an opening row's attachment metadata; replay skips its plain
+        // history counterpart, exactly as on first load.
+        let opening = self.model.blocks.first().filter(|block| matches!(block, Block::User { .. })).cloned();
+        if let Some(Block::User { text, .. }) = &opening {
+            self.first_prompt = Some(text.clone());
+        }
+        self.model = ChatModel::default();
+        self.model.blocks.extend(opening);
+        self.scroller.reset(self.model.blocks.len());
+        self.assistant_text.clear();
+        self.response_times.clear();
+        self.copied_responses.clear();
+        self.response_hover.clear();
+        self.expanded_activity.clear();
+        self.optimistic_rows.clear();
+        self.search_flash = None;
+        self.jump = None;
+        self.working_since = None;
+        self.working_message = None;
+        self.refresh_prompt_rows();
+    }
+
+    fn follow_from(&mut self, id: SessionId, resync: bool, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
         let attached = self.backend.runtime.spawn(async move {
             backend.resume(&id).await?;
@@ -581,12 +726,19 @@ impl ChatView {
                 Err(err) => return report(&this, cx, err.to_string()),
             };
             let replayed = this.update(cx, |this, cx| {
+                let scroll = (resync && !this.scroller.is_following_tail()).then(|| this.scroller.logical_scroll_top());
+                if resync {
+                    this.loading = true;
+                    this.reset_for_resync();
+                }
                 // The initial row already includes attachment/goal metadata.
                 // Skip its plain-text history counterpart exactly once.
                 let first_prompt = this.first_prompt.take();
                 let mut opening_user = true;
-                for event in &history {
-                    if let AgentEvent::UserMessage { text } = event
+                // Fold history with list updates suppressed; reset the list once.
+                this.replaying = true;
+                for event in coalesce_deltas(history) {
+                    if let AgentEvent::UserMessage { text } = &event
                         && opening_user
                     {
                         opening_user = false;
@@ -594,11 +746,18 @@ impl ChatView {
                             continue;
                         }
                     }
-                    this.on_event(event, cx);
+                    this.on_event(&event, cx);
                 }
+                this.replaying = false;
+                this.scroller.reset(this.model.blocks.len());
+                this.refresh_prompt_rows();
                 this.response_times.extend(times.restore(&this.model));
-                this.scroller.set_follow_mode(FollowMode::Tail);
-                this.scroller.scroll_to_end();
+                if let Some(scroll) = scroll {
+                    this.scroller.scroll_to(scroll);
+                } else {
+                    this.scroller.set_follow_mode(FollowMode::Tail);
+                    this.scroller.scroll_to_end();
+                }
                 this.loading = false;
                 if this.interrupt_requested && this.is_running() { this.stop(cx); }
                 this.sync(None, cx);
@@ -637,7 +796,14 @@ impl ChatView {
                             break;
                         }
                     }
-                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Lagged(_)) => {
+                        // Dropped events can include a completion; rebuild from
+                        // the session's full history on a fresh subscription.
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(id) = this.session.clone() { this.follow_from(id, true, cx); }
+                        });
+                        return;
+                    }
                     Err(RecvError::Closed) => break,
                 }
             }
@@ -718,6 +884,7 @@ impl Render for ChatView {
             return super::conversation_loading("Loading conversation…".into(), cx.reduce_motion());
         }
         self.apply_search_jump(cx);
+        self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
         if let Some(jump) = &self.jump {
             let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
@@ -743,28 +910,12 @@ impl Render for ChatView {
             }
         }
         let top = self.scroller.logical_scroll_top().item_ix;
-        let prompts: Vec<_> = self
-            .model
-            .blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, block)| {
-                if let Block::User { text, .. } = block {
-                    Some((ix, text.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let prompts = self.prompt_rows.clone();
         let at_end = self.scroller.is_following_tail()
             || self.scroller.is_scrolled_to_end() == Some(true)
             || self.scroller.max_offset_for_scrollbar().y <= zpx(0.0);
         let active = self.jump.as_ref().map(|jump| jump.target).or_else(|| {
-            active_prompt(
-                &prompts.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(),
-                top,
-                at_end,
-            )
+            active_prompt(&prompts, top, at_end)
         });
         let hover = self.rail_hover;
         let previous_hover = self.rail_previous_hover;
@@ -788,7 +939,12 @@ impl Render for ChatView {
                                     .max_h_full()
                                     .overflow_y_scroll()
                                     .children(prompts.into_iter().enumerate().map(
-                                        |(position, (ix, text))| {
+                                        |(position, ix)| {
+                                            let text = match self.model.blocks.get(ix) {
+                                                Some(Block::User { text, .. }) => text.as_str(),
+                                                _ => "",
+                                            };
+                                            let tooltip_view = view.downgrade();
                                             let strength = |hover: Option<usize>| {
                                                 hover.map_or(0.0, |hover| {
                                                     (1.0 - position.abs_diff(hover) as f32 / 4.0)
@@ -806,10 +962,16 @@ impl Render for ChatView {
                                                     text.chars().take(80).collect::<String>()
                                                 ))
                                                 .tooltip(move |window, cx| {
-                                                    gpui_kit::component::tooltip::Tooltip::new(
-                                                        text.chars().take(180).collect::<String>(),
-                                                    )
-                                                    .build(window, cx)
+                                                    // Read the text only when the tooltip opens.
+                                                    let text = tooltip_view
+                                                        .upgrade()
+                                                        .and_then(|view| match view.read(cx).model.blocks.get(ix) {
+                                                            Some(Block::User { text, .. }) => Some(text.chars().take(180).collect::<String>()),
+                                                            _ => None,
+                                                        })
+                                                        .unwrap_or_default();
+                                                    gpui_kit::component::tooltip::Tooltip::new(text)
+                                                        .build(window, cx)
                                                 })
                                                 .on_hover(cx.listener(
                                                     move |this, hovered, _, cx| {
@@ -908,6 +1070,17 @@ impl Render for ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_short_message_is_located_past_longer_messages_containing_it() {
+        // Saved transcript: "yes please", "yes", "yes". The second "yes" message
+        // has two earlier matches, so it is the third match overall.
+        let earlier = ["yes please", "yes"];
+        let occurrence = substring_matches(earlier, "yes").count();
+        let rows = ["yes please", "yes", "yes"];
+        assert_eq!(substring_matches(rows, "yes").nth(occurrence), Some((2, 0)));
+        assert_eq!(substring_matches(["yes please"], "yes").next(), Some((0, 0)));
+    }
     use ::gpui;
     use core::prelude::v1::test;
 
@@ -959,6 +1132,40 @@ mod tests {
         cx.executor().advance_clock(std::time::Duration::from_millis(1000));
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(!view.copied_responses.contains_key(&0)));
+    }
+
+    #[gpui::test]
+    fn failed_delivery_removes_its_own_row_and_renumbers_side_tables(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let manager = SessionManager::new(dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>()).unwrap();
+        let view = cx.new(|cx| ChatView::new(Backend { runtime: runtime.handle().clone(), manager }, None, None, cx));
+        view.update(cx, |view, cx| {
+            view.on_event(&AgentEvent::UserMessage { text: "first".into() }, cx);
+            view.on_event(&AgentEvent::AssistantMessage { turn_id: "a".into(), text: "one".into() }, cx);
+            view.on_event(&AgentEvent::TurnCompleted { turn_id: "a".into(), status: del_agent::TurnStatus::Completed }, cx);
+            // Two optimistic prompts; the earlier one fails after the later one was queued.
+            let change = view.model.push_user("undelivered".into(), false);
+            view.optimistic_rows.insert("item-1".into(), 2);
+            view.sync(Some(change), cx);
+            let change = view.model.push_user("later".into(), true);
+            view.optimistic_rows.insert("item-2".into(), 3);
+            view.sync(Some(change), cx);
+            view.on_event(&AgentEvent::AssistantMessage { turn_id: "b".into(), text: "two".into() }, cx);
+            view.on_event(&AgentEvent::TurnCompleted { turn_id: "b".into(), status: del_agent::TurnStatus::Completed }, cx);
+            let before = view.response_times[&4];
+            assert_eq!(view.prompt_rows, vec![0, 2, 3]);
+            let row = view.optimistic_rows.remove("item-1").unwrap();
+            view.remove_row(row);
+            assert!(matches!(&view.model.blocks[2], Block::User { text, .. } if text == "later"));
+            assert_eq!(view.optimistic_rows["item-2"], 2);
+            assert_eq!(view.response_times.get(&3), Some(&before));
+            assert!(view.assistant_text.contains_key(&3) && !view.assistant_text.contains_key(&4));
+            assert!(view.model.is_completed_response(3));
+            assert_eq!(view.prompt_rows, vec![0, 2]);
+            assert_eq!(view.scroller.item_count(), view.model.blocks.len());
+        });
     }
 
     #[gpui::test]
@@ -1448,6 +1655,7 @@ mod search_tests {
                 archived: false,
                 live: None,
             },
+            folded: Default::default(),
             messages: Arc::new(messages),
         });
         search::search(&[doc], query).remove(n)

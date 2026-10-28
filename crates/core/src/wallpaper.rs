@@ -16,14 +16,20 @@
 //! are transcoded to JPEG with the system `sips` tool and cached under the
 //! user's cache directory.
 //!
-//! Everything here is best-effort: any failure yields `None`.
+//! Everything here is best-effort: any failure yields `None`. Helper tools
+//! run with a deadline because the app waits for this before its window opens.
 
 use std::ffi::OsStr;
 use std::fs;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+/// Longest wait for `osascript` to report the wallpaper path.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest wait for `sips` to transcode a wallpaper.
+const TRANSCODE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Longest edge, in pixels, of the transcoded copy. Wallpapers are often 5K;
 /// this keeps the GPU texture and decode time modest while still exceeding
@@ -67,9 +73,11 @@ pub fn is_user_image(path: &Path, home: Option<&Path>) -> bool {
     if !path.is_file() {
         return false;
     }
-    if path.starts_with("/System") {
+    if path.starts_with("/System") && !path.starts_with("/System/Volumes/Data") {
         // Stock wallpapers, dynamic desktops, solid colours and the Tahoe
-        // `/System/Library/Wallpapers` tree all live here.
+        // `/System/Library/Wallpapers` tree all live here. The data volume is
+        // mounted under `/System/Volumes/Data` but holds user files
+        // (`/System/Volumes/Data/Users/...` is where canonicalize may land).
         return false;
     }
     if path.starts_with("/Library/Application Support/com.apple.idleassetsd") {
@@ -103,11 +111,65 @@ pub fn displayable_copy(source: &Path, cache_dir: &Path) -> Option<PathBuf> {
         return Some(target);
     }
     fs::create_dir_all(cache_dir).ok()?;
-    if cfg!(target_os = "macos") {
-        macos::transcode_to_jpeg(source, &target, MAX_EDGE_PX).then_some(target)
-    } else {
-        None
+    if !cfg!(target_os = "macos") {
+        return None;
     }
+    // Transcode beside the target and rename, so an interrupted or killed
+    // transcode never leaves a truncated JPEG that would be reused forever.
+    let partial = cache_dir.join(format!(
+        ".{}.{}.partial.jpg",
+        cache_file_name(source),
+        std::process::id()
+    ));
+    let done = macos::transcode_to_jpeg(source, &partial, MAX_EDGE_PX)
+        && fs::rename(&partial, &target).is_ok();
+    if !done {
+        let _ = fs::remove_file(&partial);
+    }
+    done.then_some(target)
+}
+
+/// Run `command` with stdin closed and stderr discarded, killing it after
+/// `limit`. Returns its exit status and stdout when it finished in time.
+fn output_within(mut command: Command, limit: Duration) -> Option<(ExitStatus, Vec<u8>)> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Drain concurrently so a chatty tool cannot block on a full pipe.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    Some((status, reader.join().ok()?))
+}
+
+/// 64-bit FNV-1a: unlike `DefaultHasher`, stable across Rust releases, so
+/// cache names survive toolchain upgrades.
+fn fnv1a(bytes: impl IntoIterator<Item = u8>, mut hash: u64) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Whether the file extension names a format the UI decodes without help.
@@ -123,16 +185,18 @@ pub fn is_natively_decodable(path: &Path) -> bool {
 /// The name hashes the source path and its modification time, so a changed
 /// wallpaper at the same path gets a fresh transcode.
 pub fn cache_file_name(source: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
     let modified = fs::metadata(source)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|dur| dur.as_secs())
         .unwrap_or(0);
-    modified.hash(&mut hasher);
-    format!("wallpaper-{:016x}.jpg", hasher.finish())
+    let hash = fnv1a(
+        source.as_os_str().as_encoded_bytes().iter().copied(),
+        0xcbf2_9ce4_8422_2325,
+    );
+    let hash = fnv1a(modified.to_le_bytes(), hash);
+    format!("wallpaper-{hash:016x}.jpg")
 }
 
 /// Per-user cache directory for transcoded wallpapers.
@@ -157,14 +221,13 @@ mod macos {
         const SCRIPT: &str = "ObjC.import('AppKit'); \
             $.NSWorkspace.sharedWorkspace\
             .desktopImageURLForScreen($.NSScreen.mainScreen).path.js";
-        let output = Command::new("osascript")
-            .args(["-l", "JavaScript", "-e", SCRIPT])
-            .output()
-            .ok()?;
-        if !output.status.success() {
+        let mut command = Command::new("osascript");
+        command.args(["-l", "JavaScript", "-e", SCRIPT]);
+        let (status, stdout) = output_within(command, LOOKUP_TIMEOUT)?;
+        if !status.success() {
             return None;
         }
-        let path = String::from_utf8(output.stdout).ok()?;
+        let path = String::from_utf8(stdout).ok()?;
         let path = path.trim();
         (!path.is_empty()).then(|| PathBuf::from(path))
     }
@@ -173,13 +236,14 @@ mod macos {
     /// to `max_edge` pixels. Uses the system `sips` tool, which understands
     /// HEIC and every other format macOS can display.
     pub(super) fn transcode_to_jpeg(source: &Path, target: &Path, max_edge: u32) -> bool {
-        Command::new("sips")
+        let mut command = Command::new("sips");
+        command
             .args(["-s", "format", "jpeg", "-Z", &max_edge.to_string()])
             .arg(source)
             .arg("--out")
-            .arg(target)
-            .output()
-            .is_ok_and(|output| output.status.success() && target.is_file())
+            .arg(target);
+        output_within(command, TRANSCODE_TIMEOUT)
+            .is_some_and(|(status, _)| status.success() && target.is_file())
     }
 }
 
@@ -202,6 +266,37 @@ mod tests {
         assert_eq!(cache_file_name(a), cache_file_name(a));
         assert_ne!(cache_file_name(a), cache_file_name(b));
         assert!(cache_file_name(a).ends_with(".jpg"));
+    }
+
+    #[test]
+    fn cache_name_hash_is_fixed_across_toolchains() {
+        // FNV-1a test vectors.
+        assert_eq!(fnv1a(*b"", 0xcbf2_9ce4_8422_2325), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(*b"a", 0xcbf2_9ce4_8422_2325), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(
+            cache_file_name(Path::new("/nonexistent/one.heic")),
+            format!(
+                "wallpaper-{:016x}.jpg",
+                fnv1a(
+                    0u64.to_le_bytes(),
+                    fnv1a(*b"/nonexistent/one.heic", 0xcbf2_9ce4_8422_2325)
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn slow_helpers_are_killed_at_the_deadline() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let started = Instant::now();
+        assert!(output_within(command, Duration::from_millis(200)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let mut command = Command::new("/bin/echo");
+        command.arg("ok");
+        let (status, out) = output_within(command, Duration::from_secs(2)).unwrap();
+        assert!(status.success());
+        assert_eq!(out, b"ok\n");
     }
 
     #[test]
@@ -234,6 +329,24 @@ mod tests {
         assert!(!is_user_image(
             Path::new("/nonexistent/photo.png"),
             Some(home)
+        ));
+    }
+
+    #[test]
+    fn data_volume_paths_are_not_system_assets() {
+        // `/System/Volumes/Data` is the writable data volume: user files
+        // canonicalize there on some setups and must not be rejected.
+        let dir = std::env::temp_dir().join("del-wallpaper-test-data-volume");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.png");
+        fs::write(&file, b"png").unwrap();
+        let data_volume = Path::new("/System/Volumes/Data").join(file.strip_prefix("/").unwrap());
+        if data_volume.is_file() {
+            assert!(is_user_image(&data_volume, None));
+        }
+        assert!(!is_user_image(
+            Path::new("/System/Library/Wallpapers/x.heic"),
+            None
         ));
     }
 

@@ -18,25 +18,33 @@ auth, scoping and the blocking `ask_user`.
   authenticates as exactly one session**, so the server knows the caller and
   agents cannot claim another identity. `revoke_session` invalidates them.
 - `Host` must be loopback with our port and `Origin`, if present, must be
-  loopback (DNS-rebinding / browser protection). 1 MiB body limit.
-- Scoping: `report_status` only for yourself; `send_to_session` only to sessions
-  you spawned and the session that spawned you; spawn quotas
-  (`max_spawn_per_session` 8, `max_spawn_total` 32); `ask_user` times out after
-  `ask_timeout` (30 min). Input lengths are capped.
+  loopback with our port too, so pages on other local ports are rejected
+  (DNS-rebinding / browser protection). 1 MiB body limit.
+- Scoping: a caller's *family* is its own session, the sessions it spawned, and
+  the session that spawned it. `list_sessions`, `get_session_summary`,
+  `send_to_session` (family minus self) and `browser` only reach the family;
+  `report_status` only yourself. Spawn quotas (`max_spawn_per_session` 8,
+  `max_spawn_total` 32) count live children: a child stops counting once its
+  credentials are revoked, and a reservation is released even if the client
+  disconnects mid-spawn. `forget_session` drops a deleted session's family links.
+  `ask_user` times out after `ask_timeout` (30 min). Input lengths are capped.
 - No raw filesystem or shell tools. The browser tool can access websites and
   interact with signed-in pages. Tool failures return `isError: true`;
   malformed arguments return JSON-RPC `-32602`.
 - `Credentials` and `LaunchConfig` redact tokens in `Debug`. Claude config files
   have unique names, are created exclusively, and use mode 0600. Codex gets the
-  terminal token via an env var, never argv. Codex chat receives its browser-only
-  configuration through thread/start or thread/resume; Claude chat gets a private
-  MCP config file. Browser-only credentials cannot call coordination tools.
+  terminal token via an env var, never argv. Each Codex chat receives its own
+  browser-only credential through thread/start or thread/resume (a new thread's
+  provisional credential is rebound to its thread id once Codex assigns it);
+  Claude chat gets a private MCP config file. Browser-only credentials cannot
+  call coordination tools.
 
 ## Tools
 
 All inputs are objects with `additionalProperties: false`; unknown fields are
 rejected. Object results carry both `content[0].text` (JSON) and
-`structuredContent`; acknowledgments carry text only.
+`structuredContent`; acknowledgments carry text only. Browser results, which can
+be megabytes, are sent once as `content[0].text` JSON.
 
 | tool | input | result |
 | --- | --- | --- |
@@ -57,9 +65,15 @@ Del is the default for browser requests unless the user explicitly names another
 browser or destination. This routing instruction is supplied to Codex/Claude/OpenCode chats
 and in MCP initialization/tool metadata.
 
-`list_tabs` without a session lists saved sessions, their browser tabs, and
-`active_session_id` for the visible session. Choose an explicit `session_id` or a returned `tab_id` for subsequent actions. Operations
-open/select the corresponding visible pane. Tabs in one session share its profile;
+`list_tabs` without a session lists the sessions this credential may use (its
+family), their browser tabs, and `active_session_id` when the visible session is
+one of them. Without `session_id` or `tab_id`, actions use the caller's own
+session. Actions on a session the user is not viewing run in that session's
+hidden browser without changing the user's selection. In the viewed session,
+page-changing actions reveal the Browser pane; `list_tabs`, `snapshot` and
+`screenshot` do not. A session must be open in a top tab to run in the
+background; otherwise Del opens it first. Agents may open at most 20 tabs per
+session. Tabs in one session share its profile;
 different sessions use separate profiles. Closing tabs and unloading sessions
 retain website data; permanent session deletion removes it.
 
@@ -69,11 +83,18 @@ Actions: `new_tab` (optional `url`), `select_tab`, `close_tab`, `navigate` (`url
 page text and CSS selectors for interactive elements. JavaScript is a function
 body with `return` and optional `await`, executed only in the webpage. Key events
 support Enter, Tab, Escape, and arrows. Navigation acknowledges load start; inspect
-snapshot readiness before using the new page. Operations time out after 30 seconds.
-Screenshots return MCP image content. Page text and scripts have bounded sizes.
+snapshot readiness before using the new page. Operations time out after 30 seconds;
+page scripts are rejected after 25. Results JSON cannot represent (dates, NaN,
+Infinity) are converted rather than failing. Screenshots return MCP image
+content. Page text and scripts have bounded sizes. Page `alert`/`confirm`/`prompt`
+dialogs name the page origin, and a burst of more than three in ten seconds
+blocks further dialogs from that site; hidden browsers dismiss them.
 
-Chat backends get a browser-only credential; terminal agents retain the complete
-tool set. Page text is untrusted content, not instructions. Website actions remain
+Claude and Codex chats get a credential bound to their own session, so they
+reach only their own browser and their spawn family's. OpenCode configures MCP
+per workspace server rather than per session, so the chats of one OpenCode
+workspace share a credential that reaches only those chats, and of them only
+the ones currently running a turn. Terminal agents retain the complete tool set. Page text is untrusted content, not instructions. Website actions remain
 subject to the user's authorization, including forms and signed-in accounts.
 
 ## Host contract
@@ -105,7 +126,8 @@ the child environment, delete `files` when the session ends. Neither touches
 global config (Claude keeps the user's other servers; no `--strict-mcp-config`).
 `Transport::Stdio { binary }` points the agent at `del-mcp-stdio` instead, which
 reads `DEL_MCP_URL` / `DEL_MCP_TOKEN` and proxies newline-delimited JSON-RPC to
-the HTTP endpoint (one thread per request, so `ask_user` does not block `ping`).
+the HTTP endpoint (one thread per request, at most 64 in flight, so `ask_user`
+does not block `ping`).
 
 `cargo run -p del-mcp --example serve -- <dir>` runs the server over a mock host
 and prints ready-to-use commands for both CLIs.
@@ -138,6 +160,6 @@ sibling spawning are not exposed to these chat credentials.
 
 OpenCode 2.x receives launch-local MCP configuration through
 `OPENCODE_CONFIG_CONTENT` in standalone terminal mode. Its chat adapter connects
-a browser-only credential to its private native server and attaches Del browser
+a browser-only credential shared by that workspace's chats to its private native server and attaches Del browser
 routing through native session instruction entries. Live integration checks in
 `app_bridge.rs` exercise cold startup and browser requests through OpenCode.

@@ -10,5 +10,7 @@
   <key>CFBundleIconFile</key><string>Del.icns</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Del uses your microphone to dictate text into the message composer.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Del controls Terminal to open provider sign-in sessions on your behalf.</string>
+  <key>NSCameraUsageDescription</key><string>Del's embedded browser can use your camera when a web page requests it.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Del uses Apple speech recognition for dictation. Audio may be processed by Apple when on-device recognition is unavailable.</string>
 </dict></plist>

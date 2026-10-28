@@ -163,31 +163,94 @@ async fn transfer_opencode(record: &del_agent::SessionRecord, source: Option<&Ac
 fn registry() -> std::io::Result<PathBuf> {
     del_agent::data_dir().map(|root| root.join("accounts.json")).ok_or_else(|| std::io::Error::other("Account storage directory is unavailable"))
 }
+/// Set once `accounts.json` could not be read. Saving would replace the file
+/// with only the accounts known to this run and orphan every other credentialed
+/// profile, so account changes are refused until the file is repaired.
+static SAVE_BLOCKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 pub fn load() -> std::io::Result<Vec<Account>> {
-    let path = registry()?;
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let mut accounts: Vec<Account> = serde_json::from_slice(&bytes)?;
-            for provider in Provider::ALL {
-                if accounts.iter().any(|a| a.provider == provider && a.number == 1) {
-                    for account in accounts.iter_mut().filter(|a| a.provider == provider) { account.number += 1; }
-                }
-            }
-            if accounts.iter().any(|a| uuid::Uuid::parse_str(&a.id).is_err()) {
-                return Err(std::io::Error::other("Invalid account profile ID"));
-            }
-            Ok(accounts)
+    load_from(&registry()?, &SAVE_BLOCKED)
+}
+fn parse_registry(bytes: &[u8]) -> std::io::Result<Vec<Account>> {
+    let mut accounts: Vec<Account> = serde_json::from_slice(bytes)?;
+    for provider in Provider::ALL {
+        if accounts.iter().any(|a| a.provider == provider && a.number == 1) {
+            for account in accounts.iter_mut().filter(|a| a.provider == provider) { account.number += 1; }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
-        Err(e) => Err(e),
     }
+    if accounts.iter().any(|a| uuid::Uuid::parse_str(&a.id).is_err()) {
+        return Err(std::io::Error::other("Invalid account profile ID"));
+    }
+    Ok(accounts)
+}
+fn load_from(path: &Path, blocked: &std::sync::Mutex<Option<String>>) -> std::io::Result<Vec<Account>> {
+    let error = match std::fs::read(path) {
+        Ok(bytes) => match parse_registry(&bytes) {
+            Ok(accounts) => return Ok(accounts),
+            Err(error) => error,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => error,
+    };
+    let mut blocked = blocked.lock().unwrap_or_else(|e| e.into_inner());
+    if blocked.is_none() {
+        // Keep the original in place (so a restart still refuses to clobber it) plus a dated copy.
+        let copy = if path.exists() {
+            match crate::sessions::preserve_corrupt(path, true) {
+                Ok(aside) => format!(" A copy was saved as {}.", aside.display()),
+                Err(copy_error) => format!(" It could not be copied aside: {copy_error}."),
+            }
+        } else { String::new() };
+        *blocked = Some(format!("{} could not be read: {error}.{copy} Account changes will not be saved until it is repaired or removed and Del is restarted.", path.display()));
+    }
+    Err(std::io::Error::other(blocked.clone().unwrap_or_default()))
 }
 pub fn save(accounts: &[Account]) -> std::io::Result<()> {
-    let path = registry()?;
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(accounts)?)?;
-    std::fs::rename(temporary, path)
+    save_to(&registry()?, accounts, &SAVE_BLOCKED)
+}
+fn save_to(path: &Path, accounts: &[Account], blocked: &std::sync::Mutex<Option<String>>) -> std::io::Result<()> {
+    if let Some(reason) = blocked.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Err(std::io::Error::other(reason));
+    }
+    crate::sessions::write_atomic(path, &serde_json::to_vec_pretty(accounts)?, crate::sessions::PRIVATE)
+}
+/// Removed profiles stay recoverable this long before startup deletes them.
+pub const REMOVED_RETENTION: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+pub const REMOVED_AT: &str = ".del-removed-at";
+
+/// Move a deleted profile into `removed-accounts/`, stamped for later purging.
+pub fn retire_profile(source: &Path, removed: &Path, id: &str) -> std::io::Result<Option<PathBuf>> {
+    if !source.exists() { return Ok(None); }
+    std::fs::create_dir_all(removed)?;
+    let destination = removed.join(format!("{id}-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(source, &destination)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let _ = std::fs::write(destination.join(REMOVED_AT), now.to_string());
+    Ok(Some(destination))
+}
+
+/// Delete recovery copies (with their credentials) older than `retention`.
+/// Only `<uuid>-<uuid>` directories Del created are considered.
+pub fn purge_removed_profiles(removed: &Path, retention: std::time::Duration) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(removed) else { return 0; };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut purged = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ours = name.len() == 73 && name.as_bytes()[36] == b'-'
+            && uuid::Uuid::parse_str(&name[..36]).is_ok() && uuid::Uuid::parse_str(&name[37..]).is_ok();
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue; };
+        if !ours || !meta.file_type().is_dir() { continue; }
+        // Older removals have no stamp; their rename into place updated ctime.
+        let removed_at = std::fs::read_to_string(entry.path().join(REMOVED_AT)).ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| meta.ctime().max(0) as u64);
+        if now.saturating_sub(removed_at) >= retention.as_secs() && std::fs::remove_dir_all(entry.path()).is_ok() {
+            purged += 1;
+        }
+    }
+    purged
 }
 fn next_number(provider: Provider, accounts: &[Account]) -> usize {
     accounts.iter().filter(|a| a.provider == provider).map(|a| a.number).max().unwrap_or(1).max(1) + 1
@@ -244,11 +307,22 @@ pub fn launch_provider_login(provider: Provider, account: Option<&Account>, bina
     let script = format!("tell application \"Terminal\"\nactivate\nset loginTab to do script \"{}\"\nreturn tty of loginTab\nend tell", command.replace('\\', "\\\\").replace('"', "\\\""));
     let output = std::process::Command::new("/usr/bin/osascript").args(["-e", &script]).output()?;
     if output.status.success() {
-        std::fs::write(marker.with_extension("tty"), &output.stdout)?;
+        if let Err(error) = std::fs::write(marker.with_extension("tty"), &output.stdout) {
+            cleanup_login(&marker);
+            return Err(error);
+        }
         Ok(marker)
     } else {
-        let _ = std::fs::remove_file(marker.with_extension("sh"));
+        cleanup_login(&marker);
         Err(std::io::Error::other("Could not open provider sign-in in Terminal"))
+    }
+}
+
+/// Remove every file a sign-in attempt created: its exit marker, the Terminal
+/// tty record and (if the script never ran) the launcher script.
+pub fn cleanup_login(marker: &Path) {
+    for path in [marker.to_path_buf(), marker.with_extension("tty"), marker.with_extension("sh")] {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -315,6 +389,10 @@ fn claude_usage_remaining(value: &serde_json::Value) -> Option<f64> {
 }
 
 /// Return only non-secret identity information, never token strings or raw CLI output.
+/// A sign-in check that did not answer in time says nothing about the login itself.
+pub const IDENTITY_TIMED_OUT: &str = "Sign-in check timed out";
+pub fn identity_check_inconclusive(error: &str) -> bool { error == IDENTITY_TIMED_OUT }
+
 pub async fn identity(account: &Account, binary: &Path) -> Result<Option<String>, String> {
     provider_identity(account.provider, Some(account), binary).await
 }
@@ -334,7 +412,8 @@ pub async fn provider_identity(provider: Provider, account: Option<&Account>, bi
             Ok(Ok(del_codex::AuthStatus::ChatGpt { email, .. })) => Ok(email),
             Ok(Ok(del_codex::AuthStatus::ApiKey)) => Ok(Some("API key".into())),
             Ok(Ok(_)) => Ok(None),
-            _ => Err("Unable to read Codex account identity".into()),
+            Err(_) => Err(IDENTITY_TIMED_OUT.into()),
+            Ok(Err(_)) => Err("Unable to read Codex account identity".into()),
         };
     }
     let args: &[&str] = match provider {
@@ -347,7 +426,7 @@ pub async fn provider_identity(provider: Provider, account: Option<&Account>, bi
     cmd.args(args).envs(account.map(|a| a.environment()).unwrap_or_default()).stdin(std::process::Stdio::null()).kill_on_drop(true);
     del_agent::environment::prepare_provider_command(cmd.as_std_mut());
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
-        .map_err(|_| "Sign-in check timed out".to_string())?.map_err(|e| e.to_string())?;
+        .map_err(|_| IDENTITY_TIMED_OUT.to_string())?.map_err(|e| e.to_string())?;
     if provider == Provider::Claude {
         let data: serde_json::Value = serde_json::from_slice(&result.stdout).map_err(|_| "Unable to read Claude sign-in status".to_string())?;
         if data["loggedIn"] != true { return Err("Sign in to connect this account".into()); }
@@ -357,8 +436,10 @@ pub async fn provider_identity(provider: Provider, account: Option<&Account>, bi
     Ok(None)
 }
 
+/// The profile a record names. Only a UUID can name a profile directory (same rule as `load`).
 pub fn for_record(record: &del_agent::SessionRecord) -> Option<Account> {
-    Some(Account { id: record.account_id.clone()?, provider: record.provider, number: 0, identity: None, is_default: false, requires_login: false })
+    let id = record.account_id.clone().filter(|id| uuid::Uuid::parse_str(id).is_ok())?;
+    Some(Account { id, provider: record.provider, number: 0, identity: None, is_default: false, requires_login: false })
 }
 
 #[cfg(test)]
@@ -387,6 +468,57 @@ mod tests {
             assert_eq!(manager.list_sessions()[0].id, handle.id);
         }
         manager.shutdown().await;
+    }
+
+    #[test]
+    fn unreadable_registry_is_copied_aside_and_blocks_saving() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.json");
+        let blocked = std::sync::Mutex::new(None);
+        assert!(load_from(&path, &blocked).unwrap().is_empty());
+        let account = Account { id: uuid::Uuid::new_v4().to_string(), provider: Provider::Codex, number: 2, identity: None, is_default: false, requires_login: false };
+        save_to(&path, std::slice::from_ref(&account), &blocked).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load_from(&path, &blocked).unwrap().len(), 1);
+        std::fs::write(&path, "[{\"id\": truncated").unwrap();
+        let error = load_from(&path, &blocked).unwrap_err().to_string();
+        assert!(error.contains("copy was saved"), "{error}");
+        assert!(save_to(&path, &[account], &blocked).is_err(), "saving must not orphan existing profiles");
+        assert_eq!(std::fs::read(&path).unwrap(), b"[{\"id\": truncated");
+        let copies = std::fs::read_dir(dir.path()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("accounts.json.corrupt-")).count();
+        assert_eq!(copies, 1);
+        // Repeated loads (e.g. terminal launches) do not pile up copies.
+        let _ = load_from(&path, &blocked);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn removed_profiles_are_kept_for_the_retention_window_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let removed = dir.path().join("removed-accounts");
+        let id = uuid::Uuid::new_v4().to_string();
+        let profile = dir.path().join(&id);
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("auth.json"), "secret").unwrap();
+        let retired = retire_profile(&profile, &removed, &id).unwrap().unwrap();
+        assert!(!profile.exists() && retired.join("auth.json").exists());
+        std::fs::create_dir_all(removed.join("not-a-del-profile")).unwrap();
+        assert_eq!(purge_removed_profiles(&removed, REMOVED_RETENTION), 0);
+        assert!(retired.exists());
+        std::fs::write(retired.join(REMOVED_AT), "0").unwrap();
+        assert_eq!(purge_removed_profiles(&removed, REMOVED_RETENTION), 1);
+        assert!(!retired.exists());
+        assert!(removed.join("not-a-del-profile").exists());
+    }
+
+    #[test]
+    fn login_cleanup_removes_every_attempt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("login-x");
+        for path in [marker.clone(), marker.with_extension("tty"), marker.with_extension("sh")] { std::fs::write(path, "1").unwrap(); }
+        cleanup_login(&marker);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -487,6 +619,21 @@ mod tests {
             assert_eq!(restored.environment(), a.environment());
             assert_eq!(restored.display(), "Account 1");
         }
+    }
+    #[test]
+    fn record_profiles_require_uuid_ids() {
+        let mut record = del_agent::SessionRecord {
+            id: del_agent::SessionId::new("s"), provider: Provider::Claude, account_id: Some("../../etc".into()),
+            cwd: "/tmp".into(), model: None, reasoning_effort: None, service_tier: None,
+            permission_mode: Default::default(), title: None, title_turns: 0, created_at_ms: 0, updated_at_ms: 0,
+            status: del_agent::SessionStatus::Idle,
+        };
+        assert!(for_record(&record).is_none());
+        let id = uuid::Uuid::new_v4().to_string();
+        record.account_id = Some(id.clone());
+        assert_eq!(for_record(&record).unwrap().id, id);
+        record.account_id = None;
+        assert!(for_record(&record).is_none());
     }
     #[test]
     fn terminal_arguments_are_quoted_as_literals() {

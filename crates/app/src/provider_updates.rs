@@ -25,8 +25,77 @@ enum Installer {
     Unmanaged,
 }
 
-type UpdateLocks = Mutex<HashMap<PathBuf, Arc<Mutex<Option<(Instant, bool)>>>>>;
+/// Agent terminals launched per provider, by process id. Entries are pruned
+/// once their process has ended.
+static TERMINALS: OnceLock<std::sync::Mutex<Vec<(Provider, u32)>>> = OnceLock::new();
+
+/// Record an agent terminal running `provider`'s CLI as process `pid`.
+pub fn terminal_started(provider: Provider, pid: u32) {
+    TERMINALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .push((provider, pid));
+}
+
+fn terminal_uses(provider: Provider, alive: impl Fn(u32) -> bool) -> bool {
+    let mut terminals = TERMINALS.get_or_init(Default::default).lock().unwrap();
+    terminals.retain(|(_, pid)| alive(*pid));
+    terminals.iter().any(|(p, _)| *p == provider)
+}
+
+/// Whether replacing `provider`'s CLI now could break something running on
+/// it: a live chat or a running agent terminal. Package managers can remove
+/// the old version (e.g. Homebrew's Cellar) mid-turn, so updates wait.
+pub fn provider_in_use(manager: &del_agent::SessionManager, provider: Provider) -> bool {
+    manager
+        .list_sessions()
+        .iter()
+        .any(|record| record.provider == provider && manager.is_live(&record.id))
+        || terminal_uses(provider, del_agent::procgroup::process_alive)
+}
+
+/// Last outcome per harness binary. Failures (typically offline) back off so a
+/// config change or terminal launch does not rerun `brew update` each time.
+#[derive(Clone)]
+struct Checked {
+    at: Instant,
+    result: Result<bool, String>,
+    failures: u32,
+}
+
+impl Checked {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < retry_after(self.result.is_ok(), self.failures)
+    }
+}
+
+const SUCCESS_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// 5, 10, 20 … minutes after consecutive failures, capped at six hours.
+fn retry_after(succeeded: bool, failures: u32) -> Duration {
+    if succeeded {
+        return SUCCESS_INTERVAL;
+    }
+    let exponent = failures.saturating_sub(1).min(7);
+    (Duration::from_secs(5 * 60) * 2u32.pow(exponent)).min(Duration::from_secs(6 * 60 * 60))
+}
+
+type UpdateLocks = Mutex<HashMap<PathBuf, Arc<Mutex<Option<Checked>>>>>;
 static LOCKS: OnceLock<UpdateLocks> = OnceLock::new();
+
+/// A global npm package name: optional `@scope/`, then lowercase URL-safe characters.
+fn valid_npm_package(name: &str) -> bool {
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 214
+            && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+    };
+    match name.strip_prefix('@') {
+        Some(scoped) => scoped.split_once('/').is_some_and(|(scope, pkg)| segment(scope) && segment(pkg)),
+        None => segment(name),
+    }
+}
 
 fn version(value: &str) -> Option<(u64, u64, u64)> {
     let parts = value
@@ -89,13 +158,7 @@ fn installer(program: &Path, provider: Provider) -> Installer {
             _ => false,
         };
         let npm = prefix.join("bin/npm");
-        if owns_binary
-            && npm.is_file()
-            && version(installed).is_some()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "@/._-".contains(c))
-        {
+        if owns_binary && npm.is_file() && version(installed).is_some() && valid_npm_package(name) {
             return Installer::Npm {
                 npm,
                 prefix: prefix.to_path_buf(),
@@ -196,19 +259,22 @@ pub async fn ensure_program(
         crate::providers::display_name(provider)
     ));
     let mut checked = lock.lock().await;
-    if let Some((at, managed)) = *checked
-        && at.elapsed() < Duration::from_secs(1800)
-    {
-        return Ok(managed);
+    if let Some(previous) = checked.as_ref().filter(|checked| checked.fresh()) {
+        return previous.result.clone();
     }
     let target = program.clone();
     let plan = tokio::task::spawn_blocking(move || installer(&target, provider))
         .await
         .map_err(|e| e.to_string())?;
     let managed = plan != Installer::Unmanaged;
-    apply_update(&program, &plan, &progress).await?;
-    *checked = Some((Instant::now(), managed));
-    Ok(managed)
+    let result = apply_update(&program, &plan, &progress).await.map(|()| managed);
+    let failures = match (&result, checked.as_ref()) {
+        (Ok(_), _) => 0,
+        (Err(_), Some(previous)) => previous.failures + 1,
+        (Err(_), None) => 1,
+    };
+    *checked = Some(Checked { at: Instant::now(), result: result.clone(), failures });
+    result
 }
 
 async fn apply_update(
@@ -367,6 +433,28 @@ pub fn completed_cli_update(provider: Provider, output: &str, exit: Option<i32>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_terminals_hold_off_their_provider_until_they_exit() {
+        terminal_started(Provider::OpenCode, 4242);
+        assert!(terminal_uses(Provider::OpenCode, |_| true));
+        assert!(!terminal_uses(Provider::Acp, |_| true));
+        // An ended process is pruned and no longer blocks updates.
+        assert!(!terminal_uses(Provider::OpenCode, |_| false));
+        assert!(!terminal_uses(Provider::OpenCode, |_| true));
+    }
+
+    #[test]
+    fn failed_checks_back_off_instead_of_rerunning_immediately() {
+        assert_eq!(retry_after(true, 0), SUCCESS_INTERVAL);
+        assert_eq!(retry_after(false, 1), Duration::from_secs(300));
+        assert_eq!(retry_after(false, 3), Duration::from_secs(1200));
+        assert_eq!(retry_after(false, 40), Duration::from_secs(6 * 3600));
+        let failed = Checked { at: Instant::now(), result: Err("offline".into()), failures: 1 };
+        assert!(failed.fresh());
+        let stale = Checked { at: Instant::now() - Duration::from_secs(301), ..failed };
+        assert!(!stale.fresh());
+    }
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn executable(path: &Path, source: &str) {
@@ -433,7 +521,7 @@ esac
     }
 
     #[tokio::test]
-    async fn failed_update_is_retryable_and_never_cached_as_success() {
+    async fn failed_update_backs_off_then_retries_and_is_never_cached_as_success() {
         let (root, program) = installation("1.0.0", "2.0.0");
         std::fs::write(root.path().join("fail"), "").unwrap();
         assert!(
@@ -444,11 +532,34 @@ esac
         );
         assert!(!root.path().join("installed").exists());
         std::fs::remove_file(root.path().join("fail")).unwrap();
+        // Within the backoff the failure is reported without rerunning the installer.
+        let calls = std::fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(
+            ensure_program(program.clone(), Provider::Codex, |_| {})
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(root.path().join("calls")).unwrap(), calls);
+        // Once the backoff passes, the update is retried and succeeds.
+        let lock = LOCKS.get().unwrap().lock().await.get(&program).unwrap().clone();
+        if let Some(checked) = lock.lock().await.as_mut() {
+            checked.at = Instant::now() - Duration::from_secs(301);
+        }
         assert_eq!(
             ensure_program(program, Provider::Codex, |_| {}).await,
             Ok(true)
         );
         assert!(root.path().join("installed").is_file());
+    }
+
+    #[test]
+    fn npm_package_names_follow_the_registry_grammar() {
+        for ok in ["@openai/codex", "opencode-ai", "@anthropic-ai/claude-code", "a.b_c"] {
+            assert!(valid_npm_package(ok), "{ok}");
+        }
+        for bad in ["", "@", "@scope", "@scope/", "/x", "a/b", "@a/b/c", "Upper", "a b", "a;b", "@a@b/c", "../x", "x\n"] {
+            assert!(!valid_npm_package(bad), "{bad:?}");
+        }
     }
 
     #[tokio::test]
