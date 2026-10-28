@@ -337,6 +337,7 @@ mod tests {
 
     fn record(id: &str, title: Option<&str>, updated_ms: u64) -> SessionRecord {
         SessionRecord {
+            fork: None,
             id: SessionId::new(id),
             provider: Provider::Claude,
             account_id: None,

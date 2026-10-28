@@ -555,6 +555,9 @@ impl AppState {
                 self.set_records(self.manager.list_sessions());
             }
             Msg::ReplyFinished(id) => {
+                if self.backend().manager.is_temporary(&id) {
+                    return;
+                }
                 self.reply_finished(&id, cx);
                 self.set_records(self.manager.list_sessions());
             }
@@ -672,6 +675,99 @@ impl AppState {
                 && self.status_of(c.provider).is_some_and(providers::ready)
         });
         readiness.set_config(config);
+    }
+
+    /// Draft owners must keep their identity across restart so their saved
+    /// side conversations cannot attach to a different new session.
+    pub fn save_draft_owners(&self) -> std::io::Result<()> {
+        if cfg!(test) {
+            return Ok(());
+        }
+        let Some(path) = del_agent::data_dir().map(|dir| dir.join("side-chat-draft-owners.json"))
+        else {
+            return Ok(());
+        };
+        let drafts: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                Tab::Draft(id) => self
+                    .drafts
+                    .get(id)
+                    .map(|config| (*id, config.clone(), self.draft_accounts.get(id).cloned())),
+                _ => None,
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&drafts)?;
+        if std::fs::read(&path).ok().as_deref() != Some(&bytes) {
+            sessions::write_atomic(&path, &bytes, sessions::PRIVATE)?;
+        }
+        Ok(())
+    }
+
+    pub fn restore_draft_owners(&mut self, cx: &mut Context<Self>) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(path) = del_agent::data_dir().map(|dir| dir.join("side-chat-draft-owners.json"))
+        else {
+            return;
+        };
+        let (drafts, error): (Vec<(u64, SessionConfig, Option<String>)>, _) =
+            sessions::load_or_set_aside(&path, "saved draft owners");
+        if let Some(error) = error {
+            self.error = Some(error);
+        }
+        if drafts.is_empty() {
+            return;
+        }
+        self.drafts.clear();
+        self.draft_accounts.clear();
+        self.tabs.clear();
+        self.uids.clear();
+        for (id, config, account) in drafts {
+            if self.drafts.contains_key(&id) {
+                continue;
+            }
+            self.drafts.insert(id, config);
+            if let Some(account) = account {
+                self.draft_accounts.insert(id, account);
+            }
+            self.next_draft = self.next_draft.max(id.saturating_add(1));
+            self.new_uid(Tab::Draft(id));
+            self.tabs.push(Tab::Draft(id));
+        }
+        if let Some(tab) = self.tabs.first() {
+            self.selection = tab.selection();
+        }
+        cx.notify();
+    }
+
+    pub fn side_chat_context(&self) -> crate::side_chat::Context {
+        let source = if let Selection::Session(id) = &self.selection {
+            del_agent::ForkSource::Session(id.clone())
+        } else {
+            let (provider, model, cwd) = self.effective();
+            del_agent::ForkSource::New {
+                config: self.draft().cloned().unwrap_or(SessionConfig {
+                    provider,
+                    model,
+                    cwd,
+                    reasoning_effort: self.effort(),
+                    service_tier: self.service_tier(),
+                    permission_mode: providers::permission_mode(provider),
+                }),
+                account_id: self.selected_account(),
+            }
+        };
+        crate::side_chat::Context {
+            backend: self.backend(),
+            source,
+            accounts: providers::VISIBLE
+                .iter()
+                .flat_map(|provider| self.visible_accounts(*provider).into_iter().cloned())
+                .collect(),
+        }
     }
 
     pub fn backend(&self) -> crate::chat::Backend {
@@ -3994,6 +4090,7 @@ pub(crate) mod tests {
             let chat = SessionId::new("chat");
             s.invalidate_rows();
             s.records.push(SessionRecord {
+                fork: None,
                 id: chat.clone(),
                 provider: Provider::Codex,
                 account_id: None,

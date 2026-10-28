@@ -1060,6 +1060,7 @@ mod tests {
     #[test]
     fn record_profiles_require_uuid_ids() {
         let mut record = del_agent::SessionRecord {
+            fork: None,
             id: del_agent::SessionId::new("s"),
             provider: Provider::Claude,
             account_id: Some("../../etc".into()),

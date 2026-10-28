@@ -278,6 +278,7 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
     let path = dir.path().join("sessions.jsonl");
     let id = SessionId::new("saved");
     let record = SessionRecord {
+        fork: None,
         id: id.clone(),
         provider: Provider::Codex,
         account_id: None,
@@ -364,6 +365,7 @@ async fn resumed_history_reaches_chat_subscribers() {
     del_agent::index::SessionIndex::open(&path)
         .unwrap()
         .upsert(SessionRecord {
+            fork: None,
             id: id.clone(),
             provider: Provider::Codex,
             account_id: None,
@@ -1092,6 +1094,30 @@ async fn account_transfer_resumes_the_copied_native_transcript() {
         .await
         .unwrap();
     assert_eq!(handle.id.as_str(), "saved");
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"child","turns":[{"id":"old","status":"completed","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"inherited"}]}]}]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let child = backend
+        .fork_session(config(), &SessionId::new("parent"), true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.id.as_str(), "child");
+    assert!(child.history().is_empty());
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

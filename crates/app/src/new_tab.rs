@@ -2,7 +2,6 @@
 use crate::appearance::rgba;
 use crate::right_panel::Pane;
 use crate::zoom::px as zpx;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -79,22 +78,12 @@ pub fn tools<T: 'static>(
         cx,
     );
     let files = tool(Pane::Files, "Files", IconName::Folder.into(), cx);
-    let side_chat = Button::new("new-tab-side-chat")
-        .ghost()
-        .disabled(true)
-        .label("Side chat")
-        .icon(Icon::default().path("icons/messages-square.svg"))
-        .flex_1()
-        .when(compact, |t| t.flex_none().w_full())
-        .min_w_0()
-        .h(zpx(44.))
-        .px_3()
-        .gap_2()
-        .rounded_lg()
-        .bg(rgba(0xffffff05))
-        .text_color(rgba(0xffffff55))
-        .child(div().flex_1())
-        .child(div().text_size(zpx(11.)).child("Coming soon"));
+    let side_chat = tool(
+        Pane::SideChat,
+        "Side chat",
+        Icon::default().path("icons/side-chat.svg"),
+        cx,
+    );
     div()
         .id("new-tab-tools")
         .flex_1()

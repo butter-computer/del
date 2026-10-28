@@ -203,6 +203,23 @@ pub trait AgentBackend: Send + Sync {
     /// Start a fresh session. Backends need not emit `SessionStarted`: nobody can
     /// be subscribed yet, so `SessionManager` emits it as the first history event.
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle>;
+
+    /// Start without provider-side persistence when supported. The manager
+    /// always excludes temporary sessions from Del's index and history UI.
+    async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        self.start_session(config).await
+    }
+
+    /// Fork provider-owned context into a distinct session. `None` requests the
+    /// manager's transcript fallback; errors must not silently discard context.
+    async fn fork_session(
+        &self,
+        _config: SessionConfig,
+        _source: &SessionId,
+        _temporary: bool,
+    ) -> Result<Option<SessionHandle>> {
+        Ok(None)
+    }
     /// Begin a new turn. Returns once the prompt is accepted; progress arrives as events.
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()>;
     /// Inject guidance into the turn currently in flight.

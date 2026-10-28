@@ -507,3 +507,93 @@ async fn real_luna_title_without_reasoning() {
     eprintln!("Luna title: {title}");
     assert!(title.to_lowercase().contains("chess"));
 }
+
+/// Verify native context inheritance and isolation against the installed CLI.
+#[tokio::test]
+#[ignore = "requires installed authenticated Codex; sends two short model turns"]
+async fn native_side_chat_inherits_context() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    }));
+    let manager = SessionManager::new(
+        dir.path().join("sessions.jsonl"),
+        [backend as Arc<dyn AgentBackend>],
+    )
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(180), async {
+        let parent = manager.start_session(config(dir.path(), PermissionMode::Plan)).await?;
+        let mut parent_events = manager.subscribe(&parent.id)?;
+        let marker = format!("fork-check-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        manager.send_prompt(&parent.id, UserInput::text(format!("Remember this exact marker for our conversation: {marker}. Reply only OK. Do not use tools."))).await?;
+        collect_until(&mut parent_events, is_end).await;
+        let before = manager.subscribe_with_history(&parent.id)?.0;
+        let child = manager.fork(ForkSource::Session(parent.id.clone()), ForkLifetime::Temporary).await?;
+        assert_eq!(child.context, ForkContext::Native);
+        assert_eq!(manager.subscribe_with_history(&child.handle.id)?.0.len(), 1);
+        let mut events = manager.subscribe(&child.handle.id)?;
+        manager.send_prompt(&child.handle.id, UserInput::text("What is the exact marker I asked you to remember? Reply with just that marker. Do not use tools.")).await?;
+        let response = collect_until(&mut events, is_end).await;
+        let text: String = response.iter().filter_map(|e| match e { AgentEvent::AssistantTextDelta { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert!(text.contains(&marker), "native fork did not recall parent marker: {text}");
+        assert_eq!(manager.subscribe_with_history(&parent.id)?.0, before);
+        assert_eq!(manager.list_sessions().len(), 1);
+        manager.delete(&child.handle.id).await?;
+        assert!(manager.is_live(&parent.id));
+        Ok::<_, AgentError>(())
+    }).await;
+    manager.shutdown().await;
+    result.expect("bounded fork probe timed out").unwrap();
+}
+
+/// Temporary native threads have no rollout to fork again. Switching settings
+/// and restoring durable context must use the transcript path instead.
+#[tokio::test]
+#[ignore = "requires authenticated Codex; sends three short model turns"]
+async fn side_chat_model_switch_and_restart_preserve_context() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    }));
+    let manager = SessionManager::new(
+        dir.path().join("index"),
+        [backend.clone() as Arc<dyn AgentBackend>],
+    )
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(180), async {
+        let mut selected = config(dir.path(), PermissionMode::Plan);
+        let models = manager.account_models(Provider::Codex, None, dir.path()).await?;
+        let model = models.iter().find(|model| model.id.contains("luna")).expect("Luna catalog entry").id.clone();
+        let first = manager.fork(ForkSource::New { config: selected.clone(), account_id: None }, ForkLifetime::Temporary).await?;
+        let mut events = manager.subscribe(&first.handle.id)?;
+        manager.send_prompt(&first.handle.id, UserInput::text("Remember the marker durable-ibis-6182. Reply only OK. Do not use tools.")).await?;
+        collect_until(&mut events, is_end).await;
+        selected.model = Some(model.clone());
+        let changed = manager.reconfigure_fork(&first.handle.id, selected, None).await?;
+        assert_eq!(changed.context, ForkContext::Transcript);
+        assert_eq!(manager.session_record(&changed.handle.id)?.model.as_deref(), Some(model.as_str()));
+        manager.delete(&first.handle.id).await?;
+        let mut events = manager.subscribe(&changed.handle.id)?;
+        manager.send_prompt(&changed.handle.id, UserInput::text("What marker did I ask you to remember? Reply only the marker. Do not use tools.")).await?;
+        let response = collect_until(&mut events, is_end).await;
+        let answer: String = response.iter().filter_map(|event| match event { AgentEvent::AssistantTextDelta { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert!(answer.contains("durable-ibis-6182"), "model switch lost context: {answer}");
+        let saved = serde_json::to_vec(&manager.export_fork(&changed.handle.id)?).unwrap();
+        manager.delete(&changed.handle.id).await?;
+        let restored = manager.restore_fork(serde_json::from_slice(&saved).unwrap()).await?;
+        let mut events = manager.subscribe(&restored.handle.id)?;
+        manager.send_prompt(&restored.handle.id, UserInput::text("Repeat the marker from our conversation. Reply only the marker. Do not use tools.")).await?;
+        let response = collect_until(&mut events, is_end).await;
+        let answer: String = response.iter().filter_map(|event| match event { AgentEvent::AssistantTextDelta { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert!(answer.contains("durable-ibis-6182"), "restart lost context: {answer}");
+        assert!(manager.list_sessions().is_empty());
+        manager.delete(&restored.handle.id).await?;
+        Ok::<_, AgentError>(())
+    }).await;
+    manager.shutdown().await;
+    result.expect("bounded side chat probe timed out").unwrap();
+}

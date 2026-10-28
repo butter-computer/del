@@ -234,6 +234,16 @@ impl ClaudeBackend {
         id: SessionId,
         session_flag: [&str; 2],
     ) -> Result<SessionHandle> {
+        self.spawn_with_persistence(config, id, session_flag, true)
+    }
+
+    fn spawn_with_persistence(
+        &self,
+        config: &SessionConfig,
+        id: SessionId,
+        session_flag: [&str; 2],
+        persist: bool,
+    ) -> Result<SessionHandle> {
         // Held until the new process is registered: two concurrent resumes of
         // one id must share a single `claude`, never start two.
         let mut sessions = self.sessions.lock().unwrap();
@@ -251,6 +261,9 @@ impl ClaudeBackend {
         let mut command = Command::new(&self.options.binary);
         self.options.prepare(&mut command);
         let mut args = self.args(config, session_flag);
+        if !persist {
+            args.push("--no-session-persistence".into());
+        }
         if let Some(factory) = self
             .browser_tools
             .lock()
@@ -640,6 +653,16 @@ impl AgentBackend for ClaudeBackend {
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
         let id = uuid::Uuid::new_v4().to_string();
         self.spawn(&config, SessionId::new(id.clone()), ["--session-id", &id])
+    }
+
+    async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.spawn_with_persistence(
+            &config,
+            SessionId::new(id.clone()),
+            ["--session-id", &id],
+            false,
+        )
     }
 
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {

@@ -255,6 +255,9 @@ impl CodexBackend {
             st.open_params.clone()
         };
         if let Some(mut params) = params {
+            if params.get("ephemeral").and_then(Value::as_bool) == Some(true) {
+                return Err(AgentError::Backend("Temporary Codex chat lost its server. Open a new side chat to inherit the main context again.".into()));
+            }
             params.insert("threadId".into(), json!(id.as_str()));
             conn.client
                 .request("thread/resume", Value::Object(params))
@@ -735,6 +738,30 @@ impl AgentBackend for CodexBackend {
             config.provider,
         )
         .await
+    }
+
+    async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+        let mut params = thread_params(&config);
+        params.insert("ephemeral".into(), json!(true));
+        self.open("thread/start", params, None, config.provider)
+            .await
+    }
+
+    async fn fork_session(
+        &self,
+        config: SessionConfig,
+        source: &SessionId,
+        temporary: bool,
+    ) -> Result<Option<SessionHandle>> {
+        let mut params = thread_params(&config);
+        params.insert("threadId".into(), json!(source.as_str()));
+        params.insert("ephemeral".into(), json!(temporary));
+        params.insert("excludeTurns".into(), json!(true));
+        // This is a new identity: mint new browser credentials and do not replay
+        // inherited turns into the child's visible transcript.
+        self.open("thread/fork", params, None, config.provider)
+            .await
+            .map(Some)
     }
 
     async fn resume_transferred(

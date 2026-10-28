@@ -8,6 +8,94 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::path::PathBuf;
+use std::{cell::Cell, rc::Rc, time::Duration};
+
+pub const TAB_WIDTH: f32 = 160.0;
+const TAB_GAP: f32 = 2.0;
+
+#[derive(Clone)]
+struct DraggedWorkspaceTab {
+    owner: EntityId,
+    id: u64,
+    label: String,
+    kind: Kind,
+    origin_x: Rc<Cell<Pixels>>,
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    pointer_y: Pixels,
+    offset_x: Pixels,
+}
+
+impl Render for DraggedWorkspaceTab {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let bounds = self.bounds.get();
+        let width = zpx(TAB_WIDTH).min(bounds.size.width.max(zpx(0.)));
+        let natural_left = window.mouse_position().x - self.offset_x;
+        let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
+        div()
+            .w(zpx(TAB_WIDTH))
+            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+            .child(
+                h_flex()
+                    .relative()
+                    .top(self.pointer_y - window.mouse_position().y)
+                    .left(left - natural_left)
+                    .w(width)
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .px_2()
+                    .gap_2()
+                    .rounded_md()
+                    .overflow_hidden()
+                    .bg(rgb(0x303033))
+                    .text_color(rgb(0xf5f5f5))
+                    .text_size(zpx(del_core::typography::TEXT_MD))
+                    .shadow_md()
+                    .when(self.kind != Kind::Blank, |tab| {
+                        tab.child(crate::icons::icon(self.kind.icon()).with_size(zpx(15.)))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(self.label.clone()),
+                    ),
+            )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TabDrag {
+    id: u64,
+    source: usize,
+    target: usize,
+    previous: usize,
+}
+
+fn drag_target(source: usize, delta: f32, current: usize, count: usize) -> usize {
+    let slot = TAB_WIDTH + TAB_GAP;
+    let x = source as f32 * slot + delta;
+    let target = (x / slot)
+        .round()
+        .clamp(0.0, count.saturating_sub(1) as f32) as usize;
+    // Match the titlebar's dead zone around slot boundaries.
+    if (target > current && x < (current as f32 + 0.5) * slot + 12.)
+        || (target < current && x > (current as f32 - 0.5) * slot - 12.)
+    {
+        current
+    } else {
+        target
+    }
+}
+
+fn drag_offset(index: usize, source: usize, target: usize) -> f32 {
+    if source < target && index > source && index <= target {
+        -(TAB_WIDTH + TAB_GAP)
+    } else if target < source && index >= target && index < source {
+        TAB_WIDTH + TAB_GAP
+    } else {
+        0.
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -16,6 +104,7 @@ enum Kind {
     Changes,
     Terminal,
     Browser,
+    SideChat,
 }
 impl Kind {
     fn label(self) -> &'static str {
@@ -25,6 +114,7 @@ impl Kind {
             Self::Changes => "Changes",
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
+            Self::SideChat => "Side chat",
         }
     }
     fn icon(self) -> Icon {
@@ -34,6 +124,7 @@ impl Kind {
             Self::Changes => IconName::File.into(),
             Self::Terminal => Icon::default().path("icons/terminal.svg"),
             Self::Browser => IconName::Globe.into(),
+            Self::SideChat => Icon::default().path("icons/side-chat.svg"),
         }
     }
 }
@@ -44,7 +135,18 @@ struct ToolTab {
     browser: Option<crate::browser::Browser>,
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedSideTabs {
+    ids: Vec<String>,
+    active: Option<usize>,
+}
+
 pub struct WorkspaceTabs {
+    side_context: Option<crate::side_chat::Context>,
+    storage_key: Option<String>,
+    drag: Option<TabDrag>,
+    drag_origin: Rc<Cell<Pixels>>,
+    strip_bounds: Rc<Cell<Bounds<Pixels>>>,
     root: PathBuf,
     tabs: Vec<ToolTab>,
     active: Option<u64>,
@@ -54,7 +156,117 @@ pub struct WorkspaceTabs {
     profile: String,
     scroll: ScrollHandle,
 }
+impl EventEmitter<crate::side_chat::SendToMain> for WorkspaceTabs {}
+impl EventEmitter<crate::chat::OpenLink> for WorkspaceTabs {}
 impl WorkspaceTabs {
+    pub fn set_side_context(&mut self, context: crate::side_chat::Context) {
+        self.side_context = Some(context);
+    }
+
+    fn storage_path(key: &str) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            let _ = key;
+            None
+        }
+        #[cfg(not(test))]
+        {
+            let name: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+            Some(
+                del_agent::data_dir()?
+                    .join("side-chat-tabs")
+                    .join(format!("{name}.json")),
+            )
+        }
+    }
+    pub fn save_side_chats(&self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            if let Some(panel) = &tab.panel {
+                panel.update(cx, |panel, cx| panel.save_side_chat(cx));
+            }
+        }
+        self.persist(cx);
+    }
+
+    pub fn persist(&self, cx: &App) {
+        if let Some(path) = self.storage_key.as_deref().and_then(Self::storage_path) {
+            let tabs: Vec<_> = self
+                .tabs
+                .iter()
+                .filter_map(|tab| {
+                    tab.panel
+                        .as_ref()
+                        .and_then(|panel| panel.read(cx).side_chat_id())
+                        .map(|id| (tab.id, id))
+                })
+                .collect();
+            let saved = SavedSideTabs {
+                active: tabs.iter().position(|(id, _)| Some(*id) == self.active),
+                ids: tabs.into_iter().map(|(_, id)| id).collect(),
+            };
+            if let Ok(bytes) = serde_json::to_vec(&saved)
+                && let Err(error) =
+                    crate::sessions::write_atomic(&path, &bytes, crate::sessions::PRIVATE)
+            {
+                eprintln!("Could not save side chat tabs: {error}");
+            }
+        }
+    }
+    pub fn set_storage_key(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.storage_key.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(old) = self.storage_key.replace(key.clone()) {
+            // Draft -> saved session: move the existing strip, don't reopen it.
+            self.persist(cx);
+            if let Some(path) = Self::storage_path(&old) {
+                let _ = std::fs::remove_file(path);
+            }
+            return;
+        }
+        if let Some(path) = Self::storage_path(&key) {
+            let saved: SavedSideTabs = match std::fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice(&bytes) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        eprintln!("Could not read side chat tabs: {error}");
+                        return;
+                    }
+                },
+                Err(_) => return,
+            };
+            let mut active = None;
+            for (index, id) in saved.ids.into_iter().enumerate() {
+                let Some(context) = self.side_context.clone() else {
+                    break;
+                };
+                let panel = cx.new(|cx| {
+                    let mut panel = RightPanel::new(self.root.clone(), window, cx);
+                    panel.set_side_context(context);
+                    panel.restore_side_chat(id, window, cx);
+                    panel
+                });
+                cx.observe(&panel, |_, _, cx| cx.notify()).detach();
+                cx.subscribe(&panel, |_, _, event: &crate::chat::OpenLink, cx| {
+                    cx.emit(crate::chat::OpenLink(event.0.clone()))
+                })
+                .detach();
+                let tab_id = self.next_id;
+                self.next_id += 1;
+                if saved.active == Some(index) {
+                    active = Some(tab_id);
+                }
+                self.tabs.push(ToolTab {
+                    id: tab_id,
+                    kind: Kind::SideChat,
+                    panel: Some(panel),
+                    browser: None,
+                });
+            }
+            self.select(active, window, cx);
+        }
+    }
+
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter a URL"));
         cx.subscribe_in(&address, window, |this, _, event, window, cx| {
@@ -63,7 +275,17 @@ impl WorkspaceTabs {
             }
         })
         .detach();
+        cx.on_app_quit(|this, cx| {
+            this.persist(cx);
+            async {}
+        })
+        .detach();
         Self {
+            side_context: None,
+            storage_key: None,
+            drag: None,
+            drag_origin: Default::default(),
+            strip_bounds: Default::default(),
             root,
             tabs: vec![],
             active: None,
@@ -74,6 +296,20 @@ impl WorkspaceTabs {
             scroll: ScrollHandle::new(),
         }
     }
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        self.persist(cx);
+        self.drag = None;
+        for tab in self.tabs.drain(..) {
+            if let Some(panel) = tab.panel {
+                panel.update(cx, |p, cx| p.release(cx));
+            }
+            if let Some(browser) = tab.browser {
+                browser.hide();
+            }
+        }
+        self.active = None;
+    }
+
     pub fn is_chat(&self) -> bool {
         self.active.is_none()
     }
@@ -90,6 +326,9 @@ impl WorkspaceTabs {
     }
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.visible = visible;
+        if !visible {
+            self.drag = None;
+        }
         for tab in &self.tabs {
             let shown = visible && self.active == Some(tab.id);
             if let Some(panel) = &tab.panel {
@@ -142,7 +381,11 @@ impl WorkspaceTabs {
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.iter().find(|tab| Some(tab.id) == self.active) {
-            if tab.kind == Kind::Terminal {
+            if tab.kind == Kind::SideChat {
+                if let Some(panel) = &tab.panel {
+                    panel.update(cx, |p, cx| p.focus_side_chat(window, cx));
+                }
+            } else if tab.kind == Kind::Terminal {
                 if let Some(panel) = &tab.panel {
                     panel.update(cx, |p, cx| p.show_terminal(window, cx));
                 }
@@ -175,9 +418,13 @@ impl WorkspaceTabs {
             );
             return;
         }
+        self.drag = None;
         let tab = self.tabs.remove(index);
         if let Some(panel) = tab.panel {
-            panel.update(cx, |p, cx| p.release(cx));
+            panel.update(cx, |p, cx| {
+                p.forget_side_chat(cx);
+                p.release(cx);
+            });
         }
         if let Some(browser) = tab.browser {
             browser.hide();
@@ -199,14 +446,26 @@ impl WorkspaceTabs {
             Kind::Files => Pane::Files,
             Kind::Changes => Pane::Changes,
             Kind::Terminal => Pane::Terminal,
+            Kind::SideChat => Pane::SideChat,
             _ => return,
         };
         let panel = cx.new(|cx| {
             let mut panel = RightPanel::new(self.root.clone(), window, cx);
+            if let Some(context) = self.side_context.clone() {
+                panel.set_side_context(context);
+            }
             panel.show_workspace(pane, window, cx);
             panel
         });
         cx.observe(&panel, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&panel, |_, _, event: &crate::side_chat::SendToMain, cx| {
+            cx.emit(event.clone())
+        })
+        .detach();
+        cx.subscribe(&panel, |_, _, event: &crate::chat::OpenLink, cx| {
+            cx.emit(crate::chat::OpenLink(event.0.clone()))
+        })
+        .detach();
         tab.kind = kind;
         tab.panel = Some(panel);
         cx.notify();
@@ -230,9 +489,82 @@ impl WorkspaceTabs {
         tab.browser = Some(crate::browser::Browser::new(&url, &self.profile));
         cx.notify();
     }
-    pub fn render_strip(&self, hints: bool, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .gap_0p5()
+    fn begin_drag(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(source) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        self.drag = Some(TabDrag {
+            id,
+            source,
+            target: source,
+            previous: source,
+        });
+        cx.notify();
+    }
+
+    fn move_drag(&mut self, owner: EntityId, id: u64, delta: f32, cx: &mut Context<Self>) {
+        if owner != cx.entity_id() {
+            return;
+        }
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        if drag.id != id {
+            return;
+        }
+        let target = drag_target(drag.source, delta, drag.target, self.tabs.len());
+        if drag.target != target {
+            drag.previous = drag.target;
+            drag.target = target;
+            crate::haptics::tick();
+            cx.notify();
+        }
+    }
+
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if let Some(source) = self.tabs.iter().position(|tab| tab.id == drag.id) {
+            let tab = self.tabs.remove(source);
+            self.tabs.insert(drag.target.min(self.tabs.len()), tab);
+        }
+        // The original chat is not in `tabs`, so it can never move or be displaced.
+        // Selection and tool entities use stable ids and survive a reorder.
+        cx.notify();
+    }
+
+    pub fn render_strip(&mut self, hints: bool, cx: &mut Context<Self>) -> AnyElement {
+        if self.drag.is_some() && !cx.has_active_drag() {
+            self.drag = None;
+        }
+        let bounds = self.strip_bounds.clone();
+        let drag = self.drag;
+        let row = h_flex()
+            .id("workspace-tools-strip")
+            .gap(zpx(TAB_GAP))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<DraggedWorkspaceTab>, _, cx| {
+                    let drag = event.drag(cx);
+                    let delta = del_core::zoom::unscaled(
+                        (event.event.position.x - drag.origin_x.get()).as_f32(),
+                    );
+                    this.move_drag(drag.owner, drag.id, delta, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
+            )
+            .on_drop(cx.listener(|this, dragged: &DraggedWorkspaceTab, _, cx| {
+                if dragged.owner == cx.entity_id() {
+                    this.finish_drag(cx);
+                }
+            }))
             .flex_none()
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let id = tab.id;
@@ -244,13 +576,27 @@ impl WorkspaceTabs {
                     .and_then(|b| url::Url::parse(&b.url()).ok())
                     .and_then(|url| url.host_str().map(str::to_owned))
                     .unwrap_or_else(|| tab.kind.label().into());
-                h_flex()
+                let payload = DraggedWorkspaceTab {
+                    owner: cx.entity_id(),
+                    id,
+                    label: label.clone(),
+                    kind: tab.kind,
+                    origin_x: self.drag_origin.clone(),
+                    bounds: self.strip_bounds.clone(),
+                    pointer_y: Pixels::ZERO,
+                    offset_x: Pixels::ZERO,
+                };
+                let origin = self.drag_origin.clone();
+                let workspace = cx.entity();
+                let element = h_flex()
                     .id(group.clone())
+                    .debug_selector(move || format!("workspace-tool-{id}"))
                     .group(group.clone())
                     .role(gpui::Role::Button)
                     .aria_label(format!("Open {label} tab"))
-                    .h(zpx(34.))
-                    .w(zpx(160.))
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .w(zpx(TAB_WIDTH))
+                    .flex_none()
                     .px_2()
                     .gap_2()
                     .rounded_md()
@@ -263,7 +609,28 @@ impl WorkspaceTabs {
                     })
                     .when(active, |t| t.bg(rgba(0xffffff14)))
                     .hover(|t| t.bg(rgba(0xffffff0a)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                        origin.set(event.position.x);
+                        cx.stop_propagation();
+                    })
+                    .on_drag(payload, move |drag, offset, window, cx| {
+                        let movement = window.mouse_position().x - drag.origin_x.get();
+                        workspace.update(cx, |this, cx| {
+                            this.begin_drag(drag.id, cx);
+                            // A fast drag can cross slots before GPUI starts its
+                            // drag payload; include that first movement too.
+                            this.move_drag(
+                                drag.owner,
+                                drag.id,
+                                del_core::zoom::unscaled(movement.as_f32()),
+                                cx,
+                            );
+                        });
+                        let mut preview = drag.clone();
+                        preview.offset_x = offset.x - movement;
+                        preview.pointer_y = window.mouse_position().y;
+                        cx.new(|_| preview)
+                    })
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.select(Some(id), window, cx)),
                     )
@@ -287,13 +654,38 @@ impl WorkspaceTabs {
                             .opacity(0.0)
                             .group_hover(group, |b| b.opacity(1.))
                             .hover(|b| b.bg(rgba(0xffffff14)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close(id, window, cx);
                             }))
                             .child(crate::icons::icon(IconName::Close).with_size(zpx(13.))),
+                    );
+                let old_offset = drag.map_or(0., |d| drag_offset(index, d.source, d.previous));
+                let new_offset = drag.map_or(0., |d| drag_offset(index, d.source, d.target));
+                div()
+                    .flex_none()
+                    .when(drag.is_some_and(|d| d.id == id), |tab| tab.opacity(0.))
+                    .child(element)
+                    .with_animation(
+                        SharedString::from(format!(
+                            "workspace-tab-shift-{id}-{old_offset}-{new_offset}"
+                        )),
+                        Animation::new(Duration::from_millis(90)).with_easing(ease_out_quint()),
+                        move |tab, t| {
+                            tab.relative()
+                                .left(zpx(old_offset + (new_offset - old_offset) * t))
+                        },
                     )
-            }))
+            }));
+        h_flex()
+            .flex_none()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bound) = children.first() {
+                    bounds.set(*bound);
+                }
+            })
+            .child(row)
             .into_any_element()
     }
     fn choose_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,6 +693,7 @@ impl WorkspaceTabs {
             Pane::Files => Kind::Files,
             Pane::Changes => Kind::Changes,
             Pane::Terminal => Kind::Terminal,
+            Pane::SideChat => Kind::SideChat,
             _ => return,
         };
         self.choose(kind, window, cx);
@@ -321,7 +714,9 @@ impl Render for WorkspaceTabs {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .child(crate::new_tab::address_bar(&self.address))
+            .when(kind != Kind::SideChat, |v| {
+                v.child(crate::new_tab::address_bar(&self.address))
+            })
             .child(if kind == Kind::Blank {
                 crate::new_tab::tools(false, &self.scroll, Self::choose_tool, cx)
             } else {
@@ -393,6 +788,167 @@ mod tests {
                 assert!(!w.close_active(window, cx));
             });
         });
+    }
+
+    #[::gpui::test]
+    fn reordering_preserves_tool_views_selection_and_session_boundaries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| WorkspaceTabs::new(dir.path().into(), window, cx));
+        cx.update(|window, cx| {
+            let other = cx.new(|cx| WorkspaceTabs::new(dir.path().into(), window, cx));
+            other.update(cx, |other, cx| other.new_tab(window, cx));
+            workspace.update(cx, |w, cx| {
+                w.new_tab(window, cx);
+                w.choose(Kind::Files, window, cx);
+                let first = w.tabs[0].id;
+                let files = w.tabs[0].panel.clone().unwrap();
+                w.new_tab(window, cx);
+                let second = w.tabs[1].id;
+                w.new_tab(window, cx);
+                let third = w.tabs[2].id;
+                w.select(Some(first), window, cx);
+
+                w.begin_drag(third, cx);
+                w.move_drag(other.entity_id(), third, -1000., cx);
+                assert_eq!(
+                    w.drag.unwrap().target,
+                    2,
+                    "a different session cannot move these tabs"
+                );
+                w.move_drag(cx.entity_id(), third, -1000., cx);
+                w.finish_drag(cx);
+                assert_eq!(
+                    w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![third, first, second]
+                );
+                assert_eq!(w.active, Some(first));
+                assert_eq!(w.tabs[1].panel.as_ref(), Some(&files));
+                assert_eq!(other.read(cx).tabs.len(), 1);
+
+                w.begin_drag(third, cx);
+                w.move_drag(cx.entity_id(), third, 1000., cx);
+                w.finish_drag(cx);
+                assert_eq!(
+                    w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![first, second, third]
+                );
+                w.select_index(0, window, cx);
+                assert!(w.is_chat());
+                w.begin_drag(third, cx);
+                w.move_drag(cx.entity_id(), third, -1000., cx);
+                w.finish_drag(cx);
+                assert!(
+                    w.is_chat(),
+                    "reordering tools never displaces the original chat"
+                );
+                w.select_relative(1, window, cx);
+                assert_eq!(
+                    w.active,
+                    Some(third),
+                    "keyboard traversal follows the new order"
+                );
+
+                w.begin_drag(first, cx);
+                w.move_drag(cx.entity_id(), first, 1000., cx);
+                w.set_visible(false, cx);
+                w.finish_drag(cx);
+                assert_eq!(
+                    w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![third, first, second],
+                    "switching sessions cancels an unfinished drag"
+                );
+                w.set_visible(true, cx);
+                w.close(first, window, cx);
+                assert_eq!(
+                    w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![third, second]
+                );
+                assert_eq!(w.active, Some(third));
+            });
+        });
+    }
+
+    struct DragFixture(Entity<WorkspaceTabs>);
+    impl Render for DragFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .child(
+                    div()
+                        .id("original-chat")
+                        .debug_selector(|| "original-chat".into())
+                        .w(zpx(TAB_WIDTH))
+                        .flex_none()
+                        .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                        .child("Original chat"),
+                )
+                .child(self.0.update(cx, |w, cx| w.render_strip(false, cx)))
+        }
+    }
+
+    #[::gpui::test]
+    fn mouse_drag_reorders_tools_without_crossing_the_original_chat(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut w = WorkspaceTabs::new(dir.path().into(), window, cx);
+                for _ in 0..3 {
+                    w.new_tab(window, cx);
+                }
+                w
+            });
+            workspace = Some(view.clone());
+            cx.observe(&view, |_, _, cx| cx.notify()).detach();
+            DragFixture(view)
+        });
+        let workspace = workspace.unwrap();
+        cx.run_until_parked();
+        let original = cx.debug_bounds("original-chat").unwrap();
+        let last = cx.debug_bounds("workspace-tool-3").unwrap();
+        cx.simulate_mouse_move(last.center(), None, Modifiers::default());
+        cx.simulate_mouse_down(last.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(original.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(original.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(
+                w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                vec![3, 1, 2]
+            );
+            assert_eq!(w.active, Some(3));
+        });
+        assert_eq!(cx.debug_bounds("original-chat").unwrap(), original);
+
+        // A normal multi-event drag can finish outside the row and still settles
+        // into the last tool slot, without moving the fixed original tab.
+        let moved = cx.debug_bounds("workspace-tool-3").unwrap().center();
+        let outside = point(moved.x + zpx(900.), moved.y + zpx(80.));
+        cx.simulate_mouse_move(moved, None, Modifiers::default());
+        cx.simulate_mouse_down(moved, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(moved.x + zpx(12.), moved.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(
+                w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert_eq!(w.active, Some(3));
+        });
+        assert_eq!(cx.debug_bounds("original-chat").unwrap(), original);
     }
 
     #[::gpui::test]

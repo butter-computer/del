@@ -45,6 +45,7 @@ mod readiness;
 mod right_panel;
 mod search_ui;
 mod sessions;
+mod side_chat;
 mod sidebar;
 mod signin;
 mod state;
@@ -436,7 +437,13 @@ struct AppShell {
 }
 
 impl AppShell {
-    fn resize_handle(&self, right: bool, width: f32, other: f32) -> Stateful<Div> {
+    fn resize_handle(
+        &self,
+        right: bool,
+        width: f32,
+        other: f32,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let drag = SidebarResize {
             right,
             start_x: self.resize_origin.clone(),
@@ -444,6 +451,7 @@ impl AppShell {
             other,
         };
         let start_x = drag.start_x.clone();
+        let shell = cx.entity();
         div()
             .id(if right {
                 "resize-right-sidebar"
@@ -453,12 +461,35 @@ impl AppShell {
             .absolute()
             .top_0()
             .bottom_0()
-            .w(zpx(5.0))
+            .w(zpx(3.0))
             .cursor_col_resize()
             .on_mouse_down(MouseButton::Left, move |event, _, _| {
                 start_x.set(event.position.x.as_f32())
             })
-            .on_drag(drag, |_, _, _, cx| cx.new(|_| ResizePreview))
+            .on_drag(drag, move |drag, _, window, cx| {
+                // Include the motion that crossed GPUI's drag threshold, even
+                // when a quick drag releases before the next move event.
+                shell.update(cx, |this, cx| this.resize_sidebar(drag, window, cx));
+                cx.new(|_| ResizePreview)
+            })
+    }
+
+    fn resize_sidebar(&mut self, drag: &SidebarResize, window: &Window, cx: &mut Context<Self>) {
+        let delta =
+            del_core::zoom::unscaled(window.mouse_position().x.as_f32() - drag.start_x.get());
+        let width = sidebar_width(
+            drag.width + if drag.right { -delta } else { delta },
+            drag.right,
+            del_core::zoom::unscaled(window.viewport_size().width.as_f32()),
+            drag.other,
+        );
+        if drag.right {
+            self.sidebar_widths.right = width;
+        } else {
+            self.sidebar_widths.left = width;
+        }
+        self.save_sidebar_widths_soon(cx);
+        cx.notify();
     }
 
     fn sync_caffeine(&mut self, cx: &mut Context<Self>) {
@@ -596,16 +627,9 @@ impl AppShell {
         let updater = cx.new(app_updates::AppUpdater::new);
         cx.observe(&updater, |_, _, cx| cx.notify()).detach();
         updater.update(cx, |updater, cx| updater.watch_sessions(&state, cx));
+        state.update(cx, |state, cx| state.restore_draft_owners(cx));
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         updater.update(cx, |updater, cx| updater.check(false, cx));
-
-        // Kill every child process when the app quits.
-        let quit_state = state.clone();
-        cx.on_app_quit(move |_, cx| {
-            quit_state.read(cx).shutdown();
-            async {}
-        })
-        .detach();
 
         let rename = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&rename, window, |this, rename, event, _, cx| match event {
@@ -757,11 +781,24 @@ impl AppShell {
         .detach();
         cx.on_app_quit(|this, cx| {
             this.cancel_dictation(cx);
+            this.right.update(cx, |panel, cx| panel.save_side_chat(cx));
+            for cached in this.right_cache.values() {
+                cached
+                    .panel
+                    .update(cx, |panel, cx| panel.save_side_chat(cx));
+            }
+            for workspace in this.workspaces.values() {
+                workspace.update(cx, |workspace, cx| workspace.save_side_chats(cx));
+            }
             this.remember_right(cx);
             this.persist_right(cx);
             if let Err(error) = this.sidebar_widths.save() {
                 eprintln!("Could not save sidebar widths: {error}");
             }
+            if let Err(error) = this.state.read(cx).save_draft_owners() {
+                eprintln!("Could not save draft owners: {error}");
+            }
+            this.state.read(cx).shutdown();
             async {}
         })
         .detach();
@@ -934,7 +971,45 @@ impl AppShell {
         cx.notify();
     }
 
+    fn send_side_to_main(&mut self, event: &side_chat::SendToMain, cx: &mut Context<Self>) {
+        if !self
+            .state
+            .read(cx)
+            .backend()
+            .manager
+            .list_sessions()
+            .iter()
+            .any(|r| r.id == event.parent)
+        {
+            self.state.update(cx, |state, cx| { state.error = Some("The main conversation is no longer available. Copy the side reply before closing it.".into()); cx.notify(); });
+            return;
+        }
+        self.state
+            .update(cx, |state, cx| state.select(event.parent.clone(), cx));
+        self.ensure_chat(cx);
+        if let Some(chat) = self.chats.get(&event.parent) {
+            let input = del_agent::UserInput::text(format!(
+                "Use this conclusion from our side chat as context for the main task:\n\n{}",
+                event.text
+            ));
+            chat.update(cx, |chat, cx| chat.submit_input(input, false, cx));
+        }
+    }
+
     fn watch_right(&mut self, cx: &mut Context<Self>) {
+        cx.subscribe(&self.right, |this, _, event: &side_chat::SendToMain, cx| {
+            this.send_side_to_main(event, cx)
+        })
+        .detach();
+        cx.subscribe(&self.right, |_, _, event: &chat::OpenLink, cx| {
+            if matches!(
+                chat::links::classify(&event.0, std::path::Path::new("/")),
+                chat::links::LinkTarget::External(_)
+            ) {
+                cx.open_url(&event.0);
+            }
+        })
+        .detach();
         cx.observe(&self.right, |this, panel, cx| {
             if this.right == panel {
                 this.remember_right(cx);
@@ -944,6 +1019,9 @@ impl AppShell {
     }
 
     fn remember_right(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.state.read(cx).save_draft_owners() {
+            eprintln!("Could not save draft owners: {error}");
+        }
         self.right_cache.insert(
             self.right_owner,
             CachedRight {
@@ -1062,7 +1140,10 @@ impl AppShell {
         }
         let state = self.state.read(cx);
         let (tab, key) = match &state.selection {
-            Selection::Draft(id) => (Tab::Draft(*id), None),
+            Selection::Draft(id) => (
+                Tab::Draft(*id),
+                Some(format!("draft:{id}:{}", state.effective().2.display())),
+            ),
             Selection::Session(id) => (
                 Tab::Session(id.clone()),
                 Some(format!("chat:{}", id.as_str())),
@@ -1124,7 +1205,9 @@ impl AppShell {
         for uid in stale {
             self.evict_right(uid, cx);
         }
+        let context = self.state.read(cx).side_chat_context();
         self.right.update(cx, |panel, cx| {
+            panel.set_side_context(context);
             panel.set_root(root, window, cx);
             if self.right_open {
                 panel.prepare_to_show(window, cx);
@@ -1139,10 +1222,44 @@ impl AppShell {
     fn sync_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = self.composer_owner(cx);
         let root = self.state.read(cx).effective().2;
+        let state = self.state.read(cx);
+        let open: std::collections::HashSet<_> =
+            state.tabs.iter().map(|t| state.uid_of(t)).collect();
+        let stale: Vec<_> = self
+            .workspaces
+            .keys()
+            .copied()
+            .filter(|uid| *uid != owner && !open.contains(uid))
+            .collect();
+        for uid in stale {
+            if let Some(workspace) = self.workspaces.remove(&uid) {
+                workspace.update(cx, |w, cx| w.release(cx));
+            }
+        }
         self.workspaces.entry(owner).or_insert_with(|| {
             let workspace =
                 cx.new(|cx| workspace_tabs::WorkspaceTabs::new(root.clone(), window, cx));
-            cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+            cx.observe(&workspace, |this, workspace, cx| {
+                if let Err(error) = this.state.read(cx).save_draft_owners() {
+                    eprintln!("Could not save draft owners: {error}");
+                }
+                workspace.read(cx).persist(cx);
+                cx.notify();
+            })
+            .detach();
+            cx.subscribe(&workspace, |this, _, event: &side_chat::SendToMain, cx| {
+                this.send_side_to_main(event, cx)
+            })
+            .detach();
+            cx.subscribe(&workspace, |_, _, event: &chat::OpenLink, cx| {
+                if matches!(
+                    chat::links::classify(&event.0, std::path::Path::new("/")),
+                    chat::links::LinkTarget::External(_)
+                ) {
+                    cx.open_url(&event.0);
+                }
+            })
+            .detach();
             workspace
         });
         if self.workspace_previous != Some(owner) {
@@ -1156,7 +1273,15 @@ impl AppShell {
         }
         if let Some(workspace) = self.workspace(cx) {
             let visible = !self.search_open && self.state.read(cx).panel == Panel::Chat;
+            let context = self.state.read(cx).side_chat_context();
+            let storage_key = match &self.state.read(cx).selection {
+                Selection::Session(id) => format!("chat:{}", id.as_str()),
+                Selection::Terminal(id) => format!("terminal:{}", id.as_str()),
+                Selection::Draft(id) => format!("draft:{id}:{}", root.display()),
+            };
             workspace.update(cx, |w, cx| {
+                w.set_side_context(context);
+                w.set_storage_key(storage_key, window, cx);
                 w.set_root(root, window, cx);
                 w.set_visible(visible, cx);
             });
@@ -1919,7 +2044,7 @@ impl AppShell {
             .child(
                 h_flex()
                     .id("session-workspace-tabs")
-                    .h(zpx(50.))
+                    .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
                     .flex_none()
                     .gap_1()
                     .overflow_x_scroll()
@@ -1928,8 +2053,8 @@ impl AppShell {
                             .id("workspace-chat-tab")
                             .role(gpui::Role::Button)
                             .aria_label("Open session chat tab")
-                            .h(zpx(34.))
-                            .max_w(zpx(220.))
+                            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                            .w(zpx(workspace_tabs::TAB_WIDTH))
                             .flex_none()
                             .px_2()
                             .gap_2()
@@ -1950,7 +2075,7 @@ impl AppShell {
                                 this.focus_composer(window, cx);
                             }))
                             .child(mode_ui::tab_mark(provider))
-                            .child(div().min_w_0().truncate().child(title)),
+                            .child(div().flex_1().min_w_0().truncate().child(title)),
                     )
                     .children(tools)
                     .child(
@@ -2504,23 +2629,8 @@ impl Render for AppShell {
                     .bg(shell_surface())
                     .on_drag_move(cx.listener(
                         |this, event: &DragMoveEvent<SidebarResize>, window, cx| {
-                            let drag = event.drag(cx);
-                            let delta = del_core::zoom::unscaled(
-                                window.mouse_position().x.as_f32() - drag.start_x.get(),
-                            );
-                            let width = sidebar_width(
-                                drag.width + if drag.right { -delta } else { delta },
-                                drag.right,
-                                del_core::zoom::unscaled(window.viewport_size().width.as_f32()),
-                                drag.other,
-                            );
-                            if drag.right {
-                                this.sidebar_widths.right = width;
-                            } else {
-                                this.sidebar_widths.left = width;
-                            }
-                            this.save_sidebar_widths_soon(cx);
-                            cx.notify();
+                            let drag = event.drag(cx).clone();
+                            this.resize_sidebar(&drag, window, cx);
                         },
                     ))
                     .when(SIDEBAR_ENABLED && sidebar_visible, |row| {
@@ -2537,7 +2647,16 @@ impl Render for AppShell {
                                 &self.usage,
                                 &self.updater,
                                 cx,
-                            ));
+                            ))
+                            .child(
+                                self.resize_handle(
+                                    false,
+                                    left_width,
+                                    if right_visible { right_width } else { 0.0 },
+                                    cx,
+                                )
+                                .right_0(),
+                            );
                         if settings_open || self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {
@@ -2570,18 +2689,7 @@ impl Render for AppShell {
                                     }
                                 }
                             })
-                            .child(self.render_page(window, cx))
-                            .when(sidebar_visible, |page| {
-                                page.child(
-                                    self.resize_handle(
-                                        false,
-                                        left_width,
-                                        if right_visible { right_width } else { 0.0 },
-                                    )
-                                    .left(inset)
-                                    .bottom(inset),
-                                )
-                            }),
+                            .child(self.render_page(window, cx)),
                     )
                     .when(right_visible, |row| {
                         let opening = self.right_open;
@@ -2613,6 +2721,7 @@ impl Render for AppShell {
                                         true,
                                         right_width,
                                         if sidebar_visible { left_width } else { 0.0 },
+                                        cx,
                                     )
                                     .left_0()
                                     .bottom(inset),

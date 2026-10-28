@@ -4,13 +4,15 @@
 use crate::backend::Result;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<crate::manager::ForkRecord>,
     pub id: SessionId,
     pub provider: Provider,
     #[serde(default)]
@@ -174,6 +176,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub struct SessionIndex {
     path: PathBuf,
     records: Vec<SessionRecord>,
+    temporary: HashSet<SessionId>,
     /// Lines this version cannot parse (corrupt, or written by a newer
     /// version), kept verbatim so a rewrite never erases them.
     unparsed: Vec<String>,
@@ -225,6 +228,7 @@ impl SessionIndex {
         Ok(Self {
             path,
             records,
+            temporary: HashSet::new(),
             unparsed,
             writer,
             thread: None,
@@ -237,7 +241,12 @@ impl SessionIndex {
 
     /// Most recently updated first.
     pub fn list(&self) -> Vec<SessionRecord> {
-        let mut v = self.records.clone();
+        let mut v: Vec<_> = self
+            .records
+            .iter()
+            .filter(|r| !self.temporary.contains(&r.id))
+            .cloned()
+            .collect();
         v.sort_by_key(|r| std::cmp::Reverse(r.updated_at_ms));
         v
     }
@@ -254,6 +263,15 @@ impl SessionIndex {
         self.flush()
     }
 
+    pub fn upsert_temporary(&mut self, record: SessionRecord) -> Result<()> {
+        self.temporary.insert(record.id.clone());
+        self.upsert(record)
+    }
+
+    pub fn is_temporary(&self, id: &SessionId) -> bool {
+        self.temporary.contains(id)
+    }
+
     pub fn update(&mut self, id: &SessionId, f: impl FnOnce(&mut SessionRecord)) -> Result<()> {
         if let Some(r) = self.records.iter_mut().find(|r| &r.id == id) {
             f(r);
@@ -264,6 +282,7 @@ impl SessionIndex {
 
     pub fn remove(&mut self, id: &SessionId) -> Result<()> {
         self.records.retain(|r| &r.id != id);
+        self.temporary.remove(id);
         self.flush()
     }
 
@@ -281,6 +300,9 @@ impl SessionIndex {
             out.push('\n');
         }
         for r in &self.records {
+            if self.temporary.contains(&r.id) {
+                continue;
+            }
             out.push_str(
                 &serde_json::to_string(r).map_err(|e| crate::AgentError::Backend(e.to_string()))?,
             );
@@ -319,6 +341,7 @@ mod tests {
 
     fn rec(id: &str, at: u64, status: SessionStatus) -> SessionRecord {
         SessionRecord {
+            fork: None,
             id: SessionId::new(id),
             provider: Provider::Claude,
             account_id: None,

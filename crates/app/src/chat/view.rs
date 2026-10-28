@@ -192,6 +192,7 @@ impl ChatView {
         let mut view = Self {
             queue: session
                 .as_ref()
+                .filter(|id| !backend.manager.is_temporary(id))
                 .map(crate::followups::Queue::load)
                 .unwrap_or_default(),
             model: ChatModel::default(),

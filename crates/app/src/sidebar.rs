@@ -17,7 +17,7 @@ use gpui_kit::*;
 
 pub const SIDEBAR_WIDTH: f32 = 180.0;
 const ROW_HEIGHT: f32 = 28.0;
-const TOOLBAR_HEIGHT: f32 = 34.0;
+const TOOLBAR_HEIGHT: f32 = crate::icons::TOOL_TAB_HEIGHT;
 const TOOLBAR_BACKGROUND: u8 = 0x0e;
 const TOOLBAR_HOVER: u8 = 0x1a;
 const TOOLBAR_PRESSED: u8 = 0x24;
@@ -179,7 +179,7 @@ fn toolbar_row() -> Div {
         .min_w_0()
         .gap(zpx(6.))
         .pr(zpx(6.))
-        .py(zpx(8.))
+        .py(zpx((crate::icons::TOOL_ROW_HEIGHT - TOOLBAR_HEIGHT) / 2.))
         .flex_none()
 }
 
@@ -1051,7 +1051,7 @@ pub fn render(
                                 let state = cleanup_state.clone(); let path = cleanup_path.clone();
                                 menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
                             })
-                            .child(crate::icons::icon(IconName::Folder))
+                            .child(if collapsed { crate::icons::icon(IconName::Folder) } else { crate::icons::path("icons/project-folder-open.svg") })
                             .child(div().flex_1().min_w_0().child(if project_renaming {
                                 Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD)).into_any_element()
                             } else { fading_title(s.project_name(&path)).into_any_element() }))
@@ -1238,7 +1238,7 @@ mod toolbar_tests {
                         (target.size.width - expected_width).abs() <= px(0.5),
                         "unequal quarter at width={width},zoom={zoom}: {target:?}, row={row:?}"
                     );
-                    assert_eq!(target.size.height, zpx(34.));
+                    assert_eq!(target.size.height, zpx(super::TOOLBAR_HEIGHT));
                     assert_eq!(glyph.size, size(zpx(16.), zpx(16.)));
                     assert!((target.center().x - glyph.center().x).abs() <= px(0.5));
                     assert!((target.center().y - glyph.center().y).abs() <= px(0.5));

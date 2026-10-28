@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
+mod forks;
+pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
+
 /// Everything the manager broadcasts to `subscribe_all` listeners.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -288,6 +291,9 @@ impl SessionManager {
     /// Serialized per session, separately from foreground sends; failed generation leaves the
     /// fallback title intact and can retry on a later prompt.
     pub async fn generate_title(&self, id: &SessionId) -> Result<bool> {
+        if self.is_temporary(id) {
+            return Ok(false);
+        }
         let lock = self
             .shared
             .title_generation
@@ -688,6 +694,7 @@ impl SessionManager {
         );
         let now = now_ms();
         let recorded = self.shared.index.lock().unwrap().upsert(SessionRecord {
+            fork: None,
             id: handle.id.clone(),
             provider: config.provider,
             account_id,
@@ -731,6 +738,9 @@ impl SessionManager {
             && l.status != SessionStatus::Error
         {
             return Ok(l.handle.clone());
+        }
+        if self.is_temporary(id) {
+            return Err(AgentError::Backend("This temporary chat lost its provider connection. Open a new side chat to fork the main conversation again.".into()));
         }
         let record = self
             .shared
@@ -895,10 +905,14 @@ impl SessionManager {
             position
         };
         self.shared.set_status(id, SessionStatus::Running);
+        let ordinary_prompt = command.is_none();
+        let context = self.pending_fork_context(id);
         let result = if let Some(command) = command {
             backend.invoke_command(id, command, input).await
         } else {
-            backend.send_prompt(id, input).await
+            backend
+                .send_prompt(id, forks::with_context(input, context.as_deref()))
+                .await
         };
         if let Err(error) = result {
             if let Some(session) = self.shared.live.lock().unwrap().get_mut(id)
@@ -911,6 +925,9 @@ impl SessionManager {
                 (current == SessionStatus::Running).then_some(previous)
             });
             return Err(error);
+        }
+        if ordinary_prompt {
+            self.consume_fork_context(id);
         }
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
             if r.title.is_none() && !title.is_empty() {
@@ -1051,6 +1068,12 @@ impl SessionManager {
     }
 
     pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        if self.pending_fork_context(id).is_some() {
+            return Err(AgentError::Busy(
+                "updated fork context is waiting; queue a normal message instead of steering"
+                    .into(),
+            ));
+        }
         let backend = self.session_backend(id)?;
         if crate::split_command(&input.text).is_some() || !input.skills.is_empty() {
             let cwd = self
@@ -1158,6 +1181,9 @@ impl SessionManager {
 
     /// Close if live, then forget the session entirely.
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
+        if self.is_temporary(id) && self.is_live(id) {
+            let _ = self.interrupt(id).await;
+        }
         if self.is_live(id) {
             let _ = self.close(id).await;
         }

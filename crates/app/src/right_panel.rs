@@ -79,6 +79,7 @@ pub(crate) enum Pane {
     Browser,
     Changes,
     NewTab,
+    SideChat,
 }
 
 impl Pane {
@@ -88,19 +89,21 @@ impl Pane {
             Self::Changes => ("tab-changes", "Changes"),
             Self::Terminal => ("tab-terminal", "Terminal"),
             Self::Browser => ("tab-browser", "Browser"),
+            Self::SideChat => ("tab-side-chat", "Side chat"),
             Self::NewTab => ("tab-new", "New tab"),
         }
     }
 }
 
 fn default_panes() -> Vec<Pane> {
-    vec![Pane::Files, Pane::Changes, Pane::Terminal, Pane::Browser]
+    vec![Pane::Files, Pane::Changes, Pane::Terminal]
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedPanel {
     pub open: bool,
+    side_chat_id: Option<String>,
     pane: Pane,
     open_panes: Vec<Pane>,
     expanded: HashSet<PathBuf>,
@@ -129,6 +132,7 @@ impl Default for SavedPanel {
     fn default() -> Self {
         Self {
             open: false,
+            side_chat_id: None,
             pane: Pane::Files,
             open_panes: default_panes(),
             expanded: HashSet::new(),
@@ -256,6 +260,9 @@ enum Viewer {
 }
 
 pub struct RightPanel {
+    side_context: Option<crate::side_chat::Context>,
+    side_chat: Option<Entity<crate::side_chat::SideChat>>,
+    side_chat_id: Option<String>,
     workspace: bool,
     pane: Pane,
     open_panes: Vec<Pane>,
@@ -304,7 +311,46 @@ pub struct RightPanel {
     markdown_scroll: ScrollHandle,
 }
 
+impl EventEmitter<crate::side_chat::SendToMain> for RightPanel {}
+impl EventEmitter<crate::chat::OpenLink> for RightPanel {}
+
 impl RightPanel {
+    pub fn set_side_context(&mut self, context: crate::side_chat::Context) {
+        self.side_context = Some(context);
+    }
+
+    pub fn focus_side_chat(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(side) = &self.side_chat {
+            side.update(cx, |side, cx| side.focus(window, cx));
+        }
+    }
+
+    fn ensure_side_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.side_chat.is_none()
+            && let Some(context) = self.side_context.clone()
+        {
+            let saved = self.side_chat_id.clone();
+            let side = cx.new(|cx| match saved {
+                Some(id) => crate::side_chat::SideChat::restore(context, id, window, cx),
+                None => crate::side_chat::SideChat::new(context, window, cx),
+            });
+            self.side_chat_id = Some(side.read(cx).storage_id());
+            cx.observe(&side, |_, _, cx| cx.notify()).detach();
+            cx.subscribe(&side, |_, _, event: &crate::side_chat::SendToMain, cx| {
+                cx.emit(event.clone())
+            })
+            .detach();
+            cx.subscribe(&side, |_, _, event: &crate::chat::OpenLink, cx| {
+                cx.emit(crate::chat::OpenLink(event.0.clone()))
+            })
+            .detach();
+            self.side_chat = Some(side);
+        }
+        if let Some(side) = &self.side_chat {
+            side.update(cx, |side, cx| side.focus(window, cx));
+        }
+    }
+
     fn activate_pane(&mut self, pane: Pane) {
         if pane != Pane::NewTab && !self.open_panes.contains(&pane) {
             self.open_panes.push(pane);
@@ -325,6 +371,7 @@ impl RightPanel {
             Pane::Terminal => self.focus_terminal(window, cx),
             Pane::Changes => self.refresh_changes(cx),
             Pane::Files => self.refresh_tree(cx),
+            Pane::SideChat => self.ensure_side_chat(window, cx),
             _ => {}
         }
         cx.notify();
@@ -404,6 +451,7 @@ impl RightPanel {
                 self.changes_loading = false;
                 self.change_expanded.clear();
             }
+            Pane::SideChat => self.forget_side_chat(cx),
             Pane::NewTab => {}
         }
         self.open_panes.remove(index);
@@ -428,6 +476,9 @@ impl RightPanel {
     pub fn show_workspace(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace = true;
         self.pane = pane;
+        if pane == Pane::SideChat {
+            self.ensure_side_chat(window, cx);
+        }
         self.prepare_to_show(window, cx);
         if pane == Pane::Terminal {
             self.focus_terminal(window, cx);
@@ -441,7 +492,32 @@ impl RightPanel {
 
     /// Free everything a panel for a closed tab still holds: shells, web views,
     /// and the polling tasks. The panel's saved state is the caller's business.
+    pub fn forget_side_chat(&mut self, cx: &mut Context<Self>) {
+        self.side_chat_id = None;
+        if let Some(side) = self.side_chat.take() {
+            side.update(cx, |side, cx| side.forget(cx));
+        }
+    }
+
+    pub fn side_chat_id(&self) -> Option<String> {
+        self.side_chat_id.clone()
+    }
+
+    pub fn restore_side_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.side_chat_id = Some(id);
+        self.show_workspace(Pane::SideChat, window, cx);
+    }
+
+    pub fn save_side_chat(&self, cx: &mut Context<Self>) {
+        if let Some(side) = &self.side_chat {
+            side.update(cx, |side, cx| side.save(cx));
+        }
+    }
+
     pub fn release(&mut self, cx: &mut Context<Self>) {
+        if let Some(side) = self.side_chat.take() {
+            side.update(cx, |side, cx| side.release(cx));
+        }
         for (_, terminal) in self.terminals.drain() {
             terminal.update(cx, |terminal, cx| terminal.close(cx));
         }
@@ -471,6 +547,9 @@ impl RightPanel {
     }
 
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane == Pane::SideChat && self.side_chat.is_none() {
+            self.ensure_side_chat(window, cx);
+        }
         if self.pane == Pane::Changes && self.changes_watch.is_none() {
             self.changes_watch = Some(cx.spawn(async move |this, cx| {
                 loop {
@@ -501,8 +580,22 @@ impl RightPanel {
     pub fn snapshot(&self, open: bool) -> SavedPanel {
         SavedPanel {
             open,
-            pane: self.pane,
-            open_panes: self.open_panes.clone(),
+            side_chat_id: self.side_chat_id.clone(),
+            pane: if self.pane == Pane::NewTab {
+                self.open_panes
+                    .iter()
+                    .copied()
+                    .find(|p| !matches!(p, Pane::SideChat | Pane::NewTab))
+                    .unwrap_or(Pane::NewTab)
+            } else {
+                self.pane
+            },
+            open_panes: self
+                .open_panes
+                .iter()
+                .copied()
+                .filter(|p| *p != Pane::NewTab)
+                .collect(),
             expanded: self.expanded.clone(),
             selected: match &self.viewer {
                 Viewer::None => None,
@@ -529,15 +622,25 @@ impl RightPanel {
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane = if saved.pane == Pane::Changes {
-            Pane::Files
-        } else {
-            saved.pane
-        };
+        self.side_chat_id = saved.side_chat_id;
+        let unused_browser = saved
+            .browser_tabs
+            .iter()
+            .all(|tab| tab.url == "about:blank" || tab.url.is_empty());
+        self.pane =
+            if matches!(saved.pane, Pane::Changes | Pane::NewTab) && !saved.open_panes.is_empty() {
+                Pane::Files
+            } else {
+                saved.pane
+            };
         self.open_panes = saved
             .open_panes
             .into_iter()
-            .filter(|p| *p != Pane::NewTab)
+            .filter(|p| {
+                *p != Pane::NewTab
+                    && !(*p == Pane::SideChat && self.side_chat_id.is_none())
+                    && !(*p == Pane::Browser && unused_browser)
+            })
             .collect();
         self.open_panes.dedup();
         if self.pane != Pane::NewTab && !self.open_panes.contains(&self.pane) {
@@ -592,6 +695,9 @@ impl RightPanel {
         .detach();
         let mut panel = Self {
             workspace: false,
+            side_context: None,
+            side_chat: None,
+            side_chat_id: None,
             pane: Pane::Files,
             open_panes: default_panes(),
             address,
@@ -1056,14 +1162,14 @@ impl RightPanel {
             .role(gpui::Role::Button)
             .aria_label(label)
             .px_1p5()
-            .h(zpx(24.0))
+            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .flex()
             .flex_none()
             .whitespace_nowrap()
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(zpx(TEXT_SM))
+            .text_size(zpx(del_core::typography::TEXT_MD))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
@@ -2054,6 +2160,10 @@ impl Render for RightPanel {
             Pane::Terminal => self.render_terminal(cx),
             Pane::Browser => self.render_browser(cx),
             Pane::Changes => self.render_changes(window, cx),
+            Pane::SideChat => div()
+                .size_full()
+                .when_some(self.side_chat.clone(), |v, side| v.child(side))
+                .into_any_element(),
             Pane::NewTab => v_flex()
                 .size_full()
                 .min_w_0()
@@ -2085,7 +2195,7 @@ impl Render for RightPanel {
             .flex_none()
             .child(
                 h_flex()
-                    .h(zpx(32.0))
+                    .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
                     .flex_none()
                     .overflow_hidden()
                     .px_2()
@@ -2112,7 +2222,7 @@ impl Render for RightPanel {
                             .id("new-sidebar-tab")
                             .role(gpui::Role::Button)
                             .aria_label("New sidebar tab")
-                            .size(zpx(24.))
+                            .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2126,7 +2236,7 @@ impl Render for RightPanel {
                             .child(crate::icons::icon(IconName::Plus).with_size(zpx(14.))),
                     )
                     .when(self.pane == Pane::Files, |row| {
-                        row.child(div().flex_1()).child(
+                        row.child(
                             h_flex()
                                 .id("show-hidden-files")
                                 .gap(zpx(5.0))
@@ -2346,12 +2456,7 @@ mod tests {
             gpui_kit::component::Root::new(fixture, window, cx)
         });
         let panel = panel.unwrap();
-        for id in [
-            "close-tab-files",
-            "close-tab-changes",
-            "close-tab-terminal",
-            "close-tab-browser",
-        ] {
+        for id in ["close-tab-files", "close-tab-changes", "close-tab-terminal"] {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let target = cx
                 .debug_bounds(id)
@@ -2757,25 +2862,26 @@ mod tests {
         let (panel, cx) =
             cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
         cx.run_until_parked();
-        // Header 32px + tree 220px + middle of the 8px handle.
+        // Header + tree 220px + middle of the 8px handle.
+        let handle_y = crate::icons::TOOL_ROW_HEIGHT + 220.0 + 4.0;
         cx.simulate_mouse_down(
-            point(px(100.0), px(256.0)),
+            point(px(100.0), px(handle_y)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            point(px(100.0), px(276.0)),
+            point(px(100.0), px(handle_y + 20.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.run_until_parked();
         cx.simulate_mouse_move(
-            point(px(100.0), px(296.0)),
+            point(px(100.0), px(handle_y + 40.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_up(
-            point(px(100.0), px(296.0)),
+            point(px(100.0), px(handle_y + 40.0)),
             MouseButton::Left,
             Modifiers::default(),
         );

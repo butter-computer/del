@@ -97,7 +97,9 @@ pub struct ComposerCard {
     provider: Provider,
     provider_ready: bool,
     account_state: Option<Entity<crate::state::AppState>>,
-    model_picker: Entity<crate::model_picker::ModelPicker>,
+    model_picker: Option<Entity<crate::model_picker::ModelPicker>>,
+    settings: Option<AnyElement>,
+    show_voice: bool,
     folder: String,
     /// Shown on hover over the folder, e.g. the session's branch.
     folder_tooltip: Option<String>,
@@ -127,7 +129,7 @@ impl ComposerCard {
         max_width: f32,
         provider: Provider,
         provider_ready: bool,
-        model_picker: Entity<crate::model_picker::ModelPicker>,
+        model_picker: impl Into<Option<Entity<crate::model_picker::ModelPicker>>>,
         folder: String,
         folder_locked: bool,
         running: bool,
@@ -139,7 +141,9 @@ impl ComposerCard {
             provider,
             provider_ready,
             account_state: None,
-            model_picker,
+            model_picker: model_picker.into(),
+            settings: None,
+            show_voice: false,
             folder,
             folder_tooltip: None,
             folder_locked,
@@ -159,6 +163,13 @@ impl ComposerCard {
             on_folder: noop,
             on_provider: Rc::new(|_, _, _| {}),
         }
+    }
+
+    /// A conversation can supply independently scoped account/model controls
+    /// while sharing the same input, attachments and send/stop presentation.
+    pub fn settings(mut self, controls: impl IntoElement) -> Self {
+        self.settings = Some(controls.into_any_element());
+        self
     }
 
     pub fn accounts(mut self, state: Entity<crate::state::AppState>) -> Self {
@@ -218,6 +229,7 @@ impl ComposerCard {
     }
     pub fn on_voice(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_voice = Rc::new(handler);
+        self.show_voice = true;
         self
     }
     pub fn on_stop(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -271,6 +283,8 @@ impl RenderOnce for ComposerCard {
             provider_ready,
             account_state,
             model_picker,
+            settings,
+            show_voice,
             folder,
             folder_tooltip,
             folder_locked,
@@ -478,6 +492,7 @@ impl RenderOnce for ComposerCard {
             })
             .on_click(move |_, window, cx| on_voice(window, cx));
 
+        let custom_settings = settings.is_some();
         // The wrapper owns the tint; the textarea adds no second background.
         v_flex()
             .w_full()
@@ -515,6 +530,7 @@ impl RenderOnce for ComposerCard {
                         h_flex()
                             .items_center()
                             .gap_0p5()
+                            .when(custom_settings, |row| row.flex_1().min_w_0())
                             .child(
                                 chip("attach-files")
                                     .size(crate::icons::button_size())
@@ -524,8 +540,14 @@ impl RenderOnce for ComposerCard {
                                     .accessibility_label("Attach files")
                                     .on_click(move |_, window, cx| on_attach(window, cx)),
                             )
-                            .child(agent_el)
-                            .child(model_picker)
+                            .child(settings.unwrap_or_else(|| {
+                                h_flex()
+                                    .items_center()
+                                    .gap_0p5()
+                                    .child(agent_el)
+                                    .when_some(model_picker, |row, picker| row.child(picker))
+                                    .into_any_element()
+                            }))
                             .when(goal_mode, |row| {
                                 row.child(
                                     chip("goal-mode")
@@ -545,7 +567,13 @@ impl RenderOnce for ComposerCard {
                             })
                             .when(show_folder, |row| row.child(folder_el)),
                     )
-                    .child(h_flex().items_center().gap_1().child(voice).child(action)),
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .when(show_voice, |row| row.child(voice))
+                            .child(action),
+                    ),
             )
     }
 }
