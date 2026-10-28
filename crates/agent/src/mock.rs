@@ -149,6 +149,28 @@ async fn run_turn(state: Arc<SessionState>, turn_id: String, prompt: String, del
             },
         );
         status = TurnStatus::Failed;
+    } else if lower.contains("withdraw") {
+        // The provider settles both requests itself, without our answer.
+        for n in 1..=2 {
+            emit(
+                &state,
+                AgentEvent::ApprovalRequested {
+                    id: format!("appr-{turn_id}-{n}"),
+                    kind: ApprovalKind::Command,
+                    detail: "ls".into(),
+                },
+            );
+        }
+        for n in 1..=2 {
+            pause().await;
+            emit(
+                &state,
+                AgentEvent::ApprovalResolved {
+                    id: format!("appr-{turn_id}-{n}"),
+                },
+            );
+        }
+        full.push_str("Never mind.");
     } else if lower.contains("approve") {
         let id = format!("call-{turn_id}");
         let approval = format!("appr-{turn_id}");

@@ -30,6 +30,21 @@ pub fn signal_group(_pid: u32, _kill: bool) -> bool {
     false
 }
 
+/// Whether process `pid` still exists. Refuses pids 0 and 1. False off Unix.
+#[cfg(unix)]
+pub fn process_alive(pid: u32) -> bool {
+    let Some(pid) = group_id(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn process_alive(_pid: u32) -> bool {
+    false
+}
+
 /// SIGTERM the group, then SIGKILL it after `grace` if `child` has not exited.
 pub async fn terminate_group(
     pid: u32,

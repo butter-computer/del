@@ -56,10 +56,19 @@ impl Translator {
     }
 
     /// Note that an interrupt was requested so the aborted result maps to `Interrupted`.
-    pub fn mark_interrupting(&mut self) {
+    pub fn mark_interrupting(&mut self) -> Vec<AgentEvent> {
         self.interrupting = true;
         // The CLI abandons its permission prompts when interrupted.
-        self.approvals.clear();
+        self.drop_approvals()
+    }
+
+    /// Forget every pending prompt, retiring its card.
+    fn drop_approvals(&mut self) -> Vec<AgentEvent> {
+        let mut ids: Vec<String> = self.approvals.drain().map(|(id, _)| id).collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| AgentEvent::ApprovalResolved { id })
+            .collect()
     }
 
     /// Build the `control_response` line answering a pending `can_use_tool` request.
@@ -85,17 +94,18 @@ impl Translator {
 
     /// The process died: fail the running turn so consumers do not hang.
     pub fn abort(&mut self) -> Vec<AgentEvent> {
-        let out = self
-            .turns
-            .pop_front()
-            .map(|turn_id| AgentEvent::TurnCompleted {
-                turn_id,
-                status: TurnStatus::Failed,
-            });
+        let mut out = self.drop_approvals();
+        out.extend(
+            self.turns
+                .pop_front()
+                .map(|turn_id| AgentEvent::TurnCompleted {
+                    turn_id,
+                    status: TurnStatus::Failed,
+                }),
+        );
         self.turns.clear();
         self.consumed_inputs = 0;
-        self.approvals.clear();
-        out.into_iter().collect()
+        out
     }
 
     fn turn(&self) -> String {
@@ -159,10 +169,12 @@ impl Translator {
             Some("control_request") => self.control_request(v),
             Some("control_cancel_request") => {
                 // The CLI withdrew a permission prompt; an answer would be stale.
-                if let Some(id) = v["request_id"].as_str() {
-                    self.approvals.remove(id);
+                match v["request_id"].as_str() {
+                    Some(id) if self.approvals.remove(id).is_some() => {
+                        vec![AgentEvent::ApprovalResolved { id: id.to_owned() }]
+                    }
+                    _ => vec![],
                 }
-                vec![]
             }
             Some("result") => self.result(v),
             _ => vec![],
@@ -326,6 +338,8 @@ impl Translator {
                 recoverable: true,
             });
         }
+        // Prompts belong to the turn that is ending.
+        out.extend(self.drop_approvals());
         out.push(AgentEvent::TurnCompleted {
             turn_id: self.turn(),
             status,
@@ -337,8 +351,6 @@ impl Translator {
         self.consumed_inputs = 0;
         self.interrupting = false;
         self.tools.clear();
-        // Prompts belong to the turn that just ended.
-        self.approvals.clear();
         if let Some(next) = self.turns.front() {
             out.push(AgentEvent::TurnStarted {
                 turn_id: next.clone(),
@@ -466,17 +478,26 @@ mod approval_tests {
     fn withdrawn_finished_and_interrupted_prompts_cannot_be_answered() {
         let mut t = Translator::new();
         t.enqueue_turn("t".into());
+        let resolved = |id: &str| AgentEvent::ApprovalResolved { id: id.into() };
         ask(&mut t, "a");
-        t.handle_value(&json!({"type":"control_cancel_request","request_id":"a"}));
+        let cancel = json!({"type":"control_cancel_request","request_id":"a"});
+        assert_eq!(t.handle_value(&cancel), vec![resolved("a")]);
         assert!(t.approval_reply("a", ApprovalResponse::Approve).is_none());
+        // A repeated or unknown cancel retires nothing.
+        assert!(t.handle_value(&cancel).is_empty());
 
         ask(&mut t, "b");
-        t.handle_value(&json!({"type":"result","usage":{}}));
+        let evs = t.handle_value(&json!({"type":"result","usage":{}}));
+        let at = evs.iter().position(|e| *e == resolved("b")).unwrap();
+        assert!(matches!(evs[at + 1], AgentEvent::TurnCompleted { .. }));
         assert!(t.approval_reply("b", ApprovalResponse::Approve).is_none());
 
         t.enqueue_turn("u".into());
         ask(&mut t, "c");
-        t.mark_interrupting();
+        assert_eq!(t.mark_interrupting(), vec![resolved("c")]);
         assert!(t.approval_reply("c", ApprovalResponse::Deny).is_none());
+
+        ask(&mut t, "d");
+        assert_eq!(t.abort()[0], resolved("d"));
     }
 }

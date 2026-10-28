@@ -86,17 +86,44 @@ impl OpenCodeBackend {
                 return Ok(server.clone());
             }
             // Crashed: start a fresh server rather than reuse a dead address.
-            servers.remove(&cwd);
+            if let Some(server) = servers.remove(&cwd) {
+                self.retire_browser(&server);
+            }
         }
         // Browser tools are installed per session by `install_tools`.
         let server = Arc::new(Server::start(&cwd, &self.environment).await?);
         servers.insert(cwd, server.clone());
         Ok(server)
     }
+    /// Revoke the browser credential of a server that is going away.
+    fn retire_browser(&self, server: &Server) {
+        let group = server.browser.lock().unwrap().take();
+        if let (Some((group, _)), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
+            tools.credentials.revoke(&group);
+        }
+    }
     async fn install_tools(&self, server: &Server) -> Result<()> {
         let tools = self.tools.lock().unwrap().clone();
         if let Some(tools) = tools {
-            server.json(Method::PUT,"/api/experimental/mcp/del",Some(&json!({"config":{"type":"remote","url":tools.url,"headers":{"Authorization":format!("Bearer {}",tools.token)},"oauth":false}}))).await?;
+            // OpenCode configures MCP per workspace server, not per session, so
+            // its chats share one credential that reaches exactly those chats.
+            let token = {
+                let mut browser = server.browser.lock().unwrap();
+                match browser.as_ref() {
+                    Some((_, token)) => token.clone(),
+                    None => {
+                        let group = SessionId::new(format!(
+                            "opencode-workspace-{}-{}",
+                            std::process::id(),
+                            uuid::Uuid::new_v4()
+                        ));
+                        let token = tools.credentials.mint_shared(&group).map_err(err)?;
+                        *browser = Some((group, token.clone()));
+                        token
+                    }
+                }
+            };
+            server.json(Method::PUT,"/api/experimental/mcp/del",Some(&json!({"config":{"type":"remote","url":tools.url,"headers":{"Authorization":format!("Bearer {token}")},"oauth":false}}))).await?;
             tokio::time::timeout(std::time::Duration::from_secs(20), async {
                 loop {
                     let servers = server.json(Method::GET, "/api/mcp", None).await?;
@@ -124,6 +151,13 @@ impl OpenCodeBackend {
             .map_err(|_| err("Del MCP connection timed out"))??;
         }
         Ok(())
+    }
+    /// Let (or stop letting) the server's shared browser credential reach `id`.
+    fn set_browser_member(&self, server: &Server, id: &SessionId, member: bool) {
+        let group = server.browser.lock().unwrap().as_ref().map(|(group, _)| group.clone());
+        if let (Some(group), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
+            tools.credentials.set_shared_member(&group, id, member);
+        }
     }
     fn live(&self, id: &SessionId) -> Result<Arc<Live>> {
         self.sessions
@@ -341,6 +375,7 @@ impl OpenCodeBackend {
             }
         });
         live.tasks.lock().unwrap().push(task);
+        self.set_browser_member(&live.server, &id, true);
         let previous = self.sessions.lock().unwrap().insert(id.clone(), live);
         if let Some(previous) = previous {
             previous.stop_tasks();
@@ -742,6 +777,7 @@ impl AgentBackend for OpenCodeBackend {
         let live = self.sessions.lock().unwrap().remove(id);
         if let Some(live) = live {
             live.stop_tasks();
+            self.set_browser_member(&live.server, id, false);
             if live.busy.load(Ordering::SeqCst) {
                 let _ = live
                     .server
@@ -760,7 +796,9 @@ impl AgentBackend for OpenCodeBackend {
         for id in ids {
             self.close(&id).await?;
         }
-        self.servers.lock().await.clear();
+        for (_, server) in self.servers.lock().await.drain() {
+            self.retire_browser(&server);
+        }
         Ok(())
     }
 }
@@ -805,6 +843,18 @@ pub async fn create_terminal_session_with_environment(cwd: &Path, model: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NoCredentials;
+    impl backend::BrowserCredentials for NoCredentials {
+        fn mint(&self, _: &SessionId) -> std::io::Result<String> {
+            Err(std::io::Error::other("no browser in this fixture"))
+        }
+        fn rebind(&self, _: &SessionId, _: &SessionId) {}
+        fn revoke(&self, _: &SessionId) {}
+        fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+            Err(std::io::Error::other("no browser in this fixture"))
+        }
+        fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+    }
     #[tokio::test]
     #[ignore = "requires installed OpenCode 2.x; use isolated XDG data directories"]
     async fn real_native_form_answer_and_cancellation() {
@@ -826,8 +876,7 @@ mod tests {
         let ask_closed = closed.clone();
         *backend.tools.lock().unwrap() = Some(backend::BrowserTools {
             url: String::new(),
-            token: String::new(),
-            claude_config: PathBuf::new(),
+            credentials: Arc::new(NoCredentials),
             claude_session_config: None,
             question: Some(Arc::new(move |_, prompt, _| {
                 let started = ask_started.clone();

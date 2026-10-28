@@ -179,6 +179,8 @@ async fn replays_command_and_file_change_with_approvals() {
         seen.iter()
             .any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "done"))
     );
+    // Both were answered before the server reported them resolved.
+    assert!(!seen.iter().any(|e| matches!(e, AgentEvent::ApprovalResolved { .. })));
     assert!(matches!(
         seen.last(),
         Some(AgentEvent::TurnCompleted {
@@ -531,6 +533,121 @@ async fn steer_and_interrupt_use_the_active_turn_id() {
     // No turn left: steer errors, interrupt is a no-op.
     assert!(backend.steer(&h.id, "x".into()).await.is_err());
     backend.interrupt(&h.id).await.unwrap();
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[derive(Default)]
+struct RecordedCredentials(std::sync::Mutex<Vec<String>>);
+
+impl del_agent::backend::BrowserCredentials for RecordedCredentials {
+    fn mint(&self, session: &SessionId) -> std::io::Result<String> {
+        self.0.lock().unwrap().push(format!("mint {session}"));
+        Ok(format!("token-{session}"))
+    }
+    fn rebind(&self, from: &SessionId, to: &SessionId) {
+        self.0.lock().unwrap().push(format!("rebind {from} {to}"));
+    }
+    fn revoke(&self, session: &SessionId) {
+        self.0.lock().unwrap().push(format!("revoke {session}"));
+    }
+    fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+        unreachable!("Codex binds every credential to one thread")
+    }
+    fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+}
+
+#[tokio::test]
+async fn browser_credentials_are_bound_to_each_thread() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"thread/start","params":{}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"t2"}}}"#,
+        r#"> {"id":5,"method":"thread/unsubscribe","params":{"threadId":"t1"}}"#,
+        r#"< {"id":5,"result":{}}"#,
+        r#"> {"id":6,"method":"thread/resume","params":{"threadId":"t1"}}"#,
+        r#"< {"id":6,"result":{"thread":{"id":"t1","turns":[]}}}"#,
+        r#"> {"id":7,"method":"thread/goal/get","params":{"threadId":"t1"}}"#,
+        r#"< {"id":7,"result":{"goal":null}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let credentials = std::sync::Arc::new(RecordedCredentials::default());
+    backend.set_browser_tools(del_agent::backend::BrowserTools {
+        url: "http://127.0.0.1:1/mcp".into(),
+        credentials: credentials.clone(),
+        claude_session_config: None,
+        question: None,
+    });
+    let first = backend.start_session(config()).await.unwrap();
+    let second = backend.start_session(config()).await.unwrap();
+    backend.close(&first.id).await.unwrap();
+    // A resumed thread's id is known up front.
+    backend.resume(config(), &first.id).await.unwrap();
+    let log = credentials.0.lock().unwrap().clone();
+    assert_eq!(log.len(), 6, "{log:?}");
+    assert_eq!(log[5], "mint t1");
+    // Each new thread gets its own provisional credential, rebound to its id.
+    let provisional: Vec<_> = log[..5]
+        .iter()
+        .filter_map(|line| line.strip_prefix("mint "))
+        .collect();
+    assert_eq!(provisional.len(), 2);
+    assert_ne!(provisional[0], provisional[1]);
+    assert_eq!(log[1], format!("rebind {} {}", provisional[0], first.id));
+    assert_eq!(log[3], format!("rebind {} {}", provisional[1], second.id));
+    assert_eq!(log[4], "revoke t1");
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn server_resolved_approval_retires_the_card() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        THREAD[0],
+        THREAD[1],
+        r#"> {"id":4,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"go"}]}}"#,
+        r#"< {"id":4,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#,
+        r#"< {"id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}}"#,
+        r#"< {"method":"serverRequest/resolved","params":{"threadId":"t1","requestId":7}}"#,
+        r#"< {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"interrupted","items":[]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let h = backend.start_session(config()).await.unwrap();
+    let mut ev = h.subscribe();
+    backend
+        .send_prompt(&h.id, UserInput::text("go"))
+        .await
+        .unwrap();
+    let evs = until_turn_end(&mut ev).await;
+    let requested = evs
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ApprovalRequested { id, .. } if id == "7"))
+        .expect("approval requested");
+    let resolved = evs
+        .iter()
+        .position(|e| *e == AgentEvent::ApprovalResolved { id: "7".into() })
+        .expect("approval resolved");
+    assert!(requested < resolved);
+    // The request is gone, so a late answer is refused instead of sent.
+    assert!(
+        backend
+            .respond_approval(&h.id, "7", ApprovalResponse::Approve)
+            .await
+            .is_err()
+    );
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

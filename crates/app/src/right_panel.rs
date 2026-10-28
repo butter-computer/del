@@ -2150,7 +2150,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            std::process::Command::new("git")
+            std::process::Command::new(crate::projects::git_program().expect("git installed"))
                 .args(["init", "-q"])
                 .arg(dir.path())
                 .status()

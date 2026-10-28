@@ -120,10 +120,11 @@ impl ChatView {
                 )
                 .into_any_element();
         }
-        if let Block::FileChange(change) = block {
-            if ix > 0 && matches!(&self.model.blocks[ix - 1], Block::Tool(tool) if super::activity::matches_file(tool, change)) {
-                return div().h_0().into_any_element();
-            }
+        if let Block::FileChange(change) = block
+            && ix > 0
+            && matches!(&self.model.blocks[ix - 1], Block::Tool(tool) if super::activity::matches_file(tool, change))
+        {
+            return div().h_0().into_any_element();
         }
         if let Some(group) = super::activity::group_at(&self.tool_groups, ix)
             .filter(|group| group.end <= self.model.blocks.len())
@@ -427,10 +428,10 @@ impl ChatView {
                     )))
                     .into_any_element()
             } else {
-                let (label, color) = if approval.state == ApprovalState::Approved {
-                    ("Approved", GREEN)
-                } else {
-                    ("Denied", RED)
+                let (label, color) = match approval.state {
+                    ApprovalState::Approved => ("Approved", GREEN),
+                    ApprovalState::Closed => ("No longer needed", MUTED),
+                    _ => ("Denied", RED),
                 };
                 div()
                     .text_size(zpx(TEXT_SM))

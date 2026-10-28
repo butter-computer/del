@@ -762,6 +762,44 @@ async fn chat_browser_credentials_cannot_call_session_or_notification_tools() {
 }
 
 #[tokio::test]
+async fn chat_browser_credentials_are_bound_to_their_chat() {
+    let e = env().await;
+    let text = |r: &Value| r["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+    let snapshot = |session: &str| json!({"action":"snapshot","session_id":session});
+    let a = e.server.register_browser_client(&SessionId::new("chat-a"));
+    let denied = call(&a, "browser", snapshot("chat-b")).await;
+    assert!(text(&denied).contains("session_id must be your own session"));
+    assert_eq!(text(&call(&a, "browser", snapshot("chat-a")).await), "This host has no browser");
+
+    // A provisional credential becomes the chat's once its id is known.
+    let pending = SessionId::new("pending");
+    let b = e.server.register_browser_client(&pending);
+    e.server.rebind_session(&pending, &SessionId::new("chat-b"));
+    assert_eq!(text(&call(&b, "browser", snapshot("chat-b")).await), "This host has no browser");
+    assert!(text(&call(&b, "browser", snapshot("pending")).await).contains("own session"));
+    assert!(text(&call(&b, "browser", snapshot("chat-a")).await).contains("own session"));
+    let list = rpc(&b, "tools/list", json!({})).await;
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
+    e.server.revoke_session(&SessionId::new("chat-b"));
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(post(&b.url, auth(&b), body.clone()).await.0, 401);
+    assert_eq!(post(&a.url, auth(&a), body).await.0, 200);
+
+    // A shared credential reaches exactly its member chats.
+    let group = SessionId::new("workspace");
+    let shared = e.server.register_shared_browser_client(&group);
+    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), true);
+    assert_eq!(
+        text(&call(&shared, "browser", snapshot("chat-a")).await),
+        "This host has no browser"
+    );
+    assert!(text(&call(&shared, "browser", snapshot("chat-b")).await).contains("chats this credential serves"));
+    e.server.set_shared_browser_member(&group, &SessionId::new("chat-a"), false);
+    assert!(text(&call(&shared, "browser", snapshot("chat-a")).await).contains("chats this credential serves"));
+    assert!(is_error(&call(&shared, "list_sessions", json!({})).await));
+}
+
+#[tokio::test]
 async fn chat_credentials_expose_only_browser_and_own_goal() {
     let e = env().await;
     let chat = e.server.register_chat_client(&SessionId::new("chat"));

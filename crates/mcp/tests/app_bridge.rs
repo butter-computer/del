@@ -663,26 +663,96 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     )
     .await;
     assert_eq!(denied["isError"], true);
+    // Codex/OpenCode chats get browser-only credentials bound to their own chat.
+    let chat_config = || SessionConfig {
+        cwd: std::env::temp_dir(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        provider: Provider::Codex,
+        permission_mode: Default::default(),
+    };
+    let a = f.manager.start_session(chat_config()).await.unwrap().id;
+    let b = f.manager.start_session(chat_config()).await.unwrap().id;
     let tools = f.handle.chat_browser_tools().unwrap();
-    let config = LaunchConfig {
+    let credential = |token: String| LaunchConfig {
         args: vec![],
         env: vec![
-            ("DEL_MCP_URL".into(), tools.url),
-            ("DEL_MCP_TOKEN".into(), tools.token),
+            ("DEL_MCP_URL".into(), tools.url.clone()),
+            ("DEL_MCP_TOKEN".into(), token),
         ],
         files: vec![],
     };
-    assert!(tools.claude_config.exists());
-    let (_, listing) = post(&config, "tools/list", json!({})).await;
+    let chat_a = credential(tools.credentials.mint(&a).unwrap());
+    let (_, listing) = post(&chat_a, "tools/list", json!({})).await;
     assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 1);
     assert_eq!(listing["result"]["tools"][0]["name"], "browser");
-    let denied = call(&config, "list_sessions", json!({})).await;
+    let denied = call(&chat_a, "list_sessions", json!({})).await;
     assert_eq!(denied["isError"], true);
-    // The shared chat credential only reaches chats that are running a turn.
-    let idle = call(&config, "browser", json!({"action":"list_tabs"})).await;
+    // Chat A cannot reach chat B's browser.
+    let denied = call(
+        &chat_a,
+        "browser",
+        json!({"action":"snapshot","session_id":b.as_str()}),
+    )
+    .await;
+    assert_eq!(denied["isError"], true);
+    // Without session_id it reaches only its own browser.
+    let own = |config: LaunchConfig| {
+        tokio::spawn(async move { call(&config, "browser", json!({"action":"list_tabs"})).await })
+    };
+    let pending = own(chat_a.clone());
+    match f.event().await {
+        BridgeEvent::Browser {
+            caller,
+            allowed,
+            reply,
+            ..
+        } => {
+            assert_eq!(caller, a);
+            assert_eq!(allowed, vec![a.clone()]);
+            reply.send(Ok(json!({"sessions":[]}))).unwrap();
+        }
+        _ => panic!("expected browser command"),
+    }
+    assert_eq!(pending.await.unwrap()["isError"], false);
+    // A new thread's provisional credential follows it to its real id.
+    let provisional = SessionId::new("codex-pending-test");
+    let chat_b = credential(tools.credentials.mint(&provisional).unwrap());
+    tools.credentials.rebind(&provisional, &b);
+    let pending = own(chat_b.clone());
+    match f.event().await {
+        BridgeEvent::Browser {
+            caller,
+            allowed,
+            reply,
+            ..
+        } => {
+            assert_eq!(caller, b);
+            assert_eq!(allowed, vec![b.clone()]);
+            reply.send(Ok(json!({"sessions":[]}))).unwrap();
+        }
+        _ => panic!("expected browser command"),
+    }
+    assert_eq!(pending.await.unwrap()["isError"], false);
+    tools.credentials.revoke(&b);
+    assert_eq!(post(&chat_b, "tools/list", json!({})).await.0, 401);
+    assert_eq!(post(&chat_a, "tools/list", json!({})).await.0, 200);
+    // A workspace-shared credential reaches only its member chats, and of
+    // those only the ones running a turn.
+    let group = SessionId::new("opencode-workspace-test");
+    let shared = credential(tools.credentials.mint_shared(&group).unwrap());
+    tools.credentials.set_shared_member(&group, &a, true);
+    let denied = call(
+        &shared,
+        "browser",
+        json!({"action":"snapshot","session_id":b.as_str()}),
+    )
+    .await;
+    assert_eq!(denied["isError"], true);
+    let idle = call(&shared, "browser", json!({"action":"list_tabs"})).await;
     assert_eq!(idle["isError"], true);
     f.bridge.shutdown();
-    assert!(!tools.claude_config.exists());
 }
 
 #[tokio::test]

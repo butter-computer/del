@@ -625,8 +625,12 @@ impl ChatView {
         response: ApprovalResponse,
         cx: &mut Context<Self>,
     ) {
-        let change = self.model.resolve_approval(&id, response);
-        self.sync(change, cx);
+        // Only a still-pending card is answered; the provider may have
+        // settled it already.
+        let Some(change) = self.model.resolve_approval(&id, response) else {
+            return;
+        };
+        self.sync(Some(change), cx);
         let Some(session) = self.session.clone() else {
             return;
         };

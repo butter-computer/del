@@ -24,7 +24,9 @@ Terminal launch allocates a native session before opening the TUI and persists
 its exact ID. Model and variant are set on that session; they are not passed as
 unsupported TUI flags. The terminal uses a standalone server so the launch's
 session-scoped Del MCP configuration is applied. Chat receives browser-only MCP
-access; terminal sessions receive Del's coordination tools.
+access; OpenCode configures MCP per workspace server, so the chats of one
+workspace share a credential that reaches only those chats (and of them, only
+the ones running a turn). Terminal sessions receive Del's coordination tools.
 Del disables OpenCode's shared inner tab strip for its terminal launches, so a
 fresh terminal cannot restore unrelated tabs from earlier OpenCode runs. Saved
 Del terminals still reopen their exact native conversation ID.

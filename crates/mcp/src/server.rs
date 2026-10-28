@@ -70,6 +70,9 @@ struct Scope {
     /// token -> session it authenticates as.
     tokens: HashMap<String, SessionId>,
     browser_only: HashSet<SessionId>,
+    /// Browser-only callers that stand for several chats (a provider process
+    /// serving one MCP config to all of them) -> those chats.
+    shared_browser: HashMap<SessionId, HashSet<SessionId>>,
     chat_tools: HashSet<SessionId>,
     children: HashMap<SessionId, HashSet<SessionId>>,
     parent: HashMap<SessionId, SessionId>,
@@ -112,6 +115,19 @@ impl Scope {
         // Registration re-adds these, so rotation keeps the credential kind.
         self.browser_only.remove(session);
         self.chat_tools.remove(session);
+        self.shared_browser.remove(session);
+    }
+
+    /// Which browsers a browser call from `caller` may touch.
+    fn browser_access(&self, caller: &SessionId) -> crate::BrowserAccess {
+        match self.shared_browser.get(caller) {
+            Some(members) => {
+                let mut members: Vec<_> = members.iter().cloned().collect();
+                members.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                crate::BrowserAccess::Shared(members)
+            }
+            None => crate::BrowserAccess::Sessions(self.family(caller)),
+        }
     }
 }
 
@@ -226,6 +242,53 @@ impl McpServer {
             .browser_only
             .insert(session.clone());
         self.register_session(session)
+    }
+
+    /// Authenticate `from`'s tokens as `to` from now on, keeping their kind.
+    /// Used when a chat's real session id is known only after its provider
+    /// started it with a provisional credential.
+    pub fn rebind_session(&self, from: &SessionId, to: &SessionId) {
+        let mut s = self.inner.scope.lock().unwrap();
+        if from == to {
+            return;
+        }
+        for session in s.tokens.values_mut() {
+            if session == from {
+                *session = to.clone();
+            }
+        }
+        if s.browser_only.remove(from) {
+            s.browser_only.insert(to.clone());
+        }
+        if s.chat_tools.remove(from) {
+            s.chat_tools.insert(to.clone());
+        }
+    }
+
+    /// Mint a browser-only credential for `group`, a provider process that
+    /// serves one MCP config to several chats. Its browser calls may touch
+    /// exactly the chats added with [`set_shared_browser_member`](Self::set_shared_browser_member).
+    pub fn register_shared_browser_client(&self, group: &SessionId) -> Credentials {
+        self.inner
+            .scope
+            .lock()
+            .unwrap()
+            .shared_browser
+            .entry(group.clone())
+            .or_default();
+        self.register_browser_client(group)
+    }
+
+    /// Add or remove `session` from the chats `group`'s credential reaches.
+    pub fn set_shared_browser_member(&self, group: &SessionId, session: &SessionId, member: bool) {
+        let mut s = self.inner.scope.lock().unwrap();
+        if let Some(members) = s.shared_browser.get_mut(group) {
+            if member {
+                members.insert(session.clone());
+            } else {
+                members.remove(session);
+            }
+        }
     }
 
     /// Browser and own-goal tools only, authenticated as the real chat session.
@@ -524,21 +587,25 @@ impl Inner {
                 if let Err(error) = request.validate() {
                     return Ok(tool_err(error));
                 }
-                let access = {
-                    let s = self.scope.lock().unwrap();
-                    if s.browser_only.contains(caller) {
-                        crate::BrowserAccess::SharedChat
-                    } else {
-                        crate::BrowserAccess::Sessions(s.family(caller))
+                let access = self.scope.lock().unwrap().browser_access(caller);
+                if let Some(target) = &request.session_id {
+                    match &access {
+                        crate::BrowserAccess::Sessions(allowed)
+                            if !allowed.iter().any(|s| s.as_str() == target) =>
+                        {
+                            return Ok(tool_err(
+                                "session_id must be your own session, one you spawned, or the session that spawned you",
+                            ));
+                        }
+                        crate::BrowserAccess::Shared(allowed)
+                            if !allowed.iter().any(|s| s.as_str() == target) =>
+                        {
+                            return Ok(tool_err(
+                                "session_id must be one of the chats this credential serves",
+                            ));
+                        }
+                        _ => {}
                     }
-                };
-                if let (crate::BrowserAccess::Sessions(allowed), Some(target)) =
-                    (&access, &request.session_id)
-                    && !allowed.iter().any(|s| s.as_str() == target)
-                {
-                    return Ok(tool_err(
-                        "session_id must be your own session, one you spawned, or the session that spawned you",
-                    ));
                 }
                 Ok(
                     match tokio::time::timeout(

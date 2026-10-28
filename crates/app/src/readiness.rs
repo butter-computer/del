@@ -39,9 +39,12 @@ impl Readiness {
                 let selected = update_rx.borrow_and_update().clone();
                 let mut wait = Duration::from_secs(30 * 60);
                 if let Some(config) = selected {
-                    // Replacing a harness under a running chat can break it mid-turn
-                    // (e.g. Homebrew removes the old Cellar version). Try again later.
-                    if provider_in_use(&manager_for_updates, config.provider) {
+                    // Replacing a harness under a running chat or terminal can
+                    // break it mid-turn. Try again later.
+                    if crate::provider_updates::provider_in_use(
+                        &manager_for_updates,
+                        config.provider,
+                    ) {
                         wait = Duration::from_secs(5 * 60);
                     } else if let Err(error) = crate::provider_updates::ensure_provider(
                         config.provider,
@@ -81,14 +84,6 @@ impl Readiness {
         self.preparation.abort();
         self.updates.abort();
     }
-}
-
-/// Whether any attached chat session runs on `provider`'s harness.
-fn provider_in_use(manager: &SessionManager, provider: del_agent::Provider) -> bool {
-    manager
-        .list_sessions()
-        .iter()
-        .any(|record| record.provider == provider && manager.is_live(&record.id))
 }
 
 impl Drop for Readiness {

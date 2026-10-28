@@ -289,7 +289,12 @@ impl AppShell {
         let prepare_info = info.clone();
         let runtime = self.state.read(cx).backend().runtime;
         if let (Some(program), Some(provider)) = (spec.program.clone(), spec.provider()) {
+            // Never replace the CLI under another running chat or terminal.
+            let manager = self.state.read(cx).backend().manager;
             runtime.spawn(async move {
+                if crate::provider_updates::provider_in_use(&manager, provider) {
+                    return;
+                }
                 if let Err(error) =
                     crate::provider_updates::ensure_program(program.into(), provider, |_| {}).await
                 {
@@ -383,6 +388,9 @@ impl AppShell {
                     if !resuming || this.state.read(cx).selection == Selection::Terminal(id.clone())
                     {
                         host.update(cx, |host, cx| host.focus(window, cx));
+                    }
+                    if let Some(provider) = spec.provider() {
+                        crate::provider_updates::terminal_started(provider, host.read(cx).snapshot().pid);
                     }
                     this.terminals.insert(id.clone(), host);
                     this.terminal_store.upsert(TerminalRecord {

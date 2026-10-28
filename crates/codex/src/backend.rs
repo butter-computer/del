@@ -122,6 +122,9 @@ impl Drop for StartingGuard<'_> {
     }
 }
 
+/// Suffix of provisional browser-credential ids for threads being started.
+static NEXT_PROVISIONAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn be(e: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(e.to_string())
 }
@@ -356,18 +359,42 @@ impl CodexBackend {
     ) -> Result<SessionHandle> {
         let opening = OpeningGuard::new(&self.opening);
         let conn = self.connection().await?;
-        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
-            apply_browser_tools(&mut params, tools);
+        // The browser credential is bound to the thread. A new thread's id is
+        // known only from the reply, so it starts on a provisional id.
+        let tools = self.browser_tools.lock().unwrap().clone();
+        let mut provisional = None;
+        if let Some(tools) = &tools {
+            let bound = match thread {
+                Some(t) => t.clone(),
+                None => provisional
+                    .insert(SessionId::new(format!(
+                        "codex-pending-{}-{}",
+                        std::process::id(),
+                        NEXT_PROVISIONAL.fetch_add(1, Ordering::Relaxed)
+                    )))
+                    .clone(),
+            };
+            let token = tools.credentials.mint(&bound).map_err(be)?;
+            apply_browser_tools(&mut params, &tools.url, &token);
         }
         if let Some(t) = thread {
             params.insert("threadId".into(), json!(t.as_str()));
         }
-        let resp: ThreadResponse = conn
-            .client
-            .call(method, Value::Object(params))
-            .await
-            .map_err(be)?;
+        let resp: std::result::Result<ThreadResponse, _> =
+            conn.client.call(method, Value::Object(params)).await;
+        let resp = match resp {
+            Ok(resp) => resp,
+            Err(error) => {
+                if let (Some(tools), Some(provisional)) = (&tools, &provisional) {
+                    tools.credentials.revoke(provisional);
+                }
+                return Err(be(error));
+            }
+        };
         let id = SessionId::new(resp.thread.id);
+        if let (Some(tools), Some(provisional)) = (&tools, &provisional) {
+            tools.credentials.rebind(provisional, &id);
+        }
         let existing = self.sessions.lock().unwrap().get(id.as_str()).cloned();
         let session = existing.unwrap_or_else(|| self.register(id.as_str()));
         drop(opening);
@@ -761,6 +788,9 @@ impl AgentBackend for CodexBackend {
         if removed.is_none() {
             return Err(AgentError::UnknownSession(session.clone()));
         }
+        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
+            tools.credentials.revoke(session);
+        }
         if last {
             // No session left: stop the app-server rather than leave it idle.
             // The next session spawns a fresh one. Checked under the slot lock
@@ -848,10 +878,15 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
             Incoming::Notification { method, params } => {
                 let Some(s) = find(&params) else { continue };
                 if method == "serverRequest/resolved" {
-                    // Resolved server-side (e.g. interrupt): the answer is moot.
+                    // Resolved server-side (e.g. interrupt): the answer is moot,
+                    // so retire the card unless we already answered it.
                     if let Ok(id) = serde_json::from_value::<RequestId>(params["requestId"].clone())
                     {
-                        s.state.lock().unwrap().approvals.remove(&id.to_string());
+                        let id = id.to_string();
+                        let was_pending = s.state.lock().unwrap().approvals.remove(&id).is_some();
+                        if was_pending {
+                            s.emit(AgentEvent::ApprovalResolved { id });
+                        }
                     }
                     continue;
                 }
@@ -900,12 +935,15 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
                 }
                 let all: Vec<_> = sessions.lock().unwrap().values().cloned().collect();
                 for s in all {
-                    {
+                    let dropped: Vec<String> = {
                         let mut st = s.state.lock().unwrap();
-                        st.approvals.clear();
                         st.starting = false;
                         st.interrupt_pending = false;
                         st.mapper = Mapper::default();
+                        st.approvals.drain().map(|(id, _)| id).collect()
+                    };
+                    for id in dropped {
+                        s.emit(AgentEvent::ApprovalResolved { id });
                     }
                     s.emit(AgentEvent::Error {
                         message: msg.clone(),
@@ -918,15 +956,12 @@ async fn route(client: CodexClient, mut rx: mpsc::UnboundedReceiver<Incoming>, s
     }
 }
 
-fn apply_browser_tools(
-    params: &mut serde_json::Map<String, Value>,
-    tools: &del_agent::backend::BrowserTools,
-) {
+fn apply_browser_tools(params: &mut serde_json::Map<String, Value>, url: &str, token: &str) {
     let config = params
         .entry("config".to_owned())
         .or_insert_with(|| json!({}));
     config["mcp_servers.del_browser"] =
-        json!({"url":tools.url,"http_headers":{"Authorization":format!("Bearer {}",tools.token)}});
+        json!({"url":url,"http_headers":{"Authorization":format!("Bearer {token}")}});
     let existing = params
         .get("developerInstructions")
         .and_then(Value::as_str)
@@ -945,16 +980,7 @@ mod model_config_tests {
     #[test]
     fn browser_routing_is_included_without_losing_thread_settings() {
         let mut params = serde_json::json!({"config":{"model_reasoning_effort":"high"},"developerInstructions":"Existing instructions"}).as_object().unwrap().clone();
-        super::apply_browser_tools(
-            &mut params,
-            &del_agent::backend::BrowserTools {
-                url: "http://127.0.0.1:1234/mcp".into(),
-                token: "fixture".into(),
-                claude_config: "/tmp/browser.json".into(),
-                claude_session_config: None,
-                question: None,
-            },
-        );
+        super::apply_browser_tools(&mut params, "http://127.0.0.1:1234/mcp", "fixture");
         assert_eq!(params["config"]["model_reasoning_effort"], "high");
         assert_eq!(
             params["config"]["mcp_servers.del_browser"]["url"],

@@ -58,6 +58,8 @@ pub enum ApprovalState {
     Pending,
     Approved,
     Denied,
+    /// The provider settled or withdrew the request without our answer.
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,6 +424,15 @@ impl ChatModel {
                     detail: detail.clone(),
                     state: ApprovalState::Pending,
                 })))
+            }
+            AgentEvent::ApprovalResolved { id } => {
+                let ix = self.blocks.iter().position(|b| {
+                    matches!(b, Block::Approval(a) if a.id == *id && a.state == ApprovalState::Pending)
+                })?;
+                if let Block::Approval(a) = &mut self.blocks[ix] {
+                    a.state = ApprovalState::Closed;
+                }
+                Some(Change::Updated(ix))
             }
             AgentEvent::TokenUsage { .. } => None,
             AgentEvent::TurnCompleted { turn_id, status } => {
@@ -843,6 +854,38 @@ mod tests {
             panic!()
         };
         assert_eq!(a.state, ApprovalState::Denied);
+    }
+
+    #[test]
+    fn provider_resolved_approval_closes_card() {
+        let mut m = ChatModel::default();
+        for id in ["a1", "a2"] {
+            m.apply(&AgentEvent::ApprovalRequested {
+                id: id.into(),
+                kind: ApprovalKind::Command,
+                detail: "ls".into(),
+            });
+        }
+        let resolved = AgentEvent::ApprovalResolved { id: "a1".into() };
+        assert_eq!(m.apply(&resolved), Some(Change::Updated(0)));
+        assert_eq!(m.apply(&resolved), None);
+        let Block::Approval(a) = &m.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(a.state, ApprovalState::Closed);
+        // A closed card no longer accepts an answer; the other stays pending.
+        assert_eq!(m.resolve_approval("a1", ApprovalResponse::Approve), None);
+        assert!(m.has_pending_approval());
+        m.apply(&AgentEvent::ApprovalResolved { id: "a2".into() });
+        assert!(!m.has_pending_approval());
+        // An answer the user already gave is kept.
+        m.apply(&AgentEvent::ApprovalRequested {
+            id: "a3".into(),
+            kind: ApprovalKind::Command,
+            detail: "ls".into(),
+        });
+        m.resolve_approval("a3", ApprovalResponse::Approve);
+        assert_eq!(m.apply(&AgentEvent::ApprovalResolved { id: "a3".into() }), None);
     }
 
     #[test]

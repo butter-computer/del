@@ -212,10 +212,9 @@ impl ClaudeBackend {
         if let Some(s) = &self.options.setting_sources {
             a.extend(["--setting-sources".into(), s.clone()]);
         }
-        if let Some(tools) = self.browser_tools.lock().unwrap().as_ref() {
+        // The per-chat `--mcp-config` is added at spawn, once the id is known.
+        if self.browser_tools.lock().unwrap().is_some() {
             a.extend([
-                "--mcp-config".into(),
-                tools.claude_config.to_string_lossy().into_owned(),
                 "--append-system-prompt".into(),
                 del_agent::backend::BROWSER_INSTRUCTIONS.into(),
             ]);
@@ -255,9 +254,7 @@ impl ClaudeBackend {
             .and_then(|tools| tools.claude_session_config.clone())
         {
             let path = factory(&id)?;
-            if let Some(index) = args.iter().position(|arg| arg == "--mcp-config") {
-                args[index + 1] = path.to_string_lossy().into_owned();
-            }
+            args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned()]);
             if let Some(index) = args.iter().position(|arg| arg == "--append-system-prompt") {
                 args[index + 1].push_str("\n\n");
                 args[index + 1].push_str(del_agent::backend::GOAL_INSTRUCTIONS);
@@ -661,7 +658,8 @@ impl AgentBackend for ClaudeBackend {
         if !live.translator.lock().unwrap().is_busy() {
             return Ok(());
         }
-        live.translator.lock().unwrap().mark_interrupting();
+        let evs = live.translator.lock().unwrap().mark_interrupting();
+        live.emit(evs);
         live.write_line(&interrupt_line(&uuid::Uuid::new_v4().to_string()))
             .await
     }
@@ -804,13 +802,25 @@ mod model_config_tests {
                 .any(|pair| pair == ["--settings", "{\"fastMode\":false}"])
         );
     }
+    struct Unused;
+    impl del_agent::backend::BrowserCredentials for Unused {
+        fn mint(&self, _: &SessionId) -> std::io::Result<String> {
+            unreachable!("Claude chats use their per-chat config file")
+        }
+        fn rebind(&self, _: &SessionId, _: &SessionId) {}
+        fn revoke(&self, _: &SessionId) {}
+        fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+            unreachable!("Claude chats use their per-chat config file")
+        }
+        fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {}
+    }
+
     #[test]
     fn browser_routing_is_appended_for_new_and_resumed_chats() {
         let backend = ClaudeBackend::new(ClaudeOptions::default());
         backend.set_browser_tools(del_agent::backend::BrowserTools {
             url: "http://127.0.0.1:1234/mcp".into(),
-            token: "fixture".into(),
-            claude_config: "/tmp/browser.json".into(),
+            credentials: std::sync::Arc::new(Unused),
             claude_session_config: None,
             question: None,
         });
@@ -829,10 +839,8 @@ mod model_config_tests {
                     "--append-system-prompt",
                     del_agent::backend::BROWSER_INSTRUCTIONS
                 ]));
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--mcp-config", "/tmp/browser.json"])
-            );
+            // Claude chats get their own MCP config at spawn, never a shared one.
+            assert!(!args.contains(&"--mcp-config".into()));
             assert!(!args.contains(&"--system-prompt".into()));
         }
     }

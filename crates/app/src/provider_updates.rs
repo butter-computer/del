@@ -25,6 +25,36 @@ enum Installer {
     Unmanaged,
 }
 
+/// Agent terminals launched per provider, by process id. Entries are pruned
+/// once their process has ended.
+static TERMINALS: OnceLock<std::sync::Mutex<Vec<(Provider, u32)>>> = OnceLock::new();
+
+/// Record an agent terminal running `provider`'s CLI as process `pid`.
+pub fn terminal_started(provider: Provider, pid: u32) {
+    TERMINALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .push((provider, pid));
+}
+
+fn terminal_uses(provider: Provider, alive: impl Fn(u32) -> bool) -> bool {
+    let mut terminals = TERMINALS.get_or_init(Default::default).lock().unwrap();
+    terminals.retain(|(_, pid)| alive(*pid));
+    terminals.iter().any(|(p, _)| *p == provider)
+}
+
+/// Whether replacing `provider`'s CLI now could break something running on
+/// it: a live chat or a running agent terminal. Package managers can remove
+/// the old version (e.g. Homebrew's Cellar) mid-turn, so updates wait.
+pub fn provider_in_use(manager: &del_agent::SessionManager, provider: Provider) -> bool {
+    manager
+        .list_sessions()
+        .iter()
+        .any(|record| record.provider == provider && manager.is_live(&record.id))
+        || terminal_uses(provider, del_agent::procgroup::process_alive)
+}
+
 /// Last outcome per harness binary. Failures (typically offline) back off so a
 /// config change or terminal launch does not rerun `brew update` each time.
 #[derive(Clone)]
@@ -396,6 +426,16 @@ pub fn completed_cli_update(provider: Provider, output: &str, exit: Option<i32>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_terminals_hold_off_their_provider_until_they_exit() {
+        terminal_started(Provider::OpenCode, 4242);
+        assert!(terminal_uses(Provider::OpenCode, |_| true));
+        assert!(!terminal_uses(Provider::Acp, |_| true));
+        // An ended process is pruned and no longer blocks updates.
+        assert!(!terminal_uses(Provider::OpenCode, |_| false));
+        assert!(!terminal_uses(Provider::OpenCode, |_| true));
+    }
 
     #[test]
     fn failed_checks_back_off_instead_of_rerunning_immediately() {

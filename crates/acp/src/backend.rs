@@ -77,9 +77,17 @@ impl Client {
                 recoverable: true,
             }]);
         }
-        state.approvals.clear();
+        self.emit(retire_approvals(&mut state.approvals));
         self.emit(state.translator.end_turn(status));
     }
+}
+
+/// Forget unanswered approvals, retiring their cards.
+fn retire_approvals(approvals: &mut HashMap<String, PendingApproval>) -> Vec<AgentEvent> {
+    approvals
+        .drain()
+        .map(|(id, _)| AgentEvent::ApprovalResolved { id })
+        .collect()
 }
 
 fn cancelled() -> Value {
@@ -170,7 +178,7 @@ impl Handler for Client {
     fn closed(&self, exit: Option<i32>, stderr_tail: String) {
         let mut state = self.state.lock().unwrap();
         state.closed = true;
-        state.approvals.clear();
+        self.emit(retire_approvals(&mut state.approvals));
         self.emit(state.translator.end_turn(TurnStatus::Failed));
         if !state.closing {
             self.emit(vec![AgentEvent::Error {
@@ -223,7 +231,7 @@ impl Live {
         {
             let mut state = self.client.state.lock().unwrap();
             state.closing = true;
-            state.approvals.clear();
+            self.client.emit(retire_approvals(&mut state.approvals));
             self.client
                 .emit(state.translator.end_turn(TurnStatus::Interrupted));
         }
@@ -559,7 +567,7 @@ impl AgentBackend for AcpBackend {
                 return Ok(());
             };
             state.cancelled = true;
-            state.approvals.clear();
+            live.client.emit(retire_approvals(&mut state.approvals));
             live.rpc
                 .notify("session/cancel", json!({"sessionId":live.remote}));
             turn

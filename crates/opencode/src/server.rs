@@ -18,6 +18,9 @@ pub struct Server {
     url: String,
     password: String,
     directory: String,
+    /// Del's browser credential for this workspace server: one MCP config
+    /// serves all its chats, so it is a shared group (id, token).
+    pub(crate) browser: std::sync::Mutex<Option<(del_agent::SessionId, String)>>,
 }
 fn error(e: impl std::fmt::Display) -> AgentError {
     AgentError::Backend(format!("OpenCode: {e}"))
@@ -133,6 +136,7 @@ impl Server {
             url,
             password,
             directory: cwd.to_string_lossy().into_owned(),
+            browser: Default::default(),
         })
     }
     /// Whether `opencode serve` is still running.

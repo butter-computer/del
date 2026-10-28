@@ -52,9 +52,11 @@ pub struct ChangedFile {
 /// Read-only Git for the review pane, which polls while visible. It must not
 /// take `index.lock` (an agent's concurrent commit would fail) or run commands
 /// named by repository config such as `core.fsmonitor`.
-fn git_command(root: &Path) -> Command {
-    let mut command = Command::new("git");
+fn git_command(root: &Path) -> Result<Command, String> {
+    let program = crate::projects::git_program().ok_or("Git is not installed.")?;
+    let mut command = Command::new(program);
     command
+        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args([
             "--no-optional-locks",
@@ -65,13 +67,16 @@ fn git_command(root: &Path) -> Command {
         ])
         .arg("-C")
         .arg(root);
-    command
+    Ok(command)
 }
+
+/// Longest a review-pane Git command may run, as for project metadata queries.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Run Git, keeping at most `limit` bytes of stdout. Returns the output and
 /// whether it was cut off (the process is then stopped).
 fn git_bounded(root: &Path, args: &[&std::ffi::OsStr], limit: usize) -> Result<(Vec<u8>, bool), String> {
-    let mut child = git_command(root)
+    let mut child = git_command(root)?
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -86,24 +91,49 @@ fn git_bounded(root: &Path, args: &[&std::ffi::OsStr], limit: usize) -> Result<(
         let _ = std::io::copy(&mut errors, &mut std::io::sink());
         kept
     });
+    let output = child.stdout.take().expect("piped stdout");
+    // A hung Git (e.g. a network filesystem) is stopped at the deadline,
+    // which also ends the read below.
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let (finished, deadline) = std::sync::mpsc::channel::<()>();
+    let watchdog = {
+        let child = child.clone();
+        std::thread::spawn(move || {
+            let expired = deadline.recv_timeout(GIT_TIMEOUT)
+                == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+            if expired {
+                let _ = child.lock().unwrap().kill();
+            }
+            expired
+        })
+    };
     let mut stdout = Vec::new();
-    child
-        .stdout
-        .take()
-        .expect("piped stdout")
-        .take(limit as u64 + 1)
-        .read_to_end(&mut stdout)
-        .map_err(|e| e.to_string())?;
+    let read = output.take(limit as u64 + 1).read_to_end(&mut stdout);
     let truncated = stdout.len() > limit;
     if truncated {
+        let _ = child.lock().unwrap().kill();
+    }
+    // Poll rather than block in wait() so the watchdog can still take the lock.
+    let status = loop {
+        match child.lock().unwrap().try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(error) => break Err(error.to_string()),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let _ = finished.send(());
+    let timed_out = watchdog.join().unwrap_or(false);
+    let stderr = stderr.join().unwrap_or_default();
+    if timed_out {
+        return Err("Git timed out".into());
+    }
+    read.map_err(|e| e.to_string())?;
+    if truncated {
         stdout.truncate(limit);
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stderr.join();
         return Ok((stdout, true));
     }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let stderr = stderr.join().unwrap_or_default();
+    let status = status?;
     if !status.success() {
         return Err(String::from_utf8_lossy(&stderr).trim().to_owned());
     }

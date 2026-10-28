@@ -11,9 +11,10 @@ pub const MAX_AGENT_TABS: usize = 20;
 pub enum BrowserAccess {
     /// The caller's own session plus the sessions it spawned and its parent.
     Sessions(Vec<SessionId>),
-    /// The shared chat-browser credential, which is not bound to one session.
-    /// Hosts limit it to chat sessions that are currently running a turn.
-    SharedChat,
+    /// A credential shared by several chats of one provider process (OpenCode
+    /// serves one MCP config per workspace), so it cannot name its caller:
+    /// exactly those chats. Hosts further limit it to the ones running a turn.
+    Shared(Vec<SessionId>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

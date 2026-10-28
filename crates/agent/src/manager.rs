@@ -4,7 +4,7 @@ use crate::backend::*;
 use crate::index::*;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -71,6 +71,9 @@ struct Live {
     /// exactly once: first in the history, then on the receiver.
     fanout: broadcast::Sender<AgentEvent>,
     history: Vec<AgentEvent>,
+    /// Approval requests still waiting for an answer, so settling one of
+    /// several does not report the session Running too early.
+    pending_approvals: HashSet<String>,
 }
 
 const STANDBY_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -103,10 +106,16 @@ pub struct SessionManager {
     shared: Arc<Shared>,
 }
 
-fn next_status(current: SessionStatus, ev: &AgentEvent) -> SessionStatus {
+/// `approvals_pending`: whether any approval is still unanswered after `ev`.
+fn next_status(current: SessionStatus, ev: &AgentEvent, approvals_pending: bool) -> SessionStatus {
     match ev {
         AgentEvent::TurnStarted { .. } => SessionStatus::Running,
         AgentEvent::ApprovalRequested { .. } => SessionStatus::WaitingApproval,
+        AgentEvent::ApprovalResolved { .. }
+            if current == SessionStatus::WaitingApproval && !approvals_pending =>
+        {
+            SessionStatus::Running
+        }
         AgentEvent::Error {
             recoverable: false, ..
         } => SessionStatus::Error,
@@ -463,6 +472,16 @@ impl SessionManager {
                         continue;
                     };
                     trim_history(&mut l.history);
+                    match &event {
+                        AgentEvent::ApprovalRequested { id, .. } => {
+                            l.pending_approvals.insert(id.clone());
+                        }
+                        AgentEvent::ApprovalResolved { id } => {
+                            l.pending_approvals.remove(id);
+                        }
+                        AgentEvent::TurnCompleted { .. } => l.pending_approvals.clear(),
+                        _ => {}
+                    }
                     l.history.push(event.clone());
                     let _ = l.fanout.send(event.clone());
                     let next = match status {
@@ -478,7 +497,7 @@ impl SessionManager {
                             l.status
                         }
                         Some(status) => status,
-                        None => next_status(l.status, &event),
+                        None => next_status(l.status, &event, !l.pending_approvals.is_empty()),
                     };
                     // Status first so a listener seeing the event sees a consistent status.
                     if next != l.status {
@@ -501,6 +520,7 @@ impl SessionManager {
                 pump,
                 fanout,
                 history,
+                pending_approvals: HashSet::new(),
             },
         );
         handle
@@ -941,10 +961,16 @@ impl SessionManager {
         self.session_backend(id)?
             .respond_approval(id, approval_id, response)
             .await?;
-        // The turn may already have finished (or failed) while we awaited.
-        self.shared.transition(id, |current| {
-            (current == SessionStatus::WaitingApproval).then_some(SessionStatus::Running)
-        });
+        // The turn may already have finished (or failed) while we awaited, and
+        // other requests may still be waiting.
+        let mut live = self.shared.live.lock().unwrap();
+        if let Some(l) = live.get_mut(id) {
+            l.pending_approvals.remove(approval_id);
+            if l.status == SessionStatus::WaitingApproval && l.pending_approvals.is_empty() {
+                l.status = SessionStatus::Running;
+                self.shared.publish_status(id, SessionStatus::Running);
+            }
+        }
         Ok(())
     }
 
@@ -1699,6 +1725,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_resolved_approvals_resume_running_once_none_pend() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir.path().join("i.jsonl"));
+        let mut all = m.subscribe_all();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.send_prompt(&h.id, UserInput::text("withdraw")).await.unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::WaitingApproval).await;
+        let mut resolved = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match all.recv().await.unwrap() {
+                    ManagerEvent::Event {
+                        event: AgentEvent::ApprovalResolved { .. },
+                        ..
+                    } => resolved += 1,
+                    // The status is published just before the event that caused it.
+                    ManagerEvent::StatusChanged {
+                        status: SessionStatus::Running,
+                        ..
+                    } => {
+                        assert_eq!(resolved, 1, "Running only once both are settled");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        wait_status(&mut all, &h.id, SessionStatus::Idle).await;
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn approval_reply_never_overwrites_a_finished_turn() {
         let dir = tempfile::tempdir().unwrap();
         let m = manager(&dir.path().join("i.jsonl"));
@@ -1805,15 +1865,20 @@ mod tests {
             recoverable: true,
         };
         assert_eq!(
-            next_status(SessionStatus::Running, &soft),
+            next_status(SessionStatus::Running, &soft, false),
             SessionStatus::Running
         );
-        let e = next_status(SessionStatus::Running, &fatal);
+        let e = next_status(SessionStatus::Running, &fatal, false);
         assert_eq!(e, SessionStatus::Error);
-        assert_eq!(next_status(e, &done), SessionStatus::Error);
+        assert_eq!(next_status(e, &done, false), SessionStatus::Error);
         assert_eq!(
-            next_status(SessionStatus::Running, &done),
+            next_status(SessionStatus::Running, &done, false),
             SessionStatus::Idle
         );
+        let resolved = AgentEvent::ApprovalResolved { id: "a".into() };
+        let waiting = SessionStatus::WaitingApproval;
+        assert_eq!(next_status(waiting, &resolved, false), SessionStatus::Running);
+        assert_eq!(next_status(waiting, &resolved, true), waiting);
+        assert_eq!(next_status(SessionStatus::Idle, &resolved, false), SessionStatus::Idle);
     }
 }

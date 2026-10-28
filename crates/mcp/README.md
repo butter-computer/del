@@ -33,9 +33,11 @@ auth, scoping and the blocking `ask_user`.
   malformed arguments return JSON-RPC `-32602`.
 - `Credentials` and `LaunchConfig` redact tokens in `Debug`. Claude config files
   have unique names, are created exclusively, and use mode 0600. Codex gets the
-  terminal token via an env var, never argv. Codex chat receives its browser-only
-  configuration through thread/start or thread/resume; Claude chat gets a private
-  MCP config file. Browser-only credentials cannot call coordination tools.
+  terminal token via an env var, never argv. Each Codex chat receives its own
+  browser-only credential through thread/start or thread/resume (a new thread's
+  provisional credential is rebound to its thread id once Codex assigns it);
+  Claude chat gets a private MCP config file. Browser-only credentials cannot
+  call coordination tools.
 
 ## Tools
 
@@ -88,10 +90,11 @@ content. Page text and scripts have bounded sizes. Page `alert`/`confirm`/`promp
 dialogs name the page origin, and a burst of more than three in ten seconds
 blocks further dialogs from that site; hidden browsers dismiss them.
 
-Claude chats get a credential bound to their own session. Codex and OpenCode
-chats share one browser-only credential that cannot name its session; it can
-only reach Codex/OpenCode chats that are currently running a turn. Terminal
-agents retain the complete tool set. Page text is untrusted content, not instructions. Website actions remain
+Claude and Codex chats get a credential bound to their own session, so they
+reach only their own browser and their spawn family's. OpenCode configures MCP
+per workspace server rather than per session, so the chats of one OpenCode
+workspace share a credential that reaches only those chats, and of them only
+the ones currently running a turn. Terminal agents retain the complete tool set. Page text is untrusted content, not instructions. Website actions remain
 subject to the user's authorization, including forms and signed-in accounts.
 
 ## Host contract
@@ -157,6 +160,6 @@ sibling spawning are not exposed to these chat credentials.
 
 OpenCode 2.x receives launch-local MCP configuration through
 `OPENCODE_CONFIG_CONTENT` in standalone terminal mode. Its chat adapter connects
-a browser-only credential to its private native server and attaches Del browser
+a browser-only credential shared by that workspace's chats to its private native server and attaches Del browser
 routing through native session instruction entries. Live integration checks in
 `app_bridge.rs` exercise cold startup and browser requests through OpenCode.
