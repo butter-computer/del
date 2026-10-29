@@ -380,6 +380,7 @@ pub struct RightPanel {
     address: Entity<InputState>,
     new_tab_scroll: ScrollHandle,
     tool_tab_scroll: ScrollHandle,
+    revealed_tab: Option<SidebarTab>,
     motion: crate::tab_motion::Strip<SidebarTab>,
     tab_drag: Option<SidebarDrag>,
     tab_drag_outside: bool,
@@ -580,6 +581,7 @@ impl RightPanel {
     fn select_hosted(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_blank(cx);
         self.active_hosted = Some(id);
+        self.reveal_active_tab();
         self.set_preview_visible(self.preview_visible, cx);
         self.prepare_to_show(window, cx);
         if let Some(tab) = self
@@ -1012,6 +1014,7 @@ impl RightPanel {
         self.remember_blank(cx);
         self.blank_active = index;
         self.activate_pane(Pane::NewTab);
+        self.reveal_active_tab();
         self.show_blank_address(window, cx);
         cx.notify();
     }
@@ -1049,19 +1052,23 @@ impl RightPanel {
         self.tool_tab_scroll.scroll_to_item(position);
     }
 
+    fn reveal_active_tab(&self) {
+        let key = self.active_hosted.as_ref().map_or_else(
+            || self.tab_key(self.pane, self.pane_instance(self.pane)),
+            |id| SidebarTab::Hosted(id.clone()),
+        );
+        if let Some(index) = self.sidebar_keys().iter().position(|tab| *tab == key) {
+            self.tool_tab_scroll.scroll_to_item(index);
+        }
+    }
+
     fn open_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_blank(cx);
         if self.pane != pane {
             self.change_expanded.clear();
         }
         self.activate_pane(pane);
-        if let Some(index) = self
-            .sidebar_tabs()
-            .iter()
-            .position(|(p, instance)| *p == pane && *instance == self.pane_instance(pane))
-        {
-            self.tool_tab_scroll.scroll_to_item(index);
-        }
+        self.reveal_active_tab();
         self.prepare_to_show(window, cx);
         match pane {
             Pane::Terminal => self.focus_terminal(window, cx),
@@ -1557,6 +1564,7 @@ impl RightPanel {
             address,
             new_tab_scroll: ScrollHandle::new(),
             tool_tab_scroll: ScrollHandle::new(),
+            revealed_tab: None,
             motion: Default::default(),
             tab_drag: None,
             tab_drag_outside: false,
@@ -3189,21 +3197,33 @@ impl Render for RightPanel {
             .collect();
         let was_transitioning = self.motion.transitioning();
         let slots = self.motion.sync(visuals, cx);
+        let active_key = self.active_hosted.as_ref().map_or_else(
+            || self.tab_key(self.pane, self.pane_instance(self.pane)),
+            |id| SidebarTab::Hosted(id.clone()),
+        );
+        let active_changed = self.revealed_tab.as_ref() != Some(&active_key);
+        self.revealed_tab = Some(active_key.clone());
+        if active_changed && !self.workspace {
+            // Restored panels can first render before their scroll viewport has
+            // bounds. Repeat once after layout instead of leaving the active tab hidden.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.reveal_active_tab();
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         // Re-reveal after expansion as well: the initial scroll request sees
         // a nearly zero-width tab and cannot reveal its final bounds yet.
         if !cx.has_active_drag()
-            && (was_transitioning || self.motion.transitioning())
-            && let Some(index) = slots.iter().position(|slot| {
-                !slot.closing
-                    && slot.key
-                        == self
-                            .active_hosted
-                            .as_ref()
-                            .map(|id| SidebarTab::Hosted(id.clone()))
-                            .unwrap_or_else(|| {
-                                self.tab_key(self.pane, self.pane_instance(self.pane))
-                            })
-            })
+            && (was_transitioning || self.motion.transitioning() || active_changed)
+            && let Some(index) = slots
+                .iter()
+                .position(|slot| !slot.closing && slot.key == active_key)
         {
             self.tool_tab_scroll.scroll_to_item(index);
         }

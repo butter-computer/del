@@ -93,7 +93,7 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(1120.0), px(760.0));
 const SIDEBAR_ENABLED: bool = true;
 
 /// Every tab is this wide once settled; it animates to and from 0.
-const TAB_WIDTH: f32 = 160.0;
+const TAB_WIDTH: f32 = 144.0;
 
 /// Space after each tab, animated together with it.
 const TAB_GAP: f32 = 2.0;
@@ -2752,16 +2752,7 @@ impl Render for AppShell {
                                 &self.usage,
                                 &self.updater,
                                 cx,
-                            ))
-                            .child(
-                                self.resize_handle(
-                                    false,
-                                    left_width,
-                                    if right_visible { right_width } else { 0.0 },
-                                    cx,
-                                )
-                                .right_0(),
-                            );
+                            ));
                         if settings_open || self.sidebar_toggles == 0 {
                             row.child(sidebar.w(zpx(left_width)))
                         } else {
@@ -2784,6 +2775,18 @@ impl Render for AppShell {
                             .h_full()
                             .px(inset)
                             .pb(inset)
+                            .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
+                                page.child(
+                                    self.resize_handle(
+                                        false,
+                                        left_width,
+                                        if right_visible { right_width } else { 0.0 },
+                                        cx,
+                                    )
+                                    .left_0()
+                                    .w(inset),
+                                )
+                            })
                             .on_children_prepainted({
                                 let page_bounds = self.page_bounds.clone();
                                 move |bounds, window, _| {

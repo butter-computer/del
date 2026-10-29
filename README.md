@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.11` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.12` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,8 +14,8 @@ when making future changes.
 
 ## Download and install
 
-The latest release is **0.1.9**.
-Download **Del-0.1.9-arm64.dmg** from the [0.1.9 release](https://github.com/butter-computer/del/releases/tag/v0.1.9),
+The latest release is **0.1.12**.
+Download **Del-0.1.12-arm64.dmg** from the [0.1.12 release](https://github.com/butter-computer/del/releases/tag/v0.1.12),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.11-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.12-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

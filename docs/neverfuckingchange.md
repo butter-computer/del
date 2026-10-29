@@ -430,7 +430,8 @@ This records the final decisions, including corrections to earlier experiments.
   original conversation fixed. Transfer live entities rather than reopening tools:
   shells keep their PID, editors keep drafts and undo history, and side chats keep
   their conversation, model/account selection, and storage identity.
-- Main and right-sidebar tool tabs share one 140-point width so transfers do not resize them.
+- Main and right-sidebar tool tabs share one compact 128-point width so transfers do not resize them. Top-level session tabs are 144 points wide. Overflow fades occupy only 16 points at each edge; selecting an overflowed tab reveals its full slot, including reordered and transferred tabs.
+- The left sidebar resize target fills the six-point page gutter, outside the sidebar rows and chat tabs/content.
 - Only transfer on a valid drop inside the same session. Entering the other row
   immediately opens an insertion gap; neighboring tabs shift as the pointer moves
   between slots. Do not replace this behavior with a blue zone highlight.

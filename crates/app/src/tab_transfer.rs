@@ -89,7 +89,7 @@ pub(crate) fn edge_fades(scroll: &ScrollHandle, surface: Rgba) -> Vec<AnyElement
                     } else {
                         scroll.max_offset().x + scroll.offset().x
                     };
-                    let alpha = (distance / zpx(28.)).clamp(0., 1.);
+                    let alpha = (distance / zpx(16.)).clamp(0., 1.);
                     if alpha > 0. {
                         window.paint_quad(fill(
                             bounds,
@@ -105,7 +105,7 @@ pub(crate) fn edge_fades(scroll: &ScrollHandle, surface: Rgba) -> Vec<AnyElement
             .absolute()
             .top_0()
             .bottom_0()
-            .w(zpx(28.))
+            .w(zpx(16.))
             .when(left, |fade| fade.left_0())
             .when(!left, |fade| fade.right_0())
             .into_any_element()
