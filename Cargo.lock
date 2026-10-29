@@ -1485,6 +1485,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-apple",
  "image",
+ "markdown",
  "objc2-core-foundation",
  "objc2-core-video",
  "raw-window-handle",

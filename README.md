@@ -380,6 +380,8 @@ conversation. Unloading a running session also stops its current work.
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
   the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
   again restarts that confirmation.
+- Codex file citations render as clickable filenames in live and saved replies,
+  including Side chats. Code examples remain literal.
 - Local file links in replies open in Del’s file viewer; relative links resolve
   against the conversation’s project folder. Only http, https, and mailto links
   open in your browser or mail app; other link types (custom app links, network

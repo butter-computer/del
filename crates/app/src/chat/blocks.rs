@@ -754,7 +754,9 @@ fn assistant_message(
         .child(
             state
                 .map(TextView::new)
-                .unwrap_or_else(|| TextView::markdown(("markdown", ix), text))
+                .unwrap_or_else(|| {
+                    TextView::markdown(("markdown", ix), super::citations::markdown(&text))
+                })
                 .style(style)
                 .stream_fade(false)
                 .selectable(true)

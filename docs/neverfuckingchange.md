@@ -164,6 +164,9 @@ This records the final decisions, including corrections to earlier experiments.
   Respect Reduce Motion and keep virtual-list heights synchronized throughout the reveal.
 - Local file links in chat open in Del’s file viewer, resolved against the conversation
   folder. Do not send bare paths to the operating system as application URLs.
+- Render Codex file-citation directives as local filename links in assistant replies,
+  including streamed, restored, and Side chat messages. Preserve raw saved text,
+  literal code examples, and malformed directives; remap search-highlight offsets.
 - Keep search highlights, message navigation, and immediate streaming intact.
 - Message navigation highlights exactly one tick: the hovered tick while pointing,
   otherwise the current message. Nearby ticks may lengthen but stay gray. Emit a
@@ -185,6 +188,7 @@ This records the final decisions, including corrections to earlier experiments.
   parsing completes. Do not wait for turn completion or a later unrelated repaint.
 - Append incoming deltas directly to the existing Markdown view. Coalesce only
   already-received adjacent chunks from the same turn, preserving tool/status boundaries.
+  Replies containing file citations refresh their display text as chunks complete directives.
 - Bound event draining so a busy stream cannot monopolize the UI update loop.
 - Preserve selection, Markdown rendering, reasoning/tool events, and saved transcript loading.
 

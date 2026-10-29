@@ -310,7 +310,7 @@ impl ChatView {
         let (source, range) = if message.role == "You" {
             escaped_search_text(&text, source_range)
         } else {
-            (text, source_range)
+            super::citations::with_range(&text, source_range)
         };
         let text_view =
             cx.new(|cx| gpui_kit::component::text::TextViewState::markdown(&source, cx));
@@ -486,14 +486,18 @@ impl ChatView {
             if let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) {
                 if let Some(view) = self.assistant_text.get(&ix) {
                     view.update(cx, |view, cx| {
-                        if let Some(delta) = delta {
+                        if let Some(delta) =
+                            delta.filter(|_| !text.contains(super::citations::MARKER))
+                        {
                             view.push_str(delta, cx);
                         } else {
-                            view.set_text(text, cx);
+                            view.set_text(&super::citations::markdown(text), cx);
                         }
                     });
                 } else {
-                    let view = cx.new(|cx| text::TextViewState::markdown(text, cx));
+                    let view = cx.new(|cx| {
+                        text::TextViewState::markdown(&super::citations::markdown(text), cx)
+                    });
                     // Look the row up on each notification: rows shift when one is removed.
                     cx.observe(&view, |this, view, cx| {
                         if let Some(ix) = this
@@ -1495,6 +1499,15 @@ mod tests {
             ("First", "First"),
             (" second", "First second"),
             (" third", "First second third"),
+            (
+                "\n\n:codex-file-citation{path=\"/tmp/Report",
+                "First second third\n:codex-file-citation{path=\"/tmp/Report",
+            ),
+            (
+                ".pdf\" purpose=\"output\"}",
+                "First second third\nReport.pdf",
+            ),
+            ("\n\nReady.", "First second third\nReport.pdf\nReady."),
         ] {
             view.update(cx, |view, cx| {
                 view.on_event(
@@ -1517,7 +1530,8 @@ mod tests {
             view.on_event(
                 &AgentEvent::AssistantMessage {
                     turn_id: "streaming".into(),
-                    text: "**Corrected** 世界".into(),
+                    text: "**Corrected** 世界\n\n::codex-file-citation{path=\"/tmp/Final.pdf\"}"
+                        .into(),
                 },
                 cx,
             )
@@ -1527,7 +1541,35 @@ mod tests {
             let text = view.assistant_text.values().next().unwrap();
             assert_eq!(
                 text.read(cx).rendered_text().as_str().trim(),
-                "Corrected 世界"
+                "Corrected 世界\nFinal.pdf"
+            );
+            assert!(
+                matches!(&view.model.blocks[0], Block::Assistant { text, .. }
+                if text.contains("::codex-file-citation"))
+            );
+        });
+        // Loading saved messages creates a fresh text view, without streaming deltas.
+        view.update(cx, |view, cx| {
+            view.reset_for_resync();
+            view.replaying = true;
+            view.on_event(
+                &AgentEvent::AssistantMessage {
+                    turn_id: "restored".into(),
+                    text: ":codex-file-citation{path=\"/tmp/Saved.pdf\" purpose=\"output\"}".into(),
+                },
+                cx,
+            );
+            view.replaying = false;
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.assistant_text[&0]
+                    .read(cx)
+                    .rendered_text()
+                    .as_str()
+                    .trim(),
+                "Saved.pdf"
             );
         });
     }

@@ -5,6 +5,7 @@
 mod activity;
 pub(crate) mod attachments;
 mod blocks;
+mod citations;
 pub(crate) mod links;
 mod loading;
 pub mod model;
