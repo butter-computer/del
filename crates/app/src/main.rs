@@ -258,6 +258,10 @@ actions!(
         OpenChanges,
         OpenFiles,
         OpenSideChat,
+        SelectProvider,
+        SelectModel,
+        SelectEffort,
+        SelectBranch,
         Tab1,
         Tab2,
         Tab3,
@@ -382,6 +386,7 @@ struct AppShell {
     dictation_generation: u64,
     model_picker: Entity<model_picker::ModelPicker>,
     branch_picker: Entity<branch_picker::BranchPicker>,
+    provider_menu_open: bool,
     rename: Entity<InputState>,
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
@@ -720,6 +725,7 @@ impl AppShell {
             command_menu,
             model_picker,
             branch_picker,
+            provider_menu_open: false,
             rename,
             renaming_loaded: None,
             project_renaming_loaded: None,
@@ -1346,6 +1352,61 @@ impl AppShell {
         }
     }
 
+    fn open_composer_picker(
+        &mut self,
+        picker: keybinds::Picker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_open || self.state.read(cx).panel != Panel::Chat {
+            return;
+        }
+        if self.active_tab_zone() == tab_zone::Zone::Right {
+            self.right.update(cx, |panel, cx| {
+                panel.open_composer_picker(picker, window, cx)
+            });
+            return;
+        }
+        if let Some(workspace) = self.workspace(cx)
+            && !workspace.read(cx).is_chat()
+        {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_composer_picker(picker, window, cx)
+            });
+            return;
+        }
+        if matches!(self.state.read(cx).selection, Selection::Terminal(_)) {
+            return;
+        }
+        self.composer
+            .update(cx, |input, cx| input.focus(window, cx));
+        self.provider_menu_open = false;
+        if !matches!(picker, keybinds::Picker::Model | keybinds::Picker::Effort) {
+            self.model_picker
+                .update(cx, |picker, cx| picker.close_picker(cx));
+        }
+        if picker != keybinds::Picker::Branch {
+            self.branch_picker
+                .update(cx, |picker, cx| picker.close_picker(cx));
+        }
+        cx.notify();
+        match picker {
+            keybinds::Picker::Provider if !self.state.read(cx).is_starting() => {
+                self.provider_menu_open = true;
+                cx.notify();
+            }
+            keybinds::Picker::Model | keybinds::Picker::Effort => {
+                self.model_picker.update(cx, |picker_view, cx| {
+                    picker_view.open_picker(picker == keybinds::Picker::Effort, window, cx)
+                })
+            }
+            keybinds::Picker::Branch => self
+                .branch_picker
+                .update(cx, |picker, cx| picker.open_picker(window, cx)),
+            _ => {}
+        }
+    }
+
     fn new_inner_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace(cx).is_none() {
             self.sync_workspaces(window, cx);
@@ -1551,6 +1612,15 @@ impl AppShell {
         )
         .folder_tooltip(folder_branch.map(|branch| format!("Branch: {branch}")))
         .accounts(self.state.clone())
+        .provider_menu(self.provider_menu_open, {
+            let shell = cx.entity();
+            move |open, _, cx| {
+                shell.update(cx, |this, cx| {
+                    this.provider_menu_open = open;
+                    cx.notify();
+                })
+            }
+        })
         .goal_mode(self.goal_modes.contains_key(&self.composer_owner(cx)))
         .on_cancel_goal(move |window, cx| {
             shell_goal.update(cx, |this, cx| this.cancel_goal_mode(window, cx))
@@ -2637,6 +2707,18 @@ impl Render for AppShell {
                     cx.notify();
                 });
             }))
+            .on_action(cx.listener(|this, _: &SelectProvider, window, cx| {
+                this.open_composer_picker(keybinds::Picker::Provider, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectModel, window, cx| {
+                this.open_composer_picker(keybinds::Picker::Model, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectEffort, window, cx| {
+                this.open_composer_picker(keybinds::Picker::Effort, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectBranch, window, cx| {
+                this.open_composer_picker(keybinds::Picker::Branch, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SearchConversations, window, cx| {
                 this.open_search(window, cx);
             }))
@@ -2899,6 +2981,10 @@ fn main() {
             appearance::load(cx);
 
             cx.bind_keys([
+                KeyBinding::new("ctrl-m", SelectModel, None),
+                KeyBinding::new("ctrl-shift-m", SelectEffort, None),
+                KeyBinding::new("ctrl-shift-p", SelectProvider, None),
+                KeyBinding::new("ctrl-shift-b", SelectBranch, None),
                 KeyBinding::new("cmd-k", SearchConversations, None),
                 KeyBinding::new("cmd-\\", ToggleFiles, None),
                 KeyBinding::new("cmd-shift-b", ToggleFiles, None),

@@ -18,6 +18,50 @@ pub struct BranchPicker {
     bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 impl BranchPicker {
+    pub fn close_picker(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if state.is_starting() || !matches!(state.selection, crate::state::Selection::Draft(_)) {
+            return;
+        }
+        let root = state.effective().2;
+        let Some(info) = state.project_info.get(&root).cloned() else {
+            return;
+        };
+        if info.branches.is_empty() {
+            return;
+        }
+        let selected = state.draft_launch_options().branch.unwrap_or(info.current);
+        let return_focus = window.focused(cx);
+        self.root = Some(root);
+        self.open = true;
+        self.panel.update(cx, |panel, cx| {
+            panel.reset(info.branches, selected, window, cx)
+        });
+        if let Some(focus) = return_focus {
+            focus.focus(window, cx);
+        }
+        let picker = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = picker.update(cx, |this, cx| {
+                if this.open {
+                    this.panel.update(cx, |panel, cx| {
+                        panel
+                            .search
+                            .update(cx, |search, cx| search.focus(window, cx))
+                    });
+                }
+            });
+        });
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let bounds = Rc::new(Cell::new(Bounds::default()));
         let panel = cx.new(|cx| BranchPanel::new(bounds.clone(), window, cx));
@@ -84,6 +128,11 @@ impl Render for BranchPicker {
                             .min_w_0()
                             .max_w(zpx(180.))
                             .text_size(zpx(12.))
+                            .tooltip_with_action(
+                                "Select starting branch",
+                                &crate::SelectBranch,
+                                None,
+                            )
                             .accessibility_label(format!("Starting branch: {selected}"))
                             .child(
                                 div()

@@ -696,6 +696,24 @@ impl WorkspaceTabs {
         self.focus(window, cx);
         cx.notify();
     }
+    pub fn open_composer_picker(
+        &self,
+        picker: crate::keybinds::Picker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self
+            .tabs
+            .iter()
+            .find(|tab| Some(tab.id) == self.active)
+            .and_then(|tab| tab.panel.as_ref())
+        {
+            panel.update(cx, |panel, cx| {
+                panel.open_composer_picker(picker, window, cx)
+            });
+        }
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.iter().find(|tab| Some(tab.id) == self.active) {
             if let Some(panel) = &tab.panel {

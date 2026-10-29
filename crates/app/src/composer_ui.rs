@@ -101,6 +101,8 @@ pub struct ComposerCard {
     provider: Provider,
     provider_ready: bool,
     account_state: Option<Entity<crate::state::AppState>>,
+    provider_menu_open: bool,
+    on_provider_menu: ChoiceHandler<bool>,
     model_picker: Option<Entity<crate::model_picker::ModelPicker>>,
     settings: Option<AnyElement>,
     show_voice: bool,
@@ -145,6 +147,8 @@ impl ComposerCard {
             provider,
             provider_ready,
             account_state: None,
+            provider_menu_open: false,
+            on_provider_menu: Rc::new(|_, _, _| {}),
             model_picker: model_picker.into(),
             settings: None,
             show_voice: false,
@@ -171,6 +175,16 @@ impl ComposerCard {
 
     /// A conversation can supply independently scoped account/model controls
     /// while sharing the same input, attachments and send/stop presentation.
+    pub fn provider_menu(
+        mut self,
+        open: bool,
+        change: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.provider_menu_open = open;
+        self.on_provider_menu = Rc::new(change);
+        self
+    }
+
     pub fn settings(mut self, controls: impl IntoElement) -> Self {
         self.settings = Some(controls.into_any_element());
         self
@@ -280,13 +294,18 @@ pub(crate) fn provider_button(
     provider_ready: bool,
     locked: bool,
 ) -> Button {
-    chip(id).h(zpx(24.)).px(zpx(8.)).disabled(locked).child(
-        h_flex()
-            .gap_1p5()
-            .items_center()
-            .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
-            .child(providers::display_name(provider)),
-    )
+    chip(id)
+        .tooltip_with_action("Select provider / account", &crate::SelectProvider, None)
+        .h(zpx(24.))
+        .px(zpx(8.))
+        .disabled(locked)
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
+                .child(providers::display_name(provider)),
+        )
 }
 
 impl RenderOnce for ComposerCard {
@@ -301,6 +320,8 @@ impl RenderOnce for ComposerCard {
             provider,
             provider_ready,
             account_state,
+            provider_menu_open,
+            on_provider_menu,
             model_picker,
             settings,
             show_voice,
@@ -406,6 +427,9 @@ impl RenderOnce for ComposerCard {
                     })
             })
         };
+        let agent_el = agent_el
+            .open(provider_menu_open)
+            .on_open_change(move |open, window, cx| on_provider_menu(*open, window, cx));
         let folder_el = if folder_locked {
             h_flex()
                 .id("folder")

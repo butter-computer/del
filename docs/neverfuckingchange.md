@@ -528,3 +528,20 @@ This records the final decisions, including corrections to earlier experiments.
   (160 ms). Match top, main-inner, and right-sidebar strips. Release closed tools
   immediately; retain only a noninteractive visual for the exit. Reduced Motion
   settles instantly, as do cross-pane transfers and active drags.
+
+## Composer picker shortcuts
+
+- ⌃M opens model selection, ⌃⇧M opens effort controls, and ⌃⇧P opens
+  provider/account selection for the active chat in the last-used zone. Follow
+  Side chat ownership after tab transfers; do not change the parent chat.
+- ⌃⇧B opens starting-branch selection only in a new-session draft.
+- Show shortcut badges in control tooltips and list the bindings in Settings.
+  Respect locked controls and ignore these actions on non-chat tabs.
+- Model popovers own search focus when opening; do not defer it to a later
+  frame. Preserve typing, arrow navigation, Return, and Escape across reopening
+  and switches between model and effort controls. Model rows retain horizontal
+  padding inside their hover/selection background.
+- Side chat provider menus read live account identities and profiles from the
+  owning app state, rather than fixing labels at fork creation.
+- Return in the effort popup confirms the current settings and closes the
+  popup, returning focus to the composer without submitting its draft.

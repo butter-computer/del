@@ -137,6 +137,43 @@ pub struct ModelPicker {
 }
 
 impl ModelPicker {
+    pub fn close_picker(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn open_picker(&mut self, effort: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).locked {
+            return;
+        }
+        let was_open = self.open;
+        self.open = true;
+        self.panel.update(cx, |panel, cx| {
+            panel.models = !effort;
+            panel.highlighted = None;
+            panel.search.update(cx, |search, cx| {
+                search.set_value("", window, cx);
+            });
+            // A newly opened popover focuses its tracked control during mount.
+            // Switching panels while it is already open needs an explicit move.
+            if was_open {
+                if effort {
+                    panel.focus.focus(window, cx);
+                } else {
+                    panel
+                        .search
+                        .update(cx, |search, cx| search.focus(window, cx));
+                }
+            }
+            panel.model_scroll.set_offset(point(zpx(0.), zpx(0.)));
+            panel.state.apply(ModelChange::Refresh(false), cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, _, cx| {
             this.state.apply(ModelChange::Refresh(false), cx);
@@ -183,6 +220,14 @@ impl Render for ModelPicker {
         let label = model_label(model.as_deref(), info.as_ref());
         let effort = effort_label(state.effort.as_deref(), info.as_ref());
         let panel = self.panel.clone();
+        let content_focus = {
+            let panel = self.panel.read(cx);
+            if panel.models {
+                panel.search.read(cx).focus_handle(cx)
+            } else {
+                panel.focus.clone()
+            }
+        };
         let trigger_bottom = self.trigger_bottom.clone();
         div()
             .on_children_prepainted(move |bounds, _, _| {
@@ -192,6 +237,7 @@ impl Render for ModelPicker {
             })
             .child(
                 Popover::new("model-picker")
+                    .track_focus(&content_focus)
                     .open(self.open)
                     .appearance(false)
                     .anchor(if above {
@@ -208,11 +254,28 @@ impl Render for ModelPicker {
                             .rounded_full()
                             .text_size(zpx(15.))
                             .disabled(state.locked)
+                            .tooltip_with_action("Select model", &crate::SelectModel, None)
                             .accessibility_label(format!("Select model: {label}"))
                             .child(h_flex().gap_1().items_center().child(label).when_some(
                                 effort,
                                 |row, effort| {
-                                    row.child(div().text_color(rgba(0xffffff80)).child(effort))
+                                    row.child(
+                                        div()
+                                            .id("effort-picker-trigger")
+                                            .text_color(rgba(0xffffff80))
+                                            .child(effort)
+                                            .tooltip(|window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    "Select effort",
+                                                )
+                                                .action(&crate::SelectEffort, None)
+                                                .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.open_picker(true, window, cx);
+                                            })),
+                                    )
                                 },
                             )),
                     )
@@ -325,12 +388,26 @@ impl Render for ModelPanel {
         let supports_fast = info.as_ref().is_some_and(|m| m.fast_tier.is_some());
         let locked = state.locked;
         let muted = rgba(0xffffff80);
+        let models = self.models;
         let root = v_flex()
             .id("model-panel")
+            .debug_selector(move || {
+                if models {
+                    "model-picker-models".into()
+                } else {
+                    "model-picker-effort".into()
+                }
+            })
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke;
-                if key.key == "escape" {
+                let confirm_effort = !this.models
+                    && key.key == "enter"
+                    && !key.modifiers.platform
+                    && !key.modifiers.control
+                    && !key.modifiers.alt
+                    && !key.modifiers.shift;
+                if key.key == "escape" || confirm_effort {
                     window.prevent_default();
                     cx.stop_propagation();
                     cx.emit(CloseModelPicker);
@@ -390,7 +467,8 @@ impl Render for ModelPanel {
                         .w_full()
                         .h_auto()
                         .flex_none()
-                        .py_1p5()
+                        .px(zpx(8.))
+                        .py(zpx(6.))
                         .text_size(zpx(12.))
                         .justify_start()
                         .disabled(locked)
@@ -438,7 +516,8 @@ impl Render for ModelPanel {
                         .w_full()
                         .h_auto()
                         .flex_none()
-                        .py_1p5()
+                        .px(zpx(8.))
+                        .py(zpx(6.))
                         .text_size(zpx(12.))
                         .justify_start()
                         .disabled(locked)
@@ -456,7 +535,7 @@ impl Render for ModelPanel {
                                     col.child(
                                         div()
                                             .text_size(zpx(10.5))
-                                            .max_w(zpx(250.))
+                                            .w_full()
                                             .truncate()
                                             .text_color(muted)
                                             .child(model.description.clone()),
@@ -535,12 +614,12 @@ impl Render for ModelPanel {
                         .child(
                             Button::new("refresh-models")
                                 .ghost()
-                                .small()
-                                .label(if catalog.loading {
-                                    "Refreshing…"
-                                } else {
-                                    "Refresh"
-                                })
+                                .size(crate::icons::button_size())
+                                .flex_none()
+                                .p_0()
+                                .accessibility_label("Refresh models")
+                                .tooltip("Refresh models")
+                                .child(crate::icons::icon(IconName::RefreshCw).text_color(muted))
                                 .disabled(catalog.loading)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.state.apply(ModelChange::Refresh(true), cx)
@@ -860,6 +939,120 @@ fn fuzzy_model_matches(query: &str, candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{fuzzy_model_matches, next_effort_index, next_model_index};
+    use gpui_kit::Focusable;
+
+    #[::gpui::test]
+    fn shortcut_focus_supports_typing_and_navigation(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let (picker, cx) =
+            cx.add_window_view(|window, cx| super::ModelPicker::new(state, window, cx));
+        cx.run_until_parked();
+        for (close_first, effort) in [(false, false), (false, true), (false, false), (true, false)]
+        {
+            if close_first {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                assert!(!picker.read_with(cx, |picker, _| picker.open));
+            }
+            cx.update(|window, cx| {
+                picker.update(cx, |picker, cx| picker.open_picker(effort, window, cx));
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let panel = picker.read(cx).panel.read(cx);
+                let focus = if effort {
+                    panel.focus.clone()
+                } else {
+                    panel.search.read(cx).focus_handle(cx)
+                };
+                assert!(
+                    focus.is_focused(window),
+                    "shortcut must focus the active picker control"
+                );
+            });
+            if !effort {
+                cx.simulate_keystrokes("d e f");
+                picker.read_with(cx, |picker, cx| {
+                    assert_eq!(
+                        picker.panel.read(cx).search.read(cx).value().as_str(),
+                        "def"
+                    );
+                });
+                cx.simulate_keystrokes("down");
+                picker.read_with(cx, |picker, cx| {
+                    assert_eq!(picker.panel.read(cx).highlighted, Some(0))
+                });
+                cx.simulate_keystrokes("enter");
+                picker.read_with(cx, |picker, cx| assert!(!picker.panel.read(cx).models));
+            }
+        }
+    }
+
+    #[::gpui::test]
+    fn enter_confirms_effort_and_returns_focus_without_bubbling(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        struct Composer {
+            input: Entity<InputState>,
+            picker: Entity<ModelPicker>,
+            bubbled_enters: usize,
+        }
+        impl Render for Composer {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, _| {
+                        if event.keystroke.key == "enter" {
+                            this.bubbled_enters += 1;
+                        }
+                    }))
+                    .child(Input::new(&self.input))
+                    .child(self.picker.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.update(cx, |input, cx| input.focus(window, cx));
+            let picker = cx.new(|cx| ModelPicker::new(state, window, cx));
+            Composer {
+                input,
+                picker,
+                bubbled_enters: 0,
+            }
+        });
+        cx.run_until_parked();
+        for effort in [false, true] {
+            cx.update(|window, cx| {
+                let picker = composer.read(cx).picker.clone();
+                picker.update(cx, |picker, cx| picker.open_picker(effort, window, cx));
+            });
+            cx.run_until_parked();
+            if !effort {
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+                composer.read_with(cx, |composer, cx| {
+                    assert!(composer.picker.read(cx).open);
+                    assert!(!composer.picker.read(cx).panel.read(cx).models);
+                });
+            }
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let composer = composer.read(cx);
+                assert!(
+                    !composer.picker.read(cx).open,
+                    "Enter must confirm and close effort controls"
+                );
+                assert!(composer.input.read(cx).focus_handle(cx).is_focused(window));
+                assert_eq!(
+                    composer.bubbled_enters, 0,
+                    "Confirmation must not send a message"
+                );
+            });
+        }
+    }
 
     #[test]
     fn model_effort_label_shows_default_before_any_explicit_change() {

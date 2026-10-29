@@ -38,6 +38,7 @@ pub struct DropdownMenuPopover<T: Selectable + IntoElement + 'static> {
     anchor: Anchor,
     trigger: T,
     builder: Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>,
+    open: Option<bool>,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
 }
 
@@ -56,8 +57,15 @@ where
             anchor: anchor.into(),
             trigger,
             builder: Rc::new(builder),
+            open: None,
             on_open_change: None,
         }
+    }
+
+    /// Control the menu state; pair with `on_open_change`.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = Some(open);
+        self
     }
 
     /// Set the anchor corner for the dropdown menu popover.
@@ -109,8 +117,15 @@ where
         let menu_state =
             window.use_keyed_state(self.id.clone(), cx, |_, _| DropdownMenuState::default());
 
+        // An external close can bypass the menu's DismissEvent (for example,
+        // switching directly to another picker). Rebuild and focus on next open.
+        if self.open == Some(false) && menu_state.read(cx).menu.is_some() {
+            menu_state.update(cx, |state, _| state.menu = None);
+        }
+
         Popover::new(SharedString::from(format!("popover:{}", self.id)))
             .appearance(false)
+            .when_some(self.open, |popover, open| popover.open(open))
             .overlay_closable(false)
             .trigger(self.trigger)
             .anchor(self.anchor)

@@ -775,6 +775,29 @@ impl RightPanel {
         self.side_context = Some(context);
     }
 
+    pub fn open_composer_picker(
+        &self,
+        picker: crate::keybinds::Picker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            tab.panel.update(cx, |panel, cx| {
+                panel.open_composer_picker(picker, window, cx)
+            });
+            return;
+        }
+        if self.pane == Pane::SideChat
+            && let Some(side) = &self.side_chat
+        {
+            side.update(cx, |side, cx| side.open_composer_picker(picker, window, cx));
+        }
+    }
+
     pub fn focus_side_chat(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(side) = &self.side_chat {
             side.update(cx, |side, cx| side.focus(window, cx));

@@ -43,6 +43,7 @@ pub struct SideChat {
     attachments: Vec<del_agent::Attachment>,
     models: Vec<del_agent::ModelInfo>,
     model_picker: Entity<crate::model_picker::ModelPicker>,
+    provider_menu_open: bool,
     models_loading: bool,
     model_generation: u64,
     save_pending: bool,
@@ -197,6 +198,7 @@ impl SideChat {
             attachments: vec![],
             models: vec![],
             model_picker,
+            provider_menu_open: false,
             models_loading: false,
             model_generation: 0,
             save_pending: false,
@@ -645,6 +647,69 @@ impl std::ops::Deref for Settings {
 }
 
 impl SideChat {
+    pub fn open_composer_picker(
+        &mut self,
+        picker: crate::keybinds::Picker,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.settings_locked(cx) {
+            return;
+        }
+        if picker == crate::keybinds::Picker::Branch {
+            return;
+        }
+        self.focus(window, cx);
+        self.provider_menu_open = false;
+        if picker == crate::keybinds::Picker::Provider {
+            self.model_picker
+                .update(cx, |picker, cx| picker.close_picker(cx));
+        }
+        cx.notify();
+        match picker {
+            crate::keybinds::Picker::Provider => {
+                self.provider_menu_open = true;
+                cx.notify();
+            }
+            crate::keybinds::Picker::Model | crate::keybinds::Picker::Effort => {
+                // The picker reads and refreshes this SideChat through ModelSource.
+                // Release our entity update before opening it to avoid a double lease.
+                let model_picker = self.model_picker.downgrade();
+                window.defer(cx, move |window, cx| {
+                    let _ = model_picker.update(cx, |view, cx| {
+                        view.open_picker(picker == crate::keybinds::Picker::Effort, window, cx)
+                    });
+                });
+            }
+            crate::keybinds::Picker::Branch => {}
+        }
+    }
+
+    fn account_options(
+        &self,
+        provider: Provider,
+        cx: &App,
+    ) -> (Vec<crate::accounts::Account>, String) {
+        if let Some((owner, _)) = &self.context.activity_owner
+            && let Some(owner) = owner.upgrade()
+        {
+            let state = owner.read(cx);
+            return (
+                state.accounts.clone(),
+                state.default_account_label(provider),
+            );
+        }
+        (
+            self.context.accounts.clone(),
+            if provider == Provider::OpenCode {
+                "System"
+            } else {
+                "Account 1"
+            }
+            .into(),
+        )
+    }
+
     fn settings(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
         let Some((config, account_id)) = self.configuration() else {
             return div().into_any_element();
@@ -652,7 +717,6 @@ impl SideChat {
         let record = Settings { config, account_id };
         let locked = self.settings_locked(cx);
         let view = cx.entity();
-        let accounts = self.context.accounts.clone();
         let current = record.clone();
         let account = crate::composer_ui::provider_button(
             "side-account",
@@ -665,7 +729,7 @@ impl SideChat {
                 .iter()
                 .fold(menu, |menu, &provider| {
                     let view = view.clone();
-                    let accounts = accounts.clone();
+                    let (accounts, system_label) = view.read(cx).account_options(provider, cx);
                     let current = current.clone();
                     let default_view = view.clone();
                     let default_current = current.clone();
@@ -680,16 +744,7 @@ impl SideChat {
                         window,
                         cx,
                         move |menu, _, _| {
-                            let choices = std::iter::once((
-                                None,
-                                if provider == Provider::OpenCode {
-                                    "System"
-                                } else {
-                                    "Account 1"
-                                }
-                                .to_owned(),
-                            ))
-                            .chain(
+                            let choices = std::iter::once((None, system_label.clone())).chain(
                                 accounts
                                     .iter()
                                     .filter(|a| a.provider == provider && !a.requires_login)
@@ -741,6 +796,15 @@ impl SideChat {
                     })
                 })
         });
+        let menu_owner = cx.entity();
+        let account = account
+            .open(self.provider_menu_open)
+            .on_open_change(move |open, _, cx| {
+                menu_owner.update(cx, |this, cx| {
+                    this.provider_menu_open = *open;
+                    cx.notify();
+                });
+            });
         h_flex()
             .items_center()
             .flex_wrap()
@@ -1093,6 +1157,37 @@ mod tests {
             );
             assert_eq!(s.parent, Some(parent.id.clone()));
         });
+        state.update(cx, |state, cx| {
+            state
+                .default_identities
+                .insert(Provider::Codex, "tester@example.com".into());
+            cx.notify();
+        });
+        side.read_with(cx, |side, cx| {
+            assert_eq!(
+                side.account_options(Provider::Codex, cx).1,
+                "tester",
+                "Side chats must use the live account identity"
+            );
+        });
+        // Invoke through SideChat's update, exactly as the shortcut router does.
+        // The model picker reads and refreshes its owning SideChat settings.
+        for (picker, selector) in [
+            (crate::keybinds::Picker::Model, "model-picker-models"),
+            (crate::keybinds::Picker::Effort, "model-picker-effort"),
+        ] {
+            cx.update(|window, cx| {
+                side.update(cx, |side, cx| side.open_composer_picker(picker, window, cx))
+            });
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "shortcut must open {selector}"
+            );
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(selector).is_none());
+        }
         cx.update(|window, cx| {
             side.update(cx, |side, cx| {
                 side.input.update(cx, |input, cx| {

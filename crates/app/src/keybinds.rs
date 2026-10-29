@@ -4,6 +4,14 @@ use crate::zoom::px as zpx;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Picker {
+    Provider,
+    Model,
+    Effort,
+    Branch,
+}
+
 const GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
         "Sessions and tabs",
@@ -33,6 +41,10 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Conversation",
         &[
             ("Focus main composer", "⌘L"),
+            ("Select provider/account in the active chat", "⌃⇧P"),
+            ("Select model in the active chat", "⌃M"),
+            ("Select effort in the active chat", "⌃⇧M"),
+            ("Select starting branch in a new-session draft", "⌃⇧B"),
             ("Send or queue a message", "Return"),
             ("Insert a newline", "⇧Return"),
             (
@@ -60,6 +72,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Move through results", "↑ / ↓"),
             ("Choose highlighted result", "Return"),
             ("Change effort when effort controls are focused", "← / →"),
+            ("Confirm effort and return to the composer", "Return"),
             ("Dismiss search or picker", "Esc"),
         ],
     ),
@@ -140,4 +153,61 @@ pub fn render() -> impl IntoElement {
                         })),
                 )
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+    use gpui_kit::component::{button::Button, menu::DropdownMenu};
+    #[::gpui::test]
+    fn controlled_menu_can_open_dismiss_and_reopen(cx: &mut gpui::TestAppContext) {
+        struct Controlled {
+            open: bool,
+        }
+        impl Render for Controlled {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    Button::new("controlled-trigger")
+                        .label("Provider")
+                        .dropdown_menu(|menu, _, _| {
+                            menu.menu("Copy", Box::new(crate::SelectProvider))
+                        })
+                        .open(self.open)
+                        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                            this.open = *open;
+                            cx.notify();
+                        })),
+                )
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (root, cx) = cx.add_window_view(|_, _| Controlled { open: true });
+        cx.run_until_parked();
+        assert!(root.read_with(cx, |root, _| root.open));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!root.read_with(cx, |root, _| root.open));
+        root.update(cx, |root, cx| {
+            root.open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!root.read_with(cx, |root, _| root.open));
+        for open in [true, false, true] {
+            root.update(cx, |root, cx| {
+                root.open = open;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!root.read_with(cx, |root, _| root.open));
+    }
 }

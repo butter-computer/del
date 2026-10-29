@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.15` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.16` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.15-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.16-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -258,7 +258,7 @@ remote names case-insensitively. Its list is capped at eight rows and
 shrinks to fit the window, with wheel/trackpad scrolling, no visible scrollbar,
 and a bottom fade while more results remain. Long branch names fade at the trailing
 edge like tab titles, without ellipses. Use ↑/↓ or Page Up/Page Down to
-navigate, Return to choose, and Escape to dismiss. There is no shortcut-hint footer.
+navigate, Return to choose, and Escape to dismiss. Open the branch picker with ⌃⇧B in a new-session draft. There is no shortcut-hint footer.
 Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
@@ -955,3 +955,17 @@ clang -fobjc-arc -mmacosx-version-min=11.0 scripts/test-dictation.m -framework A
   -framework AVFoundation -o /tmp/del-dictation-test
 /tmp/del-dictation-test
 ```
+
+### Composer picker shortcuts
+
+Use ⌃M to select a model, ⌃⇧M to open effort controls, and ⌃⇧P to select a
+provider or account in the active chat pane. These commands also work in Side
+chats, including tabs moved between zones. ⌃⇧B opens the starting-branch picker
+in a new-session draft. Hover the controls for shortcut badges; Settings →
+Keybinds lists all four. Locked controls and non-chat tabs do not open a picker.
+
+Model selection focuses search as soon as its popup opens; type to filter and
+use ↑/↓ and Return without clicking the field. Side chat account menus use the
+same live account identities as the main chat.
+After selecting a model, press Return in the effort popup to confirm and return
+to the composer. This does not send the draft message.
