@@ -306,7 +306,8 @@ This records the final decisions, including corrections to earlier experiments.
   field and case-insensitive filtering,
   a viewport-aware maximum of eight visible rows, wheel/trackpad scrolling without
   a visible scrollbar, and a bottom fade only while more results remain. Keep long
-  names truncated and the keyboard highlight in view. Support ↑/↓, Page Up/Down,
+  names faded at the trailing edge using the shared tab-title treatment, without
+  ellipses, and the keyboard highlight in view. Support ↑/↓, Page Up/Down,
   Return to choose, and Escape to dismiss. Do not add a hint/footer row.
 
 - The left sidebar groups chats and terminals together as sessions under **Pinned**

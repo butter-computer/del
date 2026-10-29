@@ -277,7 +277,10 @@ impl Render for BranchPanel {
                                         )
                                     }))
                                     .child(
-                                        div().flex_1().min_w_0().truncate().child(branch.clone()),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(crate::sidebar::fading_title(branch.clone())),
                                     )
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(BranchChosen(Some(branch.clone())))
