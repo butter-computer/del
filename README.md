@@ -343,7 +343,9 @@ conversation. Unloading a running session also stops its current work.
 
 - Choose a provider, model, and project folder in a new-session composer.
 - Each New Session action opens an independent draft tab; existing drafts are
-  preserved. The tab bar scrolls when tabs overflow and reveals the selected tab.
+  preserved. The top tab bar scrolls when tabs overflow, fades at clipped edges,
+  and reveals the selected tab. Empty “New session” rows expose a hover × in the
+  left sidebar so drafts can be closed there as well as from the top tab bar.
   Dragged tabs stay inside the tab strip, beyond the left-sidebar toggle.
 - The project folder and Chat/Terminal controls sit in a matching footer beneath
   the input, keeping workspace selection distinct from the message area.
@@ -414,14 +416,17 @@ conversation. Unloading a running session also stops its current work.
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
   the dot. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
-- Both sidebars have visible theme-aware vertical dividers and resize from their panel boundaries. The left sidebar only resizes at its divider; its empty space does not drag
+- Both sidebars resize from their panel boundaries. The right tab row has a thin,
+  floating divider; the content area stays borderless. The left sidebar only
+  resizes at its boundary; its empty space does not drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
 - Session titles use the available sidebar width and fade at the edge instead
   of ending in an ellipsis. Hovering reserves extra action space so terminal
   pin/close buttons do not overlap their titles.
   Sidebar rows keep their minimum height and single-line titles in
-  short or narrow windows; the list scrolls instead of compressing rows.
+  short or narrow windows; the list scrolls instead of compressing rows. Broad
+  top/bottom fades mark overflow without covering the fixed Settings controls.
 - Agent questions appear inside the active conversation, above its input, with
   answer choices and a free-text field. Each question keeps its own draft while
   switching sessions; terminal questions stay with their terminal session.
@@ -732,8 +737,23 @@ bound to their own chat. OpenCode configures tools per workspace rather than per
 chat, so the chats of one OpenCode workspace share a credential that reaches only
 those chats, and of them only the ones currently running a turn. Actions on a
 session you aren't viewing run in its hidden browser without changing your
-selection; in the session you're viewing, page-changing actions open the Browser
-pane. Page dialogs name their origin, and repeated dialogs are blocked. Chat
+selection. When an agent uses a browser tab that isn't visible, a small draggable
+page preview appears on the right. It refreshes from the existing page without
+opening the sidebar or changing the browser's viewport. Click the preview to
+reveal that same tab in the sidebar; drag it to reposition it within the window.
+The preview image clips to rounded corners and has no URL header. A translucent
+× with a locally blurred page backdrop floats over its top-right corner.
+Each session keeps its own preview and position: switching away hides it, and
+returning restores it unless dismissed. Background sessions never show their
+preview over the current session.
+The × dismisses only the preview and stays dismissed for subsequent actions on
+that tab. Another browser tab can show a new preview. List/close-tab requests do
+not create previews. An open Browser pane in either zone hides floating previews,
+even when it displays a different browser tab, so native browser content cannot
+cover or clip the thumbnail. Hiding the Browser pane restores the preview unless
+it was dismissed. The preview fits the page’s aspect ratio without an outer frame
+or black padding.
+Page dialogs name their origin, and repeated dialogs are blocked. Chat
 credentials expose only browser operations (plus goal controls for Claude chats).
 Page content is treated as untrusted data. ACP browser-tool injection is not yet
 implemented.
@@ -919,6 +939,8 @@ python3 scripts/test-macos-install.py
 Tests cover provider transcript replay, queue ordering and busy recovery,
 steering without duplicate output, attachments, terminal resume identities,
 PTY lifecycle, updater ownership/failure handling, and persisted UI metadata.
+Browser preview regressions cover session isolation, dismissal, dragging,
+page-aspect sizing, localized blur, and suppression over open native browser panes.
 UI regression tests also cover preview tabs, unload/resume, hover clipping and
 collapse fading, incremental streamed Markdown, reasoning-step boundaries, and zoom shortcuts
 with composer or terminal focus. Permission tests cover new and resumed sessions,

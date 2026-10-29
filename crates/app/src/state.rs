@@ -156,6 +156,7 @@ pub struct AppState {
     pub window_active: bool,
     pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
+    pub sidebar_scroll: ScrollHandle,
     pub providers: Vec<ProviderStatus>,
     /// Provider whose sign-in is running in the user's terminal.
     pub signin: Option<Provider>,
@@ -378,6 +379,7 @@ impl AppState {
             window_active: true,
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
+            sidebar_scroll: Default::default(),
             providers: Provider::ALL
                 .iter()
                 .map(|&provider| ProviderStatus {
@@ -1565,6 +1567,17 @@ impl AppState {
         if !self.tabs.contains(&tab) {
             self.new_uid(tab.clone());
             self.tabs.push(tab);
+        }
+    }
+
+    /// Keep an agent's browser host alive without changing the user's selection.
+    pub(crate) fn open_background_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
+        if !self.tabs.contains(tab) {
+            if self.uid_of(tab) == 0 {
+                self.new_uid(tab.clone());
+            }
+            self.tabs.push(tab.clone());
+            cx.notify();
         }
     }
 
@@ -3184,6 +3197,7 @@ pub(crate) mod tests {
             window_active: true,
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
+            sidebar_scroll: Default::default(),
             providers: vec![],
             signin: None,
             checking: Default::default(),
@@ -3202,6 +3216,20 @@ pub(crate) mod tests {
             starting: Default::default(),
             switching_accounts: Default::default(),
         })
+    }
+
+    #[gpui::test]
+    fn browser_host_opens_in_background_without_replacing_selection(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |state, cx| {
+            let selection = state.selection.clone();
+            let tab = Tab::Session(del_agent::SessionId::new("browser-background"));
+            state.open_background_tab(&tab, cx);
+            state.open_background_tab(&tab, cx);
+            assert_eq!(state.selection, selection);
+            assert_eq!(state.tabs.iter().filter(|open| **open == tab).count(), 1);
+            assert_ne!(state.uid_of(&tab), 0);
+        });
     }
 
     #[gpui::test]

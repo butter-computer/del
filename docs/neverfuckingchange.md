@@ -545,3 +545,47 @@ This records the final decisions, including corrections to earlier experiments.
   owning app state, rather than fixing labels at fork creation.
 - Return in the effort popup confirms the current settings and closes the
   popup, returning focus to the composer without submitting its draft.
+
+## Scroll edges and draft rows
+
+- Top-level session tabs use the same gradual overflow-edge fades as inner tabs.
+  The add-tab button remains outside the fade. Fades disappear at the scroll limits.
+- The left sidebar session list fades at its scroll edges above the fixed Settings
+  footer and below the toolbar, only while more content remains offscreen.
+- New-session draft rows expose the standard small close button on hover. Closing
+  a row uses the same draft cleanup and next-tab selection as closing its top tab.
+
+## Agent browser preview
+
+- Agent browser actions preserve the user's current session and tool pane. Hidden
+  browser activity shows one small floating thumbnail on the right, not an
+  automatically opened sidebar. Tab-list and tab-close actions do not summon it.
+- Thumbnail snapshots come from the existing WebKit tab at most once per second;
+  they do not resize, reload, or interact with the page. Pause snapshots while
+  the browser is visible, the preview is dismissed, or a modal obscures it.
+- Drag the card freely inside the window; keep it reachable after resizing or
+  zooming. A drag must not also open the browser.
+- Clicking reveals that exact browser tab in the right sidebar, reusing its
+  page state and moving it back from the inner workspace if necessary. Closing
+  the preview does not close the browser or cancel the agent. Repeated actions
+  on the same dismissed tab do not reopen the preview.
+
+### Session-scoped browser preview
+
+The floating browser preview belongs to its owning session. Switching sessions
+hides it without dismissing it; returning restores that session’s preview and
+position. Background browser activity cannot replace the current session’s
+preview. Dismissal survives session switches, and closed sessions release their
+preview state. The page image itself clips to rounded corners. There is no
+URL/header banner: only a small translucent close control with a locally blurred
+page backdrop overlays its top-right corner. Clip the backdrop and tint to the
+button’s circle, without blurring the rest of the app.
+
+The floating preview frame follows the page snapshot’s aspect ratio within its
+size limit. Do not add an outer border or black letterbox padding around it.
+
+Hide floating browser previews while any Browser pane is visible in either
+zone of their session, including hosted/moved panes and a different selected
+browser tab. Native WebKit surfaces paint above GPUI; leaving the thumbnail
+visible there clips it. This visibility suppression is not dismissal: hiding
+the Browser pane restores the preview.

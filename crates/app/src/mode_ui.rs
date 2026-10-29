@@ -752,9 +752,7 @@ impl AppShell {
         // Visible changes notify through AppState, which AppShell observes.
     }
 
-    /// The right panel that hosts `tab`'s browser, without selecting the tab.
-    /// `None` when the session isn't open in a tab: it then has no panel
-    /// identity to keep a background panel under.
+    /// Keep the browser's session and panel alive without selecting either.
     fn browser_panel(
         &mut self,
         tab: &crate::state::Tab,
@@ -762,16 +760,15 @@ impl AppShell {
         cwd: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<crate::right_panel::RightPanel>> {
+    ) -> Entity<crate::right_panel::RightPanel> {
+        self.state
+            .update(cx, |state, cx| state.open_background_tab(tab, cx));
         let owner = self.state.read(cx).uid_of(tab);
-        if owner == 0 {
-            return None;
-        }
         if owner == self.right_owner {
-            return Some(self.right.clone());
+            return self.right.clone();
         }
         if let Some(cached) = self.right_cache.get(&owner) {
-            return Some(cached.panel.clone());
+            return cached.panel.clone();
         }
         let saved = self.right_store.get(&key);
         let open = saved.restore_open();
@@ -800,7 +797,7 @@ impl AppShell {
             }
         })
         .detach();
-        Some(panel)
+        panel
     }
 
     fn remember_background_right(
@@ -864,12 +861,24 @@ impl AppShell {
                         if terminal { "terminal" } else { "chat" },
                         id.as_str()
                     );
-                    sessions.push(serde_json::json!({"session_id":id.as_str(),"title":title,"mode":if terminal { "terminal" } else { "chat" },"tabs":self.right_store.browser_tabs(&key)}));
                     let tab = if terminal {
                         crate::state::Tab::Terminal(id.clone())
                     } else {
                         crate::state::Tab::Session(id.clone())
                     };
+                    let owner = self.state.read(cx).uid_of(&tab);
+                    let open = self.state.read(cx).tabs.contains(&tab);
+                    let mut tabs = if open && owner == self.right_owner {
+                        self.right.read(cx).agent_browser_tabs(cx)
+                    } else if let Some(cached) = self.right_cache.get(&owner).filter(|_| open) {
+                        cached.panel.read(cx).agent_browser_tabs(cx)
+                    } else {
+                        self.right_store.browser_tabs(&key)
+                    };
+                    if let Some(workspace) = self.workspaces.get(&owner).filter(|_| open) {
+                        tabs.extend(workspace.read(cx).agent_browser_tabs(cx));
+                    }
+                    sessions.push(serde_json::json!({"session_id":id.as_str(),"title":title,"mode":if terminal { "terminal" } else { "chat" },"tabs":tabs}));
                     places.push((tab, key, cwd));
                 }
                 let selected = match &self.state.read(cx).selection {
@@ -912,46 +921,29 @@ impl AppShell {
                     return;
                 };
                 let (tab, key, cwd) = places.swap_remove(target);
-                let panel = match self.browser_panel(&tab, key.clone(), cwd, window, cx) {
-                    Some(panel) => panel,
-                    None => {
-                        // Not open in any tab, so it has no panel to run in
-                        // the background: open it as before.
-                        self.state
-                            .update(cx, |state, cx| state.select_tab(&tab, cx));
-                        self.sync_right(window, cx);
-                        self.right.clone()
-                    }
-                };
-                let foreground = panel == self.right;
-                // In the session the user is viewing, page-changing actions
-                // show the browser. Reading it, or any action in a background
-                // session, never moves the user's selection or layout.
-                let reveal = foreground
-                    && !matches!(
-                        request.action.as_str(),
-                        "list_tabs" | "snapshot" | "screenshot"
-                    );
-                if reveal {
-                    self.set_right(true, cx);
-                }
-                let result = panel.update(cx, |panel, cx| {
-                    if reveal {
-                        panel.set_preview_visible(true, cx);
-                    }
-                    panel.browser_command(request, reveal, window, cx)
-                });
+                let panel = self.browser_panel(&tab, key.clone(), cwd, window, cx);
+                let host = panel.clone();
+                let panel = request
+                    .tab_id
+                    .as_ref()
+                    .and_then(|id| self.find_agent_browser(&tab, id, cx))
+                    .unwrap_or(panel);
+                let foreground = host == self.right;
+                let show_preview = !matches!(request.action.as_str(), "list_tabs" | "close_tab");
+                let result =
+                    panel.update(cx, |panel, cx| panel.browser_command(request, window, cx));
+                let browser_id = panel.read(cx).active_browser_id();
                 if !foreground {
                     // Keep tab_id lookups and restarts in sync with tabs the
                     // agent opened or closed in the background.
-                    self.remember_background_right(&panel, key, cx);
+                    self.remember_background_right(&host, key, cx);
                 }
                 match result {
                     Err(error) => {
                         let _ = reply.send(Err(HostError::Failed(error)));
                     }
                     Ok(result) => {
-                        cx.spawn(async move |_, _| {
+                        cx.spawn_in(window, async move |this, cx| {
                             let mut reply = reply;
                             // The MCP request may time out first; stop waiting
                             // then instead of holding the reply.
@@ -962,6 +954,15 @@ impl AppShell {
                             let result = result
                                 .map_err(|_| HostError::Failed("Browser closed".into()))
                                 .and_then(|result| result.map_err(HostError::Failed));
+                            if result.is_ok() && show_preview {
+                                let _ = this.update_in(cx, |this, _, cx| {
+                                    if this.state.read(cx).tabs.contains(&tab) {
+                                        this.browser_preview.update(cx, |preview, cx| {
+                                            preview.record(tab, panel, browser_id, cx);
+                                        });
+                                    }
+                                });
+                            }
                             let _ = reply.send(result);
                         })
                         .detach();

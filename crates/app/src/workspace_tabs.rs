@@ -608,6 +608,50 @@ impl WorkspaceTabs {
         self.active = None;
     }
 
+    pub(crate) fn browser_surface_visible(&self, cx: &App) -> bool {
+        self.visible
+            && self
+                .tabs
+                .iter()
+                .find(|tab| self.active == Some(tab.id))
+                .is_some_and(|tab| {
+                    (tab.kind == Kind::Browser && tab.browser.is_some())
+                        || tab
+                            .panel
+                            .as_ref()
+                            .is_some_and(|panel| panel.read(cx).browser_surface_visible(cx))
+                })
+    }
+
+    pub(crate) fn find_browser_panel(&self, id: &str, cx: &App) -> Option<Entity<RightPanel>> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.panel.as_ref())
+            .find_map(|panel| RightPanel::find_browser_panel(panel, id, cx))
+    }
+
+    pub(crate) fn agent_browser_tabs(&self, cx: &App) -> Vec<crate::browser::SavedTab> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.panel.as_ref())
+            .flat_map(|panel| panel.read(cx).agent_browser_tabs(cx))
+            .collect()
+    }
+
+    pub(crate) fn take_browser_tab(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<RightPanel>> {
+        let tab = self.tabs.iter().find(|tab| {
+            tab.panel
+                .as_ref()
+                .is_some_and(|panel| RightPanel::find_browser_panel(panel, id, cx).is_some())
+        })?;
+        self.take_tab(tab.id, window, cx)
+    }
+
     pub fn is_chat(&self) -> bool {
         self.active.is_none()
     }

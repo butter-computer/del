@@ -105,6 +105,14 @@ int main(int argc,char **argv) {
         del_browser_frame(a,6,0,314,650,1,false,false);
         NSCAssert(NSWidth(browser.frame)==314 && [[parent hitTest:content] isDescendantOf:browser],@"resized browser restores pointer interaction");
         del_browser_hide(a); NSCAssert(browser.hidden,@"hide on tab switch");
+        JS(browser.web,@"document.querySelector('input').value='preview-retains-state'");
+        NSRect viewportBeforePreview = browser.web.frame;
+        NSDictionary *preview=Command(a,@{@"action":@"screenshot",@"preview":@YES});
+        NSData *previewPNG=[[NSData alloc] initWithBase64EncodedString:preview[@"image"] options:0];
+        NSBitmapImageRep *previewBitmap=[[NSBitmapImageRep alloc] initWithData:previewPNG];
+        NSCAssert(previewBitmap.pixelsWide > 0 && previewBitmap.pixelsWide <= 560 * window.backingScaleFactor,@"bounded real hidden-page thumbnail");
+        NSCAssert(browser.hidden && NSEqualRects(browser.web.frame,viewportBeforePreview),@"preview must not show or resize the actual browser");
+        NSCAssert([JS(browser.web,@"document.querySelector('input').value") isEqual:@"preview-retains-state"],@"preview preserves live page state");
         del_browser_frame(a,0,0,320,500,1.2,true,false);
         NSCAssert(!browser.hidden && browser.web.pageZoom==1.2,@"resize/reopen/zoom");
         del_browser_release(a); browser=nil;

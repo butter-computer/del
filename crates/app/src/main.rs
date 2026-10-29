@@ -20,6 +20,7 @@ mod attachments;
 mod backdrop;
 mod branch_picker;
 mod browser;
+mod browser_preview;
 mod chat;
 mod command_menu;
 mod composer_ui;
@@ -408,6 +409,7 @@ struct AppShell {
     workspace_previous: Option<u64>,
     tab_zone: std::rc::Rc<std::cell::Cell<tab_zone::Zone>>,
     right: Entity<RightPanel>,
+    browser_preview: Entity<browser_preview::BrowserPreview>,
     right_owner: u64,
     right_key: Option<String>,
     right_cache: HashMap<u64, CachedRight>,
@@ -670,6 +672,38 @@ impl AppShell {
 
         let right_root = state.read(cx).effective().2;
         let right = cx.new(|cx| RightPanel::new(right_root, window, cx));
+        let browser_preview = cx.new(|_| browser_preview::BrowserPreview::default());
+        cx.subscribe_in(
+            &browser_preview,
+            window,
+            |this, _, event: &browser_preview::OpenBrowser, window, cx| {
+                let Some(_) = this.find_agent_browser(&event.session, &event.tab_id, cx) else {
+                    return;
+                };
+                this.state
+                    .update(cx, |state, cx| state.select_tab(&event.session, cx));
+                this.sync_right(window, cx);
+                let found = this.right.update(cx, |panel, cx| {
+                    panel.show_browser_id(&event.tab_id, window, cx)
+                });
+                if !found && let Some(workspace) = this.workspace(cx) {
+                    let panel = workspace.update(cx, |workspace, cx| {
+                        workspace.take_browser_tab(&event.tab_id, window, cx)
+                    });
+                    if let Some(panel) = panel {
+                        panel.update(cx, |panel, cx| {
+                            panel.show_browser_id(&event.tab_id, window, cx);
+                        });
+                        this.right
+                            .update(cx, |right, cx| right.accept_tab(panel, window, cx));
+                    }
+                }
+                this.set_right(true, cx);
+                this.tab_zone.set(tab_zone::Zone::Right);
+                cx.notify();
+            },
+        )
+        .detach();
         let right_store_path = del_agent::index::data_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("right-panels.json");
@@ -745,6 +779,7 @@ impl AppShell {
             workspace_previous: None,
             tab_zone: Default::default(),
             right,
+            browser_preview,
             right_owner: 0,
             right_key: None,
             right_cache: HashMap::new(),
@@ -1043,6 +1078,8 @@ impl AppShell {
         cx.observe(&self.right, |this, panel, cx| {
             if this.right == panel {
                 this.remember_right(cx);
+                // Recompute floating-preview visibility when a Browser pane changes.
+                cx.notify();
             }
         })
         .detach();
@@ -1246,6 +1283,24 @@ impl AppShell {
                 panel.prepare_to_show(window, cx);
             }
         });
+    }
+
+    fn find_agent_browser(&self, session: &Tab, id: &str, cx: &App) -> Option<Entity<RightPanel>> {
+        let owner = self.state.read(cx).uid_of(session);
+        if !self.state.read(cx).tabs.contains(session) {
+            return None;
+        }
+        let root = if owner == self.right_owner {
+            Some(&self.right)
+        } else {
+            self.right_cache.get(&owner).map(|cached| &cached.panel)
+        };
+        root.and_then(|panel| RightPanel::find_browser_panel(panel, id, cx))
+            .or_else(|| {
+                self.workspaces
+                    .get(&owner)
+                    .and_then(|workspace| workspace.read(cx).find_browser_panel(id, cx))
+            })
     }
 
     fn workspace(&self, cx: &App) -> Option<Entity<workspace_tabs::WorkspaceTabs>> {
@@ -1888,10 +1943,16 @@ impl AppShell {
                                 )
                             })
                             .child(
-                                h_flex()
-                                    .id("tab-scroll")
+                                div()
+                                    .relative()
                                     .w_0()
                                     .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .overflow_hidden()
+                                    .child(h_flex()
+                                    .id("tab-scroll")
+                                    .w_full()
                                     .min_w_0()
                                     .h_full()
                                     .items_center()
@@ -2111,7 +2172,8 @@ impl AppShell {
                                                     },
                                                 )
                                         },
-                                    )),
+                                    )))
+                                    .children(crate::tab_transfer::edge_fades(&self.tab_scroll, shell_surface())),
                             )
                             .child(
                                 div()
@@ -2630,7 +2692,36 @@ impl Render for AppShell {
             self.project_renaming_loaded = project_renaming;
         }
 
+        let preview_sessions = self.state.read(cx).tabs.clone();
+        let preview_session = preview_sessions
+            .iter()
+            .find(|tab| tab.selection() == self.state.read(cx).selection)
+            .cloned();
+        self.browser_preview.update(cx, |preview, cx| {
+            preview.set_session(preview_session, &preview_sessions, cx);
+        });
+        // Native WebKit surfaces paint above GPUI overlays. Do not float a
+        // thumbnail over an open browser, even when it displays another tab.
+        let browser_visible = self.right.read(cx).browser_surface_visible(cx)
+            || self
+                .workspace(cx)
+                .is_some_and(|workspace| workspace.read(cx).browser_surface_visible(cx));
+        let preview_target = self.browser_preview.read(cx).target();
+        let preview_panel = preview_target
+            .as_ref()
+            .and_then(|target| self.find_agent_browser(&target.session, &target.tab_id, cx));
+        self.browser_preview.update(cx, |preview, cx| {
+            if let (Some(target), Some(panel)) = (preview_target, preview_panel) {
+                preview.rebind(target.session, panel, target.tab_id, cx);
+            }
+            preview.set_suppressed(
+                self.search_open || settings_open || browser_visible,
+                self.metrics.topbar_height,
+                cx,
+            );
+        });
         v_flex()
+            .relative()
             .size_full()
             .when(appearance::light(), |shell| {
                 shell.bg(gpui_kit::rgb(0xfcfcfc))
@@ -2947,6 +3038,7 @@ impl Render for AppShell {
                         )
                     }),
             )
+            .child(self.browser_preview.clone())
             .when(self.search_open || settings_open, |shell| {
                 let shade = div()
                     .absolute()

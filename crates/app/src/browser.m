@@ -369,7 +369,7 @@ void del_browser_command(void *pointer, const char *command, DelBrowserReply rep
     if ([action isEqualToString:@"reload"]) { [browser.web reload]; DelReply(reply,context,@YES,nil); return; }
     if ([action isEqualToString:@"screenshot"]) {
         WKSnapshotConfiguration *configuration = [WKSnapshotConfiguration new];
-        configuration.snapshotWidth = @(MIN(1280, NSWidth(browser.web.bounds)));
+        configuration.snapshotWidth = @(MIN([request[@"preview"] boolValue] ? 560 : 1280, NSWidth(browser.web.bounds)));
         [browser.web takeSnapshotWithConfiguration:configuration completionHandler:^(NSImage *image, NSError *error) {
             if (error || !image) { DelReply(reply,context,nil,error.localizedDescription ?: @"No screenshot available"); return; }
             NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithData:image.TIFFRepresentation];

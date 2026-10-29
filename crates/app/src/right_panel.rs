@@ -269,7 +269,19 @@ impl PanelStore {
     pub fn browser_tabs(&self, key: &str) -> Vec<crate::browser::SavedTab> {
         self.0
             .get(key)
-            .map(|panel| panel.browser_tabs.clone())
+            .map(|panel| {
+                fn collect(panel: &SavedPanel, tabs: &mut Vec<crate::browser::SavedTab>) {
+                    if panel.open_panes.contains(&Pane::Browser) {
+                        tabs.extend(panel.browser_tabs.clone());
+                    }
+                    for tab in &panel.hosted {
+                        collect(&tab.panel, tabs);
+                    }
+                }
+                let mut tabs = Vec::new();
+                collect(panel, &mut tabs);
+                tabs
+            })
             .unwrap_or_default()
     }
     pub fn remove(&mut self, key: &str) -> Option<SavedPanel> {
@@ -1765,12 +1777,101 @@ impl RightPanel {
         self.ensure_browser(cx);
         cx.notify();
     }
-    /// Run an agent browser action on this panel's session. `reveal` switches
-    /// the pane to Browser; background sessions run without changing layout.
+    pub(crate) fn find_browser_panel(
+        panel: &Entity<Self>,
+        id: &str,
+        cx: &App,
+    ) -> Option<Entity<Self>> {
+        let current = panel.read(cx);
+        if current.open_panes.contains(&Pane::Browser)
+            && current.browser_tabs.iter().any(|tab| tab.id == id)
+        {
+            return Some(panel.clone());
+        }
+        current
+            .hosted
+            .iter()
+            .find_map(|tab| Self::find_browser_panel(&tab.panel, id, cx))
+    }
+
+    pub(crate) fn agent_browser_tabs(&self, cx: &App) -> Vec<crate::browser::SavedTab> {
+        let mut tabs = if self.open_panes.contains(&Pane::Browser) {
+            self.browser_snapshot()
+        } else {
+            Vec::new()
+        };
+        for tab in &self.hosted {
+            tabs.extend(tab.panel.read(cx).agent_browser_tabs(cx));
+        }
+        tabs
+    }
+
+    pub(crate) fn show_browser_id(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(hosted) = self
+            .hosted
+            .iter()
+            .find(|tab| Self::find_browser_panel(&tab.panel, id, cx).is_some())
+        {
+            let key = hosted.id.clone();
+            hosted.panel.update(cx, |panel, cx| {
+                panel.show_browser_id(id, window, cx);
+            });
+            self.select_hosted(key, window, cx);
+            return true;
+        }
+        self.reveal_browser(id, window, cx)
+    }
+
+    pub(crate) fn browser_preview_source(&self, id: &str) -> Option<crate::browser::Browser> {
+        if !self.open_panes.contains(&Pane::Browser) {
+            return None;
+        }
+        self.browsers.get(id).cloned()
+    }
+
+    pub(crate) fn browser_surface_visible(&self, cx: &App) -> bool {
+        if !self.preview_visible {
+            return false;
+        }
+        if let Some(active) = &self.active_hosted {
+            return self
+                .hosted
+                .iter()
+                .find(|tab| &tab.id == active)
+                .is_some_and(|tab| tab.panel.read(cx).browser_surface_visible(cx));
+        }
+        self.pane == Pane::Browser
+    }
+
+    pub(crate) fn active_browser_id(&self) -> String {
+        self.browser_tabs[self.browser_active].id.clone()
+    }
+
+    pub(crate) fn reveal_browser(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.browser_tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        self.activate_pane(Pane::Browser);
+        self.select_browser_tab(index, cx);
+        self.prepare_to_show(window, cx);
+        true
+    }
+
+    /// Run an agent browser action without stealing the user's selected pane.
+    /// The browser joins the tab strip; only an explicit user reveal selects it.
     pub fn browser_command(
         &mut self,
         request: del_mcp::BrowserRequest,
-        reveal: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<crate::browser::BrowserReply, String> {
@@ -1783,9 +1884,6 @@ impl RightPanel {
                 del_mcp::browser::MAX_AGENT_TABS
             ));
         }
-        if reveal {
-            self.activate_pane(Pane::Browser);
-        }
         if let Some(id) = &request.tab_id {
             let index = self
                 .browser_tabs
@@ -1793,6 +1891,10 @@ impl RightPanel {
                 .position(|tab| &tab.id == id)
                 .ok_or("Unknown browser tab")?;
             self.select_browser_tab(index, cx);
+        }
+        if request.action != "list_tabs" && !self.open_panes.contains(&Pane::Browser) {
+            self.open_panes.push(Pane::Browser);
+            self.tab_order = self.sidebar_keys();
         }
         self.ensure_browser(cx);
         let immediate = match request.action.as_str() {

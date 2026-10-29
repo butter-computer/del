@@ -997,11 +997,13 @@ pub fn render(
                 ),
         )
         .child(
-            v_flex()
+            div().relative().flex_1().min_h_0().overflow_hidden()
+            .child(v_flex()
                 .id("session-list")
                 .relative()
                 .child(s.sidebar_hover.layer(None, rgba(0xffffff00)))
-                .flex_1()
+                .h_full()
+                .track_scroll(&s.sidebar_scroll)
                 .min_h_0()
                 .gap_0p5()
                 .overflow_y_scroll()
@@ -1066,12 +1068,25 @@ pub fn render(
                         .content(v_flex().w_full().debug_selector(|| "project-session-content".into()).gap_0p5()
                             .children(s.project_drafts(&path).into_iter().filter(|_| !show_archived).map(|key| {
                                 let state = state.clone();
-                                div().id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
+                                let close_state = state.clone();
+                                let group = SharedString::from(format!("project-draft-{key}"));
+                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
                                     .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
                                     .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).child(div().flex_1().min_w_0().truncate().child("New session"))
                                     .when(s.tab_working(&crate::state::Tab::Draft(key)), |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
                                     .when(s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
+                                    .child(div().id(SharedString::from(format!("close-project-draft-{key}")))
+                                        .role(Role::Button).aria_label("Close new session")
+                                        .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
+                                        .opacity(0.).group_hover(group, |button| button.opacity(1.))
+                                        .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
+                                        .child(crate::icons::icon(IconName::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            close_state.update(cx, |s, cx| s.close_tab(&crate::state::Tab::Draft(key), cx));
+                                        }))
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
                             .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|
@@ -1083,7 +1098,8 @@ pub fn render(
                         .flex_1()
                         .min_h(zpx(12.0))
                         .w_full(),
-                ),
+                ))
+            .children(crate::tab_transfer::vertical_edge_fades(&s.sidebar_scroll, crate::appearance::sidebar_surface())),
         )
         .child(crate::app_updates::render(updater, cx))
         .child(
