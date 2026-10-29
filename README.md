@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.12` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.13` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,8 +14,8 @@ when making future changes.
 
 ## Download and install
 
-The latest release is **0.1.12**.
-Download **Del-0.1.12-arm64.dmg** from the [0.1.12 release](https://github.com/butter-computer/del/releases/tag/v0.1.12),
+The latest release is **0.1.13**.
+Download **Del-0.1.13-arm64.dmg** from the [0.1.13 release](https://github.com/butter-computer/del/releases/tag/v0.1.13),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.12-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.13-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -606,7 +606,7 @@ that row; choosing Terminal from a new tab starts an independent shell. Closing
 one terminal leaves the others running. Drag tabs to reorder them; each session
 remembers its sidebar order. Drag a tool between the session row and right-sidebar
 row to move it without closing its shell, browser, editor, or side chat. The original
-conversation stays fixed. Both rows use the same compact 140-point tab width, including during transfers.
+conversation stays fixed. Both rows use the same compact 128-point tab width, including during transfers.
 Command-T opens in the last-used zone, and newly selected tabs scroll into view.
 Command-W closes only that zone’s inner tab; Command-Shift-W closes the top-level session.
 Side chats use the same provider button and searchable model picker as main chat,
@@ -617,7 +617,9 @@ with shortcuts beside neutral icons. Card and URL-bar backgrounds are slightly
 lighter to remain visible against the page. Entering either row opens a live
 insertion gap, and neighboring tabs move aside
 as you change slots. Dragging tracks the pointer horizontally, locked to the tab
-row with no vertical movement, haptics, or magnetic effects. A darker, full-width preview settles into the destination slot.
+row with no vertical movement, haptics, or magnetic effects. The darker, full-width preview stays attached to the pointer at its original grab offset,
+including after crossing into the other zone. Keep dragging to rearrange there; the
+tab settles into its destination slot only when you release.
 The source slot collapses as soon as the tab leaves, so its plus button follows
 the remaining tabs. Both rows use the same background and small hover-close
 controls, and fade gradually at clipped edges. Both

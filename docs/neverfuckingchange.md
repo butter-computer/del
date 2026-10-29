@@ -436,13 +436,16 @@ This records the final decisions, including corrections to earlier experiments.
   immediately opens an insertion gap; neighboring tabs shift as the pointer moves
   between slots. Do not replace this behavior with a blue zone highlight.
 - Keep tool-tab dragging simple: horizontal pointer tracking locked to the source
-  row until docking, with no vertical pointer following, magnetic resistance,
+  row outside a destination and aligned with the destination row while inside it,
+  with no vertical pointer following, magnetic resistance,
   spring effects, or drag haptics. Use a darker opaque preview of the normal tab
   width. Collapse the source layout slot when it leaves its row; the plus button
   must immediately follow the remaining tabs. Restore that slot if it returns.
 - Insertion gaps participate in layout; do not translate neighboring tabs beyond
-  their measured widths or underneath the plus button. Keep destination previews
-  inside the row viewport without shrinking the dragged tab.
+  their measured widths or underneath the plus button. Keep the dragged preview
+  attached to the pointer at its original horizontal grab offset in both zones;
+  entering a destination or changing insertion slots must not snap it into place.
+  Continue reordering under the held pointer and commit the transfer only on release.
 - Both inner tab rows use the same shell background. All three tab levels use
   the sidebar's 11-point close glyph and 16-point hover button geometry.
 - Apply gradual, non-interactive overflow fades to both tool-tab rows.

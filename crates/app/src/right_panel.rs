@@ -140,12 +140,14 @@ impl Render for DraggedSidebarTab {
             .preview(natural, source_y, zpx(crate::icons::TOOL_TAB_WIDTH));
         let raw = window.mouse_position() - self.cursor_offset;
         // GPUI positions the drag root at the pointer. Offset its child to
-        // the destination slot while keeping a full-width preview.
+        // the pointer while keeping a full-width, horizontally constrained preview.
         div()
             .w(rect.size.width)
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .child(
                 h_flex()
+                    .id("held-sidebar-tab")
+                    .debug_selector(|| "held-sidebar-tab".into())
                     .relative()
                     .left(rect.left() - raw.x)
                     .top(rect.top() - raw.y)
@@ -3321,18 +3323,6 @@ impl Render for RightPanel {
                                     let index = this.insertion_index(event.event.position.x);
                                     this.incoming
                                         .update(Some(index), crate::icons::TOOL_TAB_WIDTH);
-                                    let left = this.insertion_left(index)
-                                        + this.tool_tab_scroll.offset().x;
-                                    drag.placement.slot(
-                                        Bounds::new(
-                                            point(left, event.bounds.top()),
-                                            size(
-                                                zpx(this.incoming.width),
-                                                event.bounds.size.height,
-                                            ),
-                                        ),
-                                        event.bounds,
-                                    );
                                     let mut offset = this.tool_tab_scroll.offset();
                                     let viewport = this.tool_tab_scroll.bounds();
                                     if event.event.position.x > viewport.right() - zpx(24.) {

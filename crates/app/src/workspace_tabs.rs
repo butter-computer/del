@@ -37,6 +37,8 @@ impl Render for DraggedWorkspaceTab {
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .child(
                 h_flex()
+                    .id("held-workspace-tab")
+                    .debug_selector(|| "held-workspace-tab".into())
                     .relative()
                     .top(rect.top() - raw.y)
                     .left(rect.left() - raw.x)
@@ -502,15 +504,6 @@ impl WorkspaceTabs {
                         if inside {
                             let index = this.insertion_index(event.event.position.x);
                             this.incoming.update(Some(index), TAB_WIDTH);
-                            let left = this.strip_bounds.get().left()
-                                + zpx(index as f32 * (TAB_WIDTH + TAB_GAP));
-                            drag.placement.slot(
-                                Bounds::new(
-                                    point(left, event.bounds.top()),
-                                    size(zpx(TAB_WIDTH), event.bounds.size.height),
-                                ),
-                                event.bounds,
-                            );
                             let mut offset = this.row_scroll.offset();
                             if event.event.position.x > event.bounds.right() - zpx(24.) {
                                 offset.x =
@@ -1317,6 +1310,14 @@ mod tests {
         cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(target, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
+        let held = cx.debug_bounds("held-workspace-tab").unwrap();
+        let nudged = target + point(zpx(18.), Pixels::ZERO);
+        cx.simulate_mouse_move(nudged, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("held-workspace-tab").unwrap();
+        assert_eq!(moved.left() - held.left(), zpx(18.));
+        assert_eq!(moved.top(), held.top());
+        workspace.read_with(cx, |workspace, _| assert_eq!(workspace.tabs.len(), 1));
         let plus_during_drag = cx.debug_bounds("main-plus").unwrap();
         assert!(
             (plus_before.left() - plus_during_drag.left() - zpx(TAB_WIDTH)).abs() < zpx(3.),
@@ -1429,6 +1430,13 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
+        let held = cx.debug_bounds("held-sidebar-tab").unwrap();
+        let nudged = to + point(zpx(18.), Pixels::ZERO);
+        cx.simulate_mouse_move(nudged, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("held-sidebar-tab").unwrap();
+        assert_eq!(moved.left() - held.left(), zpx(18.));
+        assert_eq!(moved.top(), held.top());
         assert!(cx.debug_bounds("main-insertion-space").is_some());
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.incoming.index, Some(1))
@@ -1452,6 +1460,12 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.incoming.index, Some(0))
         });
+        let moved = cx.debug_bounds("held-sidebar-tab").unwrap();
+        assert_eq!(
+            moved.left() - held.left(),
+            to.x - (fixed.right() + zpx((TAB_WIDTH + TAB_GAP) * 1.4))
+        );
+        assert_eq!(moved.top(), held.top());
         cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(cx, |workspace, _| {

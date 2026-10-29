@@ -9,7 +9,7 @@ pub(crate) struct Placement(Rc<RefCell<Destination>>);
 #[derive(Default)]
 struct Destination {
     target: Option<EntityId>,
-    slot: Option<Bounds<Pixels>>,
+    row: Option<Bounds<Pixels>>,
 }
 impl Placement {
     pub fn visit(&self, target: EntityId, point: Point<Pixels>, bounds: Bounds<Pixels>) -> bool {
@@ -17,20 +17,12 @@ impl Placement {
         let inside = bounds.contains(&point);
         if inside {
             state.target = Some(target);
+            state.row = Some(bounds);
         } else if state.target == Some(target) {
             state.target = None;
-            state.slot = None;
+            state.row = None;
         }
         inside
-    }
-    pub fn slot(&self, mut bounds: Bounds<Pixels>, viewport: Bounds<Pixels>) {
-        // The drag is painted above the rows, so keep a complete tab inside the
-        // destination viewport while its strip scrolls to the insertion point.
-        bounds.origin.x = bounds.left().clamp(
-            viewport.left(),
-            (viewport.right() - bounds.size.width).max(viewport.left()),
-        );
-        self.0.borrow_mut().slot = Some(bounds);
     }
     pub fn preview(
         &self,
@@ -40,13 +32,14 @@ impl Placement {
     ) -> Bounds<Pixels> {
         let state = self.0.borrow();
         let height = zpx(crate::icons::TOOL_TAB_HEIGHT);
-        if let Some(slot) = state.slot.filter(|_| state.target.is_some()) {
+        if let Some(row) = state.row.filter(|_| state.target.is_some()) {
             Bounds::new(
-                point(slot.left(), slot.center().y - height / 2.),
+                // The insertion gap moves neighbors, never the held preview.
+                point(natural.x, row.center().y - height / 2.),
                 size(width, height),
             )
         } else {
-            // Pointer movement only changes X; retain the source row until docking.
+            // Pointer movement only changes X; retain the source row outside a destination.
             Bounds::new(point(natural.x, source_y), size(width, height))
         }
     }
@@ -117,9 +110,9 @@ pub(crate) fn edge_fades(scroll: &ScrollHandle, surface: Rgba) -> Vec<AnyElement
 mod tests {
     use super::*;
     #[::core::prelude::v1::test]
-    fn preview_stays_on_its_row_then_settles_in_a_complete_destination_slot() {
+    fn preview_tracks_pointer_while_held_over_destination_slots() {
         let placement = Placement::default();
-        let width = zpx(140.);
+        let width = zpx(crate::icons::TOOL_TAB_WIDTH);
         let pointer = point(zpx(40.), zpx(90.));
         let source_y = zpx(25.);
         for y in [-100., 0., 250.] {
@@ -136,18 +129,28 @@ mod tests {
         let viewport = Bounds::new(point(zpx(200.), zpx(20.)), size(zpx(300.), zpx(40.)));
         let target = EntityId::from(1);
         assert!(placement.visit(target, viewport.center(), viewport));
-        placement.slot(
-            Bounds::new(
-                point(zpx(450.), viewport.top()),
-                size(width, viewport.size.height),
-            ),
-            viewport,
-        );
         let preview = placement.preview(pointer, source_y, width);
         assert_eq!(preview.size.width, width);
-        assert_eq!(preview.right(), viewport.right());
+        assert_eq!(preview.left(), pointer.x);
+        for x in [210., 225., 390., 280.] {
+            let moved = point(zpx(x), zpx(90.));
+            let preview = placement.preview(moved, source_y, width);
+            assert_eq!(
+                preview.left(),
+                moved.x,
+                "the held tab must track the pointer inside a destination slot"
+            );
+            assert_eq!(preview.center().y, viewport.center().y);
+        }
+        // Changing destinations must not change the horizontal grab offset.
+        let other = Bounds::new(point(zpx(0.), zpx(20.)), viewport.size);
+        assert!(placement.visit(EntityId::from(2), other.center(), other));
+        assert_eq!(
+            placement.preview(pointer, source_y, width).left(),
+            pointer.x
+        );
         assert_eq!(preview.center().y, viewport.center().y);
-        assert!(!placement.visit(target, pointer, viewport));
+        assert!(!placement.visit(EntityId::from(2), viewport.bottom_right(), other));
         assert_eq!(
             placement.preview(pointer, source_y, width).origin,
             point(pointer.x, source_y)
