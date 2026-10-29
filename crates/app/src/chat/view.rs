@@ -1111,9 +1111,22 @@ impl Render for ChatView {
                                                             }
                                                         })
                                                         .unwrap_or_default();
-                                                    gpui_kit::component::tooltip::Tooltip::new(text)
-                                                        .build(window, cx)
+                                                    let width = zpx(320.).min(
+                                                        (window.viewport_size().width - zpx(48.))
+                                                            .max(zpx(1.)),
+                                                    );
+                                                    gpui_kit::component::tooltip::Tooltip::element(
+                                                        move |_, _| {
+                                                            div()
+                                                                .w(width)
+                                                                .whitespace_normal()
+                                                                .overflow_hidden()
+                                                                .child(text.clone())
+                                                        },
+                                                    )
+                                                    .build(window, cx)
                                                 })
+                                                .tooltip_show_delay(std::time::Duration::ZERO)
                                                 .on_hover(cx.listener(
                                                     move |this, hovered, _, cx| {
                                                         let next = if *hovered {
