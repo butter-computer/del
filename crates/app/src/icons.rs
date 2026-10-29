@@ -31,6 +31,15 @@ pub fn spinner() -> gpui_kit::component::spinner::Spinner {
 }
 
 /// Thin continuous ring with a fading tail for session activity.
+pub fn unread_mark() -> impl gpui::IntoElement {
+    use gpui_kit::prelude::*;
+    gpui::div()
+        .size(zpx(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(crate::appearance::rgb(0x4a9eff))
+}
+
 pub fn working_spinner() -> gpui_kit::component::spinner::Spinner {
     gpui_kit::component::spinner::Spinner::new()
         .icon(Icon::default().path("icons/working-ring.svg"))

@@ -380,6 +380,7 @@ pub struct RightPanel {
     address: Entity<InputState>,
     new_tab_scroll: ScrollHandle,
     tool_tab_scroll: ScrollHandle,
+    motion: crate::tab_motion::Strip<SidebarTab>,
     tab_drag: Option<SidebarDrag>,
     tab_drag_outside: bool,
     tab_drag_origin: Rc<Cell<Point<Pixels>>>,
@@ -560,6 +561,7 @@ impl RightPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.motion.settle();
         self.remember_blank(cx);
         panel.update(cx, |panel, _| panel.set_tab_zone(true));
         self.watch_hosted(&panel, cx);
@@ -791,6 +793,29 @@ impl RightPanel {
         if let Some(side) = &self.side_chat {
             side.update(cx, |side, cx| side.focus(window, cx));
         }
+    }
+
+    pub(crate) fn is_unread(&self, cx: &App) -> bool {
+        self.is_unread_with(None, cx)
+    }
+
+    fn is_unread_with(&self, fallback: Option<&crate::side_chat::Context>, cx: &App) -> bool {
+        if let Some(side) = &self.side_chat {
+            return side.read(cx).is_unread(cx);
+        }
+        let Some(id) = &self.side_chat_id else {
+            return false;
+        };
+        self.side_context
+            .as_ref()
+            .or(fallback)
+            .and_then(|context| context.activity_owner.as_ref())
+            .and_then(|(state, owner)| {
+                state
+                    .upgrade()
+                    .map(|state| state.read(cx).side_chat_unread(*owner, id))
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn is_working(&self, cx: &App) -> bool {
@@ -1289,6 +1314,10 @@ impl RightPanel {
     }
 
     pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if let Some(side) = &self.side_chat {
+            let shown = visible && self.active_hosted.is_none() && self.pane == Pane::SideChat;
+            side.update(cx, |side, cx| side.set_visible(shown, cx));
+        }
         for tab in &self.hosted {
             tab.panel.update(cx, |panel, cx| {
                 panel.set_preview_visible(
@@ -1528,6 +1557,7 @@ impl RightPanel {
             address,
             new_tab_scroll: ScrollHandle::new(),
             tool_tab_scroll: ScrollHandle::new(),
+            motion: Default::default(),
             tab_drag: None,
             tab_drag_outside: false,
             tab_drag_origin: Rc::default(),
@@ -2004,6 +2034,18 @@ impl RightPanel {
         } else {
             pane == Pane::SideChat && self.is_working(cx)
         };
+        let unread = if let Some(id) = &hosted {
+            self.hosted
+                .iter()
+                .find(|tab| &tab.id == id)
+                .is_some_and(|tab| {
+                    tab.panel
+                        .read(cx)
+                        .is_unread_with(self.side_context.as_ref(), cx)
+                })
+        } else {
+            pane == Pane::SideChat && self.is_unread(cx)
+        };
         let label: SharedString = name.into();
         let close_id = format!("close-{id}");
         let close_selector = instance
@@ -2099,6 +2141,9 @@ impl RightPanel {
             )
             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
             .when(working, |tab| tab.child(crate::icons::working_spinner()))
+            .when(unread && !working, |tab| {
+                tab.child(crate::icons::unread_mark())
+            })
             .child(
                 div()
                     .id(SharedString::from(close_id))
@@ -3047,6 +3092,7 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.set_preview_visible(self.preview_visible, cx);
         if !cx.has_active_drag() {
             self.incoming.clear();
             self.incoming_items.clear();
@@ -3104,7 +3150,69 @@ impl Render for RightPanel {
         };
         let mut tab_elements = Vec::new();
         let keys = self.sidebar_keys();
-        for (index, key) in keys.iter().enumerate() {
+        let visuals = keys
+            .iter()
+            .filter_map(|key| {
+                if self.tab_drag_outside
+                    && self.tab_drag.as_ref().is_some_and(|drag| &drag.key == key)
+                {
+                    return None;
+                }
+                let pane = match key {
+                    SidebarTab::Hosted(id) => self
+                        .hosted
+                        .iter()
+                        .find(|tab| &tab.id == id)
+                        .map(|tab| tab.panel.read(cx).pane),
+                    _ => self
+                        .sidebar_tabs()
+                        .into_iter()
+                        .find(|(pane, instance)| self.tab_key(*pane, *instance) == *key)
+                        .map(|(pane, _)| pane),
+                }?;
+                Some((
+                    key.clone(),
+                    crate::tab_motion::Visual {
+                        label: pane.tab_label().1.into(),
+                        icon: pane.icon(),
+                        active: self
+                            .active_hosted
+                            .as_ref()
+                            .map(|id| SidebarTab::Hosted(id.clone()))
+                            .unwrap_or_else(|| {
+                                self.tab_key(self.pane, self.pane_instance(self.pane))
+                            })
+                            == *key,
+                    },
+                ))
+            })
+            .collect();
+        let was_transitioning = self.motion.transitioning();
+        let slots = self.motion.sync(visuals, cx);
+        // Re-reveal after expansion as well: the initial scroll request sees
+        // a nearly zero-width tab and cannot reveal its final bounds yet.
+        if !cx.has_active_drag()
+            && (was_transitioning || self.motion.transitioning())
+            && let Some(index) = slots.iter().position(|slot| {
+                !slot.closing
+                    && slot.key
+                        == self
+                            .active_hosted
+                            .as_ref()
+                            .map(|id| SidebarTab::Hosted(id.clone()))
+                            .unwrap_or_else(|| {
+                                self.tab_key(self.pane, self.pane_instance(self.pane))
+                            })
+            })
+        {
+            self.tool_tab_scroll.scroll_to_item(index);
+        }
+        for (index, slot) in slots.iter().enumerate() {
+            let key = &slot.key;
+            if slot.closing {
+                tab_elements.push(slot.ghost(format!("sidebar-close-{key:?}").into()));
+                continue;
+            }
             if self.tab_drag_outside && self.tab_drag.as_ref().is_some_and(|drag| &drag.key == key)
             {
                 continue;
@@ -3124,7 +3232,7 @@ impl Render for RightPanel {
                     .map(|(pane, instance)| self.tab(pane, instance, None, cx))
             };
             if let Some(tab) = tab {
-                tab_elements.push(tab.into_any_element());
+                tab_elements.push(slot.wrap(format!("sidebar-open-{key:?}").into(), tab));
             }
         }
         if self.incoming.index == Some(keys.len()) {
@@ -3961,6 +4069,20 @@ mod tests {
         cx.simulate_mouse_up(plus.center(), MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| assert_eq!(panel.blank_tabs.len(), 9));
+        // The final reveal must use expanded widths, not the near-zero bounds
+        // from the frame when rapid tab creation began.
+        std::thread::sleep(crate::tab_motion::ENTER + std::time::Duration::from_millis(20));
+        panel.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        panel.read_with(cx, |panel, _| {
+            let index = panel.sidebar_keys().len() - 1;
+            let tab = panel.tool_tab_scroll.bounds_for_item(index).unwrap();
+            let viewport = panel.tool_tab_scroll.bounds();
+            let offset = panel.tool_tab_scroll.offset().x;
+            assert!(tab.right() + offset <= viewport.right() + zpx(1.));
+            assert!(tab.left() + offset >= viewport.left() - zpx(1.));
+        });
     }
 
     #[::gpui::test]
@@ -3968,6 +4090,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_kit::init);
+        // This test measures settled hit targets; motion has separate coverage.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
             cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
@@ -4065,6 +4189,8 @@ mod tests {
             }
         }
         cx.update(gpui_kit::init);
+        // This test measures settled hit targets; motion has separate coverage.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let dir = tempfile::tempdir().unwrap();
         let mut panel = None;
         let (_, cx) = cx.add_window_view(|window, cx| {

@@ -118,6 +118,7 @@ fn substring_matches<'a>(
 }
 
 pub struct PromptSubmitted;
+pub struct ReplyCompleted;
 pub struct OpenLink(pub String);
 
 pub struct ChatView {
@@ -160,6 +161,7 @@ pub struct ChatView {
 }
 
 impl EventEmitter<PromptSubmitted> for ChatView {}
+impl EventEmitter<ReplyCompleted> for ChatView {}
 impl EventEmitter<OpenLink> for ChatView {}
 
 impl ChatView {
@@ -407,6 +409,17 @@ impl ChatView {
             _ => None,
         };
         self.sync_text(change, delta, cx);
+        if !self.loading
+            && matches!(
+                event,
+                AgentEvent::TurnCompleted {
+                    status: del_agent::TurnStatus::Completed,
+                    ..
+                }
+            )
+        {
+            cx.emit(ReplyCompleted);
+        }
     }
 
     pub(super) fn working_label(&self, ix: usize) -> Option<String> {

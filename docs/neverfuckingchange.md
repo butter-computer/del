@@ -506,3 +506,13 @@ This records the final decisions, including corrections to earlier experiments.
   Anchor resize drags to the measured tree height at mouse-down.
 - Terminals always paint their default black background, including in light
   appearance. Preserve explicit terminal colors and inverse-video rendering.
+
+- Successful Side chat replies completed out of view mark that fork unread and
+  show the blue dot in its tab, its parent's top tab, and the left sidebar. Keep
+  unread state across restarts and clear only the side reply actually viewed in
+  an active window. Reading the main conversation must not clear hidden forks.
+  Cancelled/failed turns and history hydration must not create new unread dots.
+- Tab opening uses a short eased expansion/fade (220 ms); closing is faster
+  (160 ms). Match top, main-inner, and right-sidebar strips. Release closed tools
+  immediately; retain only a noninteractive visual for the exit. Reduced Motion
+  settles instantly, as do cross-pane transfers and active drags.

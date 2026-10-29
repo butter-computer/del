@@ -21,6 +21,8 @@ struct Meta {
     pinned: bool,
     #[serde(default)]
     unread: bool,
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    unread_side_chats: std::collections::HashSet<String>,
     #[serde(default)]
     order: Option<u64>,
 }
@@ -121,8 +123,31 @@ impl Overrides {
     pub fn archived(&self, id: &SessionId) -> bool {
         self.0.get(&id.0).is_some_and(|meta| meta.archived)
     }
-    pub fn unread(&self, id: &SessionId) -> bool {
+    pub fn main_unread(&self, id: &SessionId) -> bool {
         self.0.get(&id.0).is_some_and(|meta| meta.unread)
+    }
+    pub fn unread(&self, id: &SessionId) -> bool {
+        self.0
+            .get(&id.0)
+            .is_some_and(|meta| meta.unread || !meta.unread_side_chats.is_empty())
+    }
+    pub fn side_chat_unread(&self, id: &SessionId, side: &str) -> bool {
+        self.0
+            .get(&id.0)
+            .is_some_and(|meta| meta.unread_side_chats.contains(side))
+    }
+    pub fn set_side_chat_unread(&mut self, id: &SessionId, side: &str, unread: bool) {
+        if unread {
+            self.meta(id).unread_side_chats.insert(side.to_owned());
+        } else {
+            self.meta(id).unread_side_chats.remove(side);
+        }
+    }
+    pub fn move_side_chat_unread(&mut self, from: &SessionId, to: &SessionId) {
+        if let Some(meta) = self.0.get_mut(&from.0) {
+            let unread = std::mem::take(&mut meta.unread_side_chats);
+            self.meta(to).unread_side_chats.extend(unread);
+        }
     }
 
     pub fn remove(&mut self, id: &SessionId) {
@@ -149,7 +174,7 @@ impl Overrides {
                     updated_secs: r.updated_at_ms / 1000,
                     archived: meta.is_some_and(|m| m.archived),
                     pinned: meta.is_some_and(|m| m.pinned),
-                    unread: meta.is_some_and(|m| m.unread),
+                    unread: meta.is_some_and(|m| m.unread || !m.unread_side_chats.is_empty()),
                 }
             })
             .collect();

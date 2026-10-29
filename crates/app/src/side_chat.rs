@@ -50,12 +50,54 @@ pub struct SideChat {
     importing: bool,
     loading: bool,
     closed: bool,
+    visible: bool,
     error: Option<String>,
 }
 impl EventEmitter<SendToMain> for SideChat {}
 impl EventEmitter<crate::chat::OpenLink> for SideChat {}
 
 impl SideChat {
+    pub fn is_unread(&self, cx: &App) -> bool {
+        self.context
+            .activity_owner
+            .as_ref()
+            .and_then(|(state, owner)| {
+                state
+                    .upgrade()
+                    .map(|state| state.read(cx).side_chat_unread(*owner, &self.storage_id))
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_visible(&self, cx: &App) -> bool {
+        self.visible
+            && self
+                .context
+                .activity_owner
+                .as_ref()
+                .and_then(|(state, owner)| {
+                    state
+                        .upgrade()
+                        .map(|state| state.read(cx).side_chat_visible(*owner))
+                })
+                .unwrap_or(false)
+    }
+
+    fn set_unread(&self, unread: bool, cx: &mut App) {
+        if let Some((state, owner)) = &self.context.activity_owner {
+            let _ = state.update(cx, |state, cx| {
+                state.set_side_chat_unread(*owner, &self.storage_id, unread, cx)
+            });
+        }
+    }
+
+    pub fn set_visible(&mut self, visible: bool, cx: &mut gpui::Context<Self>) {
+        self.visible = visible;
+        if self.is_visible(cx) {
+            self.set_unread(false, cx);
+        }
+    }
+
     pub fn is_working(&self, cx: &App) -> bool {
         !self.closed
             && self
@@ -105,6 +147,17 @@ impl SideChat {
         let storage_id = uuid::Uuid::parse_str(&storage_id)
             .map(|id| id.to_string())
             .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        if let Some((state, _)) = &context.activity_owner
+            && let Some(state) = state.upgrade()
+        {
+            cx.observe(&state, |this, _, cx| {
+                if this.is_visible(cx) {
+                    this.set_unread(false, cx);
+                }
+                cx.notify();
+            })
+            .detach();
+        }
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .placeholder("Ask anything...")
@@ -151,6 +204,7 @@ impl SideChat {
             importing: false,
             loading: false,
             closed: false,
+            visible: false,
             error: None,
         };
         if let Some(path) = view.path() {
@@ -299,6 +353,12 @@ impl SideChat {
                             this.report_activity(false, cx);
                             this.save_soon(cx);
                             cx.notify();
+                        })
+                        .detach();
+                        cx.subscribe(&chat, |this, _, _: &crate::chat::ReplyCompleted, cx| {
+                            if !this.closed {
+                                this.set_unread(!this.is_visible(cx), cx);
+                            }
                         })
                         .detach();
                         cx.subscribe(&chat, |_, _, event: &crate::chat::OpenLink, cx| {
@@ -538,6 +598,7 @@ impl SideChat {
     }
 
     pub fn forget(&mut self, cx: &mut gpui::Context<Self>) {
+        self.set_unread(false, cx);
         let path = self.path();
         self.release(cx);
         if let Some(path) = path {
@@ -1052,7 +1113,17 @@ mod tests {
             }
             runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         }
-        state.read_with(cx, |state, _| assert!(!state.tab_working(&parent_tab)));
+        state.read_with(cx, |state, _| {
+            assert!(!state.tab_working(&parent_tab));
+            assert!(
+                state.terminal_unread(&parent.id),
+                "background Side chat completion must mark its owner unread"
+            );
+        });
+        side.update(cx, |side, cx| {
+            side.set_visible(true, cx);
+            assert!(!state.read(cx).terminal_unread(&parent.id));
+        });
         side.read_with(cx, |s, cx| {
             assert!(!s.is_working(cx));
             assert!(s.latest_reply(cx).is_some());

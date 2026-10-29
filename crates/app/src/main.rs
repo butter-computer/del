@@ -50,6 +50,7 @@ mod side_chat;
 mod sidebar;
 mod signin;
 mod state;
+mod tab_motion;
 mod tab_transfer;
 mod tab_zone;
 mod terminal_conversation;
@@ -1868,7 +1869,7 @@ impl AppShell {
                                                 let (select_tab, close_tab) =
                                                     (tab_key.clone(), tab_key);
                                                 let working = self.state.read(cx).tab_working(&select_tab);
-                                                let indicator_id = match &select_tab { Tab::Session(id) | Tab::Terminal(id) => Some(id.clone()), _ => None };
+                                                let indicator_id = Some(AppState::tab_unread_id(&select_tab));
                                                 let drag_shell = cx.entity();
                                                 let drop_shell = drag_shell.clone();
                                                 let drag = DraggedTab {
@@ -2026,11 +2027,11 @@ impl AppShell {
                                                     SharedString::from(format!(
                                                         "tab-anim-{uid}-{live}"
                                                     )),
-                                                    Animation::new(state::TAB_ANIM)
-                                                        .with_easing(ease_out_quint()),
+                                                    Animation::new(if live { tab_motion::ENTER } else { tab_motion::EXIT })
+                                                        .with_easing(|t| 1. - (1. - t).powi(3)),
                                                     move |slot, t| {
                                                         let t = if live { if animate_open { t } else { 1.0 } } else { 1.0 - t };
-                                                        slot.w(zpx((TAB_WIDTH + TAB_GAP) * t))
+                                                        slot.w(zpx((TAB_WIDTH + TAB_GAP) * t)).opacity(t)
                                                     },
                                                 )
                                         },

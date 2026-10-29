@@ -1071,6 +1071,7 @@ pub fn render(
                                     .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).child(div().flex_1().min_w_0().truncate().child("New session"))
                                     .when(s.tab_working(&crate::state::Tab::Draft(key)), |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+                                    .when(s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
                             .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|

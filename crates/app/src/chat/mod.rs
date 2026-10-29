@@ -11,7 +11,7 @@ pub mod model;
 mod reply_times;
 mod view;
 
-pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView, OpenLink, PromptSubmitted};
+pub use view::{Backend, COLUMN_MAX_WIDTH, ChatView, OpenLink, PromptSubmitted, ReplyCompleted};
 
 pub use blocks::pending_prompt;
 pub use loading::conversation_loading;

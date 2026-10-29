@@ -32,7 +32,7 @@ pub enum Selection {
 }
 
 /// How long a tab takes to grow in or shrink away.
-pub const TAB_ANIM: Duration = Duration::from_millis(180);
+pub const TAB_ANIM: Duration = crate::tab_motion::ENTER;
 
 /// A tab that was just closed, kept on screen while it shrinks away.
 #[derive(Debug, Clone)]
@@ -622,6 +622,9 @@ impl AppState {
                     }
                     None => self.add_tab(&id),
                 }
+                self.overrides_mut()
+                    .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+                self.save_overrides();
                 self.set_records(self.manager.list_sessions());
                 if let Some(record) = self.records.iter().find(|r| r.id == id) {
                     self.project_info.remove(&record.cwd);
@@ -923,6 +926,57 @@ impl AppState {
         }
     }
 
+    pub fn tab_unread_id(tab: &Tab) -> SessionId {
+        match tab {
+            Tab::Session(id) | Tab::Terminal(id) => id.clone(),
+            Tab::Draft(id) => SessionId::new(format!("draft:{id}")),
+        }
+    }
+
+    fn side_chat_owner(&self, uid: u64) -> Option<&Tab> {
+        self.uids
+            .iter()
+            .find_map(|(tab, id)| (*id == uid).then_some(tab))
+    }
+
+    pub fn side_chat_visible(&self, uid: u64) -> bool {
+        self.window_active
+            && self.panel == Panel::Chat
+            && self
+                .side_chat_owner(uid)
+                .is_some_and(|tab| tab.selection() == self.selection)
+    }
+
+    pub fn side_chat_unread(&self, uid: u64, side: &str) -> bool {
+        self.side_chat_owner(uid).is_some_and(|tab| {
+            self.overrides
+                .side_chat_unread(&Self::tab_unread_id(tab), side)
+        })
+    }
+
+    pub fn set_side_chat_unread(
+        &mut self,
+        uid: u64,
+        side: &str,
+        unread: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.side_chat_owner(uid).map(Self::tab_unread_id) else {
+            return;
+        };
+        if self.overrides.side_chat_unread(&id, side) == unread {
+            return;
+        }
+        let (from, target, start) = self.unread_motion(&id);
+        let progress = start.map_or(1.0, |start| (start.elapsed().as_secs_f32() / 0.18).min(1.0));
+        let current = from + (target - from) * (1.0 - (1.0 - progress).powi(3));
+        self.unread_motion
+            .insert(id.clone(), (current, std::time::Instant::now()));
+        self.overrides_mut().set_side_chat_unread(&id, side, unread);
+        self.save_overrides();
+        cx.notify();
+    }
+
     pub fn main_session_working(&self, id: &SessionId) -> bool {
         self.records
             .iter()
@@ -1018,7 +1072,7 @@ impl AppState {
 
     /// Returns whether anything changed (and so needs saving).
     fn set_unread(&mut self, id: &SessionId, unread: bool) -> bool {
-        if self.overrides.unread(id) == unread {
+        if self.overrides.main_unread(id) == unread {
             return false;
         }
         let (from, target, start) = self.unread_motion(id);
@@ -1221,6 +1275,9 @@ impl AppState {
                     self.uids.insert(tab, uid);
                 }
             }
+            self.overrides_mut()
+                .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+            self.save_overrides();
             self.drafts.remove(&key);
             self.launch_options.remove(&key);
             self.draft_modes.remove(&key);
@@ -3287,6 +3344,43 @@ pub(crate) mod tests {
                 s.tabs,
                 vec![Tab::Draft(0), Tab::Session(a), Tab::Session(b)]
             );
+        });
+    }
+
+    #[gpui::test]
+    fn side_unread_survives_main_selection_and_clears_each_fork_independently(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let id = del_agent::SessionId::new("side-unread-owner");
+            s.select(id.clone(), cx);
+            let uid = s.uid_of(&Tab::Session(id.clone()));
+            s.set_side_chat_unread(uid, "one", true, cx);
+            s.set_side_chat_unread(uid, "two", true, cx);
+            s.mark_visible_chat_read(cx);
+            s.select(id.clone(), cx);
+            assert!(s.terminal_unread(&id));
+            s.set_side_chat_unread(uid, "one", false, cx);
+            assert!(s.terminal_unread(&id));
+            let saved = serde_json::to_vec(&s.overrides).unwrap();
+            let restored: Overrides = serde_json::from_slice(&saved).unwrap();
+            assert!(restored.side_chat_unread(&id, "two"));
+            s.set_side_chat_unread(uid, "two", false, cx);
+            assert!(!s.terminal_unread(&id));
+            s.mark_session_unread(&id, cx);
+            s.set_side_chat_unread(uid, "one", true, cx);
+            s.set_side_chat_unread(uid, "one", false, cx);
+            assert!(
+                s.terminal_unread(&id),
+                "reading a side reply must not clear the main reply"
+            );
+            let draft_id = super::AppState::tab_unread_id(&Tab::Draft(0));
+            s.overrides_mut()
+                .set_side_chat_unread(&draft_id, "draft-side", true);
+            s.overrides_mut().move_side_chat_unread(&draft_id, &id);
+            assert!(s.overrides.side_chat_unread(&id, "draft-side"));
+            assert!(!s.overrides.unread(&draft_id));
         });
     }
 

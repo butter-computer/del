@@ -159,6 +159,7 @@ pub struct WorkspaceTabs {
     pub(crate) transfer_peer: Option<WeakEntity<RightPanel>>,
     incoming: crate::tab_transfer::InsertionGap,
     row_scroll: ScrollHandle,
+    motion: crate::tab_motion::Strip<u64>,
     reveal_active: Rc<Cell<bool>>,
     watched_panels: std::collections::HashSet<EntityId>,
     transfer_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -414,6 +415,7 @@ impl WorkspaceTabs {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.motion.settle();
         panel.update(cx, |panel, _| panel.set_tab_zone(false));
         self.watch_panel(&panel, cx);
         let id = self.next_id;
@@ -579,6 +581,7 @@ impl WorkspaceTabs {
             transfer_peer: None,
             incoming: Default::default(),
             row_scroll: ScrollHandle::new(),
+            motion: Default::default(),
             reveal_active: Default::default(),
             watched_panels: Default::default(),
             transfer_bounds: Default::default(),
@@ -881,6 +884,27 @@ impl WorkspaceTabs {
                 indices.insert(drag.target.min(indices.len()), drag.source);
             }
         }
+        let was_transitioning = self.motion.transitioning();
+        let motion = self.motion.sync(
+            indices
+                .iter()
+                .map(|index| {
+                    let tab = &self.tabs[*index];
+                    (
+                        tab.id,
+                        crate::tab_motion::Visual {
+                            label: tab.kind.label().into(),
+                            icon: tab.kind.icon(),
+                            active: self.active == Some(tab.id),
+                        },
+                    )
+                })
+                .collect(),
+            cx,
+        );
+        if was_transitioning || self.motion.transitioning() {
+            self.reveal_active.set(true);
+        }
         let reveal = self.reveal_active.clone();
         let scroll = self.row_scroll.clone();
         let active_index = self.tabs.iter().position(|tab| Some(tab.id) == self.active);
@@ -913,133 +937,142 @@ impl WorkspaceTabs {
                 }
             }))
             .flex_none()
-            .children(
-                indices
-                    .into_iter()
-                    .enumerate()
-                    .flat_map(|(index, original)| {
-                        let tab = &self.tabs[original];
-                        let id = tab.id;
-                        let active = self.active == Some(id);
-                        let working = tab
-                            .panel
-                            .as_ref()
-                            .is_some_and(|panel| panel.read(cx).is_working(cx));
-                        let group: SharedString = format!("workspace-tab-{id}").into();
-                        let label = tab
-                            .browser
-                            .as_ref()
-                            .and_then(|b| url::Url::parse(&b.url()).ok())
-                            .and_then(|url| url.host_str().map(str::to_owned))
-                            .unwrap_or_else(|| tab.kind.label().into());
-                        let payload = DraggedWorkspaceTab {
-                            source: cx.entity().downgrade(),
-                            placement: Default::default(),
-                            owner: cx.entity_id(),
-                            id,
-                            label: label.clone(),
-                            kind: tab.kind,
-                            origin: self.drag_origin.clone(),
-                            cursor_offset: Point::default(),
-                            grab_offset: Point::default(),
-                        };
-                        let origin = self.drag_origin.clone();
+            .children(motion.into_iter().enumerate().flat_map(|(index, slot)| {
+                if slot.closing {
+                    return vec![slot.ghost(format!("workspace-close-{}", slot.key).into())];
+                }
+                let tab = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == slot.key)
+                    .expect("live tab");
+                let id = tab.id;
+                let active = self.active == Some(id);
+                let unread = tab
+                    .panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.read(cx).is_unread(cx));
+                let working = tab
+                    .panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.read(cx).is_working(cx));
+                let group: SharedString = format!("workspace-tab-{id}").into();
+                let label = tab
+                    .browser
+                    .as_ref()
+                    .and_then(|b| url::Url::parse(&b.url()).ok())
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .unwrap_or_else(|| tab.kind.label().into());
+                let payload = DraggedWorkspaceTab {
+                    source: cx.entity().downgrade(),
+                    placement: Default::default(),
+                    owner: cx.entity_id(),
+                    id,
+                    label: label.clone(),
+                    kind: tab.kind,
+                    origin: self.drag_origin.clone(),
+                    cursor_offset: Point::default(),
+                    grab_offset: Point::default(),
+                };
+                let origin = self.drag_origin.clone();
 
-                        let workspace = cx.entity();
-                        let element = h_flex()
-                            .id(group.clone())
-                            .debug_selector(move || format!("workspace-tool-{id}"))
-                            .group(group.clone())
+                let workspace = cx.entity();
+                let element = h_flex()
+                    .id(group.clone())
+                    .debug_selector(move || format!("workspace-tool-{id}"))
+                    .group(group.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Open {label} tab"))
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .w(zpx(TAB_WIDTH))
+                    .flex_none()
+                    .px_2()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(zpx(del_core::typography::TEXT_MD))
+                    .text_color(if active {
+                        rgb(0xf5f5f5)
+                    } else {
+                        rgba(0xffffff8c)
+                    })
+                    .when(active, |t| t.bg(rgba(0xffffff14)))
+                    .hover(|t| t.bg(rgba(0xffffff0a)))
+                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                        origin.set(event.position);
+
+                        cx.stop_propagation();
+                    })
+                    .on_drag(payload, move |drag, offset, window, cx| {
+                        let movement = window.mouse_position() - drag.origin.get();
+                        workspace.update(cx, |this, cx| {
+                            this.begin_drag(drag.id, cx);
+                            this.track_drag_position(window.mouse_position(), cx);
+                            if !this.drag_outside {
+                                this.move_drag(
+                                    drag.owner,
+                                    drag.id,
+                                    del_core::zoom::unscaled(movement.x.as_f32()),
+                                    cx,
+                                );
+                            }
+                        });
+                        let mut preview = drag.clone();
+                        preview.grab_offset = offset - movement;
+                        preview.cursor_offset = offset;
+                        cx.new(|_| preview)
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.select(Some(id), window, cx)),
+                    )
+                    .child(crate::icons::icon(tab.kind.icon()).with_size(zpx(15.)))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .when(working, |tab| tab.child(crate::icons::working_spinner()))
+                    .when(unread && !working, |tab| {
+                        tab.child(crate::icons::unread_mark())
+                    })
+                    .when(hints && index < 8, |t| {
+                        t.child(div().text_size(zpx(10.)).child(format!("⌘{}", index + 2)))
+                    })
+                    .child(
+                        div()
+                            .id(("close-workspace-tab", id))
                             .role(gpui::Role::Button)
-                            .aria_label(format!("Open {label} tab"))
-                            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                            .w(zpx(TAB_WIDTH))
+                            .aria_label(format!("Close {} tab", tab.kind.label()))
+                            .size(zpx(crate::icons::TAB_CLOSE_SIZE))
                             .flex_none()
-                            .px_2()
-                            .gap_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(zpx(del_core::typography::TEXT_MD))
-                            .text_color(if active {
-                                rgb(0xf5f5f5)
-                            } else {
-                                rgba(0xffffff8c)
-                            })
-                            .when(active, |t| t.bg(rgba(0xffffff14)))
-                            .hover(|t| t.bg(rgba(0xffffff0a)))
-                            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                                origin.set(event.position);
-
-                                cx.stop_propagation();
-                            })
-                            .on_drag(payload, move |drag, offset, window, cx| {
-                                let movement = window.mouse_position() - drag.origin.get();
-                                workspace.update(cx, |this, cx| {
-                                    this.begin_drag(drag.id, cx);
-                                    this.track_drag_position(window.mouse_position(), cx);
-                                    if !this.drag_outside {
-                                        this.move_drag(
-                                            drag.owner,
-                                            drag.id,
-                                            del_core::zoom::unscaled(movement.x.as_f32()),
-                                            cx,
-                                        );
-                                    }
-                                });
-                                let mut preview = drag.clone();
-                                preview.grab_offset = offset - movement;
-                                preview.cursor_offset = offset;
-                                cx.new(|_| preview)
-                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .opacity(0.0)
+                            .group_hover(group, |b| b.opacity(1.))
+                            .hover(|b| b.bg(rgba(0xffffff14)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select(Some(id), window, cx)
+                                cx.stop_propagation();
+                                this.close(id, window, cx);
                             }))
-                            .child(crate::icons::icon(tab.kind.icon()).with_size(zpx(15.)))
-                            .child(div().flex_1().min_w_0().truncate().child(label))
-                            .when(working, |tab| tab.child(crate::icons::working_spinner()))
-                            .when(hints && index < 8, |t| {
-                                t.child(div().text_size(zpx(10.)).child(format!("⌘{}", index + 2)))
-                            })
                             .child(
-                                div()
-                                    .id(("close-workspace-tab", id))
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Close {} tab", tab.kind.label()))
-                                    .size(zpx(crate::icons::TAB_CLOSE_SIZE))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .opacity(0.0)
-                                    .group_hover(group, |b| b.opacity(1.))
-                                    .hover(|b| b.bg(rgba(0xffffff14)))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.close(id, window, cx);
-                                    }))
-                                    .child(
-                                        crate::icons::icon(IconName::Close)
-                                            .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)),
-                                    ),
-                            );
-                        let mut elements = Vec::new();
-                        if incoming.index == Some(index) {
-                            elements.push(incoming.element("main-insertion-space"));
-                        }
-                        elements.push(
-                            div()
-                                .flex_none()
-                                .when(drag.is_some_and(|d| d.id == id), |tab| tab.opacity(0.))
-                                .child(element)
-                                .into_any_element(),
-                        );
-                        elements
-                    }),
-            )
+                                crate::icons::icon(IconName::Close)
+                                    .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)),
+                            ),
+                    );
+                let mut elements = Vec::new();
+                if incoming.index == Some(index) {
+                    elements.push(incoming.element("main-insertion-space"));
+                }
+                elements.push(
+                    slot.wrap(
+                        format!("workspace-open-{id}").into(),
+                        div()
+                            .flex_none()
+                            .when(drag.is_some_and(|d| d.id == id), |tab| tab.opacity(0.))
+                            .child(element),
+                    ),
+                );
+                elements
+            }))
             .when(incoming.index == Some(self.tabs.len()), |row| {
                 row.child(incoming.element("main-insertion-space"))
             });
