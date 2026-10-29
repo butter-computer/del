@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.13` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.14` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.13-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.14-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -252,7 +252,12 @@ shows the project name; hover it to see the branch.
 
 Below the new-session composer, the directory, **Branch**, **New worktree** checkbox,
 and Chat/Terminal controls share one row. Choose a starting branch and optionally
-enable New worktree. Git discovery and checkout preparation run in the background.
+enable New worktree. The branch picker opens with a focused search field and filters
+local and remote names case-insensitively. Its list is capped at eight rows and
+shrinks to fit the window, with wheel/trackpad scrolling, no visible scrollbar,
+and a bottom fade while more results remain. Use ↑/↓ or Page Up/Page Down to
+navigate, Return to choose, and Escape to dismiss. There is no shortcut-hint footer.
+Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
 the existing checkout only when it is clean; Git also refuses branches checked out
@@ -617,7 +622,9 @@ with shortcuts beside neutral icons. Card and URL-bar backgrounds are slightly
 lighter to remain visible against the page. Entering either row opens a live
 insertion gap, and neighboring tabs move aside
 as you change slots. Dragging tracks the pointer horizontally, locked to the tab
-row with no vertical movement, haptics, or magnetic effects. The darker, full-width preview stays attached to the pointer at its original grab offset,
+row with no vertical movement or magnetic effects. Top-level and inner tabs emit
+one native haptic tick when their reorder target changes, matching sidebar session
+reordering; movement within the same slot stays silent. The darker, full-width preview stays attached to the pointer at its original grab offset,
 including after crossing into the other zone. Keep dragging to rearrange there; the
 tab settles into its destination slot only when you release.
 The source slot collapses as soon as the tab leaves, so its plus button follows

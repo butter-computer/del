@@ -18,6 +18,7 @@ mod appearance;
 mod assets;
 mod attachments;
 mod backdrop;
+mod branch_picker;
 mod browser;
 mod chat;
 mod command_menu;
@@ -380,6 +381,7 @@ struct AppShell {
     dictation: Option<dictation::Dictation>,
     dictation_generation: u64,
     model_picker: Entity<model_picker::ModelPicker>,
+    branch_picker: Entity<branch_picker::BranchPicker>,
     rename: Entity<InputState>,
     /// The session whose title is loaded into the rename field.
     renaming_loaded: Option<SessionId>,
@@ -554,6 +556,7 @@ impl AppShell {
         }
         self.previous_drag_target = self.drag_target;
         self.drag_target = Some(target);
+        crate::haptics::tick();
         cx.notify();
     }
 
@@ -691,6 +694,8 @@ impl AppShell {
                 s.error = Some(error.clone());
             }
         });
+        let branch_picker =
+            cx.new(|cx| branch_picker::BranchPicker::new(state.clone(), window, cx));
         let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), window, cx));
         let command_menu =
             cx.new(|cx| command_menu::CommandMenu::new(composer.clone(), state.clone(), cx));
@@ -714,6 +719,7 @@ impl AppShell {
             composer,
             command_menu,
             model_picker,
+            branch_picker,
             rename,
             renaming_loaded: None,
             project_renaming_loaded: None,

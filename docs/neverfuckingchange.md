@@ -74,7 +74,7 @@ This records the final decisions, including corrections to earlier experiments.
   Lock the preview horizontally inside the sidebar; use vertical movement for reordering.
   Hide the source row and its highlight while dragging; show only the floating preview.
   Neighbor rows use the top tabs’ 90 ms easing, with a dead zone to prevent jitter.
-- Tab drags do not emit haptics.
+- Top-level and inner tab drags use the same native level-change haptic as sidebar session reordering. Tick once when the reorder target changes, including entering a destination zone or changing its insertion slot; movement within the same slot stays silent.
 - Persist manual order across restarts. Reordering must preserve selection and history.
 - Restrict dragging to the same project or the shared pinned section. Chats and
   terminals can reorder together. Cross-project or pinned/unpinned drops must not
@@ -302,6 +302,12 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Projects and worktrees
 
+- The starting-branch picker has a focused search field, case-insensitive filtering,
+  a viewport-aware maximum of eight visible rows, wheel/trackpad scrolling without
+  a visible scrollbar, and a bottom fade only while more results remain. Keep long
+  names truncated and the keyboard highlight in view. Support ↑/↓, Page Up/Down,
+  Return to choose, and Escape to dismiss. Do not add a hint/footer row.
+
 - The left sidebar groups chats and terminals together as sessions under **Pinned**
   and **Projects**. Do not restore a separate Terminals section.
 - Automatically identify projects from directories; Git worktrees and subfolders
@@ -438,7 +444,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Keep tool-tab dragging simple: horizontal pointer tracking locked to the source
   row outside a destination and aligned with the destination row while inside it,
   with no vertical pointer following, magnetic resistance,
-  spring effects, or drag haptics. Use a darker opaque preview of the normal tab
+  or spring effects. Use discrete native haptic ticks when the insertion target changes. Use a darker opaque preview of the normal tab
   width. Collapse the source layout slot when it leaves its row; the plus button
   must immediately follow the remaining tabs. Restore that slot if it returns.
 - Insertion gaps participate in layout; do not translate neighboring tabs beyond

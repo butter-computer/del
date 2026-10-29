@@ -14,7 +14,6 @@ use del_agent::{Provider, SessionId};
 use del_mcp::{HostError, HostResult, SessionInfo, SessionMode, UserAnswer};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -1099,33 +1098,89 @@ impl AppShell {
             "Checking Git…".into()
         };
         let state = self.state.clone();
-        let branches_state = self.state.clone();
         let toggle_state = self.state.clone();
         let worktree = options.worktree;
         let branch = options.branch.clone();
-        h_flex().size_full().px_2().gap_2().items_center()
-            .child(h_flex().flex_1().min_w_0().items_center().gap_1()
-                .child(Button::new("new-workspace").ghost().disabled(!enabled).h(zpx(24.)).px_2().min_w_0().max_w(zpx(150.)).text_size(zpx(13.))
-                    .tooltip(cwd.display().to_string())
-                    .child(h_flex().gap_1().items_center().child(crate::icons::icon(IconName::Folder))
-                        .child(div().min_w_0().truncate().child(crate::sessions::folder_name(&cwd))))
-                    .text_color(rgba(0xffffff8c))
-                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))))
-                .when(git, |row| row.child(Button::new("session-branch").ghost().disabled(!enabled || !git).h(zpx(24.)).px_2().min_w_0().max_w(zpx(180.)).text_size(zpx(12.))
-                    .child(div().min_w_0().truncate().child(format!("Branch: {selected}"))).tooltip("Starting branch. Enable New worktree to leave the current checkout unchanged.")
-                    .dropdown_menu(move |menu, _, _| {
-                        info.branches.iter().fold(menu, |menu, name| {
-                            let state = branches_state.clone(); let branch = name.clone();
-                            menu.item(PopupMenuItem::new(name.clone()).checked(*name == selected)
-                                .on_click(move |_, _, cx| state.update(cx, |s, cx| s.set_launch_options(Some(branch.clone()), worktree, cx))))
-                        })
-                    }))))
-            .when(!git, |row| row.child(Button::new("no-git-repository").ghost().compact().disabled(true).child(div().relative().size(crate::icons::size())
-                .child(crate::icons::path("icons/git-unavailable.svg").size(crate::icons::size()))
-                .child(div().absolute().right_0().bottom_0().size(zpx(7.)).child(crate::icons::icon(IconName::Close).with_size(zpx(7.)).text_color(rgb(0xff646b))))).text_color(rgba(0xffffff70)).accessibility_label(label.clone()).tooltip(label)))
-            .when(git, |row| row.child(gpui_kit::component::checkbox::Checkbox::new("new-worktree").small().focus_ring(false)
-                .label("New worktree").checked(worktree).disabled(!enabled)
-                .on_change(move |checked, _, cx| toggle_state.update(cx, |s, cx| s.set_launch_options(branch.clone(), *checked, cx)))))
+        h_flex()
+            .size_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("new-workspace")
+                            .ghost()
+                            .disabled(!enabled)
+                            .h(zpx(24.))
+                            .px_2()
+                            .min_w_0()
+                            .max_w(zpx(150.))
+                            .text_size(zpx(13.))
+                            .tooltip(cwd.display().to_string())
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(crate::icons::icon(IconName::Folder))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(crate::sessions::folder_name(&cwd)),
+                                    ),
+                            )
+                            .text_color(rgba(0xffffff8c))
+                            .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),
+                    )
+                    .when(git, |row| row.child(self.branch_picker.clone())),
+            )
+            .when(!git, |row| {
+                row.child(
+                    Button::new("no-git-repository")
+                        .ghost()
+                        .compact()
+                        .disabled(true)
+                        .child(
+                            div()
+                                .relative()
+                                .size(crate::icons::size())
+                                .child(
+                                    crate::icons::path("icons/git-unavailable.svg")
+                                        .size(crate::icons::size()),
+                                )
+                                .child(
+                                    div().absolute().right_0().bottom_0().size(zpx(7.)).child(
+                                        crate::icons::icon(IconName::Close)
+                                            .with_size(zpx(7.))
+                                            .text_color(rgb(0xff646b)),
+                                    ),
+                                ),
+                        )
+                        .text_color(rgba(0xffffff70))
+                        .accessibility_label(label.clone())
+                        .tooltip(label),
+                )
+            })
+            .when(git, |row| {
+                row.child(
+                    gpui_kit::component::checkbox::Checkbox::new("new-worktree")
+                        .small()
+                        .focus_ring(false)
+                        .label("New worktree")
+                        .checked(worktree)
+                        .disabled(!enabled)
+                        .on_change(move |checked, _, cx| {
+                            toggle_state.update(cx, |s, cx| {
+                                s.set_launch_options(branch.clone(), *checked, cx)
+                            })
+                        }),
+                )
+            })
             .child(self.render_mode_picker(cx))
     }
 

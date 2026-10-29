@@ -837,7 +837,7 @@ impl WorkspaceTabs {
         let target = drag_target(drag.source, delta, drag.target, self.tabs.len());
         if drag.target != target {
             drag.target = target;
-
+            crate::haptics::tick();
             cx.notify();
         }
     }

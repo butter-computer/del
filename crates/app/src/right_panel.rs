@@ -992,9 +992,10 @@ impl RightPanel {
         let mut order = drag.order.clone();
         let tab = order.remove(source);
         order.insert(target, tab);
-        if order != self.tab_order {
-            self.tab_order = order;
+        if order != self.sidebar_keys() {
+            crate::haptics::tick();
         }
+        self.tab_order = order;
         cx.notify();
     }
 

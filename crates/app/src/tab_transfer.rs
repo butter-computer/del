@@ -52,6 +52,9 @@ pub(crate) struct InsertionGap {
 }
 impl InsertionGap {
     pub fn update(&mut self, index: Option<usize>, width: f32) {
+        if index.is_some() && self.index != index {
+            crate::haptics::tick();
+        }
         self.index = index;
         self.width = width;
     }

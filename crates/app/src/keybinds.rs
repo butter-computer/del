@@ -64,6 +64,15 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Branch picker",
+        &[
+            ("Move through branches", "↑ / ↓"),
+            ("Move by a visible page", "Page Up / Page Down"),
+            ("Choose highlighted branch", "Return"),
+            ("Dismiss branch picker", "Esc"),
+        ],
+    ),
+    (
         "Text editing and terminal",
         &[
             ("Copy / paste", "⌘C / ⌘V"),
