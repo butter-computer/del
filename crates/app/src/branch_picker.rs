@@ -55,7 +55,7 @@ impl BranchPicker {
     }
 }
 impl Render for BranchPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let root = state.effective().2;
         let info = state.project_info.get(&root).cloned().unwrap_or_default();
@@ -63,8 +63,6 @@ impl Render for BranchPicker {
         let disabled = state.is_starting();
         let panel = self.panel.clone();
         let bounds = self.bounds.clone();
-        let above =
-            self.bounds.get().top() > window.viewport_size().height - self.bounds.get().bottom();
         div()
             .on_children_prepainted(move |rects, _, _| {
                 if let Some(rect) = rects.first() {
@@ -75,11 +73,7 @@ impl Render for BranchPicker {
                 Popover::new("branch-picker")
                     .open(self.open)
                     .appearance(false)
-                    .anchor(if above {
-                        Anchor::BottomLeft
-                    } else {
-                        Anchor::TopLeft
-                    })
+                    .anchor(Anchor::TopLeft)
                     .offset(zpx(6.))
                     .trigger(
                         Button::new("session-branch")
@@ -180,9 +174,7 @@ impl Render for BranchPanel {
         let choices = self.choices(cx);
         self.highlighted = self.highlighted.min(choices.len().saturating_sub(1));
         let bounds = self.bounds.get();
-        let available = bounds
-            .top()
-            .max(window.viewport_size().height - bounds.bottom());
+        let available = window.viewport_size().height - bounds.bottom();
         let height = zpx(choices.len().max(1) as f32 * 28.)
             .min((available - zpx(58.)).clamp(zpx(28.), zpx(224.)));
         let scroll = self.scroll.clone();
@@ -226,7 +218,7 @@ impl Render for BranchPanel {
                 window.prevent_default();
                 cx.stop_propagation();
             }))
-            .w(zpx(340.).min(window.viewport_size().width - zpx(24.)))
+            .w(zpx(320.).min(window.viewport_size().width - zpx(24.)))
             .p_2()
             .gap_1()
             .rounded_lg()
@@ -239,11 +231,7 @@ impl Render for BranchPanel {
                     .small()
                     .appearance(false)
                     .bordered(false)
-                    .cleanable(true)
-                    .prefix(
-                        crate::icons::icon(IconName::Search)
-                            .text_color(appearance::rgba(0xffffff80)),
-                    ),
+                    .cleanable(true),
             )
             .child(
                 div()
@@ -365,7 +353,7 @@ mod tests {
         let panel = root.read_with(cx, |root, _| root.0.clone());
         let viewport = cx.debug_bounds("branch-list").unwrap();
         assert!(viewport.size.height <= zpx(224.));
-        assert!(cx.debug_bounds("branch-panel").unwrap().size.width <= zpx(340.));
+        assert!(cx.debug_bounds("branch-panel").unwrap().size.width <= zpx(320.));
         cx.simulate_mouse_move(viewport.center(), None, Modifiers::default());
         cx.simulate_event(ScrollWheelEvent {
             position: viewport.center(),

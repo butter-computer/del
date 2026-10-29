@@ -252,8 +252,9 @@ shows the project name; hover it to see the branch.
 
 Below the new-session composer, the directory, **Branch**, **New worktree** checkbox,
 and Chat/Terminal controls share one row. Choose a starting branch and optionally
-enable New worktree. The branch picker opens with a focused search field and filters
-local and remote names case-insensitively. Its list is capped at eight rows and
+enable New worktree. The branch picker opens below its button in a compact
+320-point panel, with a focused, icon-free search field that filters local and
+remote names case-insensitively. Its list is capped at eight rows and
 shrinks to fit the window, with wheel/trackpad scrolling, no visible scrollbar,
 and a bottom fade while more results remain. Use ↑/↓ or Page Up/Page Down to
 navigate, Return to choose, and Escape to dismiss. There is no shortcut-hint footer.

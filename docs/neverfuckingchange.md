@@ -302,7 +302,8 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Projects and worktrees
 
-- The starting-branch picker has a focused search field, case-insensitive filtering,
+- The starting-branch picker opens below its button with a focused, icon-free search
+  field and case-insensitive filtering,
   a viewport-aware maximum of eight visible rows, wheel/trackpad scrolling without
   a visible scrollbar, and a bottom fade only while more results remain. Keep long
   names truncated and the keyboard highlight in view. Support ↑/↓, Page Up/Down,
