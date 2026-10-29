@@ -74,9 +74,7 @@ This records the final decisions, including corrections to earlier experiments.
   Lock the preview horizontally inside the sidebar; use vertical movement for reordering.
   Hide the source row and its highlight while dragging; show only the floating preview.
   Neighbor rows use the top tabs’ 90 ms easing, with a dead zone to prevent jitter.
-- Top-tab and sidebar chat/terminal drags emit one native haptic tick when the
-  destination position changes. Do not tick on every pointer event, on invalid
-  cross-section drops, or for non-drag reorder operations.
+- Tab drags do not emit haptics.
 - Persist manual order across restarts. Reordering must preserve selection and history.
 - Restrict dragging to the same project or the shared pinned section. Chats and
   terminals can reorder together. Cross-project or pinned/unpinned drops must not
@@ -119,8 +117,8 @@ This records the final decisions, including corrections to earlier experiments.
   tab keeps it open. Merely receiving terminal output must not keep a preview.
 - Explicitly created sessions remain open. Replacing a preview preserves history
   and drafts; it is not deletion.
-- Close glyphs in top tabs and browser tabs are slightly smaller: 14 logical
-  pixels instead of 16. Keep the surrounding click targets unchanged.
+- Top-level session tabs and both tool-tab zones share 11-point close glyphs
+  and 16-point hover buttons. Browser subtab close controls retain their own size.
 
 ## Search and command suggestions
 
@@ -428,6 +426,28 @@ This records the final decisions, including corrections to earlier experiments.
   strip edges; fades must not intercept clicks or scrolling.
 - Right-sidebar tabs can be reordered independently across tool kinds. Preserve
   the active instance, drafts, live shells, and each session’s saved order.
+- Move tool tabs between the session row and right sidebar by dragging. Keep the
+  original conversation fixed. Transfer live entities rather than reopening tools:
+  shells keep their PID, editors keep drafts and undo history, and side chats keep
+  their conversation, model/account selection, and storage identity.
+- Main and right-sidebar tool tabs share one 140-point width so transfers do not resize them.
+- Only transfer on a valid drop inside the same session. Entering the other row
+  immediately opens an insertion gap; neighboring tabs shift as the pointer moves
+  between slots. Do not replace this behavior with a blue zone highlight.
+- Keep tool-tab dragging simple: horizontal pointer tracking locked to the source
+  row until docking, with no vertical pointer following, magnetic resistance,
+  spring effects, or drag haptics. Use a darker opaque preview of the normal tab
+  width. Collapse the source layout slot when it leaves its row; the plus button
+  must immediately follow the remaining tabs. Restore that slot if it returns.
+- Insertion gaps participate in layout; do not translate neighboring tabs beyond
+  their measured widths or underneath the plus button. Keep destination previews
+  inside the row viewport without shrinking the dragged tab.
+- Both inner tab rows use the same shell background. All three tab levels use
+  the sidebar's 11-point close glyph and 16-point hover button geometry.
+- Apply gradual, non-interactive overflow fades to both tool-tab rows.
+- Restore moved tools in their destination row after restart. Preserve the existing
+  side-chat manifest when migrating to full session-tool persistence. Restored
+  terminals start fresh shells and never replay previous commands.
 - Use matching tool icons in the launcher and both tab rows. New tab uses a page
   icon; reserve the plus icon for adding tabs.
 - Each terminal appears directly in its session or right-sidebar tab row, with
@@ -442,3 +462,14 @@ This records the final decisions, including corrections to earlier experiments.
   Applications shortcut and explicit signing/notarization status. Public bundles
   use computer.butter.del; never replace the local development signing identity
   or include user data, credentials, or provider account profiles in a release.
+
+- Command-T and Control-T create an inner tab in the last-used zone. Reveal the
+  active tab immediately, including repeated opens after horizontal overflow.
+- Command-Shift-W closes only the active inner tab in that zone; it must never
+  fall through to closing the top-level session. Command-W closes the top-level
+  session even while an inner tool is active.
+- Changes (Control-Shift-G), Terminal (Control-backtick), Files (Command-P), and
+  Side chat (Option-Command-S) open in the same active zone. Show these shortcuts
+  in the new-tab launcher with neutral icons and subtle surfaces.
+- Empty left-sidebar space must not move the window. Its divider owns only
+  sidebar resizing and stops mouse-down propagation.

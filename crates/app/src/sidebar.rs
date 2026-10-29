@@ -1077,14 +1077,10 @@ pub fn render(
                 }))))
                 .child(
                     div()
-                        .id("sidebar-window-drag")
+                        .id("sidebar-empty-space")
                         .flex_1()
                         .min_h(zpx(12.0))
-                        .w_full()
-                        .window_control_area(WindowControlArea::Drag)
-                        .on_mouse_down(MouseButton::Left, |_, window, _| {
-                            window.start_window_move();
-                        }),
+                        .w_full(),
                 ),
         )
         .child(crate::app_updates::render(updater, cx))

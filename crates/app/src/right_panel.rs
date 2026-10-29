@@ -112,44 +112,56 @@ fn default_panes() -> Vec<Pane> {
 
 /// Visual order is independent of the backing tool instances and selection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum SidebarTab {
+pub(crate) enum SidebarTab {
     Tool(Pane),
     Terminal(String),
     Blank(String),
+    Hosted(String),
 }
 
 #[derive(Clone)]
-struct DraggedSidebarTab {
+pub(crate) struct DraggedSidebarTab {
+    pub source: WeakEntity<RightPanel>,
+    pub placement: crate::tab_transfer::Placement,
     owner: EntityId,
-    key: SidebarTab,
+    pub key: SidebarTab,
     pane: Pane,
-    scroll: ScrollHandle,
     origin: Rc<Cell<Point<Pixels>>>,
-    width: Pixels,
     offset: Point<Pixels>,
+    cursor_offset: Point<Pixels>,
 }
 
 impl Render for DraggedSidebarTab {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let bounds = self.scroll.bounds();
-        let width = self.width.min(bounds.size.width);
-        let natural = window.mouse_position().x - self.offset.x;
-        let left = natural.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
-        h_flex()
-            .relative()
-            .left(left - natural)
-            .top(self.origin.get().y - window.mouse_position().y)
-            .w(width)
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let natural = window.mouse_position() - self.offset;
+        let source_y = self.origin.get().y - self.offset.y;
+        let rect = self
+            .placement
+            .preview(natural, source_y, zpx(crate::icons::TOOL_TAB_WIDTH));
+        let raw = window.mouse_position() - self.cursor_offset;
+        // GPUI positions the drag root at the pointer. Offset its child to
+        // the destination slot while keeping a full-width preview.
+        div()
+            .w(rect.size.width)
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-            .px_1p5()
-            .gap_1p5()
-            .rounded_md()
-            .bg(crate::appearance::popup_surface())
-            .text_color(rgb(0xf5f5f5))
-            .text_size(zpx(14.))
-            .shadow_md()
-            .child(crate::icons::icon(self.pane.icon()).with_size(zpx(15.)))
-            .child(self.pane.tab_label().1)
+            .child(
+                h_flex()
+                    .relative()
+                    .left(rect.left() - raw.x)
+                    .top(rect.top() - raw.y)
+                    .w(rect.size.width)
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .px_1p5()
+                    .gap_1p5()
+                    .rounded_md()
+                    .bg(crate::appearance::dragged_tab_surface())
+                    .border_1()
+                    .border_color(crate::appearance::separator())
+                    .text_color(rgb(0xf5f5f5))
+                    .text_size(zpx(14.))
+                    .child(crate::icons::icon(self.pane.icon()).with_size(zpx(15.)))
+                    .child(self.pane.tab_label().1),
+            )
     }
 }
 
@@ -158,6 +170,16 @@ struct SidebarDrag {
     order: Vec<SidebarTab>,
     centers: Vec<Pixels>,
     pointer_offset: Pixels,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct SavedHostedTab {
+    id: String,
+    panel: SavedPanel,
+}
+struct HostedTab {
+    id: String,
+    panel: Entity<RightPanel>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -174,6 +196,8 @@ pub struct SavedPanel {
     pane: Pane,
     open_panes: Vec<Pane>,
     tab_order: Vec<SidebarTab>,
+    hosted: Vec<SavedHostedTab>,
+    active_hosted: Option<String>,
     blank_tabs: Vec<BlankTab>,
     blank_active: usize,
     expanded: HashSet<PathBuf>,
@@ -191,7 +215,7 @@ pub struct SavedPanel {
 
 impl SavedPanel {
     pub fn restore_open(&self) -> bool {
-        self.open && self.pane != Pane::Changes
+        self.open && (self.active_hosted.is_some() || self.pane != Pane::Changes)
     }
 
     pub fn browser_profile(&self) -> &str {
@@ -206,6 +230,8 @@ impl Default for SavedPanel {
             pane: Pane::Files,
             open_panes: default_panes(),
             tab_order: Vec::new(),
+            hosted: Vec::new(),
+            active_hosted: None,
             blank_tabs: Vec::new(),
             blank_active: 0,
             expanded: HashSet::new(),
@@ -333,19 +359,29 @@ enum Viewer {
 }
 
 pub struct RightPanel {
+    focus: FocusHandle,
     side_context: Option<crate::side_chat::Context>,
     side_chat: Option<Entity<crate::side_chat::SideChat>>,
     side_chat_id: Option<String>,
     workspace: bool,
+    compact_tools: bool,
     pane: Pane,
     open_panes: Vec<Pane>,
     tab_order: Vec<SidebarTab>,
+    hosted: Vec<HostedTab>,
+    active_hosted: Option<String>,
+    pub(crate) transfer_peer: Option<WeakEntity<crate::workspace_tabs::WorkspaceTabs>>,
+    incoming: crate::tab_transfer::InsertionGap,
+    incoming_items: Vec<Bounds<Pixels>>,
+    watched_hosted: HashSet<EntityId>,
+    transfer_bounds: Rc<Cell<Bounds<Pixels>>>,
     blank_tabs: Vec<BlankTab>,
     blank_active: usize,
     address: Entity<InputState>,
     new_tab_scroll: ScrollHandle,
     tool_tab_scroll: ScrollHandle,
     tab_drag: Option<SidebarDrag>,
+    tab_drag_outside: bool,
     tab_drag_origin: Rc<Cell<Point<Pixels>>>,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
@@ -393,6 +429,341 @@ impl EventEmitter<crate::side_chat::SendToMain> for RightPanel {}
 impl EventEmitter<crate::chat::OpenLink> for RightPanel {}
 
 impl RightPanel {
+    pub(crate) fn set_tab_zone(&mut self, sidebar: bool) {
+        self.compact_tools = sidebar;
+    }
+    pub(crate) fn focus_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            tab.panel
+                .update(cx, |panel, cx| panel.focus_workspace(window, cx));
+            return;
+        }
+        self.focus.focus(window, cx);
+        match self.pane {
+            Pane::NewTab => self.address.update(cx, |input, cx| input.focus(window, cx)),
+            Pane::Terminal => self.focus_terminal(window, cx),
+            Pane::SideChat => self.focus_side_chat(window, cx),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn current_pane(&self) -> Pane {
+        self.pane
+    }
+
+    pub(crate) fn restore_workspace(
+        &mut self,
+        saved: SavedPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = saved.pane;
+        self.workspace = true;
+        self.restore(saved, window, cx);
+        self.pane = pane;
+    }
+
+    pub(crate) fn blank_workspace(
+        &mut self,
+        draft: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = true;
+        self.open_panes.clear();
+        self.open_new_tab(window, cx);
+        self.address
+            .update(cx, |input, cx| input.set_value(draft, window, cx));
+        self.remember_blank(cx);
+    }
+
+    pub(crate) fn adopt_browser(&mut self, browser: crate::browser::Browser, profile: String) {
+        self.workspace = true;
+        self.pane = Pane::Browser;
+        self.open_panes = vec![Pane::Browser];
+        self.browser_profile = profile;
+        self.browser_tabs[0].url = browser.url();
+        self.browsers
+            .insert(self.browser_tabs[0].id.clone(), browser);
+        self.browser = None;
+    }
+
+    fn watch_hosted(&mut self, panel: &Entity<RightPanel>, cx: &mut Context<Self>) {
+        if !self.watched_hosted.insert(panel.entity_id()) {
+            return;
+        }
+        cx.observe(panel, |_, _, cx| cx.notify()).detach();
+        let source = panel.downgrade();
+        cx.subscribe(
+            panel,
+            move |this, _, event: &crate::side_chat::SendToMain, cx| {
+                if this
+                    .hosted
+                    .iter()
+                    .any(|tab| tab.panel.entity_id() == source.entity_id())
+                {
+                    cx.emit(event.clone());
+                }
+            },
+        )
+        .detach();
+        let source = panel.downgrade();
+        cx.subscribe(panel, move |this, _, event: &crate::chat::OpenLink, cx| {
+            if this
+                .hosted
+                .iter()
+                .any(|tab| tab.panel.entity_id() == source.entity_id())
+            {
+                cx.emit(crate::chat::OpenLink(event.0.clone()));
+            }
+        })
+        .detach();
+    }
+
+    fn insertion_index(&self, pointer: Pixels) -> usize {
+        let mut x = pointer - self.tool_tab_scroll.offset().x;
+        if let Some(index) = self.incoming.index {
+            let left = self.insertion_left(index);
+            let width = zpx(self.incoming.width + 2.);
+            if x > left + width {
+                x -= width;
+            } else if x >= left {
+                x = left;
+            }
+        }
+        self.incoming_items
+            .iter()
+            .position(|bounds| x < bounds.center().x)
+            .unwrap_or(self.incoming_items.len())
+    }
+
+    fn insertion_left(&self, index: usize) -> Pixels {
+        self.incoming_items
+            .get(index)
+            .map(|bounds| bounds.left())
+            .or_else(|| {
+                self.incoming_items
+                    .last()
+                    .map(|bounds| bounds.right() + zpx(2.))
+            })
+            .unwrap_or(self.tool_tab_scroll.bounds().left())
+    }
+
+    pub(crate) fn accept_tab(
+        &mut self,
+        panel: Entity<RightPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_blank(cx);
+        panel.update(cx, |panel, _| panel.set_tab_zone(true));
+        self.watch_hosted(&panel, cx);
+        let id = uuid::Uuid::new_v4().to_string();
+        self.hosted.push(HostedTab {
+            id: id.clone(),
+            panel,
+        });
+        self.tab_order = self.sidebar_keys();
+        self.select_hosted(id, window, cx);
+        self.tool_tab_scroll
+            .scroll_to_item(self.sidebar_keys().len() - 1);
+        self.incoming = Default::default();
+    }
+
+    fn select_hosted(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_blank(cx);
+        self.active_hosted = Some(id);
+        self.set_preview_visible(self.preview_visible, cx);
+        self.prepare_to_show(window, cx);
+        if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            tab.panel
+                .update(cx, |panel, cx| panel.focus_workspace(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn close_hosted(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.hosted.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if self.hosted[index].panel.read(cx).has_unsaved_edits() {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(
+                    "Save or revert your file edits before closing this tab.",
+                ),
+                cx,
+            );
+            return;
+        }
+        let tab = self.hosted.remove(index);
+        tab.panel.update(cx, |panel, cx| {
+            panel.forget_side_chat(cx);
+            panel.release(cx);
+        });
+        self.after_hosted_removed(id, window, cx);
+    }
+
+    fn after_hosted_removed(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_hosted.as_deref() == Some(id) {
+            self.active_hosted = None;
+            if let Some(pane) = self.open_panes.first().copied() {
+                self.open_tool(pane, window, cx);
+            } else if let Some(tab) = self.hosted.first() {
+                self.select_hosted(tab.id.clone(), window, cx);
+            } else {
+                self.open_new_tab(window, cx);
+            }
+        }
+        self.tab_order = self.sidebar_keys();
+        self.tab_drag = None;
+        cx.notify();
+    }
+
+    /// Detach live resources. A move is not a close: never kill a PTY, forget a
+    /// side chat, reload a browser, or discard an editor's undo history.
+    pub(crate) fn take_tab(
+        &mut self,
+        key: &SidebarTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<RightPanel>> {
+        if let SidebarTab::Hosted(id) = key {
+            let index = self.hosted.iter().position(|tab| &tab.id == id)?;
+            let tab = self.hosted.remove(index);
+            self.after_hosted_removed(id, window, cx);
+            return Some(tab.panel);
+        }
+        let (pane, instance) = self
+            .sidebar_tabs()
+            .into_iter()
+            .find(|(pane, instance)| self.tab_key(*pane, *instance) == *key)?;
+        if pane == Pane::Files && !self.saving.is_empty() {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(
+                    "Finish saving this file before moving its tab.",
+                ),
+                cx,
+            );
+            return None;
+        }
+        self.remember_blank(cx);
+        let mut saved = self.snapshot(false, cx);
+        saved.hosted.clear();
+        saved.active_hosted = None;
+        saved.pane = pane;
+        saved.open_panes = vec![pane];
+        saved.tab_order.clear();
+        saved.side_chat_id = if pane == Pane::SideChat {
+            self.side_chat_id.take()
+        } else {
+            None
+        };
+        saved.selected = if pane == Pane::Files {
+            saved.selected
+        } else {
+            None
+        };
+        if pane != Pane::Files {
+            saved.file_drafts.clear();
+        }
+        saved.blank_tabs = if pane == Pane::NewTab {
+            vec![self.blank_tabs[instance?].clone()]
+        } else {
+            Vec::new()
+        };
+        saved.blank_active = 0;
+        saved.terminal_tabs = if pane == Pane::Terminal {
+            vec![self.terminal_tabs[instance?].clone()]
+        } else {
+            vec![uuid::Uuid::new_v4().to_string()]
+        };
+        saved.terminal_active = 0;
+        let terminal = if pane == Pane::Terminal {
+            self.terminals.remove(&saved.terminal_tabs[0])
+        } else {
+            None
+        };
+        let side = if pane == Pane::SideChat {
+            self.side_chat.take()
+        } else {
+            None
+        };
+        let browsers = if pane == Pane::Browser {
+            self.browser.take();
+            self.browser_watch = None;
+            std::mem::take(&mut self.browsers)
+        } else {
+            HashMap::new()
+        };
+        let editors = if pane == Pane::Files {
+            std::mem::take(&mut self.editors)
+        } else {
+            HashMap::new()
+        };
+        let viewer = if pane == Pane::Files {
+            Some(std::mem::replace(&mut self.viewer, Viewer::None))
+        } else {
+            None
+        };
+        let preview = if pane == Pane::Files {
+            self.document_preview.take()
+        } else {
+            None
+        };
+        if pane == Pane::Files {
+            self.file_request += 1;
+            self.file_drafts.clear();
+        }
+        let context = self.side_context.clone();
+        let root = self.root.clone();
+        let panel = cx.new(|cx| {
+            let mut panel = RightPanel::new(root, window, cx);
+            panel.side_context = context;
+            // Restore metadata without starting a second file read or process.
+            let selected = saved.selected.take();
+            panel.restore_workspace(saved, window, cx);
+            if let Some(terminal) = terminal {
+                panel
+                    .terminals
+                    .insert(panel.terminal_tabs[0].clone(), terminal);
+            }
+            panel.side_chat = side;
+            if let Some(side) = panel.side_chat.clone() {
+                panel.watch_side_chat(&side, cx);
+            }
+            panel.browsers = browsers;
+            panel.document_preview = preview;
+            if let Some(viewer) = viewer {
+                if matches!(viewer, Viewer::Loading { .. }) {
+                    if let Some(path) = selected {
+                        panel.open_file(path, cx);
+                    }
+                } else {
+                    panel.viewer = viewer;
+                }
+            }
+            for (path, editor) in editors {
+                panel.watch_editor(path, editor, cx);
+            }
+            panel
+        });
+        match (pane, instance) {
+            (Pane::Terminal, Some(index)) => self.close_terminal_tab(index, window, cx),
+            (Pane::NewTab, Some(index)) => self.close_blank_tab(index, window, cx),
+            _ => self.close_tool(pane, window, cx),
+        }
+        self.tab_drag = None;
+        Some(panel)
+    }
+
     pub fn set_side_context(&mut self, context: crate::side_chat::Context) {
         self.side_context = Some(context);
     }
@@ -413,15 +784,7 @@ impl RightPanel {
                 None => crate::side_chat::SideChat::new(context, window, cx),
             });
             self.side_chat_id = Some(side.read(cx).storage_id());
-            cx.observe(&side, |_, _, cx| cx.notify()).detach();
-            cx.subscribe(&side, |_, _, event: &crate::side_chat::SendToMain, cx| {
-                cx.emit(event.clone())
-            })
-            .detach();
-            cx.subscribe(&side, |_, _, event: &crate::chat::OpenLink, cx| {
-                cx.emit(crate::chat::OpenLink(event.0.clone()))
-            })
-            .detach();
+            self.watch_side_chat(&side, cx);
             self.side_chat = Some(side);
         }
         if let Some(side) = &self.side_chat {
@@ -429,11 +792,35 @@ impl RightPanel {
         }
     }
 
+    fn watch_side_chat(
+        &mut self,
+        side: &Entity<crate::side_chat::SideChat>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(side, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            side,
+            |this, side, event: &crate::side_chat::SendToMain, cx| {
+                if this.side_chat.as_ref() == Some(&side) {
+                    cx.emit(event.clone());
+                }
+            },
+        )
+        .detach();
+        cx.subscribe(side, |this, side, event: &crate::chat::OpenLink, cx| {
+            if this.side_chat.as_ref() == Some(&side) {
+                cx.emit(crate::chat::OpenLink(event.0.clone()));
+            }
+        })
+        .detach();
+    }
+
     fn activate_pane(&mut self, pane: Pane) {
         if (pane != Pane::NewTab || !self.blank_tabs.is_empty()) && !self.open_panes.contains(&pane)
         {
             self.open_panes.push(pane);
         }
+        self.active_hosted = None;
         self.pane = pane;
         self.tab_order = self.sidebar_keys();
     }
@@ -479,10 +866,23 @@ impl RightPanel {
     }
 
     fn sidebar_keys(&self) -> Vec<SidebarTab> {
-        self.sidebar_tabs()
+        let mut keys: Vec<_> = self
+            .sidebar_tabs()
             .into_iter()
             .map(|(pane, instance)| self.tab_key(pane, instance))
-            .collect()
+            .chain(
+                self.hosted
+                    .iter()
+                    .map(|tab| SidebarTab::Hosted(tab.id.clone())),
+            )
+            .collect();
+        keys.sort_by_key(|key| {
+            self.tab_order
+                .iter()
+                .position(|tab| tab == key)
+                .unwrap_or(usize::MAX)
+        });
+        keys
     }
 
     fn begin_tab_drag(&mut self, key: &SidebarTab, cx: &mut Context<Self>) {
@@ -500,6 +900,7 @@ impl RightPanel {
         if centers.len() != order.len() {
             return;
         }
+        self.tab_drag_outside = false;
         self.tab_drag = Some(SidebarDrag {
             key: key.clone(),
             pointer_offset: self.tab_drag_origin.get().x
@@ -519,6 +920,14 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) {
         if owner != cx.entity_id() {
+            return;
+        }
+        let outside = !self.transfer_bounds.get().contains(&pointer);
+        if self.tab_drag_outside != outside {
+            self.tab_drag_outside = outside;
+            cx.notify();
+        }
+        if outside {
             return;
         }
         let Some(drag) = &self.tab_drag else {
@@ -549,7 +958,6 @@ impl RightPanel {
         order.insert(target, tab);
         if order != self.tab_order {
             self.tab_order = order;
-            crate::haptics::tick();
         }
         cx.notify();
     }
@@ -576,7 +984,12 @@ impl RightPanel {
         cx.notify();
     }
 
-    fn choose_new_tool(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn choose_new_tool(
+        &mut self,
+        pane: Pane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // A new tool takes this blank's place. Selecting an already-open
         // singleton tool leaves the blank available to return to.
         let position = if pane == Pane::Terminal || !self.open_panes.contains(&pane) {
@@ -626,6 +1039,7 @@ impl RightPanel {
             Pane::NewTab => self.show_blank_address(window, cx),
             _ => {}
         }
+        self.focus_workspace(window, cx);
         cx.notify();
     }
 
@@ -649,7 +1063,7 @@ impl RightPanel {
         });
     }
 
-    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_blank(cx);
         self.blank_tabs.push(BlankTab {
             id: uuid::Uuid::new_v4().to_string(),
@@ -658,13 +1072,13 @@ impl RightPanel {
         self.blank_active = self.blank_tabs.len() - 1;
         self.activate_pane(Pane::NewTab);
         self.tool_tab_scroll
-            .scroll_to_item(self.sidebar_tabs().len() - 1);
+            .scroll_to_item(self.sidebar_keys().len() - 1);
         self.show_blank_address(window, cx);
         cx.notify();
     }
 
     fn consume_blank(&mut self, destination: Pane) -> Option<usize> {
-        if self.pane != Pane::NewTab || self.blank_tabs.is_empty() {
+        if self.active_hosted.is_some() || self.pane != Pane::NewTab || self.blank_tabs.is_empty() {
             return None;
         }
         let key = self.tab_key(Pane::NewTab, Some(self.blank_active));
@@ -774,13 +1188,28 @@ impl RightPanel {
             }
         }
         self.open_panes.remove(index);
-        if self.open_panes.is_empty() {
+        if self.open_panes.is_empty() && !self.hosted.is_empty() {
+            self.active_hosted = Some(self.hosted[0].id.clone());
+        } else if self.open_panes.is_empty() {
             self.open_new_tab(window, cx);
         } else if self.pane == pane {
             let next = self.open_panes[index.min(self.open_panes.len() - 1)];
             self.open_tool(next, window, cx);
         }
         cx.notify();
+    }
+
+    pub(crate) fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_hosted.clone() {
+            self.close_hosted(&id, window, cx);
+        } else if self.pane == Pane::NewTab && !self.blank_tabs.is_empty() {
+            self.close_blank_tab(self.blank_active, window, cx);
+        } else if self.pane == Pane::Terminal && !self.terminal_tabs.is_empty() {
+            self.close_terminal_tab(self.terminal_active, window, cx);
+        } else {
+            self.close_tool(self.pane, window, cx);
+        }
+        self.focus_workspace(window, cx);
     }
 
     pub fn has_unsaved_edits(&self) -> bool {
@@ -794,6 +1223,7 @@ impl RightPanel {
     /// Reuse the tool body in a session tab without the sidebar's pane switcher.
     pub fn show_workspace(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace = true;
+        self.compact_tools = false;
         self.pane = pane;
         if pane == Pane::SideChat {
             self.ensure_side_chat(window, cx);
@@ -806,7 +1236,7 @@ impl RightPanel {
     }
 
     pub fn is_changes(&self) -> bool {
-        self.pane == Pane::Changes
+        self.active_hosted.is_none() && self.pane == Pane::Changes
     }
 
     /// Free everything a panel for a closed tab still holds: shells, web views,
@@ -818,22 +1248,24 @@ impl RightPanel {
         }
     }
 
-    pub fn side_chat_id(&self) -> Option<String> {
-        self.side_chat_id.clone()
-    }
-
     pub fn restore_side_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.side_chat_id = Some(id);
         self.show_workspace(Pane::SideChat, window, cx);
     }
 
     pub fn save_side_chat(&self, cx: &mut Context<Self>) {
+        for tab in &self.hosted {
+            tab.panel.update(cx, |panel, cx| panel.save_side_chat(cx));
+        }
         if let Some(side) = &self.side_chat {
             side.update(cx, |side, cx| side.save(cx));
         }
     }
 
     pub fn release(&mut self, cx: &mut Context<Self>) {
+        for tab in self.hosted.drain(..) {
+            tab.panel.update(cx, |panel, cx| panel.release(cx));
+        }
         if let Some(side) = self.side_chat.take() {
             side.update(cx, |side, cx| side.release(cx));
         }
@@ -850,6 +1282,14 @@ impl RightPanel {
     }
 
     pub fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        for tab in &self.hosted {
+            tab.panel.update(cx, |panel, cx| {
+                panel.set_preview_visible(
+                    visible && Some(&tab.id) == self.active_hosted.as_ref(),
+                    cx,
+                )
+            });
+        }
         if !visible && let Some(preview) = &self.document_preview {
             preview.hide();
         }
@@ -866,6 +1306,17 @@ impl RightPanel {
     }
 
     pub fn prepare_to_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            tab.panel.update(cx, |panel, cx| {
+                panel.side_context = self.side_context.clone();
+                panel.prepare_to_show(window, cx);
+            });
+            return;
+        }
         if self.pane == Pane::SideChat && self.side_chat.is_none() {
             self.ensure_side_chat(window, cx);
         }
@@ -896,13 +1347,22 @@ impl RightPanel {
             self.refresh_changes(cx);
         }
     }
-    pub fn snapshot(&self, open: bool) -> SavedPanel {
+    pub fn snapshot(&self, open: bool, cx: &App) -> SavedPanel {
         SavedPanel {
             open,
             side_chat_id: self.side_chat_id.clone(),
             pane: self.pane,
             open_panes: self.open_panes.clone(),
             tab_order: self.sidebar_keys(),
+            hosted: self
+                .hosted
+                .iter()
+                .map(|tab| SavedHostedTab {
+                    id: tab.id.clone(),
+                    panel: tab.panel.read(cx).snapshot(false, cx),
+                })
+                .collect(),
+            active_hosted: self.active_hosted.clone(),
             blank_tabs: self.blank_tabs.clone(),
             blank_active: self.blank_active,
             expanded: self.expanded.clone(),
@@ -931,6 +1391,20 @@ impl RightPanel {
     }
 
     pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.hosted.clear();
+        for tab in saved.hosted {
+            let panel = cx.new(|cx| {
+                let mut panel = RightPanel::new(self.root.clone(), window, cx);
+                panel.side_context = self.side_context.clone();
+                panel.restore_workspace(tab.panel, window, cx);
+                panel
+            });
+            self.watch_hosted(&panel, cx);
+            self.hosted.push(HostedTab { id: tab.id, panel });
+        }
+        self.active_hosted = saved
+            .active_hosted
+            .filter(|id| self.hosted.iter().any(|tab| &tab.id == id));
         self.tab_order = saved.tab_order;
         self.tab_drag = None;
         self.side_chat_id = saved.side_chat_id;
@@ -1002,7 +1476,9 @@ impl RightPanel {
         if let Some(path) = saved.selected {
             self.open_file(path, cx);
         }
-        if self.open_panes.is_empty() {
+        if self.open_panes.is_empty() && !self.hosted.is_empty() {
+            self.active_hosted = Some(self.hosted[0].id.clone());
+        } else if self.open_panes.is_empty() {
             self.open_new_tab(window, cx);
         } else if self.pane == Pane::NewTab {
             self.show_blank_address(window, cx);
@@ -1024,19 +1500,29 @@ impl RightPanel {
         })
         .detach();
         let mut panel = Self {
+            focus: cx.focus_handle(),
             workspace: false,
+            compact_tools: true,
+            transfer_peer: None,
+            incoming: Default::default(),
+            incoming_items: Vec::new(),
+            watched_hosted: Default::default(),
+            transfer_bounds: Default::default(),
             side_context: None,
             side_chat: None,
             side_chat_id: None,
             pane: Pane::Files,
             open_panes: default_panes(),
             tab_order: Vec::new(),
+            hosted: Vec::new(),
+            active_hosted: None,
             blank_tabs: Vec::new(),
             blank_active: 0,
             address,
             new_tab_scroll: ScrollHandle::new(),
             tool_tab_scroll: ScrollHandle::new(),
             tab_drag: None,
+            tab_drag_outside: false,
             tab_drag_origin: Rc::default(),
             root,
             expanded: HashSet::new(),
@@ -1483,33 +1969,55 @@ impl RightPanel {
         self.rows = cached_tree_rows(&self.root, &self.expanded, &self.directory_entries);
     }
 
-    fn tab(&self, pane: Pane, instance: Option<usize>, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn tab(
+        &self,
+        pane: Pane,
+        instance: Option<usize>,
+        hosted: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let (base, name) = pane.tab_label();
-        let id: SharedString = match instance {
-            Some(index) if pane == Pane::NewTab => {
-                format!("{base}-{}", self.blank_tabs[index].id).into()
+        let id: SharedString = if let Some(id) = &hosted {
+            format!("tab-hosted-{id}").into()
+        } else {
+            match instance {
+                Some(index) if pane == Pane::NewTab => {
+                    format!("{base}-{}", self.blank_tabs[index].id).into()
+                }
+                Some(index) => format!("{base}-{}", self.terminal_tabs[index]).into(),
+                None => base.into(),
             }
-            Some(index) => format!("{base}-{}", self.terminal_tabs[index]).into(),
-            None => base.into(),
         };
         let label: SharedString = name.into();
         let close_id = format!("close-{id}");
         let close_selector = instance
             .map(|index| format!("close-{base}-{index}"))
             .unwrap_or_else(|| close_id.clone());
-        let active = self.pane == pane && instance == self.pane_instance(pane);
-        let key = self.tab_key(pane, instance);
+        let active = if hosted.is_some() {
+            hosted == self.active_hosted
+        } else {
+            self.active_hosted.is_none()
+                && self.pane == pane
+                && instance == self.pane_instance(pane)
+        };
+        let key = hosted
+            .clone()
+            .map(SidebarTab::Hosted)
+            .unwrap_or_else(|| self.tab_key(pane, instance));
         let dragging = self.tab_drag.as_ref().is_some_and(|drag| drag.key == key);
         let payload = DraggedSidebarTab {
+            source: cx.entity().downgrade(),
+            placement: Default::default(),
             owner: cx.entity_id(),
             key,
             pane,
-            scroll: self.tool_tab_scroll.clone(),
             origin: self.tab_drag_origin.clone(),
-            width: Pixels::ZERO,
             offset: Point::default(),
+            cursor_offset: Point::default(),
         };
         let origin = self.tab_drag_origin.clone();
+
+        let hosted_click = hosted.clone();
         let panel = cx.entity();
         let selector = id.to_string();
         div()
@@ -1518,7 +2026,8 @@ impl RightPanel {
             .group(id.clone())
             .role(gpui::Role::Button)
             .aria_label(label.clone())
-            .px_1p5()
+            .px_2()
+            .w(zpx(crate::icons::TOOL_TAB_WIDTH))
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .flex()
             .flex_none()
@@ -1537,30 +2046,26 @@ impl RightPanel {
             .when(dragging, |tab| tab.opacity(0.))
             .on_mouse_down(MouseButton::Left, move |event, _, cx| {
                 origin.set(event.position);
+
                 cx.stop_propagation();
             })
             .on_drag(payload, move |drag, offset, window, cx| {
                 let mut preview = drag.clone();
+
                 let movement = window.mouse_position() - drag.origin.get();
                 preview.offset = offset - movement;
+                preview.cursor_offset = offset;
                 panel.update(cx, |this, cx| {
-                    let index = this
-                        .sidebar_keys()
-                        .iter()
-                        .position(|key| key == &drag.key)
-                        .unwrap();
-                    preview.width = this
-                        .tool_tab_scroll
-                        .bounds_for_item(index)
-                        .unwrap()
-                        .size
-                        .width;
                     this.begin_tab_drag(&drag.key, cx);
                     this.move_tab_drag(drag.owner, &drag.key, window.mouse_position(), cx);
                 });
                 cx.new(|_| preview)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(id) = &hosted_click {
+                    this.select_hosted(id.clone(), window, cx);
+                    return;
+                }
                 if let Some(index) = instance {
                     if pane == Pane::NewTab {
                         this.select_blank_tab(index, window, cx);
@@ -1576,15 +2081,16 @@ impl RightPanel {
                     .flex_none()
                     .child(crate::icons::icon(pane.icon()).with_size(zpx(15.))),
             )
-            .child(label.clone())
+            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
             .child(
                 div()
                     .id(SharedString::from(close_id))
                     .debug_selector(move || close_selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(format!("Close {label} sidebar tab"))
+                    .flex_none()
                     .ml_1()
-                    .size(zpx(16.))
+                    .size(zpx(crate::icons::TAB_CLOSE_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1596,6 +2102,10 @@ impl RightPanel {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
+                        if let Some(id) = &hosted {
+                            this.close_hosted(id, window, cx);
+                            return;
+                        }
                         if let Some(index) = instance {
                             if pane == Pane::NewTab {
                                 this.close_blank_tab(index, window, cx);
@@ -1606,7 +2116,10 @@ impl RightPanel {
                             this.close_tool(pane, window, cx);
                         }
                     }))
-                    .child(crate::icons::icon(IconName::Close).with_size(zpx(11.))),
+                    .child(
+                        crate::icons::icon(IconName::Close)
+                            .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)),
+                    ),
             )
     }
 
@@ -2008,9 +2521,13 @@ impl RightPanel {
                 .soft_wrap(false)
                 .default_value(draft.text.clone())
         });
+        self.watch_editor(path, editor, cx);
+    }
+
+    fn watch_editor(&mut self, path: PathBuf, editor: Entity<EditorState>, cx: &mut Context<Self>) {
         let edited = path.clone();
         cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
+            if matches!(event, InputEvent::Change) && this.editors.get(&edited) == Some(&editor) {
                 let text = editor.read(cx).text().to_string();
                 if let Some(draft) = this.file_drafts.get_mut(&edited) {
                     draft.text = text.clone();
@@ -2497,6 +3014,10 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.incoming.clear();
+            self.incoming_items.clear();
+        }
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
@@ -2508,36 +3029,77 @@ impl Render for RightPanel {
         {
             preview.hide();
         }
-        if (!self.preview_visible || self.pane != Pane::Browser)
+        if (!self.preview_visible || self.active_hosted.is_some() || self.pane != Pane::Browser)
             && let Some(browser) = &self.browser
         {
             browser.hide();
         }
         let show_hidden = self.show_hidden;
-        let body = match self.pane {
-            Pane::Files => self.render_files(window, cx).into_any_element(),
-            Pane::Terminal => self.render_terminal(cx),
-            Pane::Browser => self.render_browser(cx),
-            Pane::Changes => self.render_changes(window, cx),
-            Pane::SideChat => div()
+        let transfer_bounds = self.transfer_bounds.clone();
+        let body = if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            div()
                 .size_full()
-                .when_some(self.side_chat.clone(), |v, side| v.child(side))
-                .into_any_element(),
-            Pane::NewTab => v_flex()
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .child(crate::new_tab::address_bar(&self.address))
-                .child(crate::new_tab::tools(
-                    true,
-                    &self.new_tab_scroll,
-                    Self::choose_new_tool,
-                    cx,
-                ))
-                .into_any_element(),
+                .child(tab.panel.clone())
+                .into_any_element()
+        } else {
+            match self.pane {
+                Pane::Files => self.render_files(window, cx).into_any_element(),
+                Pane::Terminal => self.render_terminal(cx),
+                Pane::Browser => self.render_browser(cx),
+                Pane::Changes => self.render_changes(window, cx),
+                Pane::SideChat => div()
+                    .size_full()
+                    .when_some(self.side_chat.clone(), |v, side| v.child(side))
+                    .into_any_element(),
+                Pane::NewTab => v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(crate::new_tab::address_bar(&self.address))
+                    .child(crate::new_tab::tools(
+                        self.compact_tools,
+                        &self.new_tab_scroll,
+                        Self::choose_new_tool,
+                        cx,
+                    ))
+                    .into_any_element(),
+            }
         };
+        let mut tab_elements = Vec::new();
+        let keys = self.sidebar_keys();
+        for (index, key) in keys.iter().enumerate() {
+            if self.tab_drag_outside && self.tab_drag.as_ref().is_some_and(|drag| &drag.key == key)
+            {
+                continue;
+            }
+            if self.incoming.index == Some(index) {
+                tab_elements.push(self.incoming.element("sidebar-insertion-space"));
+            }
+            let tab = if let SidebarTab::Hosted(id) = key {
+                self.hosted
+                    .iter()
+                    .find(|tab| &tab.id == id)
+                    .map(|tab| self.tab(tab.panel.read(cx).pane, None, Some(id.clone()), cx))
+            } else {
+                self.sidebar_tabs()
+                    .into_iter()
+                    .find(|(pane, instance)| &self.tab_key(*pane, *instance) == key)
+                    .map(|(pane, instance)| self.tab(pane, instance, None, cx))
+            };
+            if let Some(tab) = tab {
+                tab_elements.push(tab.into_any_element());
+            }
+        }
+        if self.incoming.index == Some(keys.len()) {
+            tab_elements.push(self.incoming.element("sidebar-insertion-space"));
+        }
         if self.workspace {
             return v_flex()
+                .track_focus(&self.focus)
                 .size_full()
                 .min_w_0()
                 .min_h_0()
@@ -2546,6 +3108,8 @@ impl Render for RightPanel {
                 .into_any_element();
         }
         v_flex()
+            .track_focus(&self.focus)
+            .bg(crate::appearance::shell_surface())
             .size_full()
             .min_w_0()
             .overflow_hidden()
@@ -2554,7 +3118,112 @@ impl Render for RightPanel {
             .flex_none()
             .child(
                 h_flex()
+                    .relative()
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                transfer_bounds.set(bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .bg(crate::appearance::shell_surface())
+                    .id("sidebar-transfer-zone")
+                    .debug_selector(|| "sidebar-transfer-zone".into())
                     .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
+                    .on_drag_move(cx.listener(
+                        |this,
+                         event: &DragMoveEvent<crate::workspace_tabs::DraggedWorkspaceTab>,
+                         _,
+                         cx| {
+                            let drag = event.drag(cx).clone();
+                            if this
+                                .transfer_peer
+                                .as_ref()
+                                .is_some_and(|peer| peer.entity_id() == drag.owner)
+                            {
+                                let inside = drag.placement.visit(
+                                    cx.entity_id(),
+                                    event.event.position,
+                                    event.bounds,
+                                );
+                                if inside {
+                                    if this.incoming_items.is_empty() {
+                                        this.incoming_items = (0..this.sidebar_keys().len())
+                                            .filter_map(|index| {
+                                                this.tool_tab_scroll.bounds_for_item(index)
+                                            })
+                                            .collect();
+                                    }
+                                    let index = this.insertion_index(event.event.position.x);
+                                    this.incoming
+                                        .update(Some(index), crate::icons::TOOL_TAB_WIDTH);
+                                    let left = this.insertion_left(index)
+                                        + this.tool_tab_scroll.offset().x;
+                                    drag.placement.slot(
+                                        Bounds::new(
+                                            point(left, event.bounds.top()),
+                                            size(
+                                                zpx(this.incoming.width),
+                                                event.bounds.size.height,
+                                            ),
+                                        ),
+                                        event.bounds,
+                                    );
+                                    let mut offset = this.tool_tab_scroll.offset();
+                                    let viewport = this.tool_tab_scroll.bounds();
+                                    if event.event.position.x > viewport.right() - zpx(24.) {
+                                        offset.x = (offset.x - zpx(10.))
+                                            .max(-this.tool_tab_scroll.max_offset().x);
+                                    } else if event.event.position.x < viewport.left() + zpx(24.) {
+                                        offset.x = (offset.x + zpx(10.)).min(Pixels::ZERO);
+                                    }
+                                    this.tool_tab_scroll.set_offset(offset);
+                                } else {
+                                    this.incoming.clear();
+                                }
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        |this, drag: &crate::workspace_tabs::DraggedWorkspaceTab, window, cx| {
+                            if this
+                                .transfer_peer
+                                .as_ref()
+                                .is_some_and(|peer| peer.entity_id() == drag.owner)
+                                && drag.placement.visit(
+                                    cx.entity_id(),
+                                    window.mouse_position(),
+                                    this.transfer_bounds.get(),
+                                )
+                                && let Ok(Some(panel)) = drag
+                                    .source
+                                    .update(cx, |source, cx| source.take_tab(drag.id, window, cx))
+                            {
+                                if this.incoming_items.is_empty() {
+                                    this.incoming_items = (0..this.sidebar_keys().len())
+                                        .filter_map(|index| {
+                                            this.tool_tab_scroll.bounds_for_item(index)
+                                        })
+                                        .collect();
+                                }
+                                let position = this.incoming.index.unwrap_or_else(|| {
+                                    this.insertion_index(window.mouse_position().x)
+                                });
+                                this.accept_tab(panel, window, cx);
+                                if let Some(id) = this.active_hosted.clone() {
+                                    let key = SidebarTab::Hosted(id);
+                                    this.tab_order.retain(|tab| tab != &key);
+                                    this.tab_order
+                                        .insert(position.min(this.tab_order.len()), key);
+                                    this.tool_tab_scroll.scroll_to_item(position);
+                                }
+                            }
+                        },
+                    ))
                     .flex_none()
                     .overflow_hidden()
                     .px_2()
@@ -2601,43 +3270,12 @@ impl Render for RightPanel {
                                     .min_w_0()
                                     .overflow_x_scroll()
                                     .gap_0p5()
-                                    .children(
-                                        self.sidebar_tabs()
-                                            .into_iter()
-                                            .map(|(pane, instance)| self.tab(pane, instance, cx)),
-                                    ),
+                                    .children(tab_elements),
                             )
-                            .children([true, false].into_iter().map(|left| {
-                                let scroll = self.tool_tab_scroll.clone();
-                                canvas(
-                                    |bounds, _, _| bounds,
-                                    move |_, bounds, window, _| {
-                                        let distance = if left {
-                                            -scroll.offset().x
-                                        } else {
-                                            scroll.max_offset().x + scroll.offset().x
-                                        };
-                                        let alpha = (distance / zpx(24.)).clamp(0., 1.);
-                                        if alpha > 0. {
-                                            let surface = crate::appearance::page_surface();
-                                            window.paint_quad(fill(
-                                                bounds,
-                                                linear_gradient(
-                                                    if left { 90. } else { 270. },
-                                                    linear_color_stop(surface.opacity(alpha), 0.),
-                                                    linear_color_stop(surface.opacity(0.), 1.),
-                                                ),
-                                            ));
-                                        }
-                                    },
-                                )
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .w(zpx(24.))
-                                .when(left, |fade| fade.left_0())
-                                .when(!left, |fade| fade.right_0())
-                            })),
+                            .children(crate::tab_transfer::edge_fades(
+                                &self.tool_tab_scroll,
+                                crate::appearance::shell_surface(),
+                            )),
                     )
                     .child(
                         div()
@@ -2658,66 +3296,77 @@ impl Render for RightPanel {
                             )
                             .child(crate::icons::icon(IconName::Plus)),
                     )
-                    .when(self.pane == Pane::Files, |row| {
-                        row.child(
-                            h_flex()
-                                .id("show-hidden-files")
-                                .ml_auto()
-                                .gap(zpx(5.0))
-                                .items_center()
-                                .cursor_pointer()
-                                .hover(|control| control.opacity(0.85))
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(rgba(0xffffff8c))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_hidden = !this.show_hidden;
-                                    this.directory_entries.clear();
-                                    this.refresh_tree(cx);
-                                    cx.notify();
-                                }))
-                                .child(".files")
-                                .child(
-                                    div()
-                                        .relative()
-                                        .w(zpx(22.0))
-                                        .h(zpx(12.0))
-                                        .rounded_full()
-                                        .bg(if show_hidden {
-                                            ActionTone::Accent.foreground()
-                                        } else {
-                                            rgba(0xffffff20)
-                                        })
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top(zpx(2.0))
-                                                .size(zpx(8.0))
-                                                .rounded_full()
-                                                .bg(rgba(0xffffffe6))
-                                                .with_animation(
-                                                    SharedString::from(format!(
-                                                        "hidden-files-thumb-{}",
-                                                        show_hidden
-                                                    )),
-                                                    Animation::new(
-                                                        std::time::Duration::from_millis(120),
-                                                    )
-                                                    .with_easing(ease_out_quint()),
-                                                    move |thumb, t| {
-                                                        let (from, to) = if show_hidden {
-                                                            (2.0, 12.0)
-                                                        } else {
-                                                            (12.0, 2.0)
-                                                        };
-                                                        thumb.left(zpx(from + (to - from) * t))
-                                                    },
-                                                ),
-                                        ),
-                                ),
-                        )
-                    }),
+                    .when(
+                        self.pane == Pane::Files && self.active_hosted.is_none(),
+                        |row| {
+                            row.child(
+                                h_flex()
+                                    .id("show-hidden-files")
+                                    .ml_auto()
+                                    .gap(zpx(5.0))
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .hover(|control| control.opacity(0.85))
+                                    .text_size(zpx(TEXT_SM))
+                                    .text_color(rgba(0xffffff8c))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_hidden = !this.show_hidden;
+                                        this.directory_entries.clear();
+                                        this.refresh_tree(cx);
+                                        cx.notify();
+                                    }))
+                                    .child(".files")
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w(zpx(22.0))
+                                            .h(zpx(12.0))
+                                            .rounded_full()
+                                            .bg(if show_hidden {
+                                                ActionTone::Accent.foreground()
+                                            } else {
+                                                rgba(0xffffff20)
+                                            })
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top(zpx(2.0))
+                                                    .size(zpx(8.0))
+                                                    .rounded_full()
+                                                    .bg(rgba(0xffffffe6))
+                                                    .with_animation(
+                                                        SharedString::from(format!(
+                                                            "hidden-files-thumb-{}",
+                                                            show_hidden
+                                                        )),
+                                                        Animation::new(
+                                                            std::time::Duration::from_millis(120),
+                                                        )
+                                                        .with_easing(ease_out_quint()),
+                                                        move |thumb, t| {
+                                                            let (from, to) = if show_hidden {
+                                                                (2.0, 12.0)
+                                                            } else {
+                                                                (12.0, 2.0)
+                                                            };
+                                                            thumb.left(zpx(from + (to - from) * t))
+                                                        },
+                                                    ),
+                                            ),
+                                    ),
+                            )
+                        },
+                    ),
             )
-            .child(v_flex().flex_1().min_h_0().overflow_hidden().child(body))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .rounded(zpx(del_core::ShellMetrics::default().page_radius))
+                    .bg(crate::appearance::page_surface())
+                    .child(body),
+            )
             .into_any_element()
     }
 }
@@ -2903,7 +3552,7 @@ mod tests {
                 assert_eq!(panel.pane, Pane::NewTab);
                 assert_eq!(panel.terminal_tabs.len(), 2);
                 let saved: SavedPanel =
-                    serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true)).unwrap())
+                    serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true, cx)).unwrap())
                         .unwrap();
                 panel.restore(saved, window, cx);
                 assert_eq!(panel.sidebar_keys(), expected);
@@ -2922,6 +3571,229 @@ mod tests {
     }
 
     #[::gpui::test]
+    fn transferring_tabs_keeps_live_shells_and_editor_entities(cx: &mut gpui::TestAppContext) {
+        use crate::workspace_tabs::WorkspaceTabs;
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("move.md");
+        std::fs::write(&path, "original").unwrap();
+        let (right, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.viewer = read_viewer(path.clone());
+            panel
+        });
+        cx.run_until_parked();
+        let editor = right.read_with(cx, |right, _| right.editors[&path].clone());
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.replace_all("unsaved draft", window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let mut file = None;
+        cx.update(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceTabs::new(dir.path().into(), window, cx));
+            let panel = right.update(cx, |right, cx| {
+                right
+                    .take_tab(&SidebarTab::Tool(Pane::Files), window, cx)
+                    .unwrap()
+            });
+            assert_eq!(panel.read(cx).editors[&path], editor);
+            assert_eq!(panel.read(cx).file_drafts[&path].text, "unsaved draft");
+            assert!(right.read(cx).file_drafts.is_empty());
+            workspace.update(cx, |workspace, cx| {
+                workspace.accept_tab(panel.clone(), window, cx)
+            });
+            let moved = workspace.update(cx, |workspace, cx| {
+                workspace.take_tab(1, window, cx).unwrap()
+            });
+            assert_eq!(moved, panel);
+            right.update(cx, |right, cx| right.accept_tab(moved, window, cx));
+            file = Some(panel);
+            right.update(cx, |right, cx| {
+                right.new_terminal_tab(window, cx);
+                right.new_terminal_tab(window, cx);
+            });
+            let (key, shell, sibling) = {
+                let right = right.read(cx);
+                (
+                    right.tab_key(Pane::Terminal, Some(1)),
+                    right.terminals[&right.terminal_tabs[1]].clone(),
+                    right.terminals[&right.terminal_tabs[2]].clone(),
+                )
+            };
+            let pid = shell.read(cx).snapshot().pid;
+            let panel = right.update(cx, |right, cx| right.take_tab(&key, window, cx).unwrap());
+            assert_eq!(panel.read(cx).terminals.values().next().unwrap(), &shell);
+            workspace.update(cx, |workspace, cx| {
+                workspace.accept_tab(panel.clone(), window, cx)
+            });
+            let moved = workspace.update(cx, |workspace, cx| {
+                workspace.take_tab(2, window, cx).unwrap()
+            });
+            right.update(cx, |right, cx| right.accept_tab(moved.clone(), window, cx));
+            assert_eq!(moved, panel);
+            assert_eq!(shell.read(cx).snapshot().pid, pid);
+            assert_eq!(
+                shell.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Running
+            );
+            assert_eq!(
+                sibling.read(cx).snapshot().status,
+                crate::terminal_host::TerminalHostStatus::Running
+            );
+            // The original editor still emits into its current owner after moving twice.
+            editor.update(cx, |editor, cx| {
+                editor.replace_all("edited after transfer", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        file.unwrap().read_with(cx, |file, _| {
+            assert_eq!(file.file_drafts[&path].text, "edited after transfer")
+        });
+        right.read_with(cx, |right, cx| {
+            assert!(right.file_drafts.is_empty());
+            let saved: SavedPanel =
+                serde_json::from_slice(&serde_json::to_vec(&right.snapshot(true, cx)).unwrap())
+                    .unwrap();
+            assert_eq!(saved.hosted.len(), 2);
+            assert!(saved.hosted.iter().any(|tab| {
+                tab.panel
+                    .file_drafts
+                    .get(&path)
+                    .is_some_and(|draft| draft.text == "edited after transfer")
+            }));
+        });
+        right.update(cx, |right, cx| right.release(cx));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    #[::gpui::test]
+    fn moving_side_chats_keeps_identity_and_forwards_events_once(cx: &mut gpui::TestAppContext) {
+        use crate::workspace_tabs::WorkspaceTabs;
+        struct Fixture {
+            right: Entity<RightPanel>,
+            workspace: Entity<WorkspaceTabs>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(self.right.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let agent: std::sync::Arc<dyn del_agent::AgentBackend> =
+            std::sync::Arc::new(del_agent::MockBackend::new(del_agent::Provider::Codex));
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), [agent]).unwrap();
+        let parent = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Plan,
+            }))
+            .unwrap();
+        let context = crate::side_chat::Context {
+            backend: crate::chat::Backend {
+                runtime: runtime.handle().clone(),
+                manager,
+            },
+            source: del_agent::ForkSource::Session(parent.id.clone()),
+            accounts: vec![],
+        };
+        let right_count = Rc::new(Cell::new(0));
+        let workspace_count = Rc::new(Cell::new(0));
+        let (fixture, cx) = cx.add_window_view(|window, cx| {
+            let right = cx.new(|cx| {
+                let mut right = RightPanel::new(dir.path().into(), window, cx);
+                right.set_side_context(context.clone());
+                right.open_tool(Pane::SideChat, window, cx);
+                right
+            });
+            let workspace = cx.new(|cx| {
+                let mut workspace = WorkspaceTabs::new(dir.path().into(), window, cx);
+                workspace.set_side_context(context);
+                workspace
+            });
+            let count = right_count.clone();
+            cx.subscribe(&right, move |_, _, _: &crate::side_chat::SendToMain, _| {
+                count.set(count.get() + 1)
+            })
+            .detach();
+            let count = workspace_count.clone();
+            cx.subscribe(
+                &workspace,
+                move |_, _, _: &crate::side_chat::SendToMain, _| count.set(count.get() + 1),
+            )
+            .detach();
+            Fixture { right, workspace }
+        });
+        let (right, workspace) = fixture.read_with(cx, |fixture, _| {
+            (fixture.right.clone(), fixture.workspace.clone())
+        });
+        let side = right.read_with(cx, |right, _| right.side_chat.clone().unwrap());
+        let storage_id = side.read_with(cx, |side, _| side.storage_id());
+        cx.update(|window, cx| {
+            let panel = right.update(cx, |right, cx| {
+                right
+                    .take_tab(&SidebarTab::Tool(Pane::SideChat), window, cx)
+                    .unwrap()
+            });
+            for id in 1..=3 {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.accept_tab(panel.clone(), window, cx)
+                });
+                let moved = workspace.update(cx, |workspace, cx| {
+                    workspace.take_tab(id, window, cx).unwrap()
+                });
+                assert_eq!(moved, panel);
+                right.update(cx, |right, cx| right.accept_tab(moved, window, cx));
+                if id < 3 {
+                    right.update(cx, |right, cx| {
+                        let key = SidebarTab::Hosted(right.hosted[0].id.clone());
+                        assert_eq!(right.take_tab(&key, window, cx).unwrap(), panel);
+                    });
+                }
+            }
+            assert_eq!(panel.read(cx).side_chat.as_ref(), Some(&side));
+            assert_eq!(side.read(cx).storage_id(), storage_id);
+            side.update(cx, |_, cx| {
+                cx.emit(crate::side_chat::SendToMain {
+                    parent: parent.id.clone(),
+                    text: "once".into(),
+                })
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(right_count.get(), 1);
+        assert_eq!(workspace_count.get(), 0);
+        cx.update(|window, cx| {
+            let panel = right.update(cx, |right, cx| {
+                let key = SidebarTab::Hosted(right.hosted[0].id.clone());
+                right.take_tab(&key, window, cx).unwrap()
+            });
+            workspace.update(cx, |workspace, cx| workspace.accept_tab(panel, window, cx));
+            side.update(cx, |_, cx| {
+                cx.emit(crate::side_chat::SendToMain {
+                    parent: parent.id.clone(),
+                    text: "once again".into(),
+                })
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(right_count.get(), 1);
+        assert_eq!(workspace_count.get(), 1);
+        workspace.update(cx, |workspace, cx| workspace.release(cx));
+        right.update(cx, |right, cx| right.release(cx));
+    }
+
+    #[::gpui::test]
     fn restoring_an_empty_sidebar_creates_one_visible_blank_tab(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
@@ -2933,7 +3805,7 @@ mod tests {
             assert!(panel.pane == Pane::NewTab);
             assert!(panel.open_panes == vec![Pane::NewTab]);
             assert_eq!(panel.blank_tabs.len(), 1);
-            panel.restore(panel.snapshot(true), window, cx);
+            panel.restore(panel.snapshot(true, cx), window, cx);
             assert_eq!(panel.blank_tabs.len(), 1);
             panel
         });
@@ -2964,7 +3836,7 @@ mod tests {
                 );
             }
             let saved: SavedPanel =
-                serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true)).unwrap())
+                serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true, cx)).unwrap())
                     .unwrap();
             panel.restore(saved, window, cx);
             assert!(panel.pane == Pane::NewTab);
@@ -3118,9 +3990,10 @@ mod tests {
                 panel.close_blank_tab(0, window, cx);
                 assert_eq!(panel.blank_tabs.len(), 1);
                 assert_ne!(panel.blank_tabs[0].id, first_blank);
-                let saved =
-                    serde_json::from_str(&serde_json::to_string(&panel.snapshot(true)).unwrap())
-                        .unwrap();
+                let saved = serde_json::from_str(
+                    &serde_json::to_string(&panel.snapshot(true, cx)).unwrap(),
+                )
+                .unwrap();
                 panel.restore(saved, window, cx);
                 assert!(panel.open_panes == vec![Pane::NewTab]);
                 assert_eq!(panel.blank_tabs.len(), 1);
@@ -3379,9 +4252,9 @@ mod tests {
             panel
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _| {
+        panel.read_with(cx, |panel, cx| {
             assert!(panel.markdown_scroll.max_offset().y > px(1000.0));
-            assert!(panel.snapshot(true).markdown_preview);
+            assert!(panel.snapshot(true, cx).markdown_preview);
             match &panel.viewer {
                 Viewer::Text {
                     path: selected,
@@ -3399,9 +4272,9 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _| {
+        panel.read_with(cx, |panel, cx| {
             assert!(panel.editors.contains_key(&path));
-            assert_eq!(panel.snapshot(true).selected, Some(path.clone()));
+            assert_eq!(panel.snapshot(true, cx).selected, Some(path.clone()));
         });
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
@@ -3555,7 +4428,7 @@ mod tests {
                 first_view.read(cx).session().pid(),
                 second_view.read(cx).session().pid()
             );
-            let saved = panel.snapshot(true);
+            let saved = panel.snapshot(true, cx);
             let restored: SavedPanel =
                 serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
             assert_eq!(
@@ -3597,10 +4470,10 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        panel.update(cx, |panel, _| {
+        panel.update(cx, |panel, cx| {
             assert!(panel.selected_dirty());
             assert_eq!(
-                panel.snapshot(true).file_drafts[&path].text,
+                panel.snapshot(true, cx).file_drafts[&path].text,
                 "changed\nsecond\n"
             );
         });
@@ -3608,9 +4481,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
         cx.update(|window, cx| {
             panel.update(cx, |panel, cx| {
-                let saved: SavedPanel =
-                    serde_json::from_str(&serde_json::to_string(&panel.snapshot(true)).unwrap())
-                        .unwrap();
+                let saved: SavedPanel = serde_json::from_str(
+                    &serde_json::to_string(&panel.snapshot(true, cx)).unwrap(),
+                )
+                .unwrap();
                 panel.restore(saved, window, cx);
             })
         });

@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.6` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.7` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,8 +14,8 @@ when making future changes.
 
 ## Download and install
 
-The latest published binary is **0.1.5**; the source version is **0.1.6**.
-Download **Del-0.1.5-arm64.dmg** from the [0.1.5 release](https://github.com/butter-computer/del/releases/tag/v0.1.5),
+The latest release and source version are **0.1.7**.
+Download **Del-0.1.7-arm64.dmg** from the [0.1.7 release](https://github.com/butter-computer/del/releases/tag/v0.1.7),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.6-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.7-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -407,7 +407,7 @@ conversation. Unloading a running session also stops its current work.
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
   the dot. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
-- Both sidebars have visible theme-aware vertical dividers and resize from their panel boundaries. Empty left-sidebar space can drag
+- Both sidebars have visible theme-aware vertical dividers and resize from their panel boundaries. The left sidebar only resizes at its divider; its empty space does not drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
 - Session titles use the available sidebar width and fade at the edge instead
@@ -604,7 +604,18 @@ The right sidebar starts with **Files**, **Changes**, **Terminal**, and **+**.
 Use **+** for a new tool or browser page. Each terminal occupies its own tab in
 that row; choosing Terminal from a new tab starts an independent shell. Closing
 one terminal leaves the others running. Drag tabs to reorder them; each session
-remembers its sidebar order. Blank tabs stay open until closed, and closing the
+remembers its sidebar order. Drag a tool between the session row and right-sidebar
+row to move it without closing its shell, browser, editor, or side chat. The original
+conversation stays fixed. Both rows use the same compact 140-point tab width, including during transfers.
+Command-T opens in the last-used zone, and newly selected tabs scroll into view.
+Command-Shift-W closes only that zone’s inner tab; Command-W closes the top-level session.
+The launcher shows shortcuts beside neutral icons. Entering either row opens a live insertion gap, and neighboring tabs move aside
+as you change slots. Dragging tracks the pointer horizontally, locked to the tab
+row with no vertical movement, haptics, or magnetic effects. A darker, full-width preview settles into the destination slot.
+The source slot collapses as soon as the tab leaves, so its plus button follows
+the remaining tabs. Both rows use the same background and small hover-close
+controls, and fade gradually at clipped edges. Both
+rows remember their tabs and placement across restarts. Blank tabs stay open until closed, and closing the
 last tab leaves a fresh **New tab** with the shared launcher. Tool icons match
 between the session tabs, sidebar tabs, and launcher. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
@@ -801,9 +812,14 @@ session shortcuts.
 | Shortcut | Action |
 | --- | --- |
 | Command-1–9 | Select a top tab by position |
-| Command-N / Command-T | New session |
+| Command-N | New session |
+| Command-T / Control-T | New inner tab in the last-used zone |
 | Command-K | Open or close conversation search |
-| Command-W | Close the active tab |
+| Command-W | Close the top-level session tab |
+| Command-Shift-W | Close the active inner tab in the focused zone |
+| Control-Shift-G | Open Changes in the focused zone |
+| Command-P | Open Files in the focused zone |
+| Option-Command-S | Open Side chat in the focused zone |
 | Command-+ (Command-Shift-=) | Zoom the entire interface in |
 | Command-- | Zoom the entire interface out |
 | Command-0 | Reset zoom to 100% |
@@ -816,7 +832,7 @@ session shortcuts.
 | Command-. | Stop the active chat turn |
 | Command-B | Toggle the left sidebar |
 | Command-Backslash / Command-Shift-B | Toggle the file sidebar |
-| Command-J / Control-Backtick | Open the workspace terminal pane |
+| Command-J / Control-Backtick | Open a new terminal in the last-used zone |
 | Command-Comma | Settings |
 | Escape in Settings | Return to the previous workspace view |
 | Command-Q | Quit |

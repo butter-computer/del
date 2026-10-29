@@ -80,6 +80,11 @@ pub fn shell_surface() -> Rgba {
     })
 }
 
+/// Opaque neutral backing keeps a dragged tab readable over either pane.
+pub fn dragged_tab_surface() -> Rgba {
+    gpui_kit::rgb(if light() { 0xe4e4e4 } else { 0x101010 })
+}
+
 pub fn page_surface() -> Rgba {
     gpui_kit::rgba(if light() {
         0xffffffff

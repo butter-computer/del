@@ -63,15 +63,28 @@ pub fn tools<T: 'static>(
             .px_3()
             .gap_2()
             .rounded_lg()
-            .bg(crate::appearance::popup_surface())
+            .bg(rgba(0xffffff06))
             .hover(|b| b.bg(rgba(0xffffff0f)))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| choose(this, pane, window, cx)))
+            .child(crate::icons::icon(pane.icon()).text_color(rgba(0xffffffb3)))
+            .child(div().flex_1().min_w_0().truncate().child(label))
             .child(
-                crate::icons::icon(pane.icon())
-                    .text_color(crate::appearance::ActionTone::Accent.foreground()),
+                div()
+                    .flex_none()
+                    .rounded_full()
+                    .px_1p5()
+                    .text_size(zpx(12.))
+                    .text_color(rgba(0xffffff80))
+                    .bg(rgba(0xffffff08))
+                    .child(match pane {
+                        Pane::Changes => "⌃⇧G",
+                        Pane::Terminal => "⌃`",
+                        Pane::Files => "⌘P",
+                        Pane::SideChat => "⌥⌘S",
+                        _ => "",
+                    }),
             )
-            .child(label)
     };
     let changes = tool(Pane::Changes, "Changes", cx);
     let terminal = tool(Pane::Terminal, "Terminal", cx);

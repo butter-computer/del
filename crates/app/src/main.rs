@@ -49,6 +49,8 @@ mod side_chat;
 mod sidebar;
 mod signin;
 mod state;
+mod tab_transfer;
+mod tab_zone;
 mod terminal_conversation;
 #[allow(dead_code)]
 mod terminal_host;
@@ -165,7 +167,15 @@ fn tab_action_content(
 ) -> Div {
     div()
         .relative()
-        .size(crate::icons::button_size())
+        .w(if shortcut.is_some() {
+            crate::icons::button_size()
+        } else {
+            zpx(crate::icons::TAB_CLOSE_SIZE)
+        })
+        .h(zpx(crate::icons::TAB_CLOSE_SIZE))
+        .group_hover(group.clone(), |slot| {
+            slot.w(zpx(crate::icons::TAB_CLOSE_SIZE))
+        })
         .flex_none()
         .flex()
         .items_center()
@@ -177,7 +187,7 @@ fn tab_action_content(
                 .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
                 .child(
                     crate::icons::icon(IconName::Close)
-                        .with_size(zpx(14.))
+                        .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))
                         .text_color(color),
                 ),
         )
@@ -241,6 +251,10 @@ actions!(
         ToggleFiles,
         ToggleTerminal,
         CloseTab,
+        CloseWorkspaceTab,
+        OpenChanges,
+        OpenFiles,
+        OpenSideChat,
         Tab1,
         Tab2,
         Tab3,
@@ -383,6 +397,7 @@ struct AppShell {
     tab_reveal: Option<(u64, std::time::Instant)>,
     workspaces: HashMap<u64, Entity<workspace_tabs::WorkspaceTabs>>,
     workspace_previous: Option<u64>,
+    tab_zone: std::rc::Rc<std::cell::Cell<tab_zone::Zone>>,
     right: Entity<RightPanel>,
     right_owner: u64,
     right_key: Option<String>,
@@ -463,8 +478,9 @@ impl AppShell {
             .bottom_0()
             .w(zpx(3.0))
             .cursor_col_resize()
-            .on_mouse_down(MouseButton::Left, move |event, _, _| {
-                start_x.set(event.position.x.as_f32())
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                start_x.set(event.position.x.as_f32());
+                cx.stop_propagation();
             })
             .on_drag(drag, move |drag, _, window, cx| {
                 // Include the motion that crossed GPUI's drag threshold, even
@@ -536,7 +552,6 @@ impl AppShell {
         }
         self.previous_drag_target = self.drag_target;
         self.drag_target = Some(target);
-        haptics::tick();
         cx.notify();
     }
 
@@ -714,6 +729,7 @@ impl AppShell {
             tab_reveal: None,
             workspaces: HashMap::new(),
             workspace_previous: None,
+            tab_zone: Default::default(),
             right,
             right_owner: 0,
             right_key: None,
@@ -1035,7 +1051,7 @@ impl AppShell {
         };
         if self
             .right_store
-            .set(key, self.right.read(cx).snapshot(self.right_open))
+            .set(key, self.right.read(cx).snapshot(self.right_open, cx))
         {
             // Divider drags update in memory each frame; coalesce disk writes.
             self.right_save_generation += 1;
@@ -1063,7 +1079,7 @@ impl AppShell {
         if let Some(key) = cached.key
             && self
                 .right_store
-                .set(key, cached.panel.read(cx).snapshot(cached.open))
+                .set(key, cached.panel.read(cx).snapshot(cached.open, cx))
         {
             self.persist_right(cx);
         }
@@ -1122,7 +1138,7 @@ impl AppShell {
             .update(cx, |state, _| std::mem::take(&mut state.deleted_panels));
         for (key, uid) in deleted {
             let cached = self.right_cache.remove(&uid).map(|cached| {
-                let snapshot = cached.panel.read(cx).snapshot(false);
+                let snapshot = cached.panel.read(cx).snapshot(false, cx);
                 cached.panel.update(cx, |panel, cx| panel.release(cx));
                 snapshot
             });
@@ -1239,11 +1255,26 @@ impl AppShell {
         self.workspaces.entry(owner).or_insert_with(|| {
             let workspace =
                 cx.new(|cx| workspace_tabs::WorkspaceTabs::new(root.clone(), window, cx));
-            cx.observe(&workspace, |this, workspace, cx| {
-                if let Err(error) = this.state.read(cx).save_draft_owners() {
-                    eprintln!("Could not save draft owners: {error}");
-                }
-                workspace.read(cx).persist(cx);
+            let save_generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+            cx.observe(&workspace, move |_, workspace, cx| {
+                let generation = save_generation.get().wrapping_add(1);
+                save_generation.set(generation);
+                let pending = save_generation.clone();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    if pending.get() != generation {
+                        return;
+                    }
+                    let _ = this.update(cx, |this, cx| {
+                        if let Err(error) = this.state.read(cx).save_draft_owners() {
+                            eprintln!("Could not save draft owners: {error}");
+                        }
+                        workspace.read(cx).persist(cx);
+                    });
+                })
+                .detach();
                 cx.notify();
             })
             .detach();
@@ -1289,14 +1320,45 @@ impl AppShell {
     }
 
     fn new_workspace_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_workspaces(window, cx);
-        if let Some(workspace) = self.workspace(cx) {
-            workspace.update(cx, |w, cx| w.new_tab(window, cx));
+        self.tab_zone.set(tab_zone::Zone::Main);
+        self.new_inner_tab(window, cx);
+    }
+
+    fn active_tab_zone(&self) -> tab_zone::Zone {
+        if self.right_open {
+            self.tab_zone.get()
+        } else {
+            tab_zone::Zone::Main
         }
-        cx.notify();
+    }
+
+    fn new_inner_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace(cx).is_none() {
+            self.sync_workspaces(window, cx);
+        }
+        if let Some(workspace) = self.workspace(cx) {
+            self.active_tab_zone()
+                .new_tab(&workspace, &self.right, window, cx);
+        }
+    }
+
+    fn open_inner_tool(
+        &mut self,
+        pane: right_panel::Pane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).panel != Panel::Chat {
+            return;
+        }
+        if let Some(workspace) = self.workspace(cx) {
+            self.active_tab_zone()
+                .open_tool(pane, &workspace, &self.right, window, cx);
+        }
     }
 
     fn go_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_zone.set(tab_zone::Zone::Main);
         self.state.update(cx, |s, cx| s.select_nth(n, cx));
         self.focus_composer(window, cx);
     }
@@ -1853,10 +1915,10 @@ impl AppShell {
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
-                                                            .h(crate::icons::button_size())
+                                                            .h(zpx(crate::icons::TAB_CLOSE_SIZE))
                                                             .w(if shortcut_hint || indicator_id.as_ref().is_some_and(|id| self.state.read(cx).session_working(id)) { crate::icons::button_size() } else { zpx(0.) })
                                                             .overflow_hidden()
-                                                            .group_hover(group.clone(), |slot| slot.w(crate::icons::button_size()))
+                                                            .group_hover(group.clone(), |slot| slot.w(zpx(crate::icons::TAB_CLOSE_SIZE)))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
@@ -2037,58 +2099,65 @@ impl AppShell {
             };
             state.tab_info(&tab)
         };
-        let tools = workspace.map(|w| w.update(cx, |w, cx| w.render_strip(false, cx)));
-        v_flex()
-            .size_full()
-            .min_w_0()
+        let tools = workspace
+            .as_ref()
+            .map(|w| w.update(cx, |w, cx| w.render_strip(false, cx)));
+        let tab_row = h_flex()
+            .id("session-workspace-tabs")
+            .debug_selector(|| "session-workspace-tabs".into())
+            .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
+            .flex_none()
+            .gap_1()
+            .overflow_x_scroll()
             .child(
                 h_flex()
-                    .id("session-workspace-tabs")
-                    .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
+                    .id("workspace-chat-tab")
+                    .role(gpui::Role::Button)
+                    .aria_label("Open session chat tab")
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .w(zpx(workspace_tabs::TAB_WIDTH))
                     .flex_none()
-                    .gap_1()
-                    .overflow_x_scroll()
-                    .child(
-                        h_flex()
-                            .id("workspace-chat-tab")
-                            .role(gpui::Role::Button)
-                            .aria_label("Open session chat tab")
-                            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                            .w(zpx(workspace_tabs::TAB_WIDTH))
-                            .flex_none()
-                            .px_2()
-                            .gap_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(zpx(TEXT_MD))
-                            .text_color(if chat_active {
-                                rgb(0xf5f5f5)
-                            } else {
-                                rgba(0xffffff8c)
-                            })
-                            .when(chat_active, |t| t.bg(rgba(0xffffff14)))
-                            .hover(|t| t.bg(rgba(0xffffff0a)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(workspace) = this.workspace(cx) {
-                                    workspace.update(cx, |w, cx| w.select_index(0, window, cx));
-                                }
-                                this.focus_composer(window, cx);
-                            }))
-                            .child(mode_ui::tab_mark(provider))
-                            .child(div().flex_1().min_w_0().truncate().child(title)),
-                    )
-                    .children(tools)
-                    .child(
-                        Button::new("new-session-workspace-tab")
-                            .accessibility_label("New session tab")
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .tooltip("New tab (Ctrl+T)")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_workspace_tab(window, cx)
-                            })),
-                    ),
+                    .px_2()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(zpx(TEXT_MD))
+                    .text_color(if chat_active {
+                        rgb(0xf5f5f5)
+                    } else {
+                        rgba(0xffffff8c)
+                    })
+                    .when(chat_active, |t| t.bg(rgba(0xffffff14)))
+                    .hover(|t| t.bg(rgba(0xffffff0a)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(workspace) = this.workspace(cx) {
+                            workspace.update(cx, |w, cx| w.select_index(0, window, cx));
+                        }
+                        this.focus_composer(window, cx);
+                    }))
+                    .child(mode_ui::tab_mark(provider))
+                    .child(div().flex_1().min_w_0().truncate().child(title)),
             )
+            .children(tools)
+            .child(
+                Button::new("new-session-workspace-tab")
+                    .accessibility_label("New session tab")
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .tooltip("New tab (Ctrl+T)")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.new_workspace_tab(window, cx)),
+                    ),
+            );
+        let tab_row = if let Some(workspace) = workspace {
+            workspace.update(cx, |workspace, cx| workspace.render_row(tab_row, cx))
+        } else {
+            tab_row.into_any_element()
+        };
+        tab_zone::track(v_flex(), self.tab_zone.clone(), tab_zone::Zone::Main)
+            .size_full()
+            .min_w_0()
+            .child(tab_row)
             .child(
                 div()
                     .flex_1()
@@ -2418,6 +2487,7 @@ impl Render for AppShell {
         );
         if self.state.read(cx).panel == Panel::Chat && self.mode_focus.as_ref() != Some(&mode_key) {
             self.mode_focus = Some(mode_key);
+            self.tab_zone.set(tab_zone::Zone::Main);
             self.focus_composer(window, cx);
         }
         self.ensure_chat(cx);
@@ -2427,6 +2497,14 @@ impl Render for AppShell {
             self.tab_reveal = Some((selected_uid, std::time::Instant::now()));
         }
         self.sync_right(window, cx);
+        if let Some(workspace) = self.workspace(cx) {
+            workspace.update(cx, |workspace, _| {
+                workspace.transfer_peer = Some(self.right.downgrade())
+            });
+            self.right.update(cx, |panel, _| {
+                panel.transfer_peer = Some(workspace.downgrade())
+            });
+        }
         self.right.update(cx, |panel, cx| {
             panel.set_preview_visible(right_visible && !self.search_open, cx)
         });
@@ -2552,19 +2630,30 @@ impl Render for AppShell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
-                if !this.right_open {
-                    this.set_right(true, cx);
+                this.open_inner_tool(right_panel::Pane::Terminal, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenChanges, window, cx| {
+                this.open_inner_tool(right_panel::Pane::Changes, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenFiles, window, cx| {
+                this.open_inner_tool(right_panel::Pane::Files, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSideChat, window, cx| {
+                this.open_inner_tool(right_panel::Pane::SideChat, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseWorkspaceTab, window, cx| {
+                if this.state.read(cx).panel == Panel::Chat
+                    && let Some(workspace) = this.workspace(cx)
+                {
+                    let zone = this.active_tab_zone();
+                    zone.close_tab(&workspace, &this.right, window, cx);
+                    if zone == tab_zone::Zone::Main {
+                        this.focus_composer(window, cx);
+                    }
                 }
-                this.right.update(cx, |r, cx| r.show_terminal(window, cx));
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if this.state.read(cx).panel != Panel::Providers
-                    && let Some(workspace) = this.workspace(cx)
-                    && workspace.update(cx, |w, cx| w.close_active(window, cx))
-                {
-                    this.focus_composer(window, cx);
-                    return;
-                }
+                this.tab_zone.set(tab_zone::Zone::Main);
                 this.state.update(cx, |state, cx| {
                     if state.panel == Panel::Providers {
                         state.toggle_providers(cx);
@@ -2585,10 +2674,11 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &Tab9, w, cx| this.go_tab(8, w, cx)))
             .on_action(cx.listener(|this, _: &NewWorkspaceTab, window, cx| {
                 if this.state.read(cx).panel == Panel::Chat {
-                    this.new_workspace_tab(window, cx);
+                    this.new_inner_tab(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                this.tab_zone.set(tab_zone::Zone::Main);
                 this.state.update(cx, |s, cx| s.new_session(cx));
                 this.focus_composer(window, cx);
             }))
@@ -2697,7 +2787,7 @@ impl Render for AppShell {
                         let animate = self.right_animate;
                         let full = right_width + self.metrics.page_inset;
                         row.child(
-                            div()
+                            tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Right)
                                 .relative()
                                 .h_full()
                                 .flex_none()
@@ -2711,9 +2801,8 @@ impl Render for AppShell {
                                     div().size_full().pr(inset).pb(inset).child(
                                         div()
                                             .size_full()
-                                            .rounded(zpx(self.metrics.page_radius))
                                             .overflow_hidden()
-                                            .bg(page_surface())
+                                            .bg(appearance::shell_surface())
                                             .child(self.right.clone()),
                                     ),
                                 )
@@ -2787,6 +2876,10 @@ fn main() {
                 KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
                 KeyBinding::new("cmd-n", NewSession, None),
                 KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-shift-w", CloseWorkspaceTab, None),
+                KeyBinding::new("ctrl-shift-g", OpenChanges, None),
+                KeyBinding::new("cmd-p", OpenFiles, None),
+                KeyBinding::new("alt-cmd-s", OpenSideChat, None),
                 KeyBinding::new("cmd-1", Tab1, None),
                 KeyBinding::new("cmd-2", Tab2, None),
                 KeyBinding::new("cmd-3", Tab3, None),

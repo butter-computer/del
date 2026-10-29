@@ -815,7 +815,7 @@ impl AppShell {
             .values()
             .find(|cached| &cached.panel == panel)
             .is_some_and(|cached| cached.open);
-        if self.right_store.set(key, panel.read(cx).snapshot(open)) {
+        if self.right_store.set(key, panel.read(cx).snapshot(open, cx)) {
             self.persist_right(cx);
         }
     }

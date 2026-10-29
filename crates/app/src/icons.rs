@@ -9,6 +9,9 @@ pub const GLYPH_SIZE: f32 = 16.0;
 pub const BUTTON_SIZE: f32 = 28.0;
 /// Shared geometry for the sidebar toolbar and both session tool tab rows.
 pub const TOOL_TAB_HEIGHT: f32 = 30.0;
+pub const TOOL_TAB_WIDTH: f32 = 140.0;
+pub const TAB_CLOSE_SIZE: f32 = 16.0;
+pub const TAB_CLOSE_GLYPH: f32 = 11.0;
 pub const TOOL_ROW_HEIGHT: f32 = 40.0;
 
 pub fn size() -> Pixels {
