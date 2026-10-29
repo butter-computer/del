@@ -465,8 +465,8 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Command-T and Control-T create an inner tab in the last-used zone. Reveal the
   active tab immediately, including repeated opens after horizontal overflow.
-- Command-Shift-W closes only the active inner tab in that zone; it must never
-  fall through to closing the top-level session. Command-W closes the top-level
+- Command-W closes only the active inner tab in that zone; it must never
+  fall through to closing the top-level session. Command-Shift-W closes the top-level
   session even while an inner tool is active.
 - Changes (Control-Shift-G), Terminal (Control-backtick), Files (Command-P), and
   Side chat (Option-Command-S) open in the same active zone. Show these shortcuts
@@ -483,3 +483,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Settings includes a read-only Keybinds category with grouped current shortcuts
   and their scopes. Start directly with the shortcut groups, without explanatory
   intro text. Do not imply remapping is available until it is implemented.
+
+- Keep the top-bar bottom border and both sidebar edge borders invisible; preserve
+  the sidebar resize hit targets. Search result rows use the same provider and
+  terminal marks as sidebar rows instead of visible Chat/Terminal type labels.
+- Top-level session tabs, inner tabs in both zones, and their drag previews share
+  the same zoom-scaled height. Keep close targets and labels inside that height.

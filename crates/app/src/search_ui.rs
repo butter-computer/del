@@ -382,12 +382,11 @@ impl Palette {
         } else {
             "Chat"
         };
-        let detail = format!("{kind}{}", if source.archived { " · Archived" } else { "" });
         h_flex()
             .w_full()
             .id(("search-result", ix))
             .role(Role::Button)
-            .aria_label(format!("{}: {}", source.title, hit.snippet))
+            .aria_label(format!("{kind}: {}: {}", source.title, hit.snippet))
             .px(zpx(8.))
             .h(zpx(36.))
             .gap(zpx(8.))
@@ -409,22 +408,18 @@ impl Palette {
                 this.selected = this.actions(cx).len() + ix;
                 this.open(cx);
             }))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(rgba(0xffffff80))
-                    .child(match source.provider {
+            .child(div().flex_none().text_color(rgba(0xffffff80)).child(
+                if matches!(source.tab, Tab::Terminal(_)) {
+                    crate::mode_ui::terminal_mark(source.provider)
+                } else {
+                    match source.provider {
                         Some(provider) => {
                             crate::composer_ui::provider_logo(provider).into_any_element()
                         }
-                        None => crate::icons::path(if matches!(source.tab, Tab::Terminal(_)) {
-                            "icons/square-terminal.svg"
-                        } else {
-                            "icons/file-text.svg"
-                        })
-                        .into_any_element(),
-                    }),
-            )
+                        None => crate::icons::path("icons/file-text.svg").into_any_element(),
+                    }
+                },
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -450,13 +445,15 @@ impl Palette {
                             .child(preview),
                     ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(zpx(10.))
-                    .text_color(rgba(0xffffff70))
-                    .child(detail),
-            )
+            .when(source.archived, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(zpx(10.))
+                        .text_color(rgba(0xffffff70))
+                        .child("Archived"),
+                )
+            })
             .child(
                 div()
                     .flex_none()

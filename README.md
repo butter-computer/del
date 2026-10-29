@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.8` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.9` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,8 +14,8 @@ when making future changes.
 
 ## Download and install
 
-The source version is **0.1.8**. The latest published release is **0.1.7**.
-Download **Del-0.1.7-arm64.dmg** from the [0.1.7 release](https://github.com/butter-computer/del/releases/tag/v0.1.7),
+The latest release is **0.1.9**.
+Download **Del-0.1.9-arm64.dmg** from the [0.1.9 release](https://github.com/butter-computer/del/releases/tag/v0.1.9),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.8-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.9-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -608,7 +608,7 @@ remembers its sidebar order. Drag a tool between the session row and right-sideb
 row to move it without closing its shell, browser, editor, or side chat. The original
 conversation stays fixed. Both rows use the same compact 140-point tab width, including during transfers.
 Command-T opens in the last-used zone, and newly selected tabs scroll into view.
-Command-Shift-W closes only that zone’s inner tab; Command-W closes the top-level session.
+Command-W closes only that zone’s inner tab; Command-Shift-W closes the top-level session.
 Side chats use the same provider button and searchable model picker as main chat,
 including effort, Fast mode, and reset controls. Account names appear in the
 provider submenu; changes apply only to that side chat.
@@ -822,8 +822,8 @@ session shortcuts.
 | Command-N | New session |
 | Command-T / Control-T | New inner tab in the last-used zone |
 | Command-K | Open or close conversation search |
-| Command-W | Close the top-level session tab |
-| Command-Shift-W | Close the active inner tab in the focused zone |
+| Command-Shift-W | Close the top-level session tab |
+| Command-W | Close the active inner tab in the focused zone |
 | Control-Shift-G | Open Changes in the focused zone |
 | Command-P | Open Files in the focused zone |
 | Option-Command-S | Open Side chat in the focused zone |

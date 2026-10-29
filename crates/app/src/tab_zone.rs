@@ -124,7 +124,7 @@ mod tests {
             gpui_kit::init(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-t", crate::NewWorkspaceTab, None),
-                KeyBinding::new("cmd-shift-w", crate::CloseWorkspaceTab, None),
+                KeyBinding::new("cmd-w", crate::CloseWorkspaceTab, None),
                 KeyBinding::new("ctrl-shift-g", crate::OpenChanges, None),
             ]);
         });
@@ -177,11 +177,11 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(right_blanks(cx), 12);
         assert_eq!(main_tabs(cx), 0);
-        cx.simulate_keystrokes("cmd-shift-w");
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         assert_eq!(right_blanks(cx), 11);
         click_zone(cx, "main-zone");
-        cx.simulate_keystrokes("cmd-t cmd-t cmd-shift-w");
+        cx.simulate_keystrokes("cmd-t cmd-t cmd-w");
         cx.run_until_parked();
         assert_eq!(main_tabs(cx), 1);
         assert_eq!(right_blanks(cx), 11);
@@ -191,7 +191,7 @@ mod tests {
             let value = serde_json::to_value(main.snapshot(cx)).unwrap();
             assert_eq!(value["tabs"][0]["kind"], "Changes");
         });
-        cx.simulate_keystrokes("cmd-shift-w cmd-shift-w");
+        cx.simulate_keystrokes("cmd-w cmd-w");
         cx.run_until_parked();
         assert_eq!(main_tabs(cx), 0);
         assert!(main.read_with(cx, |main, _| main.is_chat()));

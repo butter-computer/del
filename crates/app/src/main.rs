@@ -120,7 +120,7 @@ impl Render for DraggedTab {
         // inside a fixed-size wrapper, keeping the original grab offset intact.
         div()
             .w(zpx(TAB_WIDTH))
-            .h(crate::icons::button_size())
+            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .child(
                 h_flex()
                     .relative()
@@ -128,7 +128,7 @@ impl Render for DraggedTab {
                     .left(left - natural_left)
                     .w(width)
                     .overflow_hidden()
-                    .h(crate::icons::button_size())
+                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
                     .px_2()
                     .gap_2()
                     .items_center()
@@ -1660,7 +1660,7 @@ impl AppShell {
                 .id(id.clone())
                 .group(id)
                 // The close target must fit inside the tab's animated clip.
-                .h(crate::icons::button_size())
+                .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
                 .min_w(zpx(120.0))
                 .max_w(zpx(200.0))
                 .pl_2()
@@ -1680,8 +1680,7 @@ impl AppShell {
             .h(zpx(self.metrics.topbar_height))
             .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
-            .border_b_1()
-            .border_color(appearance::separator())
+            .border_b_0()
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
             // opaque than the bar.
@@ -2730,8 +2729,6 @@ impl Render for AppShell {
                             .relative()
                             .h_full()
                             .flex_none()
-                            .border_r_1()
-                            .border_color(appearance::separator())
                             .overflow_hidden()
                             .child(sidebar::render(
                                 &self.state,
@@ -2792,8 +2789,6 @@ impl Render for AppShell {
                                 .relative()
                                 .h_full()
                                 .flex_none()
-                                .border_l_1()
-                                .border_color(appearance::separator())
                                 .overflow_hidden()
                                 .child(
                                     // Fills whatever width the animation gives it: the panel
@@ -2876,8 +2871,8 @@ fn main() {
                 KeyBinding::new("cmd-t", NewWorkspaceTab, None),
                 KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
                 KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-w", CloseTab, None),
-                KeyBinding::new("cmd-shift-w", CloseWorkspaceTab, None),
+                KeyBinding::new("cmd-w", CloseWorkspaceTab, None),
+                KeyBinding::new("cmd-shift-w", CloseTab, None),
                 KeyBinding::new("ctrl-shift-g", OpenChanges, None),
                 KeyBinding::new("cmd-p", OpenFiles, None),
                 KeyBinding::new("alt-cmd-s", OpenSideChat, None),

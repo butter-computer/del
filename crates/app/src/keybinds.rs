@@ -10,8 +10,8 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("New session", "⌘N"),
             ("New inner tab in the last-used zone", "⌘T / ⌃T"),
-            ("Close top-level session", "⌘W"),
-            ("Close active inner tab in the last-used zone", "⌘⇧W"),
+            ("Close top-level session", "⌘⇧W"),
+            ("Close active inner tab in the last-used zone", "⌘W"),
             ("Select top-level session by position", "⌘1–9"),
             ("Next / previous top-level session", "⌘⇧] / ⌘⇧["),
             ("Next / previous main-area inner tab", "⌃Tab / ⌃⇧Tab"),
