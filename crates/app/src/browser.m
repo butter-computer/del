@@ -30,6 +30,9 @@ static NSURL *DelBrowserURL(NSString *address) {
 @property(nonatomic, copy) NSString *savedURL;
 @property(nonatomic) CGFloat zoom;
 @property(nonatomic) BOOL mousePassthrough;
+@property(nonatomic) BOOL presented;
+@property(nonatomic) BOOL previewRendering;
+@property(nonatomic) NSUInteger previewGeneration;
 // Page dialogs: a short burst limit, and an opt-out that lasts while the
 // main frame stays on the same host.
 @property(nonatomic, copy) NSString *dialogHost;
@@ -44,7 +47,7 @@ static NSURL *DelBrowserURL(NSString *address) {
 - (BOOL)isFlipped { return YES; }
 - (NSView *)hitTest:(NSPoint)point {
     // GPUI owns ongoing splitter/tab drags, even over the native web view.
-    return self.mousePassthrough ? nil : [super hitTest:point];
+    return !self.presented || self.mousePassthrough ? nil : [super hitTest:point];
 }
 - (NSButton *)button:(NSString *)symbol label:(NSString *)label action:(SEL)action {
     NSButton *button = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:label]
@@ -196,7 +199,7 @@ static NSURL *DelBrowserURL(NSString *address) {
 // otherwise hold the whole window), hidden/background browsers, or a sheet
 // already showing.
 - (BOOL)admitDialog {
-    if (self.dialogsBlocked || !self.window || self.isHiddenOrHasHiddenAncestor || self.window.attachedSheet) return NO;
+    if (!self.presented || self.dialogsBlocked || !self.window || self.isHiddenOrHasHiddenAncestor || self.window.attachedSheet) return NO;
     NSDate *now = NSDate.date;
     if (!self.dialogBurstStart || [now timeIntervalSinceDate:self.dialogBurstStart] > 10) {
         self.dialogBurstStart = now;
@@ -264,12 +267,23 @@ void del_browser_frame(void *pointer, double x, double y, double width, double h
     if (![NSThread isMainThread] || !pointer) return;
     DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
     NSView *parent = browser.superview;
-    if (!parent || width <= 0 || height <= 0) { browser.hidden = YES; return; }
+    if (!parent || width <= 0 || height <= 0) {
+        browser.presented = NO;
+        browser.accessibilityHidden = YES;
+        browser.layer.opacity = 0;
+        browser.hidden = !browser.previewRendering;
+        return;
+    }
     if (!parent.isFlipped) y = NSHeight(parent.bounds) - y - height;
     browser.frame = NSMakeRect(x,y,width,height);
     browser.appearance = [NSAppearance appearanceNamed:light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
     browser.layer.backgroundColor = (light ? [NSColor colorWithWhite:0.98 alpha:1] : [NSColor colorWithWhite:0.047 alpha:1]).CGColor;
     browser.zoom = zoom;
+    browser.presented = YES;
+    browser.previewRendering = NO;
+    browser.previewGeneration++;
+    browser.layer.opacity = 1;
+    browser.accessibilityHidden = NO;
     browser.mousePassthrough = mousePassthrough;
     if (browser.web.pageZoom != zoom) browser.web.pageZoom = zoom;
     browser.needsLayout = YES;
@@ -285,7 +299,10 @@ void del_browser_hide(void *pointer) {
     NSResponder *first = browser.window.firstResponder;
     if ([first isKindOfClass:NSView.class] && [(NSView *)first isDescendantOf:browser])
         [browser.window makeFirstResponder:browser.superview];
-    browser.hidden = YES;
+    browser.presented = NO;
+    browser.accessibilityHidden = YES;
+    browser.layer.opacity = 0;
+    browser.hidden = !browser.previewRendering;
 }
 void del_browser_release(void *pointer) {
     if (![NSThread isMainThread] || !pointer) return;
@@ -368,6 +385,26 @@ void del_browser_command(void *pointer, const char *command, DelBrowserReply rep
     if ([action isEqualToString:@"forward"]) { [browser goForward:nil]; DelReply(reply,context,@YES,nil); return; }
     if ([action isEqualToString:@"reload"]) { [browser.web reload]; DelReply(reply,context,@YES,nil); return; }
     if ([action isEqualToString:@"screenshot"]) {
+        if ([request[@"preview"] boolValue] && !browser.presented) {
+            // NSView.hidden pauses WebKit animation frames, so pages such as
+            // YouTube can remain on their loading skeleton. Keep the page
+            // rendering transparently while sampled, without exposing native
+            // controls to clicks, accessibility, or page dialogs.
+            browser.previewRendering = YES;
+            browser.layer.opacity = 0;
+            browser.accessibilityHidden = YES;
+            browser.hidden = NO;
+            NSUInteger generation = ++browser.previewGeneration;
+            __weak DelBrowserView *weakBrowser = browser;
+            // Preview sampling is once per second. Let rendering sleep again
+            // when sampling stops; an old lease cannot hide a reopened pane.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                DelBrowserView *view = weakBrowser;
+                if (!view || view.previewGeneration != generation) return;
+                view.previewRendering = NO;
+                if (!view.presented) view.hidden = YES;
+            });
+        }
         WKSnapshotConfiguration *configuration = [WKSnapshotConfiguration new];
         configuration.snapshotWidth = @(MIN([request[@"preview"] boolValue] ? 560 : 1280, NSWidth(browser.web.bounds)));
         [browser.web takeSnapshotWithConfiguration:configuration completionHandler:^(NSImage *image, NSError *error) {

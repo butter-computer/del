@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.16` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.17` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.16-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.17-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -741,6 +741,12 @@ selection. When an agent uses a browser tab that isn't visible, a small draggabl
 page preview appears on the right. It refreshes from the existing page without
 opening the sidebar or changing the browser's viewport. Click the preview to
 reveal that same tab in the sidebar; drag it to reposition it within the window.
+While the preview is updating, its page keeps rendering invisibly so sites such
+as YouTube can finish loading instead of remaining on a skeleton screen. The
+hidden native view cannot intercept clicks, expose accessibility controls, or
+show page dialogs. Rendering pauses again when preview sampling stops.
+Closing the sidebar retains the page's last viewport for the preview instead of
+shrinking it with the panel animation.
 The preview image clips to rounded corners and has no URL header. A translucent
 × with a locally blurred page backdrop floats over its top-right corner.
 Each session keeps its own preview and position: switching away hides it, and

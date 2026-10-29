@@ -2660,7 +2660,9 @@ impl Render for AppShell {
             });
         }
         self.right.update(cx, |panel, cx| {
-            panel.set_preview_visible(right_visible && !self.search_open, cx)
+            // Hide native content before the close animation squeezes its
+            // viewport; a floating browser preview must retain the last size.
+            panel.set_preview_visible(right_visible && self.right_open && !self.search_open, cx)
         });
         // Only the panel that just stopped being shown needs hiding; every other
         // cached panel was hidden when it was replaced.

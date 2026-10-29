@@ -1,9 +1,15 @@
 // Compile with AppKit/WebKit. A local HTTP fixture URL is the only argument.
 #import "../crates/app/src/browser.m"
+static void Pump(void) {
+    NSEvent *event;
+    while ((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:NSDate.distantPast inMode:NSDefaultRunLoopMode dequeue:YES])) [NSApp sendEvent:event];
+    [NSApp updateWindows];
+    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+}
 static void Wait(BOOL (^done)(void)) {
     NSDate *end = [NSDate dateWithTimeIntervalSinceNow:15];
     while (!done() && end.timeIntervalSinceNow > 0)
-        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+        Pump();
     NSCAssert(done(), @"Timed out waiting for WebKit");
 }
 static id JS(WKWebView *web, NSString *script) {
@@ -74,7 +80,8 @@ int main(int argc,char **argv) {
         @autoreleasepool {
         NSWindow *window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,900,700) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
         window.releasedWhenClosed=NO;
-        [window orderFront:nil];
+        window.level=NSFloatingWindowLevel;
+        [window orderFrontRegardless];
         NSView *parent=window.contentView;
         NSCAssert([DelBrowserURL(@"localhost:3000/test").absoluteString isEqualToString:@"http://localhost:3000/test"],@"localhost defaults to HTTP");
         NSCAssert(!DelBrowserURL(@"file:///etc/passwd"),@"no local filesystem browsing");
@@ -111,7 +118,8 @@ int main(int argc,char **argv) {
         NSData *previewPNG=[[NSData alloc] initWithBase64EncodedString:preview[@"image"] options:0];
         NSBitmapImageRep *previewBitmap=[[NSBitmapImageRep alloc] initWithData:previewPNG];
         NSCAssert(previewBitmap.pixelsWide > 0 && previewBitmap.pixelsWide <= 560 * window.backingScaleFactor,@"bounded real hidden-page thumbnail");
-        NSCAssert(browser.hidden && NSEqualRects(browser.web.frame,viewportBeforePreview),@"preview must not show or resize the actual browser");
+        NSCAssert((browser.hidden || browser.layer.opacity==0) && NSEqualRects(browser.web.frame,viewportBeforePreview),@"preview must not show or resize the actual browser");
+        NSCAssert(!browser.presented && browser.accessibilityHidden && [parent hitTest:content]==parent && ![browser admitDialog],@"preview cannot expose native controls, intercept input, or open dialogs");
         NSCAssert([JS(browser.web,@"document.querySelector('input').value") isEqual:@"preview-retains-state"],@"preview preserves live page state");
         del_browser_frame(a,0,0,320,500,1.2,true,false);
         NSCAssert(!browser.hidden && browser.web.pageZoom==1.2,@"resize/reopen/zoom");
@@ -127,6 +135,34 @@ int main(int argc,char **argv) {
         browser=(__bridge DelBrowserView *)a;
         Wait(^BOOL { return browser.web.URL && !browser.web.loading; });
         NSCAssert([JS(browser.web,@"document.cookie.includes('del_test=profileA') && localStorage.getItem('del_test')==='profileA'") isEqual:@YES],@"profile persists after closing/reopening views");
+        del_browser_release(a);browser=nil;
+        // A page first opened by an agent must finish frame-driven rendering
+        // before the user opens its pane (video sites use this for hydration).
+        a=del_browser_create((__bridge void *)parent,url.UTF8String,profileA.UTF8String);
+        browser=(__bridge DelBrowserView *)a;
+        Command(a,@{@"action":@"evaluate",@"script":@"return true;"});
+        Wait(^BOOL { return browser.web.URL && !browser.web.loading; });
+        JS(browser.web,@"window.previewReady=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{document.body.style.background='rgb(0, 200, 0)';window.previewReady=true;}))");
+        for (int i=0;i<3;i++) {
+            Command(a,@{@"action":@"screenshot",@"preview":@YES});
+            NSDate *frameDeadline=[NSDate dateWithTimeIntervalSinceNow:0.2];
+            while(frameDeadline.timeIntervalSinceNow>0) Pump();
+        }
+        NSCAssert([JS(browser.web,@"window.previewReady") isEqual:@YES],@"hidden preview must show frame-driven page content, not a loading skeleton");
+        NSDictionary *rendered=Command(a,@{@"action":@"screenshot",@"preview":@YES});
+        NSBitmapImageRep *renderedBitmap=[[NSBitmapImageRep alloc] initWithData:[[NSData alloc] initWithBase64EncodedString:rendered[@"image"] options:0]];
+        NSColor *renderedColor=[[renderedBitmap colorAtX:renderedBitmap.pixelsWide/2 y:renderedBitmap.pixelsHigh/2] colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+        NSCAssert(renderedColor.greenComponent>0.6 && renderedColor.redComponent<0.1,@"preview pixels contain hydrated page content");
+        del_browser_hide(a);
+        NSCAssert(!browser.hidden && browser.layer.opacity==0,@"normal pane hiding must not interrupt preview rendering");
+        Wait(^BOOL { return browser.hidden; });
+        NSCAssert(!browser.previewRendering,@"rendering sleeps when preview sampling stops");
+        Command(a,@{@"action":@"screenshot",@"preview":@YES});
+        del_browser_frame(a,0,0,420,650,1,false,false);
+        NSDate *leaseDeadline=[NSDate dateWithTimeIntervalSinceNow:2.2];
+        while(leaseDeadline.timeIntervalSinceNow>0) Pump();
+        NSCAssert(browser.presented && !browser.hidden && browser.layer.opacity==1 && !browser.accessibilityHidden,@"stale preview lease must not hide a reopened browser");
+        NSCAssert([JS(browser.web,@"window.previewReady") isEqual:@YES],@"opening the browser preserves the preview's hydrated page");
         del_browser_release(a);browser=nil;
         [window close];
         }

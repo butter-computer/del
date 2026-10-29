@@ -589,3 +589,13 @@ zone of their session, including hosted/moved panes and a different selected
 browser tab. Native WebKit surfaces paint above GPUI; leaving the thumbnail
 visible there clips it. This visibility suppression is not dismissal: hiding
 the Browser pane restores the preview.
+
+Hidden previews must allow frame-driven page rendering to progress. During
+sampling, render the existing WebKit view transparently instead of setting
+`NSView.hidden`, which pauses animation frames and can strand YouTube on its
+loading skeleton. Keep native hit testing, accessibility, and page dialogs
+disabled until the user opens the Browser pane. Stop this rendering lease after
+sampling stops; a stale lease must never hide a reopened pane. Do not reload,
+resize, or inject replacement page scheduling functions to refresh a thumbnail.
+Hide native sidebar content at the start of its closing animation, preserving
+the browser's last viewport instead of sampling a nearly zero-width page.
