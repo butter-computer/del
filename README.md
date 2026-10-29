@@ -5,7 +5,7 @@ combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation.
 
-Del `0.1.7` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.8` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,7 +14,7 @@ when making future changes.
 
 ## Download and install
 
-The latest release and source version are **0.1.7**.
+The source version is **0.1.8**. The latest published release is **0.1.7**.
 Download **Del-0.1.7-arm64.dmg** from the [0.1.7 release](https://github.com/butter-computer/del/releases/tag/v0.1.7),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
@@ -35,7 +35,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.7-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.8-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -609,7 +609,13 @@ row to move it without closing its shell, browser, editor, or side chat. The ori
 conversation stays fixed. Both rows use the same compact 140-point tab width, including during transfers.
 Command-T opens in the last-used zone, and newly selected tabs scroll into view.
 Command-Shift-W closes only that zone’s inner tab; Command-W closes the top-level session.
-The launcher shows shortcuts beside neutral icons. Entering either row opens a live insertion gap, and neighboring tabs move aside
+Side chats use the same provider button and searchable model picker as main chat,
+including effort, Fast mode, and reset controls. Account names appear in the
+provider submenu; changes apply only to that side chat.
+The launcher centers its four options in a compact vertical stack below the URL bar,
+with shortcuts beside neutral icons. Card and URL-bar backgrounds are slightly
+lighter to remain visible against the page. Entering either row opens a live
+insertion gap, and neighboring tabs move aside
 as you change slots. Dragging tracks the pointer horizontally, locked to the tab
 row with no vertical movement, haptics, or magnetic effects. A darker, full-width preview settles into the destination slot.
 The source slot collapses as soon as the tab leaves, so its plus button follows
@@ -793,9 +799,10 @@ in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to 
 session index and restored on launch. Keyboard shortcuts work while the composer
 or terminal has focus.
 
-Settings opens in a modal with **Appearance** and **Accounts** navigation,
+Settings has **Appearance**, **Providers**, and **Keybinds** navigation,
 with icons aligned to the left of their labels. Appearance includes persisted
-Light/Dark appearance; Accounts shows sign-in status and provider controls.
+Light/Dark appearance; Providers shows sign-in status and account controls.
+**Keybinds** lists app shortcuts and contextual controls, grouped by area; it is read-only.
 Light mode uses a white workspace, off-white chrome, and slightly darker `#F9F9F9`
 composer cards. Menus, model and effort pickers, command suggestions, search, and
 Settings share that light surface. The shell opacity setting is fixed at 85%;
@@ -836,6 +843,9 @@ session shortcuts.
 | Command-Comma | Settings |
 | Escape in Settings | Return to the previous workspace view |
 | Command-Q | Quit |
+
+The Settings → Keybinds page lists these shortcuts plus file-editor, terminal,
+search, and model-picker controls. Keybindings are not editable yet.
 
 ## Local data
 

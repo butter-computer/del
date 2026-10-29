@@ -40,8 +40,97 @@ impl Render for EffortDrag {
     }
 }
 
+/// A shared picker presentation with a conversation-scoped settings target.
+#[derive(Clone)]
+enum ModelSource {
+    Main(Entity<AppState>),
+    Side(WeakEntity<crate::side_chat::SideChat>),
+}
+
+pub(crate) struct ModelSelection {
+    pub above: bool,
+    pub provider: Provider,
+    pub model: Option<String>,
+    pub catalog: crate::state::ModelCatalog,
+    pub effort: Option<String>,
+    pub tier: Option<String>,
+    pub locked: bool,
+}
+impl ModelSelection {
+    fn info(&self) -> Option<del_agent::ModelInfo> {
+        self.catalog
+            .models
+            .iter()
+            .find(|m| self.model.as_ref().map_or(m.is_default, |id| &m.id == id))
+            .cloned()
+    }
+}
+
+pub(crate) enum ModelChange {
+    Model(Option<String>),
+    Effort(Option<String>),
+    Fast(bool),
+    Reset,
+    Refresh(bool),
+}
+impl ModelSource {
+    fn read(&self, cx: &App) -> ModelSelection {
+        match self {
+            Self::Main(state) => {
+                let state = state.read(cx);
+                let (provider, model, _) = state.effective();
+                ModelSelection {
+                    above: matches!(state.selection, Selection::Session(_)),
+                    provider,
+                    model,
+                    catalog: state.model_catalog(),
+                    effort: state.effort(),
+                    tier: state.service_tier(),
+                    locked: state.is_starting(),
+                }
+            }
+            Self::Side(side) => side
+                .upgrade()
+                .map(|side| side.read(cx).model_selection(cx))
+                .unwrap_or(ModelSelection {
+                    above: true,
+                    provider: Provider::Codex,
+                    model: None,
+                    catalog: Default::default(),
+                    effort: None,
+                    tier: None,
+                    locked: true,
+                }),
+        }
+    }
+    fn apply(&self, change: ModelChange, cx: &mut App) {
+        match self {
+            Self::Main(state) => state.update(cx, |state, cx| match change {
+                ModelChange::Model(model) => state.set_model(model, cx),
+                ModelChange::Effort(effort) => state.set_effort(effort, cx),
+                ModelChange::Fast(enabled) => state.set_fast_mode(enabled, cx),
+                ModelChange::Reset => state.reset_model_settings(cx),
+                ModelChange::Refresh(refresh) => state.load_models(refresh, cx),
+            }),
+            Self::Side(side) => {
+                let _ = side.update(cx, |side, cx| side.change_model(change, cx));
+            }
+        }
+    }
+    fn observe<T: 'static>(&self, cx: &mut Context<T>) {
+        match self {
+            Self::Main(state) => cx.observe(state, |_, _, cx| cx.notify()).detach(),
+            Self::Side(side) => {
+                if let Some(side) = side.upgrade() {
+                    cx.observe(&side, |_, _, cx| cx.notify()).detach();
+                }
+            }
+        }
+    }
+}
+
 pub struct ModelPicker {
-    state: Entity<AppState>,
+    state: ModelSource,
     panel: Entity<ModelPanel>,
     open: bool,
     trigger_bottom: Rc<Cell<Pixels>>,
@@ -50,11 +139,25 @@ pub struct ModelPicker {
 impl ModelPicker {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, _, cx| {
-            this.state
-                .update(cx, |state, cx| state.load_models(false, cx));
+            this.state.apply(ModelChange::Refresh(false), cx);
             cx.notify();
         })
         .detach();
+        state.update(cx, |state, cx| state.load_models(false, cx));
+        Self::with_source(ModelSource::Main(state), window, cx)
+    }
+
+    pub fn for_side_chat(
+        side: WeakEntity<crate::side_chat::SideChat>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let source = ModelSource::Side(side);
+        source.observe(cx);
+        Self::with_source(source, window, cx)
+    }
+
+    fn with_source(state: ModelSource, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let trigger_bottom = Rc::new(Cell::new(Pixels::ZERO));
         let panel = cx.new(|cx| ModelPanel::new(state.clone(), trigger_bottom.clone(), window, cx));
         cx.subscribe(&panel, |this, _, _: &CloseModelPicker, cx| {
@@ -62,7 +165,6 @@ impl ModelPicker {
             cx.notify();
         })
         .detach();
-        state.update(cx, |state, cx| state.load_models(false, cx));
         Self {
             state,
             panel,
@@ -75,11 +177,11 @@ impl ModelPicker {
 impl Render for ModelPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let above = matches!(state.selection, Selection::Session(_));
-        let (_, model, _) = state.effective();
-        let info = state.model_info();
+        let above = state.above;
+        let model = &state.model;
+        let info = state.info();
         let label = model_label(model.as_deref(), info.as_ref());
-        let effort = effort_label(state.effort().as_deref(), info.as_ref());
+        let effort = effort_label(state.effort.as_deref(), info.as_ref());
         let panel = self.panel.clone();
         let trigger_bottom = self.trigger_bottom.clone();
         div()
@@ -105,7 +207,7 @@ impl Render for ModelPicker {
                             .compact()
                             .rounded_full()
                             .text_size(zpx(15.))
-                            .disabled(state.is_starting())
+                            .disabled(state.locked)
                             .accessibility_label(format!("Select model: {label}"))
                             .child(h_flex().gap_1().items_center().child(label).when_some(
                                 effort,
@@ -125,7 +227,7 @@ impl Render for ModelPicker {
                                     search.focus(window, cx);
                                 });
                                 panel.model_scroll.set_offset(point(zpx(0.), zpx(0.)));
-                                panel.state.update(cx, |s, cx| s.load_models(false, cx));
+                                panel.state.apply(ModelChange::Refresh(false), cx);
                                 cx.notify();
                             });
                         }
@@ -139,7 +241,7 @@ impl Render for ModelPicker {
 struct CloseModelPicker;
 
 struct ModelPanel {
-    state: Entity<AppState>,
+    state: ModelSource,
     models: bool,
     levels: Vec<EffortOption>,
     effort_index: usize,
@@ -156,7 +258,7 @@ impl EventEmitter<CloseModelPicker> for ModelPanel {}
 
 impl ModelPanel {
     fn choose_effort(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.state.read(cx).is_starting() || index == self.effort_index {
+        if self.state.read(cx).locked || index == self.effort_index {
             return;
         }
         let Some(level) = self.levels.get(index) else {
@@ -165,19 +267,18 @@ impl ModelPanel {
         let effort = Some(level.id.clone());
         self.previous_effort_index = self.effort_index;
         self.effort_index = index;
-        self.state
-            .update(cx, |state, cx| state.set_effort(effort, cx));
+        self.state.apply(ModelChange::Effort(effort), cx);
         crate::haptics::tick();
         cx.notify();
     }
 
     fn new(
-        state: Entity<AppState>,
+        state: ModelSource,
         trigger_bottom: Rc<Cell<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        state.observe(cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models…"));
         cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -206,23 +307,23 @@ impl ModelPanel {
 impl Render for ModelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let available_height = if matches!(state.selection, Selection::Session(_)) {
+        let available_height = if state.above {
             self.trigger_bottom.get() - zpx(28.)
         } else {
             window.viewport_size().height - self.trigger_bottom.get()
         };
-        let catalog = state.model_catalog();
-        let (provider, selected, _) = state.effective();
+        let catalog = state.catalog.clone();
+        let (provider, selected) = (state.provider, state.model.clone());
         let accent = rgb(match provider {
             Provider::Codex => 0x007aff,
             Provider::OpenCode => 0xd0d0ce,
             _ => crate::composer_ui::provider_brand(provider).1,
         });
-        let info = state.model_info();
-        let effort = state.effort();
-        let fast = state.service_tier().is_some();
+        let info = state.info();
+        let effort = state.effort.clone();
+        let fast = state.tier.is_some();
         let supports_fast = info.as_ref().is_some_and(|m| m.fast_tier.is_some());
-        let locked = state.is_starting();
+        let locked = state.locked;
         let muted = rgba(0xffffff80);
         let root = v_flex()
             .id("model-panel")
@@ -238,7 +339,7 @@ impl Render for ModelPanel {
                     && !key.modifiers.control
                     && !key.modifiers.alt
                     && matches!(key.key.as_str(), "left" | "right")
-                    && !this.state.read(cx).is_starting()
+                    && !this.state.read(cx).locked
                     && let Some(index) =
                         next_effort_index(this.effort_index, this.levels.len(), key.key == "right")
                 {
@@ -312,7 +413,7 @@ impl Render for ModelPanel {
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.state.update(cx, |s, cx| s.set_model(None, cx));
+                            this.state.apply(ModelChange::Model(None), cx);
                             this.focus.focus(window, cx);
                             this.models = false;
                             cx.notify();
@@ -363,8 +464,7 @@ impl Render for ModelPanel {
                                 }),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.state
-                                .update(cx, |s, cx| s.set_model(Some(id.clone()), cx));
+                            this.state.apply(ModelChange::Model(Some(id.clone())), cx);
                             this.focus.focus(window, cx);
                             this.models = false;
                             cx.notify();
@@ -383,7 +483,7 @@ impl Render for ModelPanel {
                         "up" | "down" => {
                             window.prevent_default();
                             cx.stop_propagation();
-                            if this.state.read(cx).is_starting() {
+                            if this.state.read(cx).locked {
                                 return;
                             }
                             this.highlighted = next_model_index(
@@ -399,14 +499,13 @@ impl Render for ModelPanel {
                         "enter" => {
                             window.prevent_default();
                             cx.stop_propagation();
-                            if this.state.read(cx).is_starting() {
+                            if this.state.read(cx).locked {
                                 return;
                             }
                             if let Some(model) =
                                 this.choices.get(this.highlighted.unwrap_or(0)).cloned()
                             {
-                                this.state
-                                    .update(cx, |state, cx| state.set_model(model, cx));
+                                this.state.apply(ModelChange::Model(model), cx);
                                 this.focus.focus(window, cx);
                                 this.models = false;
                                 cx.notify();
@@ -444,7 +543,7 @@ impl Render for ModelPanel {
                                 })
                                 .disabled(catalog.loading)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.load_models(true, cx))
+                                    this.state.apply(ModelChange::Refresh(true), cx)
                                 })),
                         ),
                 )
@@ -546,7 +645,7 @@ impl Render for ModelPanel {
                             rgba(0xffffff70)
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.set_fast_mode(!fast, cx));
+                            this.state.apply(ModelChange::Fast(!fast), cx);
                         })),
                 )
                 .child(
@@ -586,9 +685,9 @@ impl Render for ModelPanel {
                         .text_color(rgba(0xffffff70))
                         .disabled(locked || catalog.loading)
                         .child(crate::icons::icon(IconName::RefreshCw).text_color(rgba(0xffffff70)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.reset_model_settings(cx))
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.state.apply(ModelChange::Reset, cx)),
+                        ),
                 ),
         )
         .when(!self.levels.is_empty(), |col| {

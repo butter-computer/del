@@ -11,6 +11,14 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    Appearance,
+    Providers,
+    Keybinds,
+}
+
 fn usage_bar(remaining: Option<f64>) -> impl IntoElement {
     div()
         .w_full()
@@ -188,7 +196,7 @@ fn provider_row(
 
 /// Category navigation replaces session navigation only while Settings is open.
 pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
-    let preferences = state.read(cx).preferences_open;
+    let section = state.read(cx).settings_section;
     v_flex()
         .size_full()
         .min_w_0()
@@ -210,8 +218,13 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                 )
                 .children(
                     [
-                        ("Appearance", true, IconName::Palette),
-                        ("Providers", false, IconName::CircleUser),
+                        ("Appearance", SettingsSection::Appearance, IconName::Palette),
+                        (
+                            "Providers",
+                            SettingsSection::Providers,
+                            IconName::CircleUser,
+                        ),
+                        ("Keybinds", SettingsSection::Keybinds, IconName::Settings),
                     ]
                     .into_iter()
                     .map(|(label, category, icon)| {
@@ -229,11 +242,11 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                                     .child(crate::icons::icon(icon))
                                     .child(label),
                             )
-                            .selected(preferences == category)
+                            .selected(section == category)
                             .accessibility_label(format!("Settings: {label}"))
                             .on_click(move |_, _, cx| {
                                 state.update(cx, |state, cx| {
-                                    state.preferences_open = category;
+                                    state.settings_section = category;
                                     cx.notify();
                                 })
                             })
@@ -244,12 +257,13 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
 
 pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
-    let preferences = s.preferences_open;
+    let section = s.settings_section;
+    let preferences = section == SettingsSection::Appearance;
     let back = state.clone();
     v_flex().id("settings").size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
         .child(h_flex().w_full().items_center().justify_between().gap_4()
             .child(div().text_size(zpx(24.)).font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(0xf5f5f5)).child(if preferences { "Appearance" } else { "Providers" }))
+                .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
             .child(Button::new("settings-done").ghost().small().label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
@@ -264,7 +278,8 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             .when(crate::appearance::light() == light, |button| button.bg(rgba(0xffffff20)))
                             .on_click(move |_, _, cx| crate::appearance::set(light, cx))
                     }))))
-            .when(!preferences, |content| content
+            .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
+            .when(section == SettingsSection::Providers, |content| content
                 .children(providers::VISIBLE.into_iter().map(|provider| {
                     v_flex().gap_1().child(provider_row(provider, s.status_of(provider), state, cx))
                         .when(provider != Provider::Acp, |rows| rows.child(

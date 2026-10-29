@@ -41,6 +41,7 @@ pub struct SideChat {
     input: Entity<TextareaState>,
     attachments: Vec<del_agent::Attachment>,
     models: Vec<del_agent::ModelInfo>,
+    model_picker: Entity<crate::model_picker::ModelPicker>,
     models_loading: bool,
     model_generation: u64,
     save_pending: bool,
@@ -106,6 +107,9 @@ impl SideChat {
             async {}
         })
         .detach();
+        let owner = cx.entity().downgrade();
+        let model_picker =
+            cx.new(|cx| crate::model_picker::ModelPicker::for_side_chat(owner, window, cx));
         let mut view = Self {
             context,
             storage_id,
@@ -116,6 +120,7 @@ impl SideChat {
             input,
             attachments: vec![],
             models: vec![],
+            model_picker,
             models_loading: false,
             model_generation: 0,
             save_pending: false,
@@ -558,181 +563,191 @@ impl SideChat {
             return div().into_any_element();
         };
         let record = Settings { config, account_id };
-        let locked = self.storage_error
-            || self.loading
-            || self.chat.as_ref().is_some_and(|chat| {
-                chat.read(cx).is_loading()
-                    || chat.read(cx).is_running()
-                    || !chat.read(cx).queue.items.is_empty()
-            });
+        let locked = self.settings_locked(cx);
         let view = cx.entity();
         let accounts = self.context.accounts.clone();
         let current = record.clone();
-        let label = record
-            .account_id
-            .as_ref()
-            .and_then(|id| accounts.iter().find(|a| &a.id == id))
-            .map(|a| a.display())
-            .unwrap_or_else(|| crate::providers::display_name(record.provider).to_owned());
-        let account = Button::new("side-account")
-            .ghost()
-            .small()
-            .compact()
-            .disabled(locked)
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(crate::composer_ui::provider_logo(record.provider))
-                    .child(label),
-            )
-            .dropdown_menu(move |menu, window, cx| {
-                crate::providers::VISIBLE
-                    .iter()
-                    .fold(menu, |menu, &provider| {
-                        let view = view.clone();
-                        let accounts = accounts.clone();
-                        let current = current.clone();
-                        menu.submenu(
-                            crate::providers::display_name(provider),
-                            window,
-                            cx,
-                            move |menu, _, _| {
-                                let choices = std::iter::once((None, "Default account".to_owned()))
-                                    .chain(
-                                        accounts
-                                            .iter()
-                                            .filter(|a| a.provider == provider && !a.requires_login)
-                                            .map(|a| (Some(a.id.clone()), a.display())),
-                                    );
-                                choices.fold(menu, |menu, (id, label)| {
-                                    let view = view.clone();
-                                    let mut config = current.config();
-                                    if config.provider != provider {
-                                        config.model = None;
-                                        config.reasoning_effort = None;
-                                        config.service_tier = None;
-                                    }
-                                    config.provider = provider;
-                                    menu.item(
-                                        PopupMenuItem::new(label)
-                                            .checked(
-                                                current.provider == provider
-                                                    && current.account_id == id,
-                                            )
-                                            .on_click(move |_, _, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.change_settings(
-                                                        config.clone(),
-                                                        id.clone(),
-                                                        cx,
-                                                    )
-                                                })
-                                            }),
-                                    )
-                                })
-                            },
-                        )
-                    })
-            });
-        let model_label = record
-            .model
-            .as_ref()
-            .and_then(|id| self.models.iter().find(|m| &m.id == id))
-            .map(|m| m.name.clone())
-            .or(record.model.clone())
-            .unwrap_or_else(|| "Default".into());
-        let view = cx.entity();
-        let models = self.models.clone();
-        let current = record.clone();
-        let model = Button::new("side-model")
-            .ghost()
-            .small()
-            .compact()
-            .disabled(locked)
-            .label(if self.models_loading {
-                "Loading models…".into()
-            } else {
-                model_label
-            })
-            .dropdown_menu(move |menu, _, _| {
-                let choices = std::iter::once((None, "Default".to_owned()))
-                    .chain(models.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
-                let menu = choices.fold(menu, |menu, (id, label)| {
+        let account = crate::composer_ui::provider_button(
+            "side-account",
+            record.provider,
+            !self.loading,
+            locked,
+        )
+        .dropdown_menu(move |menu, window, cx| {
+            crate::providers::VISIBLE
+                .iter()
+                .fold(menu, |menu, &provider| {
                     let view = view.clone();
-                    let account = current.account_id.clone();
-                    let mut config = current.config();
-                    config.model = id.clone();
-                    config.reasoning_effort = None;
-                    config.service_tier = None;
-                    menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(current.model == id)
-                            .on_click(move |_, _, cx| {
-                                view.update(cx, |this, cx| {
-                                    this.change_settings(config.clone(), account.clone(), cx)
-                                })
-                            }),
+                    let accounts = accounts.clone();
+                    let current = current.clone();
+                    let default_view = view.clone();
+                    let default_current = current.clone();
+                    let default_account = accounts
+                        .iter()
+                        .find(|a| a.provider == provider && a.is_default && !a.requires_login)
+                        .map(|a| a.id.clone());
+                    let (logo, color) = crate::composer_ui::provider_brand(provider);
+                    menu.submenu_with_icon(
+                        Some(crate::icons::path(logo).text_color(crate::appearance::rgb(color))),
+                        crate::providers::display_name(provider),
+                        window,
+                        cx,
+                        move |menu, _, _| {
+                            let choices = std::iter::once((
+                                None,
+                                if provider == Provider::OpenCode {
+                                    "System"
+                                } else {
+                                    "Account 1"
+                                }
+                                .to_owned(),
+                            ))
+                            .chain(
+                                accounts
+                                    .iter()
+                                    .filter(|a| a.provider == provider && !a.requires_login)
+                                    .map(|a| (Some(a.id.clone()), a.display())),
+                            );
+                            choices.fold(menu, |menu, (id, label)| {
+                                let view = view.clone();
+                                let mut config = current.config();
+                                if config.provider != provider {
+                                    config.model = None;
+                                    config.reasoning_effort = None;
+                                    config.service_tier = None;
+                                }
+                                config.provider = provider;
+                                menu.item(
+                                    PopupMenuItem::element({
+                                        let selected = current.provider == provider
+                                            && current.account_id == id;
+                                        move |_, _| {
+                                            crate::composer_ui::account_menu_label(
+                                                label.clone(),
+                                                None,
+                                                selected,
+                                            )
+                                        }
+                                    })
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.change_settings(config.clone(), id.clone(), cx)
+                                            })
+                                        },
+                                    ),
+                                )
+                            })
+                        },
                     )
-                });
-                let view = view.clone();
-                menu.separator().item(
-                    PopupMenuItem::new("Refresh models")
-                        .on_click(move |_, _, cx| view.update(cx, |this, cx| this.load_models(cx))),
-                )
-            });
-        let info = self
-            .models
-            .iter()
-            .find(|m| record.model.as_ref().map_or(m.is_default, |id| &m.id == id));
-        let mut controls = h_flex()
+                    .submenu_on_click(move |_, _, cx| {
+                        let mut config = default_current.config();
+                        if config.provider != provider {
+                            config.model = None;
+                            config.reasoning_effort = None;
+                            config.service_tier = None;
+                        }
+                        config.provider = provider;
+                        default_view.update(cx, |this, cx| {
+                            this.change_settings(config, default_account.clone(), cx)
+                        });
+                    })
+                })
+        });
+        h_flex()
             .items_center()
             .flex_wrap()
             .min_w_0()
             .gap_0p5()
             .child(account)
-            .child(model);
-        if let Some(info) = info.filter(|m| !m.efforts.is_empty()) {
-            let view = cx.entity();
-            let efforts = info.efforts.clone();
-            let current = record.clone();
-            controls = controls.child(
-                Button::new("side-effort")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .disabled(locked)
-                    .label(
-                        record
-                            .reasoning_effort
-                            .clone()
-                            .or(info.default_effort.clone())
-                            .unwrap_or_else(|| "Effort".into()),
-                    )
-                    .dropdown_menu(move |menu, _, _| {
-                        efforts.iter().fold(menu, |menu, effort| {
-                            let view = view.clone();
-                            let mut config = current.config();
-                            let account = current.account_id.clone();
-                            config.reasoning_effort = Some(effort.id.clone());
-                            menu.item(
-                                PopupMenuItem::new(effort.name.clone())
-                                    .checked(current.reasoning_effort.as_ref() == Some(&effort.id))
-                                    .on_click(move |_, _, cx| {
-                                        view.update(cx, |this, cx| {
-                                            this.change_settings(
-                                                config.clone(),
-                                                account.clone(),
-                                                cx,
-                                            )
-                                        })
-                                    }),
-                            )
-                        })
-                    }),
-            );
+            .child(self.model_picker.clone())
+            .into_any_element()
+    }
+
+    fn settings_locked(&self, cx: &App) -> bool {
+        self.storage_error
+            || self.loading
+            || self.chat.as_ref().is_some_and(|chat| {
+                let chat = chat.read(cx);
+                chat.is_loading() || chat.is_running() || !chat.queue.items.is_empty()
+            })
+    }
+
+    pub(crate) fn model_selection(&self, cx: &App) -> crate::model_picker::ModelSelection {
+        let config = self.configuration().map(|(config, _)| config);
+        crate::model_picker::ModelSelection {
+            above: true,
+            provider: config.as_ref().map_or(Provider::Codex, |c| c.provider),
+            model: config.as_ref().and_then(|c| c.model.clone()),
+            effort: config.as_ref().and_then(|c| c.reasoning_effort.clone()),
+            tier: config.as_ref().and_then(|c| c.service_tier.clone()),
+            locked: config.is_none() || self.settings_locked(cx),
+            catalog: crate::state::ModelCatalog {
+                models: self.models.clone(),
+                loading: self.models_loading,
+                loaded: !self.models.is_empty(),
+                error: None,
+            },
         }
-        controls.into_any_element()
+    }
+
+    pub(crate) fn change_model(
+        &mut self,
+        change: crate::model_picker::ModelChange,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        use crate::model_picker::ModelChange;
+        if let ModelChange::Refresh(refresh) = change {
+            if !self.models_loading && (refresh || self.models.is_empty()) {
+                self.load_models(cx);
+                cx.notify();
+            }
+            return;
+        }
+        if self.settings_locked(cx) {
+            return;
+        }
+        let Some((mut config, account)) = self.configuration() else {
+            return;
+        };
+        let info = self
+            .models
+            .iter()
+            .find(|m| config.model.as_ref().map_or(m.is_default, |id| &m.id == id));
+        match change {
+            ModelChange::Model(model) => {
+                config.model = model;
+                config.reasoning_effort = None;
+                config.service_tier = None;
+            }
+            ModelChange::Effort(effort) => {
+                if let Some(value) = &effort {
+                    let Some(info) = info.filter(|info| info.supports_effort(value)) else {
+                        return;
+                    };
+                    if config.model.is_none() {
+                        config.model = Some(info.id.clone());
+                    }
+                }
+                config.reasoning_effort = effort;
+            }
+            ModelChange::Fast(enabled) => {
+                config.service_tier = if enabled {
+                    let Some(tier) = info.and_then(|m| m.fast_tier.clone()) else {
+                        return;
+                    };
+                    Some(tier)
+                } else {
+                    None
+                };
+            }
+            ModelChange::Reset => {
+                config.reasoning_effort = None;
+                config.service_tier = None;
+            }
+            ModelChange::Refresh(_) => unreachable!(),
+        }
+        self.change_settings(config, account, cx);
     }
 }
 
@@ -1021,6 +1036,49 @@ mod tests {
             1
         );
         assert_eq!(manager.list_sessions().len(), 1);
+        // The shared picker changes this fork and preserves its transcript, never its parent.
+        cx.update(|_, cx| {
+            side.update(cx, |side, cx| {
+                side.change_model(
+                    crate::model_picker::ModelChange::Model(Some("side-only-model".into())),
+                    cx,
+                );
+            })
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if side.read_with(cx, |side, cx| !side.settings_locked(cx)) {
+                break;
+            }
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+        }
+        side.read_with(cx, |side, cx| {
+            assert!(side.error.is_none(), "{:?}", side.error);
+            assert_eq!(
+                side.model_selection(cx).model.as_deref(),
+                Some("side-only-model")
+            );
+            assert_eq!(
+                side.saved
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .config
+                    .model
+                    .as_deref(),
+                Some("side-only-model")
+            );
+            assert!(side.latest_reply(cx).is_some());
+        });
+        assert!(
+            manager
+                .list_sessions()
+                .iter()
+                .find(|s| s.id == parent.id)
+                .unwrap()
+                .model
+                .is_none()
+        );
         let id = side.read_with(cx, |s, _| s.session.clone().unwrap());
         // Exercise the same release path used by either tab surface.
         cx.update(|_, cx| side.update(cx, |side, cx| side.release(cx)));

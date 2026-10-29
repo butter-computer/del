@@ -33,6 +33,7 @@ mod goal_ui;
 mod haptics;
 mod hover_motion;
 mod icons;
+mod keybinds;
 #[allow(dead_code)]
 mod mcp_bridge;
 mod mode_ui;

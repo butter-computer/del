@@ -21,7 +21,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::rc::Rc;
 
-fn account_menu_label(name: String, remaining: Option<f64>, selected: bool) -> impl IntoElement {
+pub(crate) fn account_menu_label(
+    name: String,
+    remaining: Option<f64>,
+    selected: bool,
+) -> impl IntoElement {
     let scale = 18. / 26.;
     h_flex()
         .w_full()
@@ -270,6 +274,21 @@ fn chip(id: &'static str) -> Button {
     Button::new(id).ghost().small().compact().rounded_full()
 }
 
+pub(crate) fn provider_button(
+    id: &'static str,
+    provider: Provider,
+    provider_ready: bool,
+    locked: bool,
+) -> Button {
+    chip(id).h(zpx(24.)).px(zpx(8.)).disabled(locked).child(
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
+            .child(providers::display_name(provider)),
+    )
+}
+
 impl RenderOnce for ComposerCard {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let can_send = self.dictation == crate::dictation::Phase::Idle
@@ -305,17 +324,7 @@ impl RenderOnce for ComposerCard {
             on_provider,
         } = self;
 
-        let agent = chip("agent")
-            .h(zpx(24.))
-            .px(zpx(8.))
-            .disabled(starting)
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
-                    .child(providers::display_name(provider)),
-            );
+        let agent = provider_button("agent", provider, provider_ready, starting);
         let agent_el = {
             let current = provider;
             agent.dropdown_menu(move |menu, window, cx| {

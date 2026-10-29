@@ -470,6 +470,16 @@ This records the final decisions, including corrections to earlier experiments.
   session even while an inner tool is active.
 - Changes (Control-Shift-G), Terminal (Control-backtick), Files (Command-P), and
   Side chat (Option-Command-S) open in the same active zone. Show these shortcuts
-  in the new-tab launcher with neutral icons and subtle surfaces.
+  in the new-tab launcher with neutral icons and subtle surfaces. Stack the four
+  options vertically in a centered column, capped at 320 points wide, below the
+  URL bar in both zones; allow scrolling in short panes. Keep cards and the URL
+  field visibly lighter than the page background.
 - Empty left-sidebar space must not move the window. Its divider owns only
   sidebar resizing and stops mouse-down propagation.
+
+- Side chat uses the shared main-chat provider chip and searchable model/effort
+  picker, including Fast mode and reset. Keep account names in the provider
+  submenu; all changes stay scoped to the side-chat fork.
+- Settings includes a read-only Keybinds category with grouped current shortcuts
+  and their scopes. Start directly with the shortcut groups, without explanatory
+  intro text. Do not imply remapping is available until it is implemented.
