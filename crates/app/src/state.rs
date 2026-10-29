@@ -141,6 +141,7 @@ pub struct AppState {
     pub browser_tools_ready: bool,
     unread_motion: HashMap<SessionId, (f32, std::time::Instant)>,
     chat_title_loading: std::collections::HashSet<SessionId>,
+    side_chat_working: HashMap<String, u64>,
     pub terminal_working: std::collections::HashSet<SessionId>,
     pub terminal_title_loading: std::collections::HashSet<SessionId>,
     pub closed_terminals: Vec<SessionId>,
@@ -406,6 +407,7 @@ impl AppState {
             next_draft: 1,
             draft_modes: HashMap::new(),
             terminal_rows: Vec::new(),
+            side_chat_working: Default::default(),
             terminal_working: Default::default(),
             terminal_title_loading: Default::default(),
             chat_title_loading: Default::default(),
@@ -743,7 +745,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn side_chat_context(&self) -> crate::side_chat::Context {
+    pub fn side_chat_context(&self, state: gpui::WeakEntity<Self>) -> crate::side_chat::Context {
         let source = if let Selection::Session(id) = &self.selection {
             del_agent::ForkSource::Session(id.clone())
         } else {
@@ -761,6 +763,14 @@ impl AppState {
             }
         };
         crate::side_chat::Context {
+            activity_owner: Some((
+                state,
+                self.uid_of(&match &self.selection {
+                    Selection::Draft(id) => Tab::Draft(*id),
+                    Selection::Session(id) => Tab::Session(id.clone()),
+                    Selection::Terminal(id) => Tab::Terminal(id.clone()),
+                }),
+            )),
             backend: self.backend(),
             source,
             accounts: providers::VISIBLE
@@ -869,6 +879,51 @@ impl AppState {
     }
 
     pub fn session_working(&self, id: &SessionId) -> bool {
+        self.main_session_working(id)
+            || [Tab::Session(id.clone()), Tab::Terminal(id.clone())]
+                .iter()
+                .filter_map(|tab| self.uids.get(tab))
+                .any(|uid| self.side_chat_working.values().any(|owner| owner == uid))
+    }
+
+    pub fn tab_working(&self, tab: &Tab) -> bool {
+        self.side_chat_working
+            .values()
+            .any(|owner| self.uids.get(tab) == Some(owner))
+            || match tab {
+                Tab::Session(id) | Tab::Terminal(id) => self.main_session_working(id),
+                Tab::Draft(_) => false,
+            }
+    }
+
+    pub fn side_chat_activity(
+        &mut self,
+        id: &str,
+        owner: u64,
+        working: bool,
+        submitted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if working {
+            self.side_chat_working.insert(id.to_owned(), owner) != Some(owner)
+        } else {
+            self.side_chat_working.remove(id).is_some()
+        };
+        if submitted
+            && let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| self.uids.get(*tab) == Some(&owner))
+                .cloned()
+        {
+            self.keep_tab(&tab, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn main_session_working(&self, id: &SessionId) -> bool {
         self.records
             .iter()
             .any(|row| &row.id == id && row.status == SessionStatus::Running)
@@ -3053,6 +3108,7 @@ pub(crate) mod tests {
             next_draft: 1,
             draft_modes: HashMap::new(),
             terminal_rows: vec![],
+            side_chat_working: Default::default(),
             terminal_working: Default::default(),
             terminal_title_loading: Default::default(),
             chat_title_loading: Default::default(),
@@ -3089,6 +3145,38 @@ pub(crate) mod tests {
             starting: Default::default(),
             switching_accounts: Default::default(),
         })
+    }
+
+    #[gpui::test]
+    fn side_chat_activity_keeps_owner_and_aggregates_independent_turns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let id = del_agent::SessionId::new("side-owner");
+            let tab = Tab::Session(id.clone());
+            s.select(id.clone(), cx);
+            let uid = s.uid_of(&tab);
+            assert_eq!(s.preview_tab, Some(tab.clone()));
+            s.side_chat_activity("one", uid, true, true, cx);
+            assert_eq!(s.preview_tab, None);
+            assert!(s.session_working(&id));
+            assert!(s.tab_working(&tab));
+            assert!(!s.main_session_working(&id));
+            s.side_chat_activity("two", uid, true, true, cx);
+            s.side_chat_activity("one", uid, false, false, cx);
+            assert!(s.session_working(&id));
+            s.select(del_agent::SessionId::new("other"), cx);
+            assert!(s.tabs.contains(&tab));
+            s.side_chat_activity("two", uid, false, false, cx);
+            assert!(!s.session_working(&id));
+            assert!(!s.tab_working(&tab));
+            // A side conversation can also work before the parent has a session ID.
+            let draft = Tab::Draft(0);
+            s.side_chat_activity("draft-side", s.uid_of(&draft), true, true, cx);
+            assert!(s.tab_working(&draft));
+            assert!(!s.tab_working(&tab));
+        });
     }
 
     #[gpui::test]

@@ -700,6 +700,7 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
+            .bg(color(crate::colors::DEFAULT_BG))
             .flex()
             .flex_col()
             .min_h_0()

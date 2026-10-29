@@ -921,6 +921,10 @@ impl WorkspaceTabs {
                         let tab = &self.tabs[original];
                         let id = tab.id;
                         let active = self.active == Some(id);
+                        let working = tab
+                            .panel
+                            .as_ref()
+                            .is_some_and(|panel| panel.read(cx).is_working(cx));
                         let group: SharedString = format!("workspace-tab-{id}").into();
                         let label = tab
                             .browser
@@ -992,6 +996,7 @@ impl WorkspaceTabs {
                             }))
                             .child(crate::icons::icon(tab.kind.icon()).with_size(zpx(15.)))
                             .child(div().flex_1().min_w_0().truncate().child(label))
+                            .when(working, |tab| tab.child(crate::icons::working_spinner()))
                             .when(hints && index < 8, |t| {
                                 t.child(div().text_size(zpx(10.)).child(format!("⌘{}", index + 2)))
                             })

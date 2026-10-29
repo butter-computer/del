@@ -51,7 +51,7 @@ const MIN_SPLIT_HEIGHT: f32 = 72.0;
 #[derive(Clone)]
 struct FileSplitDrag {
     start_y: Rc<Cell<f32>>,
-    start_height: f32,
+    start_height: Rc<Cell<f32>>,
 }
 
 struct FileSplitPreview;
@@ -420,6 +420,7 @@ pub struct RightPanel {
     tree_request: u64,
     directory_entries: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
     split_origin: Rc<Cell<f32>>,
+    split_start_height: Rc<Cell<f32>>,
     rows: Vec<(PathBuf, usize, bool)>,
     markdown_preview: bool,
     markdown_scroll: ScrollHandle,
@@ -790,6 +791,12 @@ impl RightPanel {
         if let Some(side) = &self.side_chat {
             side.update(cx, |side, cx| side.focus(window, cx));
         }
+    }
+
+    pub(crate) fn is_working(&self, cx: &App) -> bool {
+        self.side_chat
+            .as_ref()
+            .is_some_and(|side| side.read(cx).is_working(cx))
     }
 
     fn watch_side_chat(
@@ -1559,6 +1566,7 @@ impl RightPanel {
             tree_request: 0,
             directory_entries: HashMap::new(),
             split_origin: Default::default(),
+            split_start_height: Default::default(),
             rows: Vec::new(),
             markdown_preview: false,
             markdown_scroll: ScrollHandle::new(),
@@ -1988,6 +1996,14 @@ impl RightPanel {
                 None => base.into(),
             }
         };
+        let working = if let Some(id) = &hosted {
+            self.hosted
+                .iter()
+                .find(|tab| &tab.id == id)
+                .is_some_and(|tab| tab.panel.read(cx).is_working(cx))
+        } else {
+            pane == Pane::SideChat && self.is_working(cx)
+        };
         let label: SharedString = name.into();
         let close_id = format!("close-{id}");
         let close_selector = instance
@@ -2082,6 +2098,7 @@ impl RightPanel {
                     .child(crate::icons::icon(pane.icon()).with_size(zpx(15.))),
             )
             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+            .when(working, |tab| tab.child(crate::icons::working_spinner()))
             .child(
                 div()
                     .id(SharedString::from(close_id))
@@ -2135,10 +2152,13 @@ impl RightPanel {
         };
         let muted = rgba(0xffffff8c);
 
+        let empty_default_split =
+            selected.is_none() && self.file_tree_height == DEFAULT_TREE_HEIGHT;
+
         let tree = v_flex()
             .id("file-tree")
             .flex_none()
-            .h(zpx(self.file_tree_height))
+            .h_full()
             .overflow_y_scroll()
             .children(rows.into_iter().map(|(path, depth, is_dir)| {
                 let name = path
@@ -2418,14 +2438,23 @@ impl RightPanel {
             })
             .child(v_flex().flex_1().min_h_0().overflow_hidden().child(viewer));
 
+        let measured_tree_height = Rc::new(Cell::new(self.file_tree_height));
         let split_drag = FileSplitDrag {
             start_y: self.split_origin.clone(),
-            start_height: self.file_tree_height,
+            start_height: self.split_start_height.clone(),
         };
 
         let start_y = split_drag.start_y.clone();
+        let start_height = split_drag.start_height.clone();
+        let measured_start = measured_tree_height.clone();
         v_flex()
+            .debug_selector(|| "files-layout".into())
             .size_full()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(tree) = bounds.first() {
+                    measured_tree_height.set(del_core::zoom::unscaled(tree.size.height.as_f32()));
+                }
+            })
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<FileSplitDrag>, _, cx| {
                     let drag = event.drag(cx);
@@ -2433,7 +2462,7 @@ impl RightPanel {
                         event.event.position.y.as_f32() - drag.start_y.get(),
                     );
                     this.file_tree_height = resized_tree_height(
-                        drag.start_height,
+                        drag.start_height.get(),
                         delta,
                         del_core::zoom::unscaled(event.bounds.size.height.as_f32()),
                     );
@@ -2445,12 +2474,15 @@ impl RightPanel {
                     .relative()
                     .flex_none()
                     .h(zpx(self.file_tree_height))
+                    .when(empty_default_split, |tree| tree.h(relative(0.8)))
+                    .max_h(relative(0.85))
                     .overflow_hidden()
                     .child(tree),
             )
             .child(
                 div()
                     .id("file-preview-resize")
+                    .debug_selector(|| "file-preview-resize".into())
                     .group("file-preview-resize")
                     .h(zpx(8.0))
                     .w_full()
@@ -2460,7 +2492,8 @@ impl RightPanel {
                     .items_center()
                     .cursor_row_resize()
                     .on_mouse_down(MouseButton::Left, move |event, _, _| {
-                        start_y.set(event.position.y.as_f32())
+                        start_y.set(event.position.y.as_f32());
+                        start_height.set(measured_start.get());
                     })
                     .on_drag(split_drag, |_, _, _, cx| cx.new(|_| FileSplitPreview))
                     .child(
@@ -3700,6 +3733,7 @@ mod tests {
             }))
             .unwrap();
         let context = crate::side_chat::Context {
+            activity_owner: None,
             backend: crate::chat::Backend {
                 runtime: runtime.handle().clone(),
                 manager,
@@ -4509,31 +4543,40 @@ mod tests {
         let (panel, cx) =
             cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
         cx.run_until_parked();
-        // Header + tree 220px + middle of the 8px handle.
-        let handle_y = crate::icons::TOOL_ROW_HEIGHT + 220.0 + 4.0;
+        let layout = cx.debug_bounds("files-layout").unwrap();
+        let handle = cx.debug_bounds("file-preview-resize").unwrap();
+        let initial_height = (handle.top() - layout.top()).as_f32();
+        assert!((initial_height / layout.size.height.as_f32() - 0.8).abs() < 0.01);
+        let handle_y = handle.center().y.as_f32();
         cx.simulate_mouse_down(
             point(px(100.0), px(handle_y)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            point(px(100.0), px(handle_y + 20.0)),
+            point(px(100.0), px(handle_y - 20.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.run_until_parked();
         cx.simulate_mouse_move(
-            point(px(100.0), px(handle_y + 40.0)),
+            point(px(100.0), px(handle_y - 40.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_up(
-            point(px(100.0), px(handle_y + 40.0)),
+            point(px(100.0), px(handle_y - 40.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.run_until_parked();
-        panel.read_with(cx, |panel, _| assert_eq!(panel.file_tree_height, 260.0));
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                (panel.file_tree_height - (initial_height - 40.0)).abs() < 1.0,
+                "height={} initial={initial_height}",
+                panel.file_tree_height
+            )
+        });
     }
 
     #[::gpui::test]

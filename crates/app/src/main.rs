@@ -1222,7 +1222,10 @@ impl AppShell {
         for uid in stale {
             self.evict_right(uid, cx);
         }
-        let context = self.state.read(cx).side_chat_context();
+        let context = self
+            .state
+            .read(cx)
+            .side_chat_context(self.state.downgrade());
         self.right.update(cx, |panel, cx| {
             panel.set_side_context(context);
             panel.set_root(root, window, cx);
@@ -1305,7 +1308,10 @@ impl AppShell {
         }
         if let Some(workspace) = self.workspace(cx) {
             let visible = !self.search_open && self.state.read(cx).panel == Panel::Chat;
-            let context = self.state.read(cx).side_chat_context();
+            let context = self
+                .state
+                .read(cx)
+                .side_chat_context(self.state.downgrade());
             let storage_key = match &self.state.read(cx).selection {
                 Selection::Session(id) => format!("chat:{}", id.as_str()),
                 Selection::Terminal(id) => format!("terminal:{}", id.as_str()),
@@ -1680,7 +1686,8 @@ impl AppShell {
             .h(zpx(self.metrics.topbar_height))
             .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
-            .border_b_0()
+            .border_b(px(0.5))
+            .border_color(appearance::separator())
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
             // opaque than the bar.
@@ -1860,6 +1867,7 @@ impl AppShell {
                                                     (self.state.clone(), self.state.clone());
                                                 let (select_tab, close_tab) =
                                                     (tab_key.clone(), tab_key);
+                                                let working = self.state.read(cx).tab_working(&select_tab);
                                                 let indicator_id = match &select_tab { Tab::Session(id) | Tab::Terminal(id) => Some(id.clone()), _ => None };
                                                 let drag_shell = cx.entity();
                                                 let drop_shell = drag_shell.clone();
@@ -1916,7 +1924,7 @@ impl AppShell {
                                                                 "close-{name}"
                                                             )))
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
-                                                            .w(if shortcut_hint || indicator_id.as_ref().is_some_and(|id| self.state.read(cx).session_working(id)) { crate::icons::button_size() } else { zpx(0.) })
+                                                            .w(if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
                                                             .overflow_hidden()
                                                             .group_hover(group.clone(), |slot| slot.w(zpx(crate::icons::TAB_CLOSE_SIZE)))
                                                             .flex()
@@ -1939,7 +1947,7 @@ impl AppShell {
                                                                     group.clone(),
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
-                                                                    indicator_id.as_ref().is_some_and(|id| self.state.read(cx).session_working(id)),
+                                                                    working,
                                                                 ),
                                                             ),
                                                     );
@@ -2099,6 +2107,12 @@ impl AppShell {
             };
             state.tab_info(&tab)
         };
+        let working = match &self.state.read(cx).selection {
+            Selection::Session(id) | Selection::Terminal(id) => {
+                self.state.read(cx).main_session_working(id)
+            }
+            Selection::Draft(_) => false,
+        };
         let tools = workspace
             .as_ref()
             .map(|w| w.update(cx, |w, cx| w.render_strip(false, cx)));
@@ -2136,7 +2150,8 @@ impl AppShell {
                         this.focus_composer(window, cx);
                     }))
                     .child(mode_ui::tab_mark(provider))
-                    .child(div().flex_1().min_w_0().truncate().child(title)),
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .when(working, |tab| tab.child(crate::icons::working_spinner())),
             )
             .children(tools)
             .child(
@@ -2778,7 +2793,18 @@ impl Render for AppShell {
                                     }
                                 }
                             })
-                            .child(self.render_page(window, cx)),
+                            .child(self.render_page(window, cx))
+                            .when(right_visible, |page| {
+                                page.child(
+                                    div()
+                                        .absolute()
+                                        .right(inset / 2. - px(0.25))
+                                        .top(zpx(6.))
+                                        .w(px(0.5))
+                                        .h(zpx(crate::icons::TOOL_ROW_HEIGHT - 12.))
+                                        .bg(appearance::separator()),
+                                )
+                            }),
                     )
                     .when(right_visible, |row| {
                         let opening = self.right_open;

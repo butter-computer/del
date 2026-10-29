@@ -484,8 +484,25 @@ This records the final decisions, including corrections to earlier experiments.
   and their scopes. Start directly with the shortcut groups, without explanatory
   intro text. Do not imply remapping is available until it is implemented.
 
-- Keep the top-bar bottom border and both sidebar edge borders invisible; preserve
-  the sidebar resize hit targets. Search result rows use the same provider and
-  terminal marks as sidebar rows instead of visible Chat/Terminal type labels.
+- Keep the left-sidebar edge border invisible. Use matching faint 0.5-point
+  hairlines below the top bar and beside the right sidebar's tab row. Inset the
+  short vertical segment in the middle of the gutter, 6 points from each end
+  of the tab row so it floats;
+  do not draw a divider alongside the content. Keep line thickness independent
+  of app zoom; preserve the sidebar resize hit targets. Search result rows use
+  the same provider and terminal marks as sidebar rows instead of visible
+  Chat/Terminal type labels.
 - Top-level session tabs, inner tabs in both zones, and their drag previews share
   the same zoom-scaled height. Keep close targets and labels inside that height.
+
+- Side-chat tabs in either zone show a working spinner for their own live turn.
+  The parent session's top tab and left-sidebar row aggregate all its side chats
+  and the main conversation. Finishing, failing, or closing one side chat must
+  not clear another chat's working indicator. Keep the original inner chat tab's
+  indicator scoped to the main conversation. Sending from a side chat keeps its
+  parent top-level preview tab open, including before a draft becomes a session.
+- The untouched Files split gives an empty preview only the bottom fifth of the
+  pane. Preserve manually resized heights; clamp the tree in shorter windows.
+  Anchor resize drags to the measured tree height at mouse-down.
+- Terminals always paint their default black background, including in light
+  appearance. Preserve explicit terminal colors and inverse-video rendering.

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct Context {
+    pub activity_owner: Option<(WeakEntity<crate::state::AppState>, u64)>,
     pub backend: Backend,
     pub source: ForkSource,
     pub accounts: Vec<crate::accounts::Account>,
@@ -55,6 +56,23 @@ impl EventEmitter<SendToMain> for SideChat {}
 impl EventEmitter<crate::chat::OpenLink> for SideChat {}
 
 impl SideChat {
+    pub fn is_working(&self, cx: &App) -> bool {
+        !self.closed
+            && self
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.read(cx).is_running())
+    }
+
+    fn report_activity(&self, submitted: bool, cx: &mut App) {
+        if let Some((state, owner)) = &self.context.activity_owner {
+            let working = self.is_working(cx);
+            let _ = state.update(cx, |state, cx| {
+                state.side_chat_activity(&self.storage_id, *owner, working, submitted, cx)
+            });
+        }
+    }
+
     pub fn new(context: Context, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
         Self::restore(context, uuid::Uuid::new_v4().to_string(), window, cx)
     }
@@ -100,6 +118,11 @@ impl SideChat {
                 this.submit(window, cx);
             }
             this.save_soon(cx);
+        })
+        .detach();
+        cx.on_release(|this, cx| {
+            this.closed = true;
+            this.report_activity(false, cx);
         })
         .detach();
         cx.on_app_quit(|this, cx| {
@@ -273,6 +296,7 @@ impl SideChat {
                             if let Some(error) = errors.last() {
                                 this.error = Some(error.clone());
                             }
+                            this.report_activity(false, cx);
                             this.save_soon(cx);
                             cx.notify();
                         })
@@ -432,6 +456,7 @@ impl SideChat {
         chat.update(cx, |chat, cx| {
             chat.submit_input(input, false, cx);
         });
+        self.report_activity(true, cx);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.save(cx);
@@ -522,6 +547,7 @@ impl SideChat {
     pub fn release(&mut self, cx: &mut gpui::Context<Self>) {
         self.save(cx);
         self.closed = true;
+        self.report_activity(false, cx);
         self.chat = None;
         self.close_backend();
     }
@@ -971,7 +997,12 @@ mod tests {
             permission_mode: del_agent::PermissionMode::Plan,
         };
         let parent = runtime.block_on(manager.start_session(config)).unwrap();
+        let state = crate::state::tests::draft(cx);
+        let parent_tab = crate::state::Tab::Session(parent.id.clone());
+        state.update(cx, |state, cx| state.select(parent.id.clone(), cx));
+        let owner = state.read_with(cx, |state, _| state.uid_of(&parent_tab));
         let context = Context {
+            activity_owner: Some((state.downgrade(), owner)),
             backend: Backend {
                 runtime: runtime.handle().clone(),
                 manager: manager.clone(),
@@ -1007,6 +1038,9 @@ mod tests {
                     input.set_value("a side question", window, cx)
                 });
                 side.submit(window, cx);
+                assert!(side.is_working(cx));
+                assert!(state.read(cx).tab_working(&parent_tab));
+                assert!(state.read(cx).preview_tab.is_none());
             })
         });
         for _ in 0..200 {
@@ -1018,7 +1052,9 @@ mod tests {
             }
             runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         }
+        state.read_with(cx, |state, _| assert!(!state.tab_working(&parent_tab)));
         side.read_with(cx, |s, cx| {
+            assert!(!s.is_working(cx));
             assert!(s.latest_reply(cx).is_some());
             assert!(
                 s.chat
@@ -1080,8 +1116,18 @@ mod tests {
                 .is_none()
         );
         let id = side.read_with(cx, |s, _| s.session.clone().unwrap());
-        // Exercise the same release path used by either tab surface.
-        cx.update(|_, cx| side.update(cx, |side, cx| side.release(cx)));
+        // Closing a busy tab clears its contribution immediately.
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input.update(cx, |input, cx| {
+                    input.set_value("another side question", window, cx)
+                });
+                side.submit(window, cx);
+                assert!(state.read(cx).tab_working(&parent_tab));
+                side.release(cx);
+                assert!(!state.read(cx).tab_working(&parent_tab));
+            })
+        });
         for _ in 0..200 {
             if !manager.is_live(&id) {
                 break;
