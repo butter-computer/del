@@ -30,6 +30,28 @@ work. Code handles identity, project membership, persistence, FIFO within peer
 traffic, peer-before-user priority, delivery receipts, and UI events. No model
 output prose is parsed to guess task completion or intent.
 
+## Creating chat peers
+
+`spawn_session` is available to session-scoped chat credentials. It creates a normal
+chat, not a terminal or a special subordinate role. The caller supplies provider,
+its own working directory, and a task. Del verifies the canonical directory,
+inherits the caller’s registered project and permissions, and preserves account,
+model, effort, and tier when the provider matches. Switching provider uses that
+provider’s configured default backend/model; it never copies an incompatible model.
+A failed provider start does not dispatch work to another provider.
+
+The first task is persisted through the regular peer mailbox. The new chat receives
+a request ID and replies with `reply_to_session`; callers must not send the task
+again after spawning. The existing background dispatcher wakes unopened chat views.
+A caller waiting for several workers uses `session_work wait`; replies resume its
+work, and completion remains blocked while requests are unanswered. No four-worker
+planner or prose-based completion detector is added.
+
+Existing spawn reservations cap concurrent creation (8 per caller, 32 total by
+default). Each successful call creates a new session; creation itself is not
+idempotent, so agents must inspect sessions before retrying an unknown outcome.
+Terminal callers retain the existing terminal launch behavior.
+
 ## Recovery and visibility
 
 Persist an outbound request before acknowledging it. Idempotency keys are scoped
@@ -144,3 +166,32 @@ and the reply returned `PEER_UI_COBALT_1030`. The rebuilt UI was visually checke
 for both provider logos, centered conversation links, and expanded tool output
 aligned with the assistant text. Expanded tool groups no longer add a nested
 left indent. Tool-call headers use plain labels without leading icons.
+
+### Chat creation regression (2026-10-30)
+
+The original four-worker app test exposed that chat credentials hid `spawn_session`
+and the app host could only create terminals. The new bridge regression reproduced
+that failure before the fix. The corrected agent/MCP suite passes 102 tests (two
+opt-in tests ignored), with strict Clippy passing for both crates and their targets.
+Coverage includes four distinct chat peers, inherited account/model/permissions,
+canonical directory and symlink rejection before creation, cross-provider defaults,
+unavailable-provider failure without an orphan, saved reply routing/project identity,
+and standalone host delivery of the first request.
+
+A fresh Codex conversation in the rebuilt local app received one natural-language
+request to create four new Codex chats, delegate arithmetic, alphabetization,
+letter counting, and prime-number tasks, and report only after all four finished.
+No follow-up messages or direct worker prompts were supplied by the tester. The
+requesting agent created all four real chats through `spawn_session`; each worker
+called `reply_to_session` and then `session_work complete`. The saved mailbox
+contains exactly four requests and four delivered replies involving only the five
+test chats. All five work records are complete. The requesting agent checked the
+worker summaries and reported 391; apple, banana, kiwi, pear; 13 letters; and
+2, 3, 5, 7, 11, 13. The final result and worker unread dots were visible in Del.
+
+Replies that arrived while the requesting turn was still running were queued;
+its early wait/receive attempts were rejected by the existing safe-boundary
+rules, and it ended its turn and received all four continuations without human
+intervention. This live run verifies Codex; cross-provider creation/configuration
+is covered by deterministic tests, not a new live Claude/OpenCode/ACP run.
+The local app was left running with caffeine enabled.

@@ -169,6 +169,14 @@ This records the final decisions, including corrections to earlier experiments.
   including streamed, restored, and Side chat messages. Preserve raw saved text,
   literal code examples, and malformed directives; remap search-highlight offsets.
 - Keep search highlights, message navigation, and immediate streaming intact.
+- Keep intermediate responses visible while work is active, waiting, paused, or
+  still streaming. Only after a finished final answer may earlier activity collapse
+  under an expandable Worked row. Keep the final answer visible with the only Copy
+  footer; intermediate provider-turn completions are not final task answers.
+  Search/navigation must expand a hidden target. Never discard collapsed events.
+  Use a reversible reveal with reduced-motion support. Save elapsed time at reply
+  completion, including peer waits; restore it without counting time spent away.
+  Keep tool-summary disclosure arrows directly after their text, not at the far edge.
 - Message navigation highlights exactly one tick: the hovered tick while pointing,
   otherwise the current message. Nearby ticks may lengthen but stay gray. Emit a
   native haptic tick on entering a different marker, not on every pointer move.
@@ -490,7 +498,8 @@ This records the final decisions, including corrections to earlier experiments.
   in the new-tab launcher with neutral icons and subtle surfaces. Stack the four
   options vertically in a centered column, capped at 320 points wide, below the
   URL bar in both zones; allow scrolling in short panes. Keep cards and the URL
-  field visibly lighter than the page background.
+  field visibly lighter than the page background, without a horizontal divider
+  below the URL bar in either zone.
 - Empty left-sidebar space must not move the window. Its divider owns only
   sidebar resizing and stops mouse-down propagation.
 
@@ -606,6 +615,11 @@ Hide native sidebar content at the start of its closing animation, preserving
 the browser's last viewport instead of sampling a nearly zero-width page.
 
 ## Project peer communication
+
+- Chat agents can create actual chat peers through `spawn_session`, inheriting the
+  caller’s directory, project, permissions, and same-provider account/model. The
+  first task is a durable peer request with a reply route, not an untracked user
+  prompt. Unopened worker chats are driven by the same background peer scheduler.
 
 - Sessions in the same Del project are equal peers across providers. No dedicated
   orchestrator is required. Sibling worktrees use the configured project boundary;

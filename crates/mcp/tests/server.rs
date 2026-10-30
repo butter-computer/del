@@ -617,6 +617,12 @@ async fn manager_host_drives_real_session_manager() {
         .unwrap()
         .to_string();
     assert!(mgr.is_live(&SessionId::new(child.clone())));
+    let messages = mgr.peer_messages(&SessionId::new(child.clone()));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].state,
+        del_agent::peers::DeliveryState::Delivered
+    );
 
     let r = call(&c, "list_sessions", json!({})).await;
     assert_eq!(
@@ -862,13 +868,14 @@ async fn chat_credentials_expose_project_peers_and_own_goal() {
             "browser",
             "list_sessions",
             "get_session_summary",
+            "spawn_session",
             "send_to_session",
             "read_session",
             "reply_to_session",
             "session_work"
         ]
     );
-    assert!(is_error(
+    assert!(!is_error(
         &call(
             &chat,
             "spawn_session",

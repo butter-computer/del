@@ -966,7 +966,14 @@ impl McpHost for AppHost {
         caller: &SessionId,
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
-        self.info(caller)?;
+        if self.info(caller)?.mode == SessionMode::Chat {
+            let child = self
+                .manager
+                .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
+                .await
+                .map_err(|e| HostError::Failed(e.to_string()))?;
+            return self.info(&child.id);
+        }
         let (reply, rx) = oneshot::channel();
         self.emit(BridgeEvent::SpawnTerminal {
             caller: caller.clone(),

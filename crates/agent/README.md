@@ -94,6 +94,14 @@ Sibling worktrees inherit the configured project identity.
 by a character budget. It excludes private reasoning and discloses history
 retention. Reading does not send a provider prompt or alter the user's read state.
 
+`spawn_peer_session` creates a normal chat with the caller’s project, directory,
+and permissions. Same-provider children inherit account/model/effort/tier;
+cross-provider children use that provider’s defaults. Directory validation resolves
+symlinks and rejects a different working directory before creating a backend.
+The initial prompt is queued through `send_to_peer`, giving it the same durable
+reply routing and work lifecycle as later requests. The app’s existing background
+peer dispatcher runs these chats even when their views have never been opened.
+
 `send_to_peer` and `reply_to_peer` persist receipts before acknowledgment. Sender
 idempotency keys reject changed content, and replies route through the original
 request. `dispatch_peer` uses the same per-session send lock as user prompts and

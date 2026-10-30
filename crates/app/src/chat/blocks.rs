@@ -29,6 +29,82 @@ const MAX_DIFF_LINES: usize = 400;
 impl ChatView {
     /// One list row: the block, centered in the transcript column.
     pub(super) fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(section) = self
+            .work_sections
+            .iter()
+            .find(|r| r.range().contains(&ix) && r.end - r.start > 1)
+            .cloned()
+        {
+            let expanded = self.expanded_work.contains(&section.start);
+            let motion = self.work_reveals.get(&section.start);
+            let progress = motion.map_or(if expanded { 1. } else { 0. }, |reveal| {
+                reveal.sample(std::time::Instant::now()).0
+            });
+            let content = if ix == section.answer {
+                self.render_block_row(ix, cx)
+            } else if expanded || motion.is_some() {
+                gpui_kit::base::MotionReveal::new(
+                    ("work-row-reveal", ix),
+                    progress,
+                    div()
+                        .opacity(progress)
+                        .child(self.render_block_row(ix, cx))
+                        .into_any_element(),
+                )
+                .into_any_element()
+            } else {
+                div().h_0().into_any_element()
+            };
+            if ix != section.start {
+                return content;
+            }
+            let label = self
+                .work_elapsed
+                .get(&section.answer)
+                .map(|elapsed| super::work_history::duration_label(*elapsed))
+                .unwrap_or_else(|| "Worked".into());
+            let range = section.range();
+            let header = h_flex()
+                .id(("work-history", section.start))
+                .role(Role::Button)
+                .aria_label(if expanded {
+                    "Collapse work details"
+                } else {
+                    "Expand work details"
+                })
+                .w_full()
+                .min_h(zpx(32.))
+                .px_2()
+                .gap_2()
+                .items_center()
+                .cursor_pointer()
+                .text_size(zpx(TEXT_MD))
+                .text_color(rgba(MUTED))
+                .child(label)
+                .child(crate::icons::icon(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_work(range.clone(), cx);
+                }));
+            let header = h_flex()
+                .w_full()
+                .justify_center()
+                .px_3()
+                .pb(zpx(8.))
+                .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(header));
+            return v_flex()
+                .w_full()
+                .child(header)
+                .child(content)
+                .into_any_element();
+        }
+        self.render_block_row(ix, cx)
+    }
+
+    fn render_block_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         // Keep the streamed entity; don't copy the entire growing answer each frame.
         if !self
             .search_flash
@@ -55,7 +131,7 @@ impl ChatView {
                                 replied_at: self.response_times.get(&ix).copied(),
                                 hovered: self.response_hover.get(&ix).copied(),
                                 copied: self.copied_responses.contains_key(&ix),
-                                completed: self.model.is_completed_response(ix),
+                                completed: self.final_response(ix),
                                 reduced: cx.reduce_motion(),
                             },
                         )),
@@ -174,18 +250,12 @@ impl ChatView {
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
                         .id(("activity-live", ix))
-                        .flex_1()
                         .min_w_0()
                         .truncate()
                         .highlight_color(rgb(STRONG))
                         .into_any_element()
                 } else {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(label)
-                        .into_any_element()
+                    div().min_w_0().truncate().child(label).into_any_element()
                 })
                 .child(crate::icons::icon(if expanded {
                     IconName::ChevronDown
@@ -418,7 +488,7 @@ impl ChatView {
                     replied_at: self.response_times.get(&ix).copied(),
                     hovered: self.response_hover.get(&ix).copied(),
                     copied: self.copied_responses.contains_key(&ix),
-                    completed: self.model.is_completed_response(ix),
+                    completed: self.final_response(ix),
                     reduced: cx.reduce_motion(),
                 },
             )
@@ -531,7 +601,7 @@ impl ChatView {
                     .text_color(color)
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(div().min_w_0().truncate().child(label))
                     .child(
                         crate::icons::icon(if tool.expanded {
                             IconName::ChevronDown

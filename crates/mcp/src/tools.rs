@@ -91,11 +91,11 @@ pub fn tool_list() -> Value {
         {
             "name": "spawn_session",
             "title": "Spawn a sibling session",
-            "description": "Start a new agent session in del and give it a first prompt. Returns its session id. You may later message it with send_to_session. Limited in number per session.",
+            "description": "Create a new agent in Del. Chat callers create a chat in their own working directory and project, with inherited permissions; same-provider chats inherit the account and model too. Its first prompt is a tracked peer request: the new chat replies through reply_to_session. Returns the actual session id immediately, not the answer. Use session_work wait when waiting for replies, and complete only after all requested work is finished. Terminal callers create a terminal. Each call creates a new session; do not blindly retry an unknown outcome. Limited in number per session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "provider": {"type": "string", "enum": ["codex", "claude", "opencode"]},
+                    "provider": {"type": "string", "enum": ["codex", "claude", "opencode", "acp"]},
                     "cwd": {"type": "string", "description": "Absolute path of an existing directory to work in."},
                     "prompt": {"type": "string", "maxLength": MAX_PROMPT, "description": "First instruction for the new agent."}
                 },
@@ -269,6 +269,7 @@ pub fn is_peer_tool(name: &str) -> bool {
     matches!(
         name,
         "list_sessions"
+            | "spawn_session"
             | "get_session_summary"
             | "read_session"
             | "send_to_session"

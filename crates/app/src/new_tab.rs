@@ -13,8 +13,6 @@ pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
         .flex_none()
         .px_3()
         .gap_3()
-        .border_b_1()
-        .border_color(crate::appearance::separator())
         .child(
             h_flex()
                 .gap_3()

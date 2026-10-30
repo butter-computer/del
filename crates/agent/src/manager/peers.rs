@@ -116,6 +116,89 @@ impl SessionManager {
         self.shared.peers.lock().unwrap().register(session, project)
     }
 
+    /// Create an equal chat peer with a durable first request back to its caller.
+    /// Keep the caller's directory/project identity rather than allowing model
+    /// input to register a new project or broaden execution permissions.
+    pub async fn spawn_peer_session(
+        &self,
+        caller: &SessionId,
+        provider: Provider,
+        cwd: &Path,
+        prompt: &str,
+    ) -> Result<SessionHandle> {
+        let caller = self.resolve_peer(caller);
+        let parent = self.session_record(&caller)?;
+        let project = self
+            .shared
+            .peers
+            .lock()
+            .unwrap()
+            .project(&caller)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AgentError::Backend("Caller has no registered Del project".into()))?;
+        let requested = cwd.to_path_buf();
+        let inherited = parent.cwd.clone();
+        let same_directory = tokio::task::spawn_blocking(move || {
+            requested.is_absolute()
+                && requested.is_dir()
+                && std::fs::canonicalize(&requested)
+                    .ok()
+                    .zip(std::fs::canonicalize(&inherited).ok())
+                    .is_some_and(|(a, b)| a == b)
+        })
+        .await
+        .map_err(|e| AgentError::Backend(e.to_string()))?;
+        if !same_directory {
+            return Err(AgentError::Backend("New chat peers must use the caller's working directory; they inherit its Del project".into()));
+        }
+        let same_provider = provider == parent.provider;
+        let child = self
+            .start_account_session(
+                SessionConfig {
+                    cwd: parent.cwd.clone(),
+                    provider,
+                    model: if same_provider { parent.model } else { None },
+                    reasoning_effort: if same_provider {
+                        parent.reasoning_effort
+                    } else {
+                        None
+                    },
+                    service_tier: if same_provider {
+                        parent.service_tier
+                    } else {
+                        None
+                    },
+                    permission_mode: parent.permission_mode,
+                },
+                if same_provider {
+                    parent.account_id
+                } else {
+                    None
+                },
+            )
+            .await?;
+        let queued = (|| {
+            // Revalidate after provider startup: a deleted caller must not leave
+            // an unowned agent running an instruction with no reply destination.
+            self.session_record(&caller)?;
+            self.shared
+                .index
+                .lock()
+                .unwrap()
+                .update(&child.id, |record| {
+                    record.title = Some(prompt.trim().chars().take(60).collect());
+                })?;
+            self.set_peer_project(&child.id, &project)?;
+            self.send_to_peer(&caller, &child.id, &format!("spawn:{}", child.id), prompt)?;
+            Ok(())
+        })();
+        if let Err(error) = queued {
+            let _ = self.delete(&child.id).await;
+            return Err(error);
+        }
+        Ok(child)
+    }
+
     pub fn resolve_peer(&self, id: &SessionId) -> SessionId {
         self.shared.peers.lock().unwrap().resolve(id)
     }

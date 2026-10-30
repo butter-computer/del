@@ -52,7 +52,7 @@ be megabytes, are sent once as `content[0].text` JSON.
 | `ask_user` | `question` (≤4000), `options?` (≤8 strings, ≤200 each) | `{answered: true, answer, option_index?}` or `{answered: false, dismissed: true}`; blocks until the user answers in del; error on timeout |
 | `list_sessions` | none | `{sessions: [{id, provider, cwd, title, status, reported_state, is_self}]}` |
 | `get_session_summary` | `session_id` | `{info, reported_summary, last_output}` |
-| `spawn_session` | `provider` (`codex\|claude\|opencode`), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
+| `spawn_session` | `provider` (`codex\|claude\|opencode\|acp`; ACP is chat-only), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
 | `read_session` | `session_id`, `cursor?`, `max_characters?` (1000–64000) | recorded public event chunks, next cursor, retention notice |
 | `send_to_session` | `session_id`, `text` (≤20000), `idempotency_key` | durable queued receipt; does not wait for an answer |
 | `reply_to_session` | `request_id`, `text`, `idempotency_key` | reply receipt, routed to the original sender |
@@ -92,8 +92,14 @@ content. Page text and scripts have bounded sizes. Page `alert`/`confirm`/`promp
 dialogs name the page origin, and a burst of more than three in ten seconds
 blocks further dialogs from that site; hidden browsers dismiss them.
 
-Chat credentials expose browser, their own goal, and peer tools. They cannot
-spawn sessions or notify as another agent. Website actions remain subject to user
+Chat credentials expose browser, their own goal, and peer tools, including
+`spawn_session`. Chat spawns create actual chats in the caller’s working directory
+and project, inherit its permissions, and queue the first prompt as a peer request
+with a reply route. Same-provider spawns inherit the account/model configuration;
+other providers use their defaults. Terminal callers retain terminal spawning.
+The existing per-caller and total spawn quotas apply to both. Spawn is not
+idempotent: inspect existing sessions before retrying an unknown outcome.
+Chats cannot notify as another agent. Website actions remain subject to user
 authorization; peer messages do not expand browser or filesystem permissions.
 
 ## Host contract

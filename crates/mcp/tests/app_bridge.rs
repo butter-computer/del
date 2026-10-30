@@ -740,7 +740,7 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
             && names.contains(&"send_to_session")
             && names.contains(&"read_session")
     );
-    assert!(!names.contains(&"spawn_session"));
+    assert!(names.contains(&"spawn_session"));
     let peers = call(&chat_a, "list_sessions", json!({})).await;
     assert_eq!(peers["isError"], false);
     // Chat A cannot reach chat B's browser.
@@ -892,4 +892,170 @@ async fn real_opencode_cold_server_connects_before_chat_start() {
     let second = backend.start_session(config).await.unwrap();
     assert_ne!(first.id, second.id);
     backend.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_spawn_creates_four_project_peers_with_tracked_first_requests() {
+    let f = Fixture::new(Default::default()).await;
+    f.manager.register_account(
+        "selected".into(),
+        Arc::new(MockBackend::new(Provider::Codex)),
+    );
+    let parent = f
+        .manager
+        .start_account_session(
+            SessionConfig {
+                cwd: f._dir.path().into(),
+                model: Some("chosen-model".into()),
+                reasoning_effort: Some("high".into()),
+                service_tier: None,
+                provider: Provider::Codex,
+                permission_mode: del_agent::PermissionMode::Plan,
+            },
+            Some("selected".into()),
+        )
+        .await
+        .unwrap()
+        .id;
+    let tools = f.handle.chat_browser_tools().unwrap();
+    let config = LaunchConfig {
+        args: vec![],
+        env: vec![
+            ("DEL_MCP_URL".into(), tools.url.clone()),
+            (
+                "DEL_MCP_TOKEN".into(),
+                tools.credentials.mint(&parent).unwrap(),
+            ),
+        ],
+        files: vec![],
+    };
+    let outside = tempfile::tempdir().unwrap();
+    let before = f.manager.list_sessions().len();
+    let denied = call(
+        &config,
+        "spawn_session",
+        json!({"provider":"codex", "cwd":outside.path(), "prompt":"outside"}),
+    )
+    .await;
+    assert_eq!(denied["isError"], true);
+    assert_eq!(f.manager.list_sessions().len(), before);
+    #[cfg(unix)]
+    {
+        let escape = f._dir.path().join("outside-link");
+        std::os::unix::fs::symlink(outside.path(), &escape).unwrap();
+        let denied = call(
+            &config,
+            "spawn_session",
+            json!({"provider":"codex", "cwd":escape, "prompt":"outside"}),
+        )
+        .await;
+        assert_eq!(denied["isError"], true);
+        assert_eq!(f.manager.list_sessions().len(), before);
+    }
+    let mut ids = std::collections::HashSet::new();
+    for n in 0..4 {
+        let result = call(
+            &config,
+            "spawn_session",
+            json!({"provider":"codex", "cwd":f._dir.path(), "prompt":format!("Task {n}")}),
+        )
+        .await;
+        assert_eq!(result["isError"], false, "{result}");
+        let info = &result["structuredContent"];
+        assert_eq!(info["mode"], "chat");
+        let id = SessionId::new(info["id"].as_str().unwrap());
+        assert!(ids.insert(id.clone()));
+        let record = f.manager.session_record(&id).unwrap();
+        assert_eq!(record.title, Some(format!("Task {n}")));
+        assert_eq!(record.account_id.as_deref(), Some("selected"));
+        assert_eq!(record.model.as_deref(), Some("chosen-model"));
+        assert_eq!(record.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+        f.manager.authorize_peer(&parent, &id).unwrap();
+        let messages = f.manager.peer_messages(&id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, parent);
+        assert_eq!(messages[0].text, format!("Task {n}"));
+        assert!(messages[0].reply_to.is_none());
+        assert!(messages[0].prompt().contains("Reply with reply_to_session"));
+    }
+    assert_eq!(f.manager.peer_messages(&parent).len(), 4);
+    assert!(f.manager.control_peer_work(&parent, "complete").is_err());
+    f.manager.control_peer_work(&parent, "wait").unwrap();
+    f.bridge.shutdown();
+}
+
+#[tokio::test]
+async fn chat_spawn_cross_provider_keeps_permissions_and_project_without_model_leak() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("worktree");
+    std::fs::create_dir(&workspace).unwrap();
+    let manager = SessionManager::new(
+        dir.path().join("index.jsonl"),
+        [
+            Arc::new(MockBackend::new(Provider::Codex)) as Arc<dyn AgentBackend>,
+            Arc::new(MockBackend::new(Provider::Claude)) as Arc<dyn AgentBackend>,
+        ],
+    )
+    .unwrap();
+    let parent = manager
+        .start_session(SessionConfig {
+            cwd: workspace.clone(),
+            provider: Provider::Codex,
+            model: Some("codex-only-model".into()),
+            reasoning_effort: Some("high".into()),
+            service_tier: Some("priority".into()),
+            permission_mode: del_agent::PermissionMode::Plan,
+        })
+        .await
+        .unwrap()
+        .id;
+    manager.set_peer_project(&parent, dir.path()).unwrap();
+    let child = manager
+        .spawn_peer_session(&parent, Provider::Claude, &workspace, "Answer back")
+        .await
+        .unwrap();
+    let record = manager.session_record(&child.id).unwrap();
+    assert_eq!(record.provider, Provider::Claude);
+    assert_eq!(record.model, None);
+    assert_eq!(record.reasoning_effort, None);
+    assert_eq!(record.service_tier, None);
+    assert_eq!(record.account_id, None);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    manager.authorize_peer(&parent, &child.id).unwrap();
+    let count = manager.list_sessions().len();
+    assert!(
+        manager
+            .spawn_peer_session(
+                &parent,
+                Provider::OpenCode,
+                &workspace,
+                "Unavailable provider"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(manager.list_sessions().len(), count);
+    let request = manager.peer_messages(&child.id).pop().unwrap();
+    // The first prompt uses the ordinary mailbox: a real reply wakes the caller,
+    // and the receipt plus inherited project survive a manager restart.
+    manager.control_peer_work(&parent, "wait").unwrap();
+    manager
+        .reply_to_peer(&child.id, &request.id, "answer", "done")
+        .unwrap();
+    drop(manager);
+    let restored = SessionManager::new(
+        dir.path().join("index.jsonl"),
+        [
+            Arc::new(MockBackend::new(Provider::Codex)) as Arc<dyn AgentBackend>,
+            Arc::new(MockBackend::new(Provider::Claude)) as Arc<dyn AgentBackend>,
+        ],
+    )
+    .unwrap();
+    restored.authorize_peer(&parent, &child.id).unwrap();
+    assert_eq!(restored.peer_messages(&parent).len(), 2);
+    assert_eq!(
+        restored.peer_messages(&parent)[1].reply_to.as_deref(),
+        Some(request.id.as_str())
+    );
 }

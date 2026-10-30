@@ -580,7 +580,7 @@ impl Inner {
             && self.scope.lock().unwrap().chat_tools.contains(caller)
         {
             return Ok(tool_err(
-                "This credential grants browser and own-goal tools only",
+                "This credential grants browser, own-goal, and project peer tools only",
             ));
         }
         match name {

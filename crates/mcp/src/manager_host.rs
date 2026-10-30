@@ -6,10 +6,7 @@
 
 use crate::host::*;
 use async_trait::async_trait;
-use del_agent::{
-    AgentError, AgentEvent, PermissionMode, SessionConfig, SessionId, SessionManager,
-    SessionRecord, SessionStatus, UserInput,
-};
+use del_agent::{AgentError, AgentEvent, SessionId, SessionManager, SessionRecord, SessionStatus};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -155,25 +152,17 @@ impl McpHost for ManagerHost {
 
     async fn spawn_session(
         &self,
-        _caller: &SessionId,
+        caller: &SessionId,
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
         let handle = self
             .manager
-            .start_session(SessionConfig {
-                cwd: request.cwd,
-                model: None,
-                reasoning_effort: None,
-                service_tier: None,
-                provider: request.provider,
-                permission_mode: PermissionMode::default(),
-            })
+            .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
             .await
             .map_err(fail)?;
-        self.manager
-            .send_prompt(&handle.id, UserInput::text(request.prompt))
-            .await
-            .map_err(fail)?;
+        // Standalone hosts do not own the app's periodic dispatcher. Start the
+        // first queued request here; subsequent delivery uses their peer driver.
+        self.manager.dispatch_peer(&handle.id).await.map_err(fail)?;
         let record = self.record(&handle.id)?;
         Ok(self.info(&record))
     }

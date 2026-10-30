@@ -374,6 +374,14 @@ conversation. Unloading a running session also stops its current work.
 - A shimmering “Working for…” label sits beneath the latest user message and
   scrolls with it. There is no duplicate Working/Done indicator above the composer.
   Reduce Motion keeps the label static.
+- While a task is working, keep its intermediate updates, tools, and peer exchanges
+  visible. Once the final answer has finished, fold the earlier activity under an
+  expandable **Worked for…** row; the final answer stays outside it. The reveal
+  animates smoothly in both directions and respects Reduce Motion. Elapsed time
+  spans peer continuations, is saved with replies, and is recovered from older
+  Codex/Claude transcript timestamps when available; missing timing is never invented.
+  Search and navigation reveal hidden activity before jumping to it. Peer continuations
+  belong to the original request, so waiting for workers does not collapse early.
 - Hover the final reply of a completed response to reveal Copy and its local reply time
   in 24-hour `HH:MM` format. Intermediate updates and streaming replies have no copy footer.
   Reply times are saved across reopening; older Codex and Claude replies recover their
@@ -633,7 +641,17 @@ task.** The agent continues that work and explicitly completes it before Del
 releases queued user messages. Waiting and paused work remain visible. Uncertain
 delivery after a crash requires review before retrying.
 
-Tools: `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
+Chat agents can create new chat peers with `spawn_session`. New peers inherit the
+caller’s working directory, project, and permissions. When using the same provider,
+they also inherit its account, model, effort, and service tier; a different provider
+uses its default account and model. The first task is a durable peer request, so
+its reply returns to the requesting chat without a second dispatch. An agent can
+create several workers, wait for their replies, and then finish its original task.
+Creating a worker does not make either chat an orchestrator or change your selected
+conversation. Each spawn call creates a session; inspect the session list before
+retrying a call whose outcome is unknown.
+
+Tools: `spawn_session`, `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
 `reply_to_session`, and `session_work`. Context reads are paginated and exclude
 private reasoning. Side chats retain mailbox routing after restoration or provider
 changes. Plain shells are excluded. Terminal agents use a cooperative inbox and
@@ -659,7 +677,8 @@ including effort, Fast mode, and reset controls. Account names appear in the
 provider submenu; changes apply only to that side chat.
 The launcher centers its four options in a compact vertical stack below the URL bar,
 with shortcuts beside neutral icons. Card and URL-bar backgrounds are slightly
-lighter to remain visible against the page. Entering either row opens a live
+lighter to remain visible against the page, with no divider below the URL bar.
+Entering either row opens a live
 insertion gap, and neighboring tabs move aside
 as you change slots. Dragging tracks the pointer horizontally, locked to the tab
 row with no vertical movement or magnetic effects. Top-level and inner tabs emit

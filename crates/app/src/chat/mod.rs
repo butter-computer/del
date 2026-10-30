@@ -11,6 +11,7 @@ mod loading;
 pub mod model;
 mod reply_times;
 mod view;
+mod work_history;
 
 pub use view::{
     Backend, COLUMN_MAX_WIDTH, ChatView, OpenLink, OpenPeer, PeerActivity, PromptSubmitted,

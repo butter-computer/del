@@ -158,6 +158,11 @@ pub struct ChatView {
     pub(super) response_hover: std::collections::HashMap<usize, bool>,
     pub(super) response_times: std::collections::HashMap<usize, chrono::DateTime<chrono::Local>>,
     pub(super) expanded_activity: std::collections::HashSet<usize>,
+    pub(super) work_sections: Vec<super::work_history::Section>,
+    pub(super) expanded_work: std::collections::HashSet<usize>,
+    pub(super) work_reveals: std::collections::HashMap<usize, super::work_history::Reveal>,
+    work_started: std::collections::HashMap<usize, std::time::Instant>,
+    pub(super) work_elapsed: std::collections::HashMap<usize, std::time::Duration>,
     pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
     pub(super) search_pending: Option<crate::conversation_search::Hit>,
@@ -226,6 +231,11 @@ impl ChatView {
             response_hover: Default::default(),
             copied_responses: Default::default(),
             expanded_activity: Default::default(),
+            work_sections: Default::default(),
+            expanded_work: Default::default(),
+            work_reveals: Default::default(),
+            work_started: Default::default(),
+            work_elapsed: Default::default(),
             assistant_text: Default::default(),
             pending_errors: Vec::new(),
             search_pending: None,
@@ -279,6 +289,7 @@ impl ChatView {
         let Some(hit) = self.search_pending.take() else {
             return;
         };
+        self.refresh_work_sections();
         let Some(message_ix) = hit.message else {
             return;
         };
@@ -327,6 +338,7 @@ impl ChatView {
             range,
             applied: false,
         });
+        self.reveal_work_row(ix);
         self.scroller.scroll_to(ListOffset {
             item_ix: ix,
             offset_in_item: zpx(0.),
@@ -334,7 +346,8 @@ impl ChatView {
     }
 
     pub(super) fn copy_response(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if !self.model.is_completed_response(ix) {
+        self.refresh_work_sections();
+        if !self.final_response(ix) {
             return;
         }
         let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) else {
@@ -367,6 +380,27 @@ impl ChatView {
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
+        if !self.loading && matches!(event, AgentEvent::TurnStarted { .. }) {
+            let start = self
+                .model
+                .blocks
+                .iter()
+                .rposition(|b| {
+                    matches!(
+                        b,
+                        Block::User {
+                            steer: false,
+                            goal: false,
+                            ..
+                        }
+                    )
+                })
+                .map_or(0, |ix| ix + 1);
+            self.work_started
+                .entry(start)
+                .or_insert_with(std::time::Instant::now);
+        }
+
         // Stop can arrive while resume/send is still preparing the provider turn.
         if !self.loading
             && self.interrupt_requested
@@ -383,8 +417,14 @@ impl ChatView {
             {
                 let time = chrono::Local::now();
                 self.response_times.insert(ix, time);
+                let start = super::work_history::request_start(&self.model, ix);
+                let elapsed = self.work_started.get(&start).map(|at| at.elapsed());
+                if let Some(elapsed) = elapsed {
+                    self.work_elapsed.insert(ix, elapsed);
+                }
                 if let Some(id) = &self.session
                     && let Some(entry) = super::reply_times::entry(&self.model, ix, time)
+                        .map(|e| e.with_elapsed(elapsed))
                 {
                     let id = id.0.clone();
                     let write = cx
@@ -438,6 +478,97 @@ impl ChatView {
         {
             cx.emit(ReplyCompleted);
         }
+    }
+
+    pub(super) fn final_response(&self, ix: usize) -> bool {
+        self.work_sections
+            .iter()
+            .any(|section| section.answer == ix)
+    }
+
+    fn refresh_work_sections(&mut self) {
+        let pending = self
+            .session
+            .as_ref()
+            .and_then(|id| self.backend.manager.peer_work(id))
+            .is_some_and(|w| w.status != del_agent::peers::WorkStatus::Complete)
+            || self
+                .model
+                .goal()
+                .is_some_and(|g| g.status == del_agent::GoalStatus::Active);
+        let next = super::work_history::sections(&self.model, pending);
+        if next != self.work_sections {
+            self.work_sections = next;
+            self.scroller.remeasure_items(0..self.model.blocks.len());
+        }
+    }
+
+    fn reveal_work_row(&mut self, ix: usize) {
+        if let Some(section) = self
+            .work_sections
+            .iter()
+            .find(|r| r.range().contains(&ix) && ix != r.answer)
+            && self.expanded_work.insert(section.start)
+        {
+            self.work_reveals.remove(&section.start);
+            self.scroller.remeasure_items(section.range());
+        }
+    }
+
+    pub(super) fn toggle_work(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        self.scroller.pause_following_tail();
+        let now = std::time::Instant::now();
+        let was_open = self.expanded_work.contains(&range.start);
+        let from = self
+            .work_reveals
+            .get(&range.start)
+            .map_or(if was_open { 1. } else { 0. }, |motion| {
+                motion.sample(now).0
+            });
+        if was_open {
+            self.expanded_work.remove(&range.start);
+        } else {
+            self.expanded_work.insert(range.start);
+        }
+        if cx.reduce_motion() {
+            self.work_reveals.remove(&range.start);
+        } else {
+            self.work_reveals.insert(
+                range.start,
+                super::work_history::Reveal::new(from, !was_open, now),
+            );
+            let range = range.clone();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    let keep_going = this
+                        .update(cx, |this, cx| {
+                            let Some(motion) = this.work_reveals.get(&range.start) else {
+                                return false;
+                            };
+                            if motion.started != now {
+                                return false;
+                            }
+                            let done = motion.sample(std::time::Instant::now()).1;
+                            if done {
+                                this.work_reveals.remove(&range.start);
+                            }
+                            this.scroller.remeasure_items(range.clone());
+                            cx.notify();
+                            !done
+                        })
+                        .unwrap_or(false);
+                    if !keep_going {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        self.scroller.remeasure_items(range);
+        cx.notify();
     }
 
     pub(super) fn working_label(&self, ix: usize) -> Option<String> {
@@ -755,6 +886,14 @@ impl ChatView {
         remap(&mut self.response_times, ix);
         remap(&mut self.copied_responses, ix);
         remap(&mut self.response_hover, ix);
+        self.work_reveals.clear();
+        remap(&mut self.work_started, ix);
+        remap(&mut self.work_elapsed, ix);
+        self.work_sections.clear();
+        self.expanded_work = std::mem::take(&mut self.expanded_work)
+            .into_iter()
+            .filter_map(|key| shift(key, ix))
+            .collect();
         self.expanded_activity = std::mem::take(&mut self.expanded_activity)
             .into_iter()
             .filter_map(|key| shift(key, ix))
@@ -854,6 +993,11 @@ impl ChatView {
         self.copied_responses.clear();
         self.response_hover.clear();
         self.expanded_activity.clear();
+        self.work_sections.clear();
+        self.expanded_work.clear();
+        self.work_reveals.clear();
+        self.work_started.clear();
+        self.work_elapsed.clear();
         self.optimistic_rows.clear();
         self.search_flash = None;
         self.jump = None;
@@ -915,7 +1059,17 @@ impl ChatView {
                 this.replaying = false;
                 this.scroller.reset(this.model.blocks.len());
                 this.refresh_prompt_rows();
-                this.response_times.extend(times.restore(&this.model));
+                let timing = times.restore_details(&this.model);
+                this.response_times.extend(timing.times);
+                this.work_elapsed.extend(timing.elapsed);
+                let now = std::time::Instant::now();
+                for (start, time) in timing.started {
+                    if let Ok(elapsed) = (chrono::Local::now() - time).to_std()
+                        && let Some(at) = now.checked_sub(elapsed)
+                    {
+                        this.work_started.entry(start).or_insert(at);
+                    }
+                }
                 if let Some(scroll) = scroll {
                     this.scroller.scroll_to(scroll);
                 } else {
@@ -1055,6 +1209,7 @@ impl Render for ChatView {
         if self.loading && self.model.blocks.is_empty() {
             return super::conversation_loading("Loading conversation…".into(), cx.reduce_motion());
         }
+        self.refresh_work_sections();
         self.apply_search_jump(cx);
         self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
@@ -1270,6 +1425,7 @@ impl Render for ChatView {
                                                 .pl(zpx(2.0))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.reveal_work_row(ix);
                                                     this.jump = Some(MessageJump {
                                                         target: ix,
                                                         from: this
@@ -1391,6 +1547,98 @@ mod tests {
             matches!(&events[3], AgentEvent::AssistantTextDelta { turn_id, text } if turn_id == "b" && text == "next")
         );
         assert_eq!(coalesce_deltas(vec![delta("a", "partial")]).len(), 1);
+    }
+
+    #[gpui::test]
+    fn collapsed_work_keeps_final_copy_and_reveals_navigation_targets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager,
+                },
+                None,
+                None,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.on_event(
+                &AgentEvent::UserMessage {
+                    text: "Delegate work".into(),
+                },
+                cx,
+            );
+            for (turn, text) in [
+                ("one", "Waiting"),
+                ("two", "More work"),
+                ("three", "Final answer"),
+            ] {
+                view.on_event(
+                    &AgentEvent::TurnStarted {
+                        turn_id: turn.into(),
+                    },
+                    cx,
+                );
+                view.on_event(
+                    &AgentEvent::AssistantMessage {
+                        turn_id: turn.into(),
+                        text: text.into(),
+                    },
+                    cx,
+                );
+                view.on_event(
+                    &AgentEvent::TurnCompleted {
+                        turn_id: turn.into(),
+                        status: del_agent::TurnStatus::Completed,
+                    },
+                    cx,
+                );
+            }
+            view.refresh_work_sections();
+            assert_eq!(
+                view.work_sections
+                    .iter()
+                    .map(|s| s.range())
+                    .collect::<Vec<_>>(),
+                vec![1..4]
+            );
+            assert!(view.expanded_work.is_empty());
+            view.copy_response(1, cx);
+            assert!(view.copied_responses.is_empty());
+            view.copy_response(3, cx);
+            assert!(view.copied_responses.contains_key(&3));
+            view.reveal_work_row(2);
+            assert!(view.expanded_work.contains(&1));
+            assert!(!view.final_response(1));
+            assert!(view.final_response(3));
+            view.remove_row(0);
+            view.refresh_work_sections();
+            assert_eq!(
+                view.work_sections
+                    .iter()
+                    .map(|s| s.range())
+                    .collect::<Vec<_>>(),
+                vec![0..3]
+            );
+            assert!(view.expanded_work.contains(&0));
+        });
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("Final answer")
+        );
     }
 
     #[gpui::test]
