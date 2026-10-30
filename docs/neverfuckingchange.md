@@ -140,7 +140,7 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Transcript layout
 
-- Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows with semantic SF icons.
+- Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows without leading icons.
 - Assistant replies show only an overlapping-rounded-squares Copy icon and
   local reply time in 24-hour **HH:MM** format beside it in a hover footer, with a 160 ms eased fade in and out.
   Do not add audio, feedback, or overflow icons to this footer.
@@ -160,7 +160,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Keep tool input/output available through disclosure. Group consecutive tools immediately, including while running.
   Show the latest running action and failure/decline counts in the header; keep each tool’s
   output expandable. Messages and approval requests remain separate boundaries.
-- Tool group contents have a small indent and a reversible animated expand/collapse.
+- Tool group contents align with the chat text without a nested left indent,
+  and retain a reversible animated expand/collapse.
   Respect Reduce Motion and keep virtual-list heights synchronized throughout the reveal.
 - Local file links in chat open in Del’s file viewer, resolved against the conversation
   folder. Do not send bare paths to the operating system as application URLs.
@@ -603,3 +604,26 @@ sampling stops; a stale lease must never hide a reopened pane. Do not reload,
 resize, or inject replacement page scheduling functions to refresh a thumbnail.
 Hide native sidebar content at the start of its closing animation, preserving
 the browser's last viewport instead of sampling a nearly zero-width page.
+
+## Project peer communication
+
+- Sessions in the same Del project are equal peers across providers. No dedicated
+  orchestrator is required. Sibling worktrees use the configured project boundary;
+  unrelated projects are excluded.
+- Agents can read recorded public context and exchange requests for information
+  or changes using authenticated tools. Preserve the recipient’s account, model,
+  permissions, and original task. Peer messages are attributed agent input.
+- Deliver peer messages ahead of queued user messages at a safe input boundary.
+  Never interrupt an active tool or equate a turn ending or a reply with completion
+  of the original task. Release queued user messages only when that work completes.
+- Persist receipts, work state, and Side chat routing across restarts. Ambiguous
+  deliveries need user review before retrying; do not silently replay mutations.
+- Show only a centered `Current agent ⇄ Other agent` exchange row, with each
+  provider’s logo and clickable conversation name. Use stacked opposing arrows;
+  no message body, status label, error copy, or card background. Keep recovery
+  actions in the context menu for failed/uncertain deliveries.
+- Peer work participates in navigation ticks, working indicators, unread dots,
+  and keeping an interacted-with session tab open. Context reads alone must not
+  mark another conversation read or change the selected chat.
+- Terminal agents use a cooperative inbox; do not claim control over their CLI’s
+  native user-input queue. See [peer-sessions.md](peer-sessions.md).

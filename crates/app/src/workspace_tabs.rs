@@ -182,6 +182,7 @@ pub struct WorkspaceTabs {
 }
 impl EventEmitter<crate::side_chat::SendToMain> for WorkspaceTabs {}
 impl EventEmitter<crate::chat::OpenLink> for WorkspaceTabs {}
+impl EventEmitter<crate::chat::OpenPeer> for WorkspaceTabs {}
 impl WorkspaceTabs {
     pub fn set_side_context(&mut self, context: crate::side_chat::Context) {
         self.side_context = Some(context);
@@ -365,6 +366,16 @@ impl WorkspaceTabs {
                 .any(|tab| tab.panel.as_ref() == Some(&panel))
             {
                 cx.emit(crate::chat::OpenLink(event.0.clone()));
+            }
+        })
+        .detach();
+        cx.subscribe(panel, |this, panel, event: &crate::chat::OpenPeer, cx| {
+            if this
+                .tabs
+                .iter()
+                .any(|tab| tab.panel.as_ref() == Some(&panel))
+            {
+                cx.emit(crate::chat::OpenPeer(event.0.clone()));
             }
         })
         .detach();
@@ -621,6 +632,34 @@ impl WorkspaceTabs {
                             .as_ref()
                             .is_some_and(|panel| panel.read(cx).browser_surface_visible(cx))
                 })
+    }
+
+    pub(crate) fn contains_peer(&self, id: &del_agent::SessionId, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .filter_map(|t| t.panel.as_ref())
+            .any(|panel| panel.read(cx).contains_peer(id, cx))
+    }
+
+    pub(crate) fn show_peer(
+        &mut self,
+        id: &del_agent::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.iter().find(|tab| {
+            tab.panel
+                .as_ref()
+                .is_some_and(|panel| panel.read(cx).contains_peer(id, cx))
+        }) else {
+            return false;
+        };
+        let key = tab.id;
+        if let Some(panel) = &tab.panel {
+            panel.update(cx, |panel, cx| panel.show_peer(id, window, cx));
+        }
+        self.select(Some(key), window, cx);
+        true
     }
 
     pub(crate) fn find_browser_panel(&self, id: &str, cx: &App) -> Option<Entity<RightPanel>> {

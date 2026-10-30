@@ -69,6 +69,20 @@ impl MockHost {
         info
     }
 
+    pub fn set_project(&self, id: &SessionId, cwd: std::path::PathBuf) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(info) = state.sessions.iter_mut().find(|s| &s.id == id) {
+            info.cwd = cwd.clone();
+        }
+        if let Some(summary) = state.summaries.get_mut(id) {
+            summary.info.cwd = cwd;
+        }
+    }
+    pub fn remove_session(&self, id: &SessionId) {
+        let mut state = self.state.lock().unwrap();
+        state.sessions.retain(|s| &s.id != id);
+        state.summaries.remove(id);
+    }
     pub fn reports(&self) -> Vec<(SessionId, ReportedState, String)> {
         self.state.lock().unwrap().reports.clone()
     }
@@ -98,6 +112,44 @@ impl MockHost {
 
 #[async_trait]
 impl McpHost for MockHost {
+    fn authorize_peer(&self, caller: &SessionId, target: &SessionId) -> HostResult<()> {
+        let state = self.state.lock().unwrap();
+        match (
+            state.sessions.iter().find(|s| &s.id == caller),
+            state.sessions.iter().find(|s| &s.id == target),
+        ) {
+            (Some(a), Some(b)) if a.cwd == b.cwd => Ok(()),
+            _ => Err(HostError::Failed(
+                "Peer sessions must belong to the same Del project".into(),
+            )),
+        }
+    }
+    async fn queue_peer(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        key: &str,
+        text: &str,
+    ) -> HostResult<del_agent::peers::PeerMessage> {
+        self.authorize_peer(caller, target)?;
+        self.state
+            .lock()
+            .unwrap()
+            .sent
+            .push((caller.clone(), target.clone(), text.into()));
+        Ok(del_agent::peers::PeerMessage {
+            id: format!("{caller}:{key}"),
+            idempotency_key: key.into(),
+            from: caller.clone(),
+            to: target.clone(),
+            reply_to: None,
+            text: text.into(),
+            created_at_ms: 0,
+            state: del_agent::peers::DeliveryState::Queued,
+            error: None,
+        })
+    }
+
     async fn report_status(
         &self,
         caller: &SessionId,
@@ -159,21 +211,8 @@ impl McpHost for MockHost {
         };
         let mut info = self.add_session(&id, request.provider);
         info.cwd = request.cwd;
+        self.set_project(&info.id, info.cwd.clone());
         Ok(info)
-    }
-
-    async fn send_to_session(
-        &self,
-        caller: &SessionId,
-        target: &SessionId,
-        text: &str,
-    ) -> HostResult<()> {
-        let mut s = self.state.lock().unwrap();
-        if !s.sessions.iter().any(|i| &i.id == target) {
-            return Err(HostError::UnknownSession(target.to_string()));
-        }
-        s.sent.push((caller.clone(), target.clone(), text.into()));
-        Ok(())
     }
 
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()> {

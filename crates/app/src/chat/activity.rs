@@ -13,15 +13,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn icon(self) -> &'static str {
-        match self {
-            Self::Read => "icons/book-open.svg",
-            Self::Search => "icons/search.svg",
-            Self::Command => "icons/terminal.svg",
-            Self::Edit => "icons/pencil.svg",
-            Self::Tool => "icons/wrench.svg",
-        }
-    }
     fn verb(self, running: bool) -> &'static str {
         match (self, running) {
             (Self::Read, true) => "Reading",

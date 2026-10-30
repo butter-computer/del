@@ -37,8 +37,8 @@ pub struct Server {
     url: String,
     password: String,
     directory: String,
-    /// Del's browser credential for this workspace server: one MCP config
-    /// serves all its chats, so it is a shared group (id, token).
+    /// Del's credential for this dedicated chat server (session id, token).
+    /// Catalog-only workspace servers have no credential.
     pub(crate) browser: std::sync::Mutex<Option<(del_agent::SessionId, String)>>,
 }
 fn error(e: impl std::fmt::Display) -> AgentError {

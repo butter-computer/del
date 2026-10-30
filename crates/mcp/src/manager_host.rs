@@ -73,15 +73,17 @@ impl ManagerHost {
 
     fn record(&self, id: &SessionId) -> HostResult<SessionRecord> {
         self.manager
-            .list_sessions()
-            .into_iter()
-            .find(|r| &r.id == id)
-            .ok_or_else(|| HostError::UnknownSession(id.to_string()))
+            .session_record(&self.manager.resolve_peer(id))
+            .map_err(fail)
     }
 }
 
 #[async_trait]
 impl McpHost for ManagerHost {
+    fn peer_manager(&self) -> Option<SessionManager> {
+        Some(self.manager.clone())
+    }
+
     async fn report_status(
         &self,
         caller: &SessionId,
@@ -108,9 +110,10 @@ impl McpHost for ManagerHost {
     async fn list_sessions(&self, _caller: &SessionId) -> HostResult<Vec<SessionInfo>> {
         Ok(self
             .manager
-            .list_sessions()
+            .registered_peer_sessions()
             .iter()
-            .map(|r| self.info(r))
+            .filter_map(|id| self.record(id).ok())
+            .map(|r| self.info(&r))
             .collect())
     }
 
@@ -173,25 +176,6 @@ impl McpHost for ManagerHost {
             .map_err(fail)?;
         let record = self.record(&handle.id)?;
         Ok(self.info(&record))
-    }
-
-    async fn send_to_session(
-        &self,
-        _caller: &SessionId,
-        target: &SessionId,
-        text: &str,
-    ) -> HostResult<()> {
-        if self.manager.status(target) == Some(SessionStatus::Running) {
-            self.manager
-                .steer(target, text.to_string())
-                .await
-                .map_err(fail)
-        } else {
-            self.manager
-                .send_prompt(target, UserInput::text(text))
-                .await
-                .map_err(fail)
-        }
     }
 
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()> {

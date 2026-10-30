@@ -18,7 +18,8 @@ through the types below. Tokio-based; no UI dependencies.
   `ToolCallStarted/Updated/Finished`, `FileChange{path,kind,diff?}`,
   `ApprovalRequested{id,kind,detail}`, `ApprovalResolved{id}` (provider settled
   or withdrew it), `TokenUsage{input,output,cached}`,
-  `TurnCompleted{turn_id,status}`, `Error{message,recoverable}`.
+  `TurnCompleted{turn_id,status}`, `Error{message,recoverable}`,
+  `PeerMessage{message}`, `PeerWorkChanged{work}`.
   Ordering per turn: `TurnStarted` … `TurnCompleted`. Deltas of a message are
   followed by its `AssistantMessage` with the full text.
 - `#[async_trait] trait AgentBackend: Send + Sync` (object-safe, use
@@ -80,3 +81,35 @@ with the manager. The mock is for isolated tests and has no model catalog.
 status, elapsed usage, and pause capability; `None` means cleared. A turn ending
 does not imply a goal is complete. Backends restore state from their own native
 store. Unsupported controls return an error; the UI shows only supported actions.
+
+## Project peers and work lifecycle
+
+`SessionManager` owns the provider-neutral mailbox in `sessions.peers.json`.
+The app registers project membership through `set_peer_project`; callers cannot
+choose their own identity or project through tool arguments. `peer_sessions` and
+`authorize_peer` enforce that boundary for discovery, context, and delivery.
+Sibling worktrees inherit the configured project identity.
+
+`read_peer_context` pages recorded public events using `ContextCursor`, bounded
+by a character budget. It excludes private reasoning and discloses history
+retention. Reading does not send a provider prompt or alter the user's read state.
+
+`send_to_peer` and `reply_to_peer` persist receipts before acknowledgment. Sender
+idempotency keys reject changed content, and replies route through the original
+request. `dispatch_peer` uses the same per-session send lock as user prompts and
+never steers or interrupts a running turn. Claims that cannot be reconciled after
+a restart become uncertain rather than being silently replayed.
+
+`PeerWork` is separate from a provider turn and from native goals. Peer traffic
+runs before Del's queued user input at a safe input boundary. A reply or
+`TurnCompleted` does not finish the original task: `control_peer_work` explicitly
+completes, waits, pauses, or resumes that work. The app checks
+`peer_blocks_user_queue` before delivering another queued user message. Terminal
+adapters use `receive_peer` cooperatively; their native CLI queues are not managed.
+
+Restored or reconfigured Side chats rebind historical IDs to their current native
+session. Closing a backend preserves its mailbox; deleting a session cancels its
+exchanges. Reconciliation accepts only the exact recorded peer envelope with
+matching resolved endpoints, avoiding duplicate raw prompts on restoration.
+See [project peer sessions](../../docs/peer-sessions.md) for the full contract,
+UI behavior, recovery, and verification evidence.

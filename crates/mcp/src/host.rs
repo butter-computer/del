@@ -92,15 +92,87 @@ pub type HostResult<T> = Result<T, HostError>;
 
 /// Implemented by the app. Every call carries `caller`, the session whose
 /// bearer token authenticated the request; the server has already enforced
-/// scoping (`list_sessions` results are filtered to the caller's family and
-/// `session_summary` targets are checked), so hosts may trust it but must not
-/// widen it.
+/// project scoping for peer operations and separate browser-profile scoping.
 ///
 /// Methods may be dropped mid-await when the agent disconnects (notably
 /// `ask_user`); implementations should treat drop as cancellation and remove
 /// any prompt they showed.
 #[async_trait]
 pub trait McpHost: Send + Sync + 'static {
+    /// Only host code supplies the manager. Credentials determine the caller;
+    /// tools cannot choose their sender or project identity.
+    fn peer_manager(&self) -> Option<del_agent::SessionManager> {
+        None
+    }
+
+    fn authorize_peer(&self, caller: &SessionId, target: &SessionId) -> HostResult<()> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer messaging is unavailable".into()))?
+            .authorize_peer(caller, target)
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    async fn read_context(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        cursor: Option<del_agent::manager::ContextCursor>,
+        limit: usize,
+    ) -> HostResult<del_agent::manager::SessionContext> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer context is unavailable".into()))?
+            .read_peer_context(caller, target, cursor, limit)
+            .await
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    async fn queue_peer(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        key: &str,
+        text: &str,
+    ) -> HostResult<del_agent::peers::PeerMessage> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer messaging is unavailable".into()))?
+            .send_to_peer(caller, target, key, text)
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    async fn reply_peer(
+        &self,
+        caller: &SessionId,
+        request: &str,
+        key: &str,
+        text: &str,
+    ) -> HostResult<del_agent::peers::PeerMessage> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer messaging is unavailable".into()))?
+            .reply_to_peer(caller, request, key, text)
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    async fn peer_work(
+        &self,
+        caller: &SessionId,
+        action: &str,
+    ) -> HostResult<Option<del_agent::peers::PeerWork>> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer work is unavailable".into()))?
+            .control_peer_work(caller, action)
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    /// Terminal CLIs can explicitly receive their mailbox at a safe tool boundary.
+    async fn receive_peer(
+        &self,
+        _caller: &SessionId,
+    ) -> HostResult<Option<del_agent::peers::PeerMessage>> {
+        Err(HostError::Failed(
+            "Chat peer messages are delivered automatically after your current turn ends. End this turn without completing your task to receive them; do not poll.".into(),
+        ))
+    }
+
     async fn goal(
         &self,
         _caller: &SessionId,
@@ -150,13 +222,5 @@ pub trait McpHost: Send + Sync + 'static {
         request: SpawnRequest,
     ) -> HostResult<SessionInfo>;
 
-    async fn send_to_session(
-        &self,
-        caller: &SessionId,
-        target: &SessionId,
-        text: &str,
-    ) -> HostResult<()>;
-
-    /// Raise a desktop/in-app notification attributed to `caller`.
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()>;
 }

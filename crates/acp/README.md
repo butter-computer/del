@@ -86,3 +86,12 @@ installed agent using its existing login. The example uses a temporary working
 directory, requests a `printf ACP_SMOKE_OK` tool call, approves only a matching
 command request, reports observed tools and permission requests, and tests stop.
 It has a 90-second deadline and shuts down its process group on every outcome.
+
+## Del peer tools
+
+Each ACP conversation receives an authenticated Del MCP server in `session/new`
+or `session/load`. Del uses HTTP when the agent advertises `mcpCapabilities.http`,
+and otherwise starts its own `--mcp-stdio` bridge. The provisional credential is
+rebound to the native conversation ID and revoked when that process closes.
+Peers can read and message sessions in the same Del project; these tools do not
+change ACP permission prompts or grant new filesystem capabilities.

@@ -3,9 +3,10 @@
 Del is a native Rust desktop workspace for coding agents, built with GPUI. It
 combines Codex, Claude Code, and OpenCode 2.x with conversation tabs,
 a follow-up queue, a file viewer, integrated terminals, a session browser, and
-native Apple voice dictation.
+native Apple voice dictation. Sessions in a project can read each other’s recorded
+context and exchange requests and replies as equal peers.
 
-Del `0.1.17` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.18` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -14,7 +15,9 @@ when making future changes.
 
 ## Download and install
 
-The latest release is **0.1.13**.
+The latest downloadable installer is **0.1.13**. The source version is **0.1.18**;
+see its [release notes](docs/releases/0.1.18.md) and
+[validation record](docs/releases/0.1.18-validation.md).
 Download **Del-0.1.13-arm64.dmg** from the [0.1.13 release](https://github.com/butter-computer/del/releases/tag/v0.1.13),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
@@ -35,7 +38,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.17-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.18-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -363,8 +366,9 @@ conversation. Unloading a running session also stops its current work.
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
   summaries show only the first input line and truncate to the available width,
-  including while shimmering. Expanding smoothly reveals indented calls with their
-  full input, output, and diffs.
+  including while shimmering. Tool headers have no leading icons. Expanding
+  smoothly reveals calls and their full input/output aligned with the chat text,
+  without a nested left indent; diffs remain available through disclosure.
   Matching edit/file events share one row, and empty diff counts are omitted. See
   [Codex chat reference](docs/codex-chat-reference.md) for source research and scope.
 - A shimmering “Working for…” label sits beneath the latest user message and
@@ -612,6 +616,33 @@ Recognition uses the current macOS locale and runs on-device when Apple supports
 it for that locale; otherwise Apple's speech service may require a connection.
 No Codex, Claude, or third-party transcription API is used.
 
+## Project peer conversations
+
+Agents in the same Del project can discover each other, read recorded chat context,
+and exchange requests and replies across providers. Sibling worktrees use their
+parent project. A peer can ask for information or edits without changing the
+recipient's account, model, or permissions. Each exchange appears as a centered
+`Current agent ⇄ Other agent` row with provider logos and clickable names, without
+message text, status labels, or a card background. Exchanges also appear in conversation
+navigation and activity indicators. Failed or uncertain deliveries retain retry
+and dismiss actions in the row's context menu.
+
+Peer messages are durable and run before queued user messages at a safe input
+boundary. **Finishing a turn or replying to a peer does not finish the original
+task.** The agent continues that work and explicitly completes it before Del
+releases queued user messages. Waiting and paused work remain visible. Uncertain
+delivery after a crash requires review before retrying.
+
+Tools: `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
+`reply_to_session`, and `session_work`. Context reads are paginated and exclude
+private reasoning. Side chats retain mailbox routing after restoration or provider
+changes. Plain shells are excluded. Terminal agents use a cooperative inbox and
+explicit idle reports; their native CLI input queue remains owned by the CLI.
+For example, ask “Read the context of the API chat in this project” or “Ask the
+Tests chat to check your changes and report back.” Agents use the tools to find
+and contact that session; there is no required orchestrator or parent/child role.
+See [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
+
 ## Files, terminals, and browser
 
 The right sidebar starts with **Files**, **Changes**, **Terminal**, and **+**.
@@ -735,9 +766,8 @@ same visible browser and saved profiles. Del is the default browser for agent
 requests; external browsers are used only when explicitly requested by the user.
 Agents can use only their own session's browser and the browsers of sessions they
 spawned or that spawned them. Claude and Codex chats each get a browser credential
-bound to their own chat. OpenCode configures tools per workspace rather than per
-chat, so the chats of one OpenCode workspace share a credential that reaches only
-those chats, and of them only the ones currently running a turn. Actions on a
+bound to their own chat. OpenCode chats each own a server and credential, keeping
+browser access and peer identity separate even in the same workspace. Actions on a
 session you aren't viewing run in its hidden browser without changing your
 selection. When an agent uses a browser tab that isn't visible, a small draggable
 page preview appears on the right. It refreshes from the existing page without
@@ -895,6 +925,7 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | Path within Del's data directory | Contents |
 | --- | --- |
 | `sessions.jsonl` | Chat session index and configuration |
+| `sessions.peers.json` | Project membership, peer receipts, work state, restored Side chat routing |
 | `sidebar.json` | Local names, shared session order, pins, archive/unread metadata |
 | `projects.json` | Directory identities, display names, collapse state, and last directory |
 | `worktrees/` | Managed Git checkouts and ownership manifests |
@@ -920,13 +951,13 @@ See [ACP configuration](crates/acp/README.md) for custom installed agents.
 | Crate | Responsibility |
 | --- | --- |
 | `app` | GPUI shell, composer, queue, settings, file viewer, terminal host, updates |
-| `agent` | Provider-neutral sessions, events, model metadata, persistence |
+| `agent` | Provider-neutral sessions, events, project peer mailbox, work lifecycle, persistence |
 | `codex` | Codex app-server adapter |
 | `claude` | Claude streaming CLI adapter |
 | `acp` | ACP registry and protocol adapter |
 | `opencode` | OpenCode 2.x native server adapter |
 | `terminal` | PTY lifecycle, input, emulator state, and rendering |
-| `mcp` | Session bridge, MCP server, and stdio proxy |
+| `mcp` | Authenticated peer/browser tools, session bridge, and stdio proxy |
 | `core` | Shared UI-independent helpers and shell metrics |
 
 GPUI is pinned through `gpui-kit =0.8.0` and `gpui-pre =0.3.9`; update these pins

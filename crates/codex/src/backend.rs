@@ -1062,7 +1062,11 @@ fn apply_browser_tools(params: &mut serde_json::Map<String, Value>, url: &str, t
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let policy = del_agent::backend::BROWSER_INSTRUCTIONS;
+    let policy = format!(
+        "{}\n\n{}",
+        del_agent::backend::BROWSER_INSTRUCTIONS,
+        del_agent::backend::PEER_INSTRUCTIONS
+    );
     let instructions = if existing.is_empty() {
         policy.to_owned()
     } else {

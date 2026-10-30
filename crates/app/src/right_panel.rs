@@ -444,6 +444,7 @@ pub struct RightPanel {
 
 impl EventEmitter<crate::side_chat::SendToMain> for RightPanel {}
 impl EventEmitter<crate::chat::OpenLink> for RightPanel {}
+impl EventEmitter<crate::chat::OpenPeer> for RightPanel {}
 
 impl RightPanel {
     pub(crate) fn set_tab_zone(&mut self, sidebar: bool) {
@@ -536,6 +537,17 @@ impl RightPanel {
                 .any(|tab| tab.panel.entity_id() == source.entity_id())
             {
                 cx.emit(crate::chat::OpenLink(event.0.clone()));
+            }
+        })
+        .detach();
+        let source = panel.downgrade();
+        cx.subscribe(panel, move |this, _, event: &crate::chat::OpenPeer, cx| {
+            if this
+                .hosted
+                .iter()
+                .any(|tab| tab.panel.entity_id() == source.entity_id())
+            {
+                cx.emit(crate::chat::OpenPeer(event.0.clone()));
             }
         })
         .detach();
@@ -881,6 +893,12 @@ impl RightPanel {
         cx.subscribe(side, |this, side, event: &crate::chat::OpenLink, cx| {
             if this.side_chat.as_ref() == Some(&side) {
                 cx.emit(crate::chat::OpenLink(event.0.clone()));
+            }
+        })
+        .detach();
+        cx.subscribe(side, |this, side, event: &crate::chat::OpenPeer, cx| {
+            if this.side_chat.as_ref() == Some(&side) {
+                cx.emit(crate::chat::OpenPeer(event.0.clone()));
             }
         })
         .detach();
@@ -1777,6 +1795,47 @@ impl RightPanel {
         self.ensure_browser(cx);
         cx.notify();
     }
+    pub(crate) fn contains_peer(&self, id: &del_agent::SessionId, cx: &App) -> bool {
+        self.side_chat
+            .as_ref()
+            .is_some_and(|side| side.read(cx).session_id() == Some(id))
+            || self
+                .hosted
+                .iter()
+                .any(|tab| tab.panel.read(cx).contains_peer(id, cx))
+    }
+
+    pub(crate) fn show_peer(
+        &mut self,
+        id: &del_agent::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| tab.panel.read(cx).contains_peer(id, cx))
+        {
+            let key = tab.id.clone();
+            tab.panel
+                .update(cx, |panel, cx| panel.show_peer(id, window, cx));
+            self.select_hosted(key, window, cx);
+            return true;
+        }
+        if self
+            .side_chat
+            .as_ref()
+            .is_some_and(|side| side.read(cx).session_id() == Some(id))
+        {
+            // Select the existing pane without converting the sidebar into
+            // an embedded workspace (which would hide its tab strip).
+            self.open_tool(Pane::SideChat, window, cx);
+            self.focus_side_chat(window, cx);
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn find_browser_panel(
         panel: &Entity<Self>,
         id: &str,
@@ -4017,6 +4076,28 @@ mod tests {
         });
         let side = right.read_with(cx, |right, _| right.side_chat.clone().unwrap());
         let storage_id = side.read_with(cx, |side, _| side.storage_id());
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if side.read_with(cx, |side, _| side.session_id().is_some()) {
+                break;
+            }
+            runtime
+                .block_on(async { tokio::time::sleep(std::time::Duration::from_millis(2)).await });
+        }
+        let peer = side.read_with(cx, |side, _| side.session_id().unwrap().clone());
+        cx.update(|window, cx| {
+            right.update(cx, |right, cx| {
+                right.open_tool(Pane::Files, window, cx);
+                assert!(right.show_peer(&peer, window, cx));
+                assert_eq!(right.pane, Pane::SideChat);
+                assert!(
+                    !right.workspace,
+                    "peer navigation must retain the sidebar tab strip"
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-side-chat").is_some());
         cx.update(|window, cx| {
             let panel = right.update(cx, |right, cx| {
                 right

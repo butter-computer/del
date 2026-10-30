@@ -65,7 +65,7 @@ async fn call(c: &Credentials, tool: &str, args: Value) -> Value {
 }
 
 fn is_error(v: &Value) -> bool {
-    v["result"]["isError"].as_bool().unwrap_or(false)
+    v.get("error").is_some() || v["result"]["isError"].as_bool().unwrap_or(false)
 }
 
 #[tokio::test]
@@ -143,12 +143,22 @@ async fn initialize_and_list_tools() {
             "get_session_summary",
             "spawn_session",
             "send_to_session",
+            "read_session",
+            "reply_to_session",
+            "session_work",
             "notify"
         ]
     );
     for t in tools {
         assert!(!t["description"].as_str().unwrap().is_empty());
         assert_eq!(t["inputSchema"]["type"], "object");
+        if matches!(
+            t["name"].as_str(),
+            Some("send_to_session" | "reply_to_session" | "session_work")
+        ) {
+            assert_eq!(t["annotations"]["destructiveHint"], false);
+            assert_eq!(t["annotations"]["openWorldHint"], false);
+        }
     }
     // Notifications get 202 and no body.
     let (s, b) = post(
@@ -253,13 +263,13 @@ async fn list_and_summary() {
     let e = env().await;
     e.host.add_session("other", Provider::Codex);
     let r = call(&e.me, "list_sessions", json!({})).await;
-    // Sessions outside the caller's spawn family are neither listed nor readable.
+    // Same-project sessions are peers regardless of who created them.
     let rows = r["result"]["structuredContent"]["sessions"]
         .as_array()
         .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["is_self"], true);
-    assert!(is_error(
+    assert!(!is_error(
         &call(&e.me, "get_session_summary", json!({"session_id":"other"})).await
     ));
     assert!(is_error(
@@ -273,17 +283,18 @@ async fn list_and_summary() {
 }
 
 #[tokio::test]
-async fn spawn_then_send_is_scoped_to_family() {
+async fn peer_messages_are_scoped_to_project() {
     let e = env().await;
     e.host.add_session("stranger", Provider::Codex);
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
 
-    // Not spawned by me -> refused, and nothing reaches the host.
+    e.host.set_project(&e.me.session_id, dir.path().into());
+    // A different project is refused even when both credentials are live.
     let r = call(
         &e.me,
         "send_to_session",
-        json!({"session_id":"stranger","text":"hi"}),
+        json!({"session_id":"stranger","text":"hi","idempotency_key":"test-send"}),
     )
     .await;
     assert!(is_error(&r));
@@ -322,19 +333,19 @@ async fn spawn_then_send_is_scoped_to_family() {
     let r = call(
         &e.me,
         "send_to_session",
-        json!({"session_id":child,"text":"more"}),
+        json!({"session_id":child,"text":"more","idempotency_key":"test-send"}),
     )
     .await;
     assert!(!is_error(&r));
     assert_eq!(e.host.sent()[0].2, "more");
 
-    // The child may talk back to its parent, but not to the stranger.
+    // Peers in this project may talk both ways; the stranger remains outside.
     let child_creds = e.server.register_session(&SessionId::new(child));
     assert!(!is_error(
         &call(
             &child_creds,
             "send_to_session",
-            json!({"session_id":"me","text":"done"})
+            json!({"session_id":"me","text":"done","idempotency_key":"test-send"})
         )
         .await
     ));
@@ -342,7 +353,7 @@ async fn spawn_then_send_is_scoped_to_family() {
         &call(
             &child_creds,
             "send_to_session",
-            json!({"session_id":"stranger","text":"x"})
+            json!({"session_id":"stranger","text":"x","idempotency_key":"test-send"})
         )
         .await
     ));
@@ -380,6 +391,7 @@ async fn spawn_limit_enforced() {
 async fn forgotten_sessions_lose_family_access() {
     let e = env().await;
     let dir = tempfile::tempdir().unwrap();
+    e.host.set_project(&e.me.session_id, dir.path().into());
     let r = call(
         &e.me,
         "spawn_session",
@@ -403,6 +415,7 @@ async fn forgotten_sessions_lose_family_access() {
         .await
     ));
     e.server.forget_session(&child);
+    e.host.remove_session(&child);
     let rows =
         call(&e.me, "list_sessions", json!({})).await["result"]["structuredContent"]["sessions"]
             .as_array()
@@ -413,7 +426,7 @@ async fn forgotten_sessions_lose_family_access() {
         &call(
             &e.me,
             "send_to_session",
-            json!({"session_id":child.as_str(),"text":"x"})
+            json!({"session_id":child.as_str(),"text":"x","idempotency_key":"test-send"})
         )
         .await
     ));
@@ -487,7 +500,7 @@ async fn stdio_proxy_round_trip() {
     assert_eq!(lines.len(), 1);
     let v: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(v["id"], 7);
-    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 11);
 
     // Bad token surfaces as a JSON-RPC error for requests.
     let out = Buf::default();
@@ -640,7 +653,7 @@ async fn manager_host_drives_real_session_manager() {
     let r = call(
         &c,
         "send_to_session",
-        json!({"session_id": child, "text": "again"}),
+        json!({"session_id": child, "text": "again", "idempotency_key":"again"}),
     )
     .await;
     assert!(!is_error(&r), "{r}");
@@ -832,7 +845,7 @@ async fn chat_browser_credentials_are_bound_to_their_chat() {
 }
 
 #[tokio::test]
-async fn chat_credentials_expose_only_browser_and_own_goal() {
+async fn chat_credentials_expose_project_peers_and_own_goal() {
     let e = env().await;
     let chat = e.server.register_chat_client(&SessionId::new("chat"));
     let list = rpc(&chat, "tools/list", json!({})).await;
@@ -842,7 +855,19 @@ async fn chat_credentials_expose_only_browser_and_own_goal() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["goal", "browser"]);
+    assert_eq!(
+        names,
+        [
+            "goal",
+            "browser",
+            "list_sessions",
+            "get_session_summary",
+            "send_to_session",
+            "read_session",
+            "reply_to_session",
+            "session_work"
+        ]
+    );
     assert!(is_error(
         &call(
             &chat,
@@ -868,4 +893,113 @@ async fn chat_credentials_expose_only_browser_and_own_goal() {
     assert!(is_error(
         &call(&browser, "goal", json!({"action":"get"})).await
     ));
+}
+
+#[tokio::test]
+async fn authenticated_project_peers_read_request_reply_and_preserve_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(
+        dir.path().join("peers-index"),
+        [
+            Arc::new(MockBackend::new(Provider::Codex)) as Arc<dyn del_agent::AgentBackend>,
+            Arc::new(MockBackend::new(Provider::Claude)) as Arc<dyn del_agent::AgentBackend>,
+        ],
+    )
+    .unwrap();
+    let config = |provider, cwd| del_agent::SessionConfig {
+        provider,
+        cwd,
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        permission_mode: del_agent::PermissionMode::Ask,
+    };
+    let a = manager
+        .start_session(config(Provider::Codex, dir.path().into()))
+        .await
+        .unwrap();
+    let b = manager
+        .start_session(config(Provider::Claude, dir.path().join("worktree")))
+        .await
+        .unwrap();
+    let outsider = manager
+        .start_session(config(Provider::Claude, dir.path().join("other")))
+        .await
+        .unwrap();
+    manager.set_peer_project(&b.id, dir.path()).unwrap();
+    let server = McpServer::start(
+        Arc::new(ManagerHost::new(manager.clone(), Arc::new(AutoUi))),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let ca = server.register_chat_client(&a.id);
+    let cb = server.register_chat_client(&b.id);
+    let cc = server.register_chat_client(&outsider.id);
+    let peers = call(&ca, "list_sessions", json!({})).await;
+    assert_eq!(
+        peers["result"]["structuredContent"]["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!is_error(
+        &call(&cb, "read_session", json!({"session_id":a.id})).await
+    ));
+    assert!(is_error(
+        &call(&cc, "read_session", json!({"session_id":a.id})).await
+    ));
+    assert!(is_error(&call(&ca,"send_to_session",json!({"session_id":b.id,"from_session":outsider.id,"text":"forged","idempotency_key":"forged"})).await));
+    let args = json!({"session_id":b.id,"text":"Please inspect the parser and report back","idempotency_key":"inspect"});
+    let sent = call(&ca, "send_to_session", args.clone()).await;
+    assert!(!is_error(&sent), "{sent}");
+    let receipt = &sent["result"]["structuredContent"]["receipt"];
+    assert_eq!(receipt["from"], json!(a.id));
+    let retry = call(&ca, "send_to_session", args).await;
+    assert_eq!(
+        retry["result"]["structuredContent"]["receipt"]["id"],
+        receipt["id"]
+    );
+    // B can ask A while A is waiting for B: neither tool waits for a model turn.
+    let back = call(
+        &cb,
+        "send_to_session",
+        json!({"session_id":a.id,"text":"Which parser?","idempotency_key":"clarify"}),
+    )
+    .await;
+    assert!(!is_error(&back));
+    assert!(is_error(
+        &call(
+            &cc,
+            "reply_to_session",
+            json!({"request_id":receipt["id"],"text":"forged","idempotency_key":"reply"})
+        )
+        .await
+    ));
+    assert!(manager.dispatch_peer(&b.id).await.unwrap());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while manager.status(&b.id) == Some(del_agent::SessionStatus::Running) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let answer = call(
+        &cb,
+        "reply_to_session",
+        json!({"request_id":receipt["id"],"text":"Inspected","idempotency_key":"answer"}),
+    )
+    .await;
+    assert!(!is_error(&answer), "{answer}");
+    assert!(manager.peer_blocks_user_queue(&b.id));
+    assert!(
+        is_error(&call(&cb, "session_work", json!({"action":"complete"})).await),
+        "B still needs its own answer from A"
+    );
+    assert_eq!(
+        manager.session_record(&b.id).unwrap().permission_mode,
+        del_agent::PermissionMode::Ask
+    );
+    manager.shutdown().await;
 }

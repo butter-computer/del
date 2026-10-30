@@ -120,6 +120,10 @@ fn substring_matches<'a>(
 pub struct PromptSubmitted;
 pub struct ReplyCompleted;
 pub struct OpenLink(pub String);
+pub struct OpenPeer(pub SessionId);
+pub struct PeerActivity {
+    pub outgoing: bool,
+}
 
 pub struct ChatView {
     pub(super) model: ChatModel,
@@ -139,9 +143,9 @@ pub struct ChatView {
     /// Optimistic user rows awaiting delivery, by queue item id. Row removal
     /// renumbers these, so a failed delivery never removes the wrong row.
     optimistic_rows: std::collections::HashMap<String, usize>,
-    backend: Backend,
+    pub(super) backend: Backend,
     pub queue: crate::followups::Queue,
-    session: Option<SessionId>,
+    pub(super) session: Option<SessionId>,
     /// The session's event stream ended (session closed or app quitting).
     closed: bool,
     loading: bool,
@@ -163,6 +167,8 @@ pub struct ChatView {
 impl EventEmitter<PromptSubmitted> for ChatView {}
 impl EventEmitter<ReplyCompleted> for ChatView {}
 impl EventEmitter<OpenLink> for ChatView {}
+impl EventEmitter<OpenPeer> for ChatView {}
+impl EventEmitter<PeerActivity> for ChatView {}
 
 impl ChatView {
     pub fn goal(&self) -> Option<del_agent::Goal> {
@@ -404,11 +410,23 @@ impl ChatView {
             self.pending_errors.push(message.clone());
         }
         let change = self.model.apply(event);
+        if !self.loading
+            && matches!(change, Some(Change::Pushed(_)))
+            && let AgentEvent::PeerMessage { message } = event
+        {
+            cx.emit(PeerActivity {
+                outgoing: self.session.as_ref() == Some(&message.from),
+            });
+        }
         let delta = match event {
             AgentEvent::AssistantTextDelta { text, .. } => Some(text.as_str()),
             _ => None,
         };
         self.sync_text(change, delta, cx);
+        if matches!(event, AgentEvent::PeerWorkChanged { .. }) && !self.loading {
+            self.send_next(cx);
+        }
+
         if !self.loading
             && matches!(
                 event,
@@ -519,7 +537,10 @@ impl ChatView {
             }
             match change {
                 Change::Pushed(_) => {
-                    if matches!(self.model.blocks.get(ix), Some(Block::User { .. })) {
+                    if matches!(
+                        self.model.blocks.get(ix),
+                        Some(Block::User { .. } | Block::Peer(_))
+                    ) {
                         self.prompt_rows.push(ix);
                     }
                     let count = self.scroller.item_count();
@@ -570,6 +591,21 @@ impl ChatView {
     /// Whether a turn is in flight.
     pub fn is_running(&self) -> bool {
         self.model.is_running()
+    }
+
+    pub fn has_active_work(&self) -> bool {
+        self.is_running()
+            || self
+                .session
+                .as_ref()
+                .and_then(|id| self.backend.manager.peer_work(id))
+                .is_some_and(|w| {
+                    matches!(
+                        w.status,
+                        del_agent::peers::WorkStatus::Active
+                            | del_agent::peers::WorkStatus::Waiting
+                    )
+                })
     }
 
     pub fn is_loading(&self) -> bool {
@@ -625,6 +661,9 @@ impl ChatView {
         let Some(session) = self.session.clone() else {
             return;
         };
+        if !steer && self.backend.manager.peer_blocks_user_queue(&session) {
+            return;
+        }
         let Some(input) = self.queue.begin(&item_id) else {
             return;
         };
@@ -745,7 +784,9 @@ impl ChatView {
             .blocks
             .iter()
             .enumerate()
-            .filter_map(|(ix, block)| matches!(block, Block::User { .. }).then_some(ix))
+            .filter_map(|(ix, block)| {
+                matches!(block, Block::User { .. } | Block::Peer(_)).then_some(ix)
+            })
             .collect();
     }
 
@@ -1052,8 +1093,74 @@ impl Render for ChatView {
             .or_else(|| active_prompt(&prompts, top, at_end));
         let hover = self.rail_hover;
         let previous_hover = self.rail_previous_hover;
+        let work = self
+            .session
+            .as_ref()
+            .and_then(|id| self.backend.manager.peer_work(id));
         v_flex()
             .size_full()
+            .when_some(
+                work.filter(|w| w.status != del_agent::peers::WorkStatus::Complete),
+                |column, work| {
+                    let paused = work.status == del_agent::peers::WorkStatus::Paused;
+                    let label = match work.status {
+                        del_agent::peers::WorkStatus::Paused => {
+                            "Current work paused · queued messages are waiting"
+                        }
+                        del_agent::peers::WorkStatus::Waiting => {
+                            "Waiting for a peer · current task stays active"
+                        }
+                        _ => {
+                            "Current task and peer requests · queued messages follow when finished"
+                        }
+                    };
+                    column.child(
+                        h_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .text_size(zpx(TEXT_SM))
+                            .text_color(rgba(0xffffff8c))
+                            .child(label)
+                            .when(!paused, |row| {
+                                row.child(
+                                    div()
+                                        .id("pause-peer-work")
+                                        .cursor_pointer()
+                                        .child("Pause")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(id) = &this.session {
+                                                let _ = this
+                                                    .backend
+                                                    .manager
+                                                    .control_peer_work(id, "pause");
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when(paused, |row| {
+                                row.child(
+                                    div()
+                                        .id("resume-peer-work")
+                                        .cursor_pointer()
+                                        .child("Resume")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(id) = &this.session
+                                                && let Err(error) = this
+                                                    .backend
+                                                    .manager
+                                                    .control_peer_work(id, "resume")
+                                            {
+                                                this.pending_errors.push(error.to_string());
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    )
+                },
+            )
             .child(
                 h_flex()
                     .flex_1()
@@ -1075,6 +1182,7 @@ impl Render for ChatView {
                                         |(position, ix)| {
                                             let text = match self.model.blocks.get(ix) {
                                                 Some(Block::User { text, .. }) => text.as_str(),
+                                                Some(Block::Peer(message)) => message.text.as_str(),
                                                 _ => "",
                                             };
                                             let tooltip_view = view.downgrade();
@@ -1349,6 +1457,51 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(!view.copied_responses.contains_key(&0))
+        });
+    }
+
+    #[gpui::test]
+    fn peer_receipts_add_one_navigation_tick_and_update_in_place(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager,
+                },
+                None,
+                None,
+                cx,
+            )
+        });
+        let mut message = del_agent::peers::PeerMessage {
+            id: "receipt".into(),
+            idempotency_key: "request".into(),
+            from: SessionId::new("a"),
+            to: SessionId::new("b"),
+            reply_to: None,
+            text: "Inspect the API".into(),
+            created_at_ms: 1,
+            state: del_agent::peers::DeliveryState::Queued,
+            error: None,
+        };
+        view.update(cx, |view,cx| {
+            view.on_event(&AgentEvent::PeerMessage { message:message.clone() },cx);
+            assert_eq!(view.prompt_rows,vec![0]);
+            message.state=del_agent::peers::DeliveryState::Delivered;
+            view.on_event(&AgentEvent::PeerMessage { message:message.clone() },cx);
+            assert_eq!(view.prompt_rows,vec![0]);
+            assert_eq!(view.model.blocks.len(),1);
+            assert!(matches!(&view.model.blocks[0], Block::Peer(m) if m.state == del_agent::peers::DeliveryState::Delivered));
         });
     }
 

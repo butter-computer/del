@@ -534,3 +534,74 @@ async fn failed_stop_reason_is_not_reported_as_completed() {
     ));
     backend.shutdown().await.unwrap();
 }
+
+#[derive(Default)]
+struct PeerCredentials(std::sync::Mutex<Vec<(String, String)>>);
+impl backend::BrowserCredentials for PeerCredentials {
+    fn mint(&self, id: &SessionId) -> std::io::Result<String> {
+        self.0.lock().unwrap().push(("mint".into(), id.to_string()));
+        Ok("test-only-peer-token".into())
+    }
+    fn rebind(&self, from: &SessionId, to: &SessionId) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((from.to_string(), to.to_string()));
+    }
+    fn revoke(&self, id: &SessionId) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("revoke".into(), id.to_string()));
+    }
+    fn mint_shared(&self, _: &SessionId) -> std::io::Result<String> {
+        panic!("ACP identity must not be shared")
+    }
+    fn set_shared_member(&self, _: &SessionId, _: &SessionId, _: bool) {
+        panic!("ACP identity must not be shared")
+    }
+}
+
+#[tokio::test]
+async fn peer_tools_use_negotiated_transport_and_revoke_rebound_identity() {
+    for http in ["1", "0"] {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("mcp.json");
+        let backend = backend(&[
+            ("MCP_CAPTURE", capture.to_str().unwrap()),
+            ("MCP_HTTP", http),
+        ]);
+        let credentials = std::sync::Arc::new(PeerCredentials::default());
+        backend.set_browser_tools(backend::BrowserTools {
+            url: "http://127.0.0.1:12345/mcp".into(),
+            credentials: credentials.clone(),
+            claude_session_config: None,
+            question: None,
+        });
+        let handle = backend.start_session(config()).await.unwrap();
+        let servers: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(capture).unwrap()).unwrap();
+        assert_eq!(servers.as_array().unwrap().len(), 1);
+        assert_eq!(servers[0]["name"], "del");
+        if http == "1" {
+            assert_eq!(servers[0]["type"], "http");
+            assert_eq!(
+                servers[0]["headers"][0]["value"],
+                "Bearer test-only-peer-token"
+            );
+        } else {
+            assert_eq!(servers[0]["args"][0], "--mcp-stdio");
+            assert!(servers[0]["command"].as_str().unwrap().starts_with('/'));
+            assert_eq!(servers[0]["env"][1]["value"], "test-only-peer-token");
+        }
+        backend.close(&handle.id).await.unwrap();
+        let events = credentials.0.lock().unwrap();
+        assert_eq!(events[0].0, "mint");
+        assert_eq!(events[1].0, events[0].1);
+        assert_eq!(events[1].1, handle.id.to_string());
+        assert_eq!(
+            events.last().unwrap(),
+            &("revoke".into(), handle.id.to_string())
+        );
+    }
+}

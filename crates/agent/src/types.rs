@@ -190,6 +190,12 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    PeerMessage {
+        message: crate::peers::PeerMessage,
+    },
+    PeerWorkChanged {
+        work: Option<crate::peers::PeerWork>,
+    },
     GoalUpdated {
         goal: Option<crate::Goal>,
     },

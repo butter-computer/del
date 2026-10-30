@@ -12,7 +12,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 mod forks;
+mod peers;
 pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
+pub use peers::{ContextChunk, ContextCursor, SessionContext};
 
 /// Everything the manager broadcasts to `subscribe_all` listeners.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +90,7 @@ struct Standby {
 }
 
 struct Shared {
+    peers: Mutex<crate::peers::PeerStore>,
     backends: HashMap<Provider, Arc<dyn AgentBackend>>,
     account_backends: Mutex<HashMap<(Provider, String), Arc<dyn AgentBackend>>>,
     browser_tools: Mutex<Option<BrowserTools>>,
@@ -355,12 +358,21 @@ impl SessionManager {
         backends: impl IntoIterator<Item = Arc<dyn AgentBackend>>,
     ) -> Result<Self> {
         let (all_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let index = SessionIndex::open(index_path.as_ref())?;
+        let mut peers =
+            crate::peers::PeerStore::open(index_path.as_ref().with_extension("peers.json"))?;
+        for record in index.list() {
+            if peers.project(&record.id).is_none() && record.cwd.is_absolute() {
+                peers.register(&record.id, &record.cwd)?;
+            }
+        }
         Ok(Self {
             shared: Arc::new(Shared {
                 backends: backends.into_iter().map(|b| (b.provider(), b)).collect(),
                 account_backends: Mutex::new(HashMap::new()),
                 browser_tools: Mutex::new(None),
-                index: Mutex::new(SessionIndex::open(index_path.as_ref())?),
+                index: Mutex::new(index),
+                peers: Mutex::new(peers),
                 live: Mutex::new(HashMap::new()),
                 resume_locks: Mutex::new(HashMap::new()),
                 all_tx,
@@ -477,7 +489,34 @@ impl SessionManager {
     fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> SessionHandle {
         let id = handle.id.clone();
         let mut rx = handle.subscribe();
-        let restored = handle.take_history();
+        let mut restored = handle.take_history().to_vec();
+        let messages = self.peer_messages(&id);
+        restored.retain(|event| !matches!(event, AgentEvent::UserMessage { text } if text == peers::CONTINUE_WORK));
+        for event in &mut restored {
+            // Snapshots may predate native-ID rebinding or delivery updates.
+            // The durable mailbox owns the canonical endpoints and receipt.
+            if let AgentEvent::PeerMessage { message } = event
+                && let Some(current) = messages.iter().find(|m| m.id == message.id)
+            {
+                *message = current.clone();
+            }
+            if let AgentEvent::UserMessage { text } = event
+                && let Some(message) = messages.iter().find(|m| {
+                    m.to == id && m.matches_prompt(text, |endpoint| self.resolve_peer(endpoint))
+                })
+            {
+                *event = AgentEvent::PeerMessage {
+                    message: message.clone(),
+                };
+            }
+        }
+        for message in messages {
+            if !restored.iter().any(
+                |e| matches!(e, AgentEvent::PeerMessage { message: old } if old.id == message.id),
+            ) {
+                restored.push(AgentEvent::PeerMessage { message });
+            }
+        }
         // Publish the attachment before the pump can consume its first event.
         let mut live = self.shared.live.lock().unwrap();
         let old = live.remove(&id);
@@ -714,6 +753,12 @@ impl SessionManager {
             let _ = backend.close(&handle.id).await;
             return Err(error);
         }
+        if applied_config.cwd.is_absolute()
+            && let Err(error) = self.set_peer_project(&handle.id, &applied_config.cwd)
+        {
+            let _ = backend.close(&handle.id).await;
+            return Err(error);
+        }
         Ok(self.attach(handle, applied_config))
     }
 
@@ -831,6 +876,16 @@ impl SessionManager {
     }
 
     pub async fn send_prompt(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        self.send_prompt_kind(id, input, peers::SendOrigin::User)
+            .await
+    }
+
+    async fn send_prompt_kind(
+        &self,
+        id: &SessionId,
+        input: UserInput,
+        origin: peers::SendOrigin<'_>,
+    ) -> Result<()> {
         let lock = self
             .shared
             .resume_locks
@@ -840,6 +895,19 @@ impl SessionManager {
             .or_default()
             .clone();
         let _sending = lock.lock().await;
+        if !matches!(origin, peers::SendOrigin::User)
+            && matches!(
+                self.status(id),
+                Some(SessionStatus::Running | SessionStatus::WaitingApproval)
+            )
+        {
+            return Err(AgentError::Busy("a turn is already running".into()));
+        }
+        if matches!(origin, peers::SendOrigin::User) && self.peer_blocks_user_queue(id) {
+            return Err(AgentError::Busy(
+                "current work and peer requests must finish before queued user messages".into(),
+            ));
+        }
         if self.status(id) == Some(SessionStatus::Error) {
             self.resume_locked(id).await?;
         }
@@ -892,8 +960,34 @@ impl SessionManager {
         // Local commands can finish before the call returns. Never overwrite
         // their completion (or a very fast provider result) with Running.
         let previous = self.status(id).unwrap_or(SessionStatus::Idle);
-        let title_input = AgentEvent::UserMessage {
-            text: input.text.clone(),
+        let title_input = match origin {
+            peers::SendOrigin::Peer(message_id) => {
+                self.shared.peers.lock().unwrap().claim(message_id)?;
+                None
+            }
+            peers::SendOrigin::Continuation => {
+                let peers = self.shared.peers.lock().unwrap();
+                if peers.pending(id).is_some()
+                    || peers
+                        .work(id)
+                        .is_none_or(|w| w.status != crate::peers::WorkStatus::Active)
+                {
+                    return Err(AgentError::Busy(
+                        "Peer work changed before continuation".into(),
+                    ));
+                }
+                None
+            }
+            peers::SendOrigin::User => {
+                // Reconfiguration/command discovery may have awaited while a
+                // peer arrived. Arbitrate again immediately before submission.
+                if self.peer_blocks_user_queue(id) {
+                    return Err(AgentError::Busy("Current work must finish first".into()));
+                }
+                Some(AgentEvent::UserMessage {
+                    text: input.text.clone(),
+                })
+            }
         };
         let title_position = {
             let mut live = self.shared.live.lock().unwrap();
@@ -901,7 +995,9 @@ impl SessionManager {
                 .get_mut(id)
                 .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
             let position = session.history.len();
-            session.history.push(title_input.clone());
+            if let Some(event) = &title_input {
+                session.history.push(event.clone());
+            }
             position
         };
         self.shared.set_status(id, SessionStatus::Running);
@@ -916,7 +1012,9 @@ impl SessionManager {
         };
         if let Err(error) = result {
             if let Some(session) = self.shared.live.lock().unwrap().get_mut(id)
-                && session.history.get(title_position) == Some(&title_input)
+                && title_input
+                    .as_ref()
+                    .is_some_and(|event| session.history.get(title_position) == Some(event))
             {
                 session.history.remove(title_position);
             }
@@ -924,13 +1022,26 @@ impl SessionManager {
             self.shared.transition(id, |current| {
                 (current == SessionStatus::Running).then_some(previous)
             });
+            if let peers::SendOrigin::Peer(message_id) = origin {
+                let state = if matches!(error, AgentError::Busy(_)) {
+                    crate::peers::DeliveryState::Queued
+                } else {
+                    crate::peers::DeliveryState::Uncertain
+                };
+                let message = self.shared.peers.lock().unwrap().set_delivery(
+                    message_id,
+                    state,
+                    Some(error.to_string()),
+                )?;
+                self.publish_peer(&message);
+            }
             return Err(error);
         }
         if ordinary_prompt {
             self.consume_fork_context(id);
         }
         let _ = self.shared.index.lock().unwrap().update(id, |r| {
-            if r.title.is_none() && !title.is_empty() {
+            if matches!(origin, peers::SendOrigin::User) && r.title.is_none() && !title.is_empty() {
                 r.title = Some(title);
             }
         });
@@ -1103,6 +1214,7 @@ impl SessionManager {
     }
 
     pub async fn interrupt(&self, id: &SessionId) -> Result<()> {
+        self.shared.peers.lock().unwrap().pause(id)?;
         self.session_backend(id)?.interrupt(id).await
     }
 
@@ -1190,6 +1302,7 @@ impl SessionManager {
         self.shared.resume_locks.lock().unwrap().remove(id);
         self.shared.title_generation.lock().unwrap().remove(id);
         self.shared.title_polls.lock().unwrap().remove(id);
+        self.forget_peer_session(id)?;
         self.shared.index.lock().unwrap().remove(id)
     }
 

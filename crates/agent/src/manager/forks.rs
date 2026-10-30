@@ -34,7 +34,7 @@ pub struct ForkResult {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkRecord {
-    parent: Option<SessionId>,
+    pub(super) parent: Option<SessionId>,
     inherited: String,
     pending: Option<String>,
 }
@@ -43,6 +43,8 @@ pub struct ForkRecord {
 /// approvals are deliberately not part of this representation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ForkSnapshot {
+    #[serde(default)]
+    session_id: Option<SessionId>,
     pub config: SessionConfig,
     pub account_id: Option<String>,
     parent: Option<SessionId>,
@@ -69,6 +71,10 @@ fn transcript(events: &[AgentEvent]) -> String {
                     assistant = text.clone();
                 }
                 flush(&mut rows, &mut assistant);
+            }
+            AgentEvent::PeerMessage { message } => {
+                flush(&mut rows, &mut assistant);
+                rows.push(serde_json::json!({"role":"peer", "message":message}));
             }
             AgentEvent::UserMessage { text } => {
                 flush(&mut rows, &mut assistant);
@@ -149,6 +155,7 @@ impl SessionManager {
             });
         }
         Ok(ForkSnapshot {
+            session_id: Some(id.clone()),
             config: record.config(),
             account_id: record.account_id,
             parent: fork.parent,
@@ -200,6 +207,16 @@ impl SessionManager {
         };
         let recorded = self.shared.index.lock().unwrap().upsert_temporary(record);
         if let Err(error) = recorded {
+            let _ = backend.close(&handle.id).await;
+            return Err(error);
+        }
+        let registered = (|| -> Result<()> {
+            if let Some(previous) = &snapshot.session_id {
+                self.rebind_peer(previous, &handle.id)?;
+            }
+            self.register_inherited_peer(&handle.id, snapshot.parent.as_ref(), &snapshot.config.cwd)
+        })();
+        if let Err(error) = registered {
             let _ = backend.close(&handle.id).await;
             return Err(error);
         }
@@ -446,6 +463,16 @@ impl SessionManager {
             let _ = self.shared.index.lock().unwrap().remove(&handle.id);
             return Err(error);
         }
+        let registered = (|| -> Result<()> {
+            if retain_history && let Some(previous) = &parent {
+                self.rebind_peer(previous, &handle.id)?;
+            }
+            self.register_inherited_peer(&handle.id, original_parent.as_ref(), &config.cwd)
+        })();
+        if let Err(error) = registered {
+            let _ = backend.close(&handle.id).await;
+            return Err(error);
+        }
         Ok(ForkResult {
             handle: self.attach(handle, config),
             context,
@@ -597,6 +624,155 @@ mod tests {
             .unwrap()
             .history
             .push(AgentEvent::UserMessage { text: text.into() });
+    }
+
+    #[tokio::test]
+    async fn peer_mailbox_survives_restart_reconfiguration_and_old_session_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let backend = Arc::new(Recorder::default());
+        let backends = || [backend.clone() as Arc<dyn AgentBackend>];
+        let manager = SessionManager::new(&path, backends()).unwrap();
+        let parent = manager.start_session(config()).await.unwrap();
+        // A worktree's project identity differs from its cwd.
+        let project = dir.path().join("project-root");
+        manager.set_peer_project(&parent.id, &project).unwrap();
+        let child = manager
+            .fork(
+                ForkSource::Session(parent.id.clone()),
+                ForkLifetime::Temporary,
+            )
+            .await
+            .unwrap();
+        let old = child.handle.id.clone();
+        let request = manager
+            .send_to_peer(
+                &parent.id,
+                &old,
+                "pending-request",
+                "Please inspect the parser",
+            )
+            .unwrap();
+        let outbound = manager
+            .send_to_peer(
+                &old,
+                &parent.id,
+                "outgoing-request",
+                "Please check the schema",
+            )
+            .unwrap();
+        // Native providers persist deliveries as user-input envelopes with the
+        // IDs that existed at delivery time, not canonical PeerMessage events.
+        let mut snapshot = manager.export_fork(&old).unwrap();
+        snapshot.history.retain(|event| {
+            !matches!(event,
+            AgentEvent::PeerMessage { message } if message.id == request.id)
+        });
+        snapshot.history.push(AgentEvent::UserMessage {
+            text: request.prompt(),
+        });
+        manager.shutdown().await;
+
+        let manager = SessionManager::new(&path, backends()).unwrap();
+        let restored = manager.restore_fork(snapshot).await.unwrap();
+        assert_eq!(manager.resolve_peer(&old), restored.handle.id);
+        let assert_canonical_history = |manager: &SessionManager, id: &SessionId| {
+            let history = manager.subscribe_with_history(id).unwrap().0;
+            assert!(
+                !history.iter().any(|event| matches!(event,
+                AgentEvent::UserMessage { text } if text.starts_with("<del_peer_message"))),
+                "restored provider envelopes must become attributed receipts"
+            );
+            for receipt in manager.peer_messages(id) {
+                assert!(
+                    history.iter().any(|event| matches!(
+                        event, AgentEvent::PeerMessage { message } if message == &receipt
+                    )),
+                    "snapshot must use the current mailbox receipt"
+                );
+            }
+            assert!(
+                history.iter().any(|event| matches!(
+                    event, AgentEvent::PeerMessage { message }
+                        if message.id == outbound.id && message.from == *id
+                )),
+                "outgoing messages must retain their direction after rebinding"
+            );
+        };
+        assert_canonical_history(&manager, &restored.handle.id);
+        let canonical = manager
+            .peer_messages(&restored.handle.id)
+            .into_iter()
+            .find(|m| m.id == request.id)
+            .unwrap();
+        assert!(
+            !canonical.matches_prompt(&format!("{} extra instructions", request.prompt()), |id| {
+                manager.resolve_peer(id)
+            })
+        );
+        let mut forged = request.clone();
+        forged.from = SessionId::new("unrelated-sender");
+        assert!(!canonical.matches_prompt(&forged.prompt(), |id| manager.resolve_peer(id)));
+        assert_eq!(
+            manager.pending_peer(&restored.handle.id).unwrap().id,
+            request.id
+        );
+        assert!(manager.peer_blocks_user_queue(&restored.handle.id));
+        assert_eq!(
+            manager
+                .shared
+                .peers
+                .lock()
+                .unwrap()
+                .project(&restored.handle.id),
+            Some(project.as_path())
+        );
+        assert!(
+            backend.prompts.lock().unwrap().is_empty(),
+            "restoration cannot replay work"
+        );
+
+        let mut next = config();
+        next.model = Some("replacement-model".into());
+        let replacement = manager
+            .reconfigure_fork(&restored.handle.id, next, None)
+            .await
+            .unwrap();
+        manager.delete(&restored.handle.id).await.unwrap();
+        assert_eq!(manager.resolve_peer(&old), replacement.handle.id);
+        assert_canonical_history(&manager, &replacement.handle.id);
+        assert_eq!(
+            manager.pending_peer(&replacement.handle.id).unwrap().id,
+            request.id
+        );
+        let retry = manager
+            .send_to_peer(
+                &parent.id,
+                &old,
+                "pending-request",
+                "Please inspect the parser",
+            )
+            .unwrap();
+        assert_eq!(retry.id, request.id);
+        let reply = manager
+            .reply_to_peer(
+                &replacement.handle.id,
+                &request.id,
+                "reply",
+                "Parser checked",
+            )
+            .unwrap();
+        assert_eq!(reply.to, parent.id);
+        assert_eq!(reply.from, replacement.handle.id);
+        assert_eq!(
+            manager
+                .session_record(&replacement.handle.id)
+                .unwrap()
+                .permission_mode,
+            PermissionMode::Plan
+        );
+        assert!(backend.prompts.lock().unwrap().is_empty());
+        manager.shutdown().await;
     }
 
     #[tokio::test]

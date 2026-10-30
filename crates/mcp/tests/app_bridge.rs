@@ -136,7 +136,7 @@ async fn real_manager_and_terminal_context_status_notify_and_summary() {
         .await
         .unwrap();
     f.handle.upsert_terminal(terminal("shell", None), None);
-    // Unrelated chats and terminals stay private to their own sessions.
+    // Unrelated projects and plain shells stay outside the peer scope.
     let list = call(&f.config, "list_sessions", json!({})).await;
     let rows = list["structuredContent"]["sessions"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
@@ -266,7 +266,7 @@ async fn visible_question_response_does_not_block_other_requests() {
 }
 
 #[tokio::test]
-async fn spawn_and_send_dispatch_real_terminal_operations_with_family_scope() {
+async fn terminal_peers_queue_until_safe_boundary_and_can_pull_without_interrupting() {
     let mut f = Fixture::new(Default::default()).await;
     let config = f.config.clone();
     let cwd = f._dir.path().to_path_buf();
@@ -302,36 +302,81 @@ async fn spawn_and_send_dispatch_real_terminal_operations_with_family_scope() {
         .handle
         .launch_config(&SessionId::new("child"), Provider::Codex)
         .unwrap();
-    for (config, target) in [(f.config.clone(), "child"), (child, "parent")] {
-        let task = tokio::spawn(async move {
-            call(
-                &config,
-                "send_to_session",
-                json!({"session_id":target,"text":"next step"}),
-            )
+    // Project membership is host-owned, independent of the spawn family.
+    f.manager
+        .set_peer_project(&SessionId::new("child"), &std::env::temp_dir())
+        .unwrap();
+    let receipt = call(
+        &f.config,
+        "send_to_session",
+        json!({"session_id":"child","text":"next step","idempotency_key":"first"}),
+    )
+    .await;
+    assert_eq!(receipt["structuredContent"]["receipt"]["state"], "queued");
+    // Unknown/working terminal status cannot cause typing into a CLI.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), f.events.recv())
             .await
-        });
-        match f.event().await {
-            BridgeEvent::SendTerminal {
-                caller,
-                target,
-                text,
-                reply,
-            } => {
-                assert_ne!(caller, target);
-                assert_eq!(text, "next step");
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected terminal send event"),
+            .is_err()
+    );
+    let pulled = call(&child, "session_work", json!({"action":"receive"})).await;
+    assert_eq!(pulled["structuredContent"]["message"]["text"], "next step");
+    let request = pulled["structuredContent"]["message"]["id"]
+        .as_str()
+        .unwrap();
+    let replied = call(
+        &child,
+        "reply_to_session",
+        json!({"request_id":request,"text":"done","idempotency_key":"answer"}),
+    )
+    .await;
+    assert_eq!(replied["isError"], false);
+    let _ = call(
+        &f.config,
+        "report_status",
+        json!({"state":"idle","summary":"Ready for peer input"}),
+    )
+    .await;
+    assert!(matches!(f.event().await, BridgeEvent::Status { .. }));
+    match f.event().await {
+        BridgeEvent::SendTerminal {
+            caller,
+            target,
+            text,
+            reply,
+        } => {
+            assert_eq!(caller.as_str(), "child");
+            assert_eq!(target.as_str(), "parent");
+            assert!(text.contains("del_peer_message") && text.contains("done"));
+            reply.send(Ok(())).unwrap();
         }
-        assert_eq!(task.await.unwrap()["isError"], false);
+        _ => panic!("expected idle-terminal wakeup"),
     }
+    // Repeated tool retries return the same receipt and never replay a send.
+    let again = call(
+        &f.config,
+        "send_to_session",
+        json!({"session_id":"child","text":"next step","idempotency_key":"first"}),
+    )
+    .await;
+    assert_eq!(
+        again["structuredContent"]["receipt"]["id"],
+        receipt["structuredContent"]["receipt"]["id"]
+    );
+    let context = call(
+        &f.config,
+        "read_session",
+        json!({"session_id":"child","max_characters":1000}),
+    )
+    .await;
+    assert_eq!(context["isError"], false);
+    assert!(context.to_string().contains("initial child output"));
     f.handle.upsert_terminal(terminal("stranger", None), None);
     assert_eq!(
         call(
             &f.config,
             "send_to_session",
-            json!({"session_id":"stranger","text":"no"})
+            json!({"session_id":"stranger","text":"no","idempotency_key":"denied"})
         )
         .await["isError"],
         true
@@ -542,14 +587,14 @@ async fn opaque_terminal_lease_is_generation_safe_and_cancels_pending_questions(
     )
     .await;
     assert_eq!(summary["structuredContent"]["info"]["id"], "leased");
-    // Other sessions cannot read it.
+    // Other agents in the same project can read it.
     let summary = call(
         &f.config,
         "get_session_summary",
         json!({"session_id":"leased"}),
     )
     .await;
-    assert_eq!(summary["isError"], true);
+    assert_eq!(summary["isError"], false);
 
     let claude = f
         .handle
@@ -571,7 +616,7 @@ async fn shell_registration_has_context_without_agent_lease() {
             .unwrap()
             .is_none()
     );
-    // Shells are not in any agent's spawn family, so agents cannot read them.
+    // Plain shells are not agent peers.
     let summary = call(
         &f.config,
         "get_session_summary",
@@ -684,10 +729,20 @@ async fn browser_commands_reach_ui_and_chat_credentials_are_restricted() {
     };
     let chat_a = credential(tools.credentials.mint(&a).unwrap());
     let (_, listing) = post(&chat_a, "tools/list", json!({})).await;
-    assert_eq!(listing["result"]["tools"].as_array().unwrap().len(), 1);
-    assert_eq!(listing["result"]["tools"][0]["name"], "browser");
-    let denied = call(&chat_a, "list_sessions", json!({})).await;
-    assert_eq!(denied["isError"], true);
+    let names: Vec<_> = listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"browser")
+            && names.contains(&"send_to_session")
+            && names.contains(&"read_session")
+    );
+    assert!(!names.contains(&"spawn_session"));
+    let peers = call(&chat_a, "list_sessions", json!({})).await;
+    assert_eq!(peers["isError"], false);
     // Chat A cannot reach chat B's browser.
     let denied = call(
         &chat_a,

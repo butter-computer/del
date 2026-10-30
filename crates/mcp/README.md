@@ -1,6 +1,6 @@
 # del-mcp
 
-Del's MCP server for terminal agents and Codex/Claude/OpenCode chat browser access.
+Del's MCP server for project peer sessions, browser access, and terminal agents.
 No GPUI dependency: the server talks to the app through the `McpHost` trait.
 
 MCP is implemented directly (JSON-RPC 2.0: `initialize`, `ping`, `tools/list`,
@@ -20,24 +20,23 @@ auth, scoping and the blocking `ask_user`.
 - `Host` must be loopback with our port and `Origin`, if present, must be
   loopback with our port too, so pages on other local ports are rejected
   (DNS-rebinding / browser protection). 1 MiB body limit.
-- Scoping: a caller's *family* is its own session, the sessions it spawned, and
-  the session that spawned it. `list_sessions`, `get_session_summary`,
-  `send_to_session` (family minus self) and `browser` only reach the family;
-  `report_status` only yourself. Spawn quotas (`max_spawn_per_session` 8,
-  `max_spawn_total` 32) count live children: a child stops counting once its
-  credentials are revoked, and a reservation is released even if the client
-  disconnects mid-spawn. `forget_session` drops a deleted session's family links.
-  `ask_user` times out after `ask_timeout` (30 min). Input lengths are capped.
+- Peer discovery, context, requests, and replies are scoped to the host's Del project
+  identity, including sibling worktrees. Every operation checks membership again.
+  Browser access retains its separate session/family boundary. `report_status`
+  only affects the authenticated caller. Spawn quotas and question timeouts are
+  unchanged; plain shells are not agent peers.
 - No raw filesystem or shell tools. The browser tool can access websites and
   interact with signed-in pages. Tool failures return `isError: true`;
   malformed arguments return JSON-RPC `-32602`.
 - `Credentials` and `LaunchConfig` redact tokens in `Debug`. Claude config files
   have unique names, are created exclusively, and use mode 0600. Codex gets the
   terminal token via an env var, never argv. Each Codex chat receives its own
-  browser-only credential through thread/start or thread/resume (a new thread's
-  provisional credential is rebound to its thread id once Codex assigns it);
-  Claude chat gets a private MCP config file. Browser-only credentials cannot
-  call coordination tools.
+  chat credential through thread/start or thread/resume (provisional credentials
+  are rebound to the native ID). Claude gets a private MCP config. Each OpenCode
+  chat owns a native server because OpenCode's MCP settings are process-wide;
+  accounts/chats never share peer identity. ACP receives HTTP MCP configuration
+  when supported, or Del's `--mcp-stdio` proxy. Credentials are revoked on close.
+  Legacy browser-only credentials remain restricted to browser operations.
 
 ## Tools
 
@@ -54,7 +53,10 @@ be megabytes, are sent once as `content[0].text` JSON.
 | `list_sessions` | none | `{sessions: [{id, provider, cwd, title, status, reported_state, is_self}]}` |
 | `get_session_summary` | `session_id` | `{info, reported_summary, last_output}` |
 | `spawn_session` | `provider` (`codex\|claude\|opencode`), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
-| `send_to_session` | `session_id` (spawned child or parent), `text` (≤20000) | text `sent` |
+| `read_session` | `session_id`, `cursor?`, `max_characters?` (1000–64000) | recorded public event chunks, next cursor, retention notice |
+| `send_to_session` | `session_id`, `text` (≤20000), `idempotency_key` | durable queued receipt; does not wait for an answer |
+| `reply_to_session` | `request_id`, `text`, `idempotency_key` | reply receipt, routed to the original sender |
+| `session_work` | `action`: `get`, `receive`, `complete`, `wait`, `pause`, `resume` | current work state; `receive` pulls a terminal agent's next peer message |
 | `notify` | `title` (≤120), `body` (≤1000) | text `notified` |
 
 `initialize` returns instructions telling the agent its own session id.
@@ -90,27 +92,30 @@ content. Page text and scripts have bounded sizes. Page `alert`/`confirm`/`promp
 dialogs name the page origin, and a burst of more than three in ten seconds
 blocks further dialogs from that site; hidden browsers dismiss them.
 
-Claude and Codex chats get a credential bound to their own session, so they
-reach only their own browser and their spawn family's. OpenCode configures MCP
-per workspace server rather than per session, so the chats of one OpenCode
-workspace share a credential that reaches only those chats, and of them only
-the ones currently running a turn. Terminal agents retain the complete tool set. Page text is untrusted content, not instructions. Website actions remain
-subject to the user's authorization, including forms and signed-in accounts.
+Chat credentials expose browser, their own goal, and peer tools. They cannot
+spawn sessions or notify as another agent. Website actions remain subject to user
+authorization; peer messages do not expand browser or filesystem permissions.
 
 ## Host contract
 
-```rust
-#[async_trait]
-trait McpHost { browser, report_status, ask_user, list_sessions, session_summary,
-                spawn_session, send_to_session, notify }  // each gets `caller: &SessionId`
-```
+`McpHost` receives the authenticated caller on every operation. `peer_manager`
+provides the durable mailbox and task state; `queue_peer`, `reply_peer`,
+`read_context`, `peer_work`, and `authorize_peer` form the collaboration seam.
+No peer operation uses provider steering to interrupt an existing turn.
 
-- `MockHost` records calls; `ask_user` parks until a test calls `take_question()`.
-- `ManagerHost::new(SessionManager, Arc<dyn McpUi>)` implements everything over
-  `del_agent::SessionManager` (spawn = `start_session` + `send_prompt`; send =
-  `steer` when running, else `send_prompt`). The app only implements `McpUi`:
-  `ask_user` (async, dropping the future cancels it), `status_reported`, `notify`.
-  TUI-mode sessions that are not manager-backed need their own `McpHost`.
+The app scheduler delivers pending peer messages at a safe provider input boundary.
+It then continues original work until the agent explicitly completes it. Queued
+user messages stay blocked across turns, replies, waits, and restarts. Failed or
+ambiguous deliveries need visible recovery rather than automatic replay.
+
+Terminal agents pull messages with `session_work receive` at safe tool boundaries.
+An explicit `report_status idle/done` permits waking that CLI with queued input;
+unknown, working, blocked, or stopped terminals are never typed into. Terminal
+context exposes the recorded output tail plus exchanges, with that limitation in
+each response. Native CLI user queues are controlled by the CLI, unlike Del's
+managed chat queue. Use chat mode for Del's strict peer-before-user scheduling.
+
+See [the peer contract](../../docs/peer-sessions.md) for task semantics and recovery.
 
 ## Launching agents
 
@@ -134,32 +139,8 @@ and prints ready-to-use commands for both CLIs.
 
 ## Verification
 
-`cargo test -p del-mcp` exercises HTTP auth/revocation, caller identity,
-parent/child messaging, spawn quotas, blocked questions and timeout, all eight
-tools, the stdio proxy, launch-file privacy, malformed requests, and the
-`ManagerHost` adapter with a real `SessionManager` and mock backend.
-
-Codex browser configuration was checked through the installed app-server's
-thread/start, using a local MCP fixture without sending a model prompt. Native
-WebKit validation is available through `python3 scripts/test-browser.py`.
-
-App wiring remains with the TUI integration: keep the server alive for the
-app lifetime, register each session before launch, apply its `LaunchConfig`,
-and revoke credentials and remove launch files when the session ends. Route
-`McpUi` callbacks onto the UI thread; resolve `ask_user` when the person answers.
-
-### Claude chat goal controls
-
-Claude streaming chats get a separate credential scoped to their own session,
-exposing only `browser` and `goal`. The `goal` tool accepts `get`, `set` with an
-objective, `resume`, and `clear`; it does not accept a target session ID. Goal
-mutations queue native commands behind the calling turn and return `queued: true`.
-The model must finish that turn before native confirmation updates the goal card.
-Ordinary browser-only credentials cannot control goals. Other session tools and
-sibling spawning are not exposed to these chat credentials.
-
-OpenCode 2.x receives launch-local MCP configuration through
-`OPENCODE_CONFIG_CONTENT` in standalone terminal mode. Its chat adapter connects
-a browser-only credential shared by that workspace's chats to its private native server and attaches Del browser
-routing through native session instruction entries. Live integration checks in
-`app_bridge.rs` exercise cold startup and browser requests through OpenCode.
+`cargo test -p del-mcp` exercises authentication/revocation, project isolation,
+forged identity/reply rejection, context paging, durable request/reply routing,
+peer work completion, terminal safe-boundary delivery, browser isolation, spawn
+quotas, question timeouts, and the stdio proxy. Real provider checks are explicitly
+ignored by default because they require local authentication and spend tokens.

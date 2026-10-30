@@ -221,7 +221,11 @@ impl ClaudeBackend {
         if self.browser_tools.lock().unwrap().is_some() {
             a.extend([
                 "--append-system-prompt".into(),
-                del_agent::backend::BROWSER_INSTRUCTIONS.into(),
+                format!(
+                    "{}\n\n{}",
+                    del_agent::backend::BROWSER_INSTRUCTIONS,
+                    del_agent::backend::PEER_INSTRUCTIONS
+                ),
             ]);
         }
         a.extend(self.options.extra_args.iter().cloned());
@@ -883,11 +887,12 @@ mod model_config_tests {
         };
         for flag in ["--session-id", "--resume"] {
             let args = backend.args(&config, [flag, "test"]);
-            assert!(args.windows(2).any(|pair| pair
-                == [
-                    "--append-system-prompt",
-                    del_agent::backend::BROWSER_INSTRUCTIONS
-                ]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--append-system-prompt"
+                        && pair[1].contains(del_agent::backend::BROWSER_INSTRUCTIONS)
+                        && pair[1].contains(del_agent::backend::PEER_INSTRUCTIONS))
+            );
             // Claude chats get their own MCP config at spawn, never a shared one.
             assert!(!args.contains(&"--mcp-config".into()));
             assert!(!args.contains(&"--system-prompt".into()));

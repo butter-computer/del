@@ -56,6 +56,7 @@ pub struct SideChat {
 }
 impl EventEmitter<SendToMain> for SideChat {}
 impl EventEmitter<crate::chat::OpenLink> for SideChat {}
+impl EventEmitter<crate::chat::OpenPeer> for SideChat {}
 
 impl SideChat {
     pub fn is_unread(&self, cx: &App) -> bool {
@@ -99,12 +100,16 @@ impl SideChat {
         }
     }
 
+    pub(crate) fn session_id(&self) -> Option<&SessionId> {
+        self.session.as_ref()
+    }
+
     pub fn is_working(&self, cx: &App) -> bool {
         !self.closed
             && self
                 .chat
                 .as_ref()
-                .is_some_and(|chat| chat.read(cx).is_running())
+                .is_some_and(|chat| chat.read(cx).has_active_work())
     }
 
     fn report_activity(&self, submitted: bool, cx: &mut App) {
@@ -357,6 +362,13 @@ impl SideChat {
                             cx.notify();
                         })
                         .detach();
+                        cx.subscribe(&chat, |this, _, event: &crate::chat::PeerActivity, cx| {
+                            this.report_activity(event.outgoing, cx);
+                            if !event.outgoing && !this.closed {
+                                this.set_unread(!this.is_visible(cx), cx);
+                            }
+                        })
+                        .detach();
                         cx.subscribe(&chat, |this, _, _: &crate::chat::ReplyCompleted, cx| {
                             if !this.closed {
                                 this.set_unread(!this.is_visible(cx), cx);
@@ -365,6 +377,10 @@ impl SideChat {
                         .detach();
                         cx.subscribe(&chat, |_, _, event: &crate::chat::OpenLink, cx| {
                             cx.emit(crate::chat::OpenLink(event.0.clone()))
+                        })
+                        .detach();
+                        cx.subscribe(&chat, |_, _, event: &crate::chat::OpenPeer, cx| {
+                            cx.emit(crate::chat::OpenPeer(event.0.clone()))
                         })
                         .detach();
                         this.chat = Some(chat);
@@ -602,30 +618,38 @@ impl SideChat {
     pub fn forget(&mut self, cx: &mut gpui::Context<Self>) {
         self.set_unread(false, cx);
         let path = self.path();
-        self.release(cx);
+        self.release_inner(true, cx);
         if let Some(path) = path {
             let _ = std::fs::remove_file(path);
         }
     }
     pub fn release(&mut self, cx: &mut gpui::Context<Self>) {
+        self.release_inner(false, cx);
+    }
+    fn release_inner(&mut self, forget: bool, cx: &mut gpui::Context<Self>) {
         self.save(cx);
         self.closed = true;
         self.report_activity(false, cx);
         self.chat = None;
-        self.close_backend();
+        self.close_backend(forget);
     }
-    fn close_backend(&mut self) {
+    fn close_backend(&mut self, forget: bool) {
         if let Some(id) = self.session.take() {
             let backend = self.context.backend.clone();
             backend.runtime.spawn(async move {
-                let _ = backend.manager.delete(&id).await;
+                if forget {
+                    let _ = backend.manager.delete(&id).await;
+                } else {
+                    // View disposal and app shutdown preserve the durable mailbox.
+                    let _ = backend.manager.close(&id).await;
+                }
             });
         }
     }
 }
 impl Drop for SideChat {
     fn drop(&mut self) {
-        self.close_backend();
+        self.close_backend(false);
     }
 }
 
@@ -1290,6 +1314,9 @@ mod tests {
                 });
                 side.submit(window, cx);
                 assert!(state.read(cx).tab_working(&parent_tab));
+                manager
+                    .send_to_peer(&id, &parent.id, "release-check", "Keep this request")
+                    .unwrap();
                 side.release(cx);
                 assert!(!state.read(cx).tab_working(&parent_tab));
             })
@@ -1301,6 +1328,14 @@ mod tests {
             runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         }
         assert!(!manager.is_live(&id));
+        assert!(
+            manager
+                .peer_messages(&id)
+                .iter()
+                .any(|message| message.idempotency_key == "release-check"
+                    && message.state == del_agent::peers::DeliveryState::Queued),
+            "disposing a saved Side chat must not cancel its mailbox"
+        );
         assert!(manager.is_live(&parent.id));
         runtime.block_on(manager.shutdown());
     }

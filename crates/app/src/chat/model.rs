@@ -72,6 +72,7 @@ pub struct ApprovalBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
+    Peer(del_agent::peers::PeerMessage),
     User {
         text: String,
         steer: bool,
@@ -279,6 +280,19 @@ impl ChatModel {
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::PeerMessage { message } => {
+                if let Some(ix) = self
+                    .blocks
+                    .iter()
+                    .position(|block| matches!(block, Block::Peer(old) if old.id == message.id))
+                {
+                    self.blocks[ix] = Block::Peer(message.clone());
+                    Some(Change::Updated(ix))
+                } else {
+                    Some(self.push(Block::Peer(message.clone())))
+                }
+            }
+            AgentEvent::PeerWorkChanged { .. } => None,
             AgentEvent::GoalUpdated { goal } => {
                 if let (Some(old), Some(next)) = (self.goal(), goal)
                     && old.objective == next.objective

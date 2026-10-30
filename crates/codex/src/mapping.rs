@@ -18,6 +18,8 @@ pub enum ApprovalMethod {
     FileChange,
     /// Carries the permission profile the agent asked for.
     Permissions(Value),
+    /// A confirmation-only MCP form; accepting it grants only this call.
+    McpConfirmation,
 }
 
 impl ApprovalMethod {
@@ -28,6 +30,10 @@ impl ApprovalMethod {
             ApprovalMethod::Command | ApprovalMethod::FileChange => {
                 json!({ "decision": if approve { "accept" } else { "decline" } })
             }
+            ApprovalMethod::McpConfirmation => json!({
+                "action": if approve { "accept" } else { "decline" },
+                "content": if approve { json!({}) } else { Value::Null },
+            }),
             ApprovalMethod::Permissions(requested) => {
                 let granted = if approve {
                     requested.clone()
@@ -452,6 +458,23 @@ impl Mapper {
                     method: ApprovalMethod::FileChange,
                 }
             }
+            "mcpServer/elicitation/request" if confirmation_only(params) => {
+                let server = params["serverName"].as_str().unwrap_or("MCP server");
+                let message = params["message"].as_str().unwrap_or("Confirm tool call");
+                let mut detail = format!("{server}: {message}");
+                if let Some(arguments) = params.get("_meta").and_then(|m| m.get("tool_params")) {
+                    detail.push('\n');
+                    detail.push_str(&arguments.to_string());
+                }
+                RequestAction::Approval {
+                    event: AgentEvent::ApprovalRequested {
+                        id: id.to_string(),
+                        kind: ApprovalKind::Other,
+                        detail,
+                    },
+                    method: ApprovalMethod::McpConfirmation,
+                }
+            }
             "item/permissions/requestApproval" => {
                 let reason = params["reason"]
                     .as_str()
@@ -474,6 +497,24 @@ impl Mapper {
             },
         }
     }
+}
+
+/// The approval UI can answer yes/no, but cannot fill forms or complete URL
+/// authentication flows. Never invent field values or silently accept those.
+fn confirmation_only(params: &Value) -> bool {
+    let schema = &params["requestedSchema"];
+    params["mode"] == "form"
+        && schema["type"] == "object"
+        && schema["properties"]
+            .as_object()
+            .is_some_and(|p| p.is_empty())
+        && schema
+            .get("required")
+            .is_none_or(|r| r.is_null() || r.as_array().is_some_and(|a| a.is_empty()))
+        && schema.as_object().is_some_and(|s| {
+            s.keys()
+                .all(|k| matches!(k.as_str(), "$schema" | "type" | "properties" | "required"))
+        })
 }
 
 fn decode<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
@@ -554,5 +595,55 @@ mod history_tests {
             live.iter()
                 .any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "live"))
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_confirmation_tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_requires_user_approval_and_never_persists_it() {
+        let request = json!({"serverName":"del_browser","mode":"form",
+            "message":"Allow reply_to_session?", "requestedSchema":{"type":"object","properties":{}},
+            "_meta":{"persist":["session","always"],"tool_params":{"text":"answer"}}});
+        let action = Mapper::default().server_request(
+            &RequestId::Int(7),
+            "mcpServer/elicitation/request",
+            &request,
+        );
+        let RequestAction::Approval { event, method } = action else {
+            panic!("missing approval")
+        };
+        assert!(
+            matches!(event, AgentEvent::ApprovalRequested { detail, .. } if detail.contains("reply_to_session") && detail.contains("answer"))
+        );
+        assert_eq!(
+            method.result(ApprovalResponse::Approve),
+            json!({"action":"accept","content":{}})
+        );
+        assert_eq!(
+            method.result(ApprovalResponse::Deny),
+            json!({"action":"decline","content":null})
+        );
+    }
+
+    #[test]
+    fn structured_forms_and_url_flows_are_not_accepted_as_confirmations() {
+        for request in [
+            json!({"mode":"form","requestedSchema":{"type":"object","properties":{"email":{"type":"string"}}}}),
+            json!({"mode":"url","url":"https://example.com"}),
+            json!({"mode":"form","requestedSchema":{"type":"object","properties":{},"required":["secret"]}}),
+            json!({"mode":"form","requestedSchema":{"type":"object","properties":{},"oneOf":[{}]}}),
+        ] {
+            assert!(matches!(
+                Mapper::default().server_request(
+                    &RequestId::Int(1),
+                    "mcpServer/elicitation/request",
+                    &request
+                ),
+                RequestAction::Reject { .. }
+            ));
+        }
     }
 }

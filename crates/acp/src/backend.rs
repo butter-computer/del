@@ -204,7 +204,18 @@ fn permission_result(
     )
 }
 
+struct ToolLease {
+    tools: backend::BrowserTools,
+    id: SessionId,
+}
+impl Drop for ToolLease {
+    fn drop(&mut self) {
+        self.tools.credentials.revoke(&self.id);
+    }
+}
+
 struct Live {
+    _tools: Option<ToolLease>,
     models: Vec<ModelInfo>,
     rpc: Arc<Rpc>,
     client: Arc<Client>,
@@ -245,6 +256,7 @@ async fn spawn_live(
     config: &SessionConfig,
     saved: Option<&(String, String)>,
     model: Option<&str>,
+    tools: Option<backend::BrowserTools>,
 ) -> Result<(SessionId, Arc<Live>, Vec<AgentEvent>)> {
     let program = agent
         .resolve()
@@ -262,6 +274,10 @@ async fn spawn_live(
         .collect::<Vec<_>>();
     let rpc = Rpc::spawn(&program, &agent.args, &env, &config.cwd, client.clone())?;
     let mut guard = SetupGuard(Some(rpc.clone()));
+    let mut tool_lease = tools.map(|tools| ToolLease {
+        tools,
+        id: SessionId::new(format!("acp-pending-{}", uuid::Uuid::new_v4())),
+    });
     let setup = async {
         let init = rpc.request("initialize", json!({
             "protocolVersion":1,
@@ -270,6 +286,20 @@ async fn spawn_live(
         }), Some(SETUP_TIMEOUT)).await?;
         if init["protocolVersion"] != 1 { return Err(RpcError::new(-32603, "Agent did not negotiate ACP v1")); }
         let mut params = json!({"cwd":config.cwd,"mcpServers":[]});
+        if let Some(lease) = &tool_lease {
+            let token = lease.tools.credentials.mint(&lease.id)
+                .map_err(|e| RpcError::new(-32603, format!("Del credential setup failed: {e}")))?;
+            let server = if init["agentCapabilities"]["mcpCapabilities"]["http"] == true {
+                json!({"type":"http","name":"del","url":lease.tools.url,
+                    "headers":[{"name":"Authorization","value":format!("Bearer {token}")}]})
+            } else {
+                // ACP always supports stdio MCP; Del's own binary proxies it.
+                let exe = std::env::current_exe().map_err(|e| RpcError::new(-32603, e.to_string()))?;
+                json!({"name":"del","command":exe,"args":["--mcp-stdio"],
+                    "env":[{"name":"DEL_MCP_URL","value":lease.tools.url},{"name":"DEL_MCP_TOKEN","value":token}]})
+            };
+            params["mcpServers"] = json!([server]);
+        }
         let mut history = Vec::new();
         let mut response = if let Some((_, remote)) = saved {
             if init["agentCapabilities"]["loadSession"] != true {
@@ -336,10 +366,15 @@ async fn spawn_live(
         "acp:{}",
         serde_json::to_string(&(&agent.id, &remote)).unwrap()
     ));
+    if let Some(lease) = &mut tool_lease {
+        lease.tools.credentials.rebind(&lease.id, &id);
+        lease.id = id.clone();
+    }
     guard.0 = None;
     Ok((
         id,
         Arc::new(Live {
+            _tools: tool_lease,
             models,
             rpc,
             client,
@@ -359,7 +394,7 @@ async fn probe_models(agent: AcpAgentConfig, cwd: std::path::PathBuf) -> Result<
         provider: Provider::Acp,
         permission_mode: PermissionMode::Ask,
     };
-    let (_, live, _) = spawn_live(&agent, &config, None, None).await?;
+    let (_, live, _) = spawn_live(&agent, &config, None, None, None).await?;
     live.retire().await;
     Ok(live.models.clone())
 }
@@ -373,6 +408,7 @@ pub struct AcpBackend {
     /// agent's config and resolved executable so edits or reinstalls re-probe.
     /// Failures are not cached, so signing in later is picked up.
     model_cache: Mutex<HashMap<String, Vec<ModelInfo>>>,
+    tools: Mutex<Option<backend::BrowserTools>>,
 }
 
 impl AcpBackend {
@@ -382,6 +418,7 @@ impl AcpBackend {
             sessions: Mutex::default(),
             opening: tokio::sync::Mutex::default(),
             model_cache: Mutex::default(),
+            tools: Mutex::default(),
         }
     }
 
@@ -435,7 +472,8 @@ impl AcpBackend {
         .ok_or_else(|| {
             AgentError::Backend("No matching installed ACP agent; configure acp-agents.json".into())
         })?;
-        let (id, live, history) = spawn_live(agent, &config, saved.as_ref(), model).await?;
+        let tools = self.tools.lock().unwrap().clone();
+        let (id, live, history) = spawn_live(agent, &config, saved.as_ref(), model, tools).await?;
         let events = live.client.events.clone();
         self.sessions.lock().unwrap().insert(id.clone(), live);
         Ok(SessionHandle::new(id, Provider::Acp, events).with_history(history))
@@ -444,6 +482,9 @@ impl AcpBackend {
 
 #[async_trait]
 impl AgentBackend for AcpBackend {
+    fn set_browser_tools(&self, tools: backend::BrowserTools) {
+        *self.tools.lock().unwrap() = Some(tools);
+    }
     async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
         self.sessions
             .lock()

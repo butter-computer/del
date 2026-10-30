@@ -137,27 +137,14 @@ impl OpenCodeBackend {
             tools.credentials.revoke(&group);
         }
     }
-    async fn install_tools(&self, server: &Server) -> Result<()> {
+    async fn install_tools(&self, server: &Server, id: &SessionId) -> Result<()> {
         let tools = self.tools.lock().unwrap().clone();
         if let Some(tools) = tools {
-            // OpenCode configures MCP per workspace server, not per session, so
-            // its chats share one credential that reaches exactly those chats.
-            let token = {
-                let mut browser = server.browser.lock().unwrap();
-                match browser.as_ref() {
-                    Some((_, token)) => token.clone(),
-                    None => {
-                        let group = SessionId::new(format!(
-                            "opencode-workspace-{}-{}",
-                            std::process::id(),
-                            uuid::Uuid::new_v4()
-                        ));
-                        let token = tools.credentials.mint_shared(&group).map_err(err)?;
-                        *browser = Some((group, token.clone()));
-                        token
-                    }
-                }
-            };
+            // Each chat has its own server because native MCP configuration is
+            // process-wide. A credential therefore identifies exactly one peer.
+            let token = tools.credentials.mint(id).map_err(err)?;
+            *server.browser.lock().unwrap() = Some((id.clone(), token.clone()));
+            let result: Result<()> = async {
             server.json(Method::PUT,"/api/experimental/mcp/del",Some(&json!({"config":{"type":"remote","url":tools.url,"headers":{"Authorization":format!("Bearer {token}")},"oauth":false}}))).await?;
             tokio::time::timeout(std::time::Duration::from_secs(20), async {
                 loop {
@@ -184,20 +171,14 @@ impl OpenCodeBackend {
             })
             .await
             .map_err(|_| err("Del MCP connection timed out"))??;
+            Ok(())
+            }.await;
+            if result.is_err() {
+                self.retire_browser(server);
+            }
+            result?;
         }
         Ok(())
-    }
-    /// Let (or stop letting) the server's shared browser credential reach `id`.
-    fn set_browser_member(&self, server: &Server, id: &SessionId, member: bool) {
-        let group = server
-            .browser
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(group, _)| group.clone());
-        if let (Some(group), Some(tools)) = (group, self.tools.lock().unwrap().as_ref()) {
-            tools.credentials.set_shared_member(&group, id, member);
-        }
     }
     fn live(&self, id: &SessionId) -> Result<Arc<Live>> {
         self.sessions
@@ -445,7 +426,6 @@ impl OpenCodeBackend {
             }
         });
         live.tasks.lock().unwrap().push(task);
-        self.set_browser_member(&live.server, &id, true);
         let previous = self.sessions.lock().unwrap().insert(id.clone(), live);
         if let Some(previous) = previous {
             previous.stop_tasks();
@@ -599,8 +579,9 @@ fn prompt_body(
 }
 async fn install_browser_instructions(server: &Server, id: &SessionId) -> Result<()> {
     let instructions = format!(
-        "{} OpenCode exposes this MCP server as del. Call tools.del.browser through execute (or the advertised del_browser tool). The built-in browser.tabs tools target OpenCode's desktop browser, not Del's embedded browser.",
-        backend::BROWSER_INSTRUCTIONS
+        "{} {} OpenCode exposes this MCP server as del. Call tools.del.browser through execute (or the advertised del_browser tool). The built-in browser.tabs tools target OpenCode's desktop browser, not Del's embedded browser.",
+        backend::BROWSER_INSTRUCTIONS,
+        backend::PEER_INSTRUCTIONS
     );
     server
         .json(
@@ -672,7 +653,7 @@ async fn configure(server: &Server, id: &SessionId, config: &SessionConfig) -> R
 #[async_trait]
 impl AgentBackend for OpenCodeBackend {
     async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
-        Some((self.live(id).ok()?.server.pid, true))
+        Some((self.live(id).ok()?.server.pid, false))
     }
     fn provider(&self) -> Provider {
         Provider::OpenCode
@@ -697,8 +678,7 @@ impl AgentBackend for OpenCodeBackend {
     }
     async fn start_session(&self, mut config: SessionConfig) -> Result<SessionHandle> {
         config.cwd = canonicalize(&config.cwd).await?;
-        let server = self.server(&config.cwd).await?;
-        self.install_tools(&server).await?;
+        let server = Arc::new(Server::start(&config.cwd, &self.environment).await?);
         let mut body = json!({"location":{"directory":config.cwd},"permissions":permissions(config.permission_mode)});
         if let Some(model) = model_ref(&config)? {
             body["model"] = model;
@@ -712,6 +692,7 @@ impl AgentBackend for OpenCodeBackend {
         let id = session["data"]["id"]
             .as_str()
             .ok_or_else(|| err("missing session identity"))?;
+        self.install_tools(&server, &SessionId::new(id)).await?;
         self.attach(config, SessionId::new(id), server, vec![])
             .await
     }
@@ -727,8 +708,8 @@ impl AgentBackend for OpenCodeBackend {
             // Its event stream or server is gone: stop it before re-attaching.
             self.close(id).await?;
         }
-        let server = self.server(&config.cwd).await?;
-        self.install_tools(&server).await?;
+        let server = Arc::new(Server::start(&config.cwd, &self.environment).await?);
+        self.install_tools(&server, id).await?;
         configure(&server, id, &config).await?;
         let mut mapping = mapping::Stream::default();
         let mut history = vec![];
@@ -882,7 +863,7 @@ impl AgentBackend for OpenCodeBackend {
         let live = self.sessions.lock().unwrap().remove(id);
         if let Some(live) = live {
             live.stop_tasks();
-            self.set_browser_member(&live.server, id, false);
+            self.retire_browser(&live.server);
             if live.busy.load(Ordering::SeqCst) {
                 let _ = live
                     .server

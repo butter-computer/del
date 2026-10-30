@@ -9,6 +9,7 @@ pub mod environment;
 pub mod index;
 pub mod manager;
 pub mod mock;
+pub mod peers;
 pub mod procgroup;
 pub mod types;
 

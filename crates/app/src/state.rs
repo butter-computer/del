@@ -69,6 +69,7 @@ enum Msg {
     Refresh,
     PanelDeleted(String, u64),
     ReplyFinished(SessionId),
+    PeerActivity(SessionId, del_agent::peers::PeerMessage),
     Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
     Checked(ProviderStatus),
@@ -272,6 +273,18 @@ impl AppState {
                     }) => {
                         let _ = events_tx.send(Msg::ReplyFinished(session));
                     }
+                    Ok(ManagerEvent::Event {
+                        session,
+                        event: del_agent::AgentEvent::PeerMessage { message },
+                    }) => {
+                        let _ = events_tx.send(Msg::PeerActivity(session, message));
+                    }
+                    Ok(ManagerEvent::Event {
+                        event: del_agent::AgentEvent::PeerWorkChanged { .. },
+                        ..
+                    }) => {
+                        let _ = events_tx.send(Msg::Refresh);
+                    }
                     Ok(ManagerEvent::PromptSent { session }) => {
                         let manager = title_events_manager.clone();
                         let tx = events_tx.clone();
@@ -468,6 +481,7 @@ impl AppState {
                     self.error = Some(error.to_string());
                 }
                 self.project_info.insert(path, info);
+                self.sync_peer_projects();
             }
             Msg::AccountSwitched(id, result) => {
                 self.switching_accounts.remove(&id);
@@ -556,6 +570,25 @@ impl AppState {
             Msg::Refresh => self.set_records(self.manager.list_sessions()),
             Msg::Unloaded(id) => {
                 self.unloading.remove(&id);
+                self.set_records(self.manager.list_sessions());
+            }
+            Msg::PeerActivity(id, message) => {
+                // Side chats report through their actual owning tab (including
+                // unsent draft sessions), not a synthetic top-level native ID.
+                if self.manager.is_temporary(&id) {
+                    return;
+                }
+                let owner = self.manager.peer_parent(&id).unwrap_or_else(|| id.clone());
+                if message.from == id {
+                    let tab = if self.terminal_rows.iter().any(|r| r.id == owner) {
+                        Tab::Terminal(owner)
+                    } else {
+                        Tab::Session(owner)
+                    };
+                    self.keep_tab(&tab, cx);
+                } else {
+                    self.record_incoming_activity(&owner, cx);
+                }
                 self.set_records(self.manager.list_sessions());
             }
             Msg::ReplyFinished(id) => {
@@ -855,7 +888,21 @@ impl AppState {
 
     fn set_records(&mut self, records: Vec<SessionRecord>) {
         self.records = records;
+        self.sync_peer_projects();
         self.invalidate_rows();
+    }
+
+    fn sync_peer_projects(&mut self) {
+        for (id, cwd) in self
+            .records
+            .iter()
+            .map(|r| (&r.id, &r.cwd))
+            .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
+        {
+            if let Err(error) = self.manager.set_peer_project(id, &self.project_root(cwd)) {
+                self.error = Some(format!("Could not save peer project: {error}"));
+            }
+        }
     }
 
     fn overrides_mut(&mut self) -> &mut Overrides {
@@ -980,7 +1027,13 @@ impl AppState {
     }
 
     pub fn main_session_working(&self, id: &SessionId) -> bool {
-        self.records
+        self.manager.peer_work(id).is_some_and(|w| {
+            matches!(
+                w.status,
+                del_agent::peers::WorkStatus::Active | del_agent::peers::WorkStatus::Waiting
+            )
+        }) || self
+            .records
             .iter()
             .any(|row| &row.id == id && row.status == SessionStatus::Running)
             || self.terminal_working.contains(id)
@@ -1197,6 +1250,10 @@ impl AppState {
 
     pub fn reply_finished(&mut self, id: &SessionId, cx: &mut Context<Self>) {
         self.terminal_working.remove(id);
+        self.record_incoming_activity(id, cx);
+    }
+
+    fn record_incoming_activity(&mut self, id: &SessionId, cx: &mut Context<Self>) {
         cx.notify();
         let visible = self.window_active
             && self.panel == Panel::Chat

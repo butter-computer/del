@@ -407,6 +407,7 @@ struct AppShell {
     tab_reveal: Option<(u64, std::time::Instant)>,
     workspaces: HashMap<u64, Entity<workspace_tabs::WorkspaceTabs>>,
     workspace_previous: Option<u64>,
+    pending_peer: Option<SessionId>,
     tab_zone: std::rc::Rc<std::cell::Cell<tab_zone::Zone>>,
     right: Entity<RightPanel>,
     browser_preview: Entity<browser_preview::BrowserPreview>,
@@ -516,6 +517,57 @@ impl AppShell {
             self.sidebar_widths.left = width;
         }
         self.save_sidebar_widths_soon(cx);
+        cx.notify();
+    }
+
+    fn open_peer(&mut self, requested: &SessionId, cx: &mut Context<Self>) {
+        let manager = self.state.read(cx).backend().manager;
+        let id = manager.resolve_peer(requested);
+        let owner = self
+            .workspaces
+            .iter()
+            .find(|(_, w)| w.read(cx).contains_peer(&id, cx))
+            .map(|(uid, _)| *uid)
+            .or_else(|| {
+                self.right_cache
+                    .iter()
+                    .find(|(_, r)| r.panel.read(cx).contains_peer(&id, cx))
+                    .map(|(uid, _)| *uid)
+            })
+            .or_else(|| {
+                self.right
+                    .read(cx)
+                    .contains_peer(&id, cx)
+                    .then_some(self.right_owner)
+            });
+        if let Some(uid) = owner {
+            let tab = self
+                .state
+                .read(cx)
+                .tabs
+                .iter()
+                .find(|tab| self.state.read(cx).uid_of(tab) == uid)
+                .cloned();
+            if let Some(tab) = tab {
+                self.state
+                    .update(cx, |state, cx| state.select_tab(&tab, cx));
+            }
+            self.pending_peer = Some(id);
+        } else {
+            self.state.update(cx, |state, cx| {
+                let target = if manager.is_temporary(&id) {
+                    manager.peer_parent(&id).unwrap_or(id.clone())
+                } else {
+                    id.clone()
+                };
+                if manager.session_record(&target).is_ok() {
+                    state.select(target, cx);
+                } else {
+                    state.select_terminal(target, cx);
+                }
+            });
+            self.pending_peer = Some(id);
+        }
         cx.notify();
     }
 
@@ -777,6 +829,7 @@ impl AppShell {
             tab_reveal: None,
             workspaces: HashMap::new(),
             workspace_previous: None,
+            pending_peer: None,
             tab_zone: Default::default(),
             right,
             browser_preview,
@@ -964,6 +1017,10 @@ impl AppShell {
             });
         })
         .detach();
+        cx.subscribe(&chat, |this, _, event: &chat::OpenPeer, cx| {
+            this.open_peer(&event.0, cx);
+        })
+        .detach();
         cx.subscribe(&chat, |this, _, event: &chat::OpenLink, cx| {
             let cwd = this.state.read(cx).effective().2;
             match chat::links::classify(&event.0, &cwd) {
@@ -1064,6 +1121,10 @@ impl AppShell {
     fn watch_right(&mut self, cx: &mut Context<Self>) {
         cx.subscribe(&self.right, |this, _, event: &side_chat::SendToMain, cx| {
             this.send_side_to_main(event, cx)
+        })
+        .detach();
+        cx.subscribe(&self.right, |this, _, event: &chat::OpenPeer, cx| {
+            this.open_peer(&event.0, cx);
         })
         .detach();
         cx.subscribe(&self.right, |_, _, event: &chat::OpenLink, cx| {
@@ -1352,6 +1413,10 @@ impl AppShell {
             .detach();
             cx.subscribe(&workspace, |this, _, event: &side_chat::SendToMain, cx| {
                 this.send_side_to_main(event, cx)
+            })
+            .detach();
+            cx.subscribe(&workspace, |this, _, event: &chat::OpenPeer, cx| {
+                this.open_peer(&event.0, cx);
             })
             .detach();
             cx.subscribe(&workspace, |_, _, event: &chat::OpenLink, cx| {
@@ -2651,6 +2716,36 @@ impl Render for AppShell {
             self.tab_reveal = Some((selected_uid, std::time::Instant::now()));
         }
         self.sync_right(window, cx);
+        if let Some(requested) = self.pending_peer.clone() {
+            let id = self
+                .state
+                .read(cx)
+                .backend()
+                .manager
+                .resolve_peer(&requested);
+            let is_primary = matches!(&self.state.read(cx).selection,
+                Selection::Session(current) | Selection::Terminal(current) if current == &id);
+            let in_main = self.workspace(cx).is_some_and(|workspace| {
+                workspace.update(cx, |w, cx| {
+                    if is_primary {
+                        w.select_index(0, window, cx);
+                        true
+                    } else {
+                        w.show_peer(&id, window, cx)
+                    }
+                })
+            });
+            let in_right = !in_main
+                && self
+                    .right
+                    .update(cx, |panel, cx| panel.show_peer(&id, window, cx));
+            if in_main || in_right {
+                if in_right {
+                    self.set_right(true, cx);
+                }
+                self.pending_peer = None;
+            }
+        }
         if let Some(workspace) = self.workspace(cx) {
             workspace.update(cx, |workspace, _| {
                 workspace.transfer_peer = Some(self.right.downgrade())
@@ -3063,6 +3158,16 @@ impl Render for AppShell {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--mcp-stdio") {
+        let (Ok(url), Ok(token)) = (std::env::var("DEL_MCP_URL"), std::env::var("DEL_MCP_TOKEN"))
+        else {
+            eprintln!("Del MCP proxy requires DEL_MCP_URL and DEL_MCP_TOKEN");
+            std::process::exit(2);
+        };
+        del_mcp::stdio::run(&url, &token, std::io::stdin().lock(), std::io::stdout());
+        return;
+    }
+
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(|cx| {
@@ -3189,3 +3294,6 @@ mod sidebar_width_tests {
         assert_eq!(SidebarWidths::read(&path).left, 180.);
     }
 }
+
+#[cfg(test)]
+mod peer_tests;

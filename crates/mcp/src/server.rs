@@ -502,8 +502,9 @@ impl Inner {
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "del", "title": "del", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": format!(
-                        "You are connected to Del as `{caller}`. Use only tools in tools/list. {}",
-                        del_agent::backend::BROWSER_INSTRUCTIONS
+                        "You are connected to Del as `{caller}`. Use only tools in tools/list. {} {}",
+                        del_agent::backend::BROWSER_INSTRUCTIONS,
+                        del_agent::backend::PEER_INSTRUCTIONS
                     )
                 })
             }
@@ -517,10 +518,11 @@ impl Inner {
                         .retain(|tool| tool["name"] == "browser");
                 }
                 if self.scope.lock().unwrap().chat_tools.contains(caller) {
-                    catalogue
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|tool| tool["name"] == "browser" || tool["name"] == "goal");
+                    catalogue.as_array_mut().unwrap().retain(|tool| {
+                        tool["name"] == "browser"
+                            || tool["name"] == "goal"
+                            || tools::is_peer_tool(tool["name"].as_str().unwrap_or(""))
+                    });
                 } else {
                     catalogue
                         .as_array_mut()
@@ -574,6 +576,7 @@ impl Inner {
         }
         if name != "browser"
             && name != "goal"
+            && !tools::is_peer_tool(name)
             && self.scope.lock().unwrap().chat_tools.contains(caller)
         {
             return Ok(tool_err(
@@ -689,12 +692,11 @@ impl Inner {
             }
             "list_sessions" => {
                 let _: ListSessionsArgs = parse(args)?;
-                let family = self.scope.lock().unwrap().family(caller);
                 Ok(match host.list_sessions(caller).await {
                     Ok(list) => {
                         let rows: Vec<Value> = list
                             .iter()
-                            .filter(|s| family.contains(&s.id))
+                            .filter(|s| host.authorize_peer(caller, &s.id).is_ok())
                             .map(|s| {
                                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                                 v["is_self"] = json!(&s.id == caller);
@@ -709,10 +711,8 @@ impl Inner {
             "get_session_summary" => {
                 let a: SessionArg = parse(args)?;
                 let target = SessionId::new(a.session_id);
-                if !self.scope.lock().unwrap().family(caller).contains(&target) {
-                    return Ok(tool_err(
-                        "you can only read your own session, sessions you spawned, and the session that spawned you",
-                    ));
+                if let Err(error) = host.authorize_peer(caller, &target) {
+                    return Ok(tool_err(error.to_string()));
                 }
                 Ok(match host.session_summary(caller, &target).await {
                     Ok(s) => tool_json(serde_json::to_value(s).unwrap_or(Value::Null)),
@@ -776,18 +776,63 @@ impl Inner {
                     return Ok(tool_err(e));
                 }
                 let target = SessionId::new(a.session_id);
-                let allowed = {
-                    let s = self.scope.lock().unwrap();
-                    s.children.get(caller).is_some_and(|c| c.contains(&target))
-                        || s.parent.get(caller) == Some(&target)
-                };
-                if !allowed {
-                    return Ok(tool_err(
-                        "you can only message sessions you spawned and the session that spawned you",
-                    ));
+                Ok(
+                    match host
+                        .queue_peer(caller, &target, &a.idempotency_key, &a.text)
+                        .await
+                    {
+                        Ok(message) => tool_json(
+                            json!({"receipt":message,"instruction":"Keep your original work active. Use session_work wait only if waiting for a peer is all that remains; complete only when all work is actually finished."}),
+                        ),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
+            }
+            "read_session" => {
+                let a: ReadContextArgs = parse(args)?;
+                Ok(
+                    match host
+                        .read_context(
+                            caller,
+                            &SessionId::new(a.session_id),
+                            a.cursor,
+                            a.max_characters.unwrap_or(24000),
+                        )
+                        .await
+                    {
+                        Ok(context) => tool_json(json!(context)),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
+            }
+            "reply_to_session" => {
+                let a: ReplyArgs = parse(args)?;
+                Ok(
+                    match host
+                        .reply_peer(caller, &a.request_id, &a.idempotency_key, &a.text)
+                        .await
+                    {
+                        Ok(message) => tool_json(
+                            json!({"receipt":message,"instruction":"Reply queued. Continue your original work; this reply does not complete it."}),
+                        ),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
+            }
+            "session_work" => {
+                let a: WorkArgs = parse(args)?;
+                if a.action == "receive" {
+                    return Ok(match host.receive_peer(caller).await {
+                        Ok(message) => tool_json(
+                            json!({"message":message,"instruction":"Handle this peer message without abandoning your original task. Use reply_to_session for requests; continue original work afterward."}),
+                        ),
+                        Err(e) => tool_err(e.to_string()),
+                    });
                 }
-                Ok(match host.send_to_session(caller, &target, &a.text).await {
-                    Ok(()) => tool_text("sent".into(), None, false),
+                Ok(match host.peer_work(caller, &a.action).await {
+                    Ok(work) => tool_json(
+                        json!({"work":work,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete your original task." }}),
+                    ),
                     Err(e) => tool_err(e.to_string()),
                 })
             }

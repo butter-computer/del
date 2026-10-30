@@ -7,6 +7,7 @@ use crate::appearance::{rgb, rgba};
 use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -158,14 +159,6 @@ impl ChatView {
             let expanded = self.expanded_activity.contains(&group.start);
             let label = super::activity::group_label(&self.model.blocks[group.clone()]);
             let live = self.model.blocks[group.clone()].iter().any(|block| matches!(block, Block::Tool(tool) if tool.state == super::model::ToolState::Running));
-            let icon = self.model.blocks[group.clone()]
-                .iter()
-                .rev()
-                .find_map(|block| match block {
-                    Block::Tool(tool) => Some(super::activity::describe(tool).0.icon()),
-                    _ => None,
-                })
-                .unwrap_or("icons/search.svg");
             let range = group.clone();
             let header = h_flex()
                 .id(("activity-group", ix))
@@ -178,7 +171,6 @@ impl ChatView {
                 .text_size(zpx(TEXT_MD))
                 .text_color(rgba(MUTED))
                 .hover(|row| row.bg(rgba(CARD)))
-                .child(crate::icons::path(icon).text_color(rgba(MUTED)))
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
                         .id(("activity-live", ix))
@@ -226,7 +218,7 @@ impl ChatView {
                     })
                     .detach();
                 }));
-            let mut children = v_flex().gap_1().pl(zpx(18.)).pt_1();
+            let mut children = v_flex().gap_1().pt_1();
             for at in group {
                 if let Block::Tool(tool) = &self.model.blocks[at] {
                     children = children.child(self.tool_card(at, tool, cx));
@@ -250,6 +242,141 @@ impl ChatView {
             Block::Tool(_) | Block::FileChange(_) | Block::Reasoning { .. }
         );
         let content = match block {
+            Block::Peer(message) => {
+                let manager = &self.backend.manager;
+                let current = manager.resolve_peer(self.session.as_ref().unwrap_or(&message.to));
+                let from = manager.resolve_peer(&message.from);
+                let target = manager.resolve_peer(if current == from {
+                    &message.to
+                } else {
+                    &message.from
+                });
+                let name = |id: &del_agent::SessionId| {
+                    manager
+                        .session_record(id)
+                        .ok()
+                        .and_then(|r| r.title)
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            if manager.is_temporary(id) {
+                                "Side chat".into()
+                            } else {
+                                "New session".into()
+                            }
+                        })
+                };
+                let current_name = name(&current);
+                let target_name = name(&target);
+                let current_provider = manager.session_record(&current).ok().map(|r| r.provider);
+                let target_provider = manager.session_record(&target).ok().map(|r| r.provider);
+                let recovery = matches!(
+                    message.state,
+                    del_agent::peers::DeliveryState::Uncertain
+                        | del_agent::peers::DeliveryState::Failed
+                );
+                let receipt_id = message.id.clone();
+                let owner = cx.entity().downgrade();
+                let row = h_flex()
+                    .id(SharedString::from(format!("peer-{}", message.id)))
+                    .w_full()
+                    .justify_center()
+                    .py_2()
+                    .text_size(zpx(TEXT_SM))
+                    .text_color(rgba(MUTED))
+                    .child(
+                        h_flex()
+                            .max_w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .id(SharedString::from(format!("peer-current-{}", message.id)))
+                                    .min_w_0()
+                                    .max_w(zpx(200.))
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .aria_label(format!("Open conversation: {current_name}"))
+                                    .hover(|name| name.text_color(rgb(TEXT)))
+                                    .when_some(current_provider, |row, provider| {
+                                        row.child(
+                                            crate::composer_ui::provider_logo(provider)
+                                                .size(zpx(14.)),
+                                        )
+                                    })
+                                    .child(div().min_w_0().truncate().child(current_name))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(super::view::OpenPeer(current.clone()))
+                                    })),
+                            )
+                            .child(div().flex_none().child("⇄"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .id(SharedString::from(format!("peer-other-{}", message.id)))
+                                    .min_w_0()
+                                    .max_w(zpx(200.))
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .aria_label(format!("Open peer conversation: {target_name}"))
+                                    .hover(|name| name.text_color(rgb(TEXT)))
+                                    .when_some(target_provider, |row, provider| {
+                                        row.child(
+                                            crate::composer_ui::provider_logo(provider)
+                                                .size(zpx(14.)),
+                                        )
+                                    })
+                                    .child(div().min_w_0().truncate().child(target_name))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(super::view::OpenPeer(target.clone()))
+                                    })),
+                            ),
+                    );
+                if !recovery {
+                    row.into_any_element()
+                } else {
+                    row.context_menu(move |menu, _, _| {
+                        let retry_owner = owner.clone();
+                        let retry_id = receipt_id.clone();
+                        let dismiss_owner = owner.clone();
+                        let dismiss_id = receipt_id.clone();
+                        menu.item(
+                            PopupMenuItem::new("Retry after checking recipient").on_click(
+                                move |_, _, cx| {
+                                    let _ = retry_owner.update(cx, |this, cx| {
+                                        if let Err(error) = this
+                                            .backend
+                                            .manager
+                                            .recover_peer_message(&retry_id, true)
+                                        {
+                                            this.pending_errors.push(error.to_string());
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            ),
+                        )
+                        .item(
+                            PopupMenuItem::new("Dismiss delivery").on_click(move |_, _, cx| {
+                                let _ = dismiss_owner.update(cx, |this, cx| {
+                                    if let Err(error) = this
+                                        .backend
+                                        .manager
+                                        .recover_peer_message(&dismiss_id, false)
+                                    {
+                                        this.pending_errors.push(error.to_string());
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                    })
+                    .into_any_element()
+                }
+            }
+
             Block::User {
                 text,
                 steer,
@@ -371,7 +498,7 @@ impl ChatView {
     }
 
     fn tool_card(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
-        let (kind, label) = super::activity::describe(tool);
+        let (_, label) = super::activity::describe(tool);
         let color = rgba(MUTED);
         let file = match self.model.blocks.get(ix + 1) {
             Some(Block::FileChange(file))
@@ -404,7 +531,6 @@ impl ChatView {
                     .text_color(color)
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(crate::icons::path(kind.icon()).text_color(color))
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .child(
                         crate::icons::icon(if tool.expanded {
@@ -420,8 +546,8 @@ impl ChatView {
                 card.child(
                     div()
                         .id(("tool-output", ix))
-                        .mx_2()
-                        .p_3()
+                        .px_2()
+                        .py_3()
                         .max_h(zpx(260.))
                         .overflow_y_scroll()
                         .rounded_lg()

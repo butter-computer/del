@@ -40,9 +40,13 @@ for line in sys.stdin:
                 f.write(str(os.getpid()))
         if os.getenv('HANG_INIT'):
             time.sleep(60)
-        result(id, dict(protocolVersion=1, agentCapabilities=dict(loadSession=os.getenv('NO_LOAD') != '1')))
+        result(id, dict(protocolVersion=1, agentCapabilities=dict(loadSession=os.getenv('NO_LOAD') != '1', mcpCapabilities=dict(http=os.getenv('MCP_HTTP') == '1'))))
     elif method in ('session/new', 'session/load'):
-        assert params['mcpServers'] == []
+        if os.getenv('MCP_CAPTURE'):
+            with open(os.environ['MCP_CAPTURE'], 'w') as f:
+                json.dump(params['mcpServers'], f)
+        else:
+            assert params['mcpServers'] == []
         assert os.path.isabs(params['cwd'])
         if os.getenv('AUTH_REQUIRED'):
             send(dict(id=id, error=dict(code=-32000, message='Authentication required')))

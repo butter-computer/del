@@ -21,10 +21,11 @@ claim of pixel-identical rendering. No upstream source was copied into this port
 
 ## Del behavior
 
-- Read, search, command, edit, and other tool calls have semantic SF icons and
-  short state-aware summaries. Compound shell scripts remain commands.
+- Read, search, command, edit, and other tool calls use short state-aware summaries
+  without leading icons. Compound shell scripts remain commands.
 - Adjacent calls share one collapsed group immediately, including during streaming. Expanding the
-  group reveals every call; each call can disclose its original input and output.
+  group reveals every call without an extra left indent; each call can disclose
+  its original input and output aligned with the chat text.
 - The group header shows the latest running action and explicit failed/declined counts.
   User/assistant messages, approvals, and file changes break activity groups.
 - Stable underlying block indexes preserve search and message navigation.
