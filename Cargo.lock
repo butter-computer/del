@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "del-acp"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "del-agent"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "del-app"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "del-claude"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "del-codex"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "del-agent",
@@ -1525,11 +1525,11 @@ dependencies = [
 
 [[package]]
 name = "del-core"
-version = "0.1.18"
+version = "0.1.19"
 
 [[package]]
 name = "del-mcp"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "axum",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "del-opencode"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "axum",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "del-terminal"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "alacritty_terminal",
  "del-core",

@@ -6,7 +6,7 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.18` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.19` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -15,9 +15,9 @@ when making future changes.
 
 ## Download and install
 
-The latest downloadable installer is **0.1.13**. The source version is **0.1.18**;
-see its [release notes](docs/releases/0.1.18.md) and
-[validation record](docs/releases/0.1.18-validation.md).
+The latest downloadable installer is **0.1.13**. The source version is **0.1.19**;
+see its [release notes](docs/releases/0.1.19.md) and
+[validation record](docs/releases/0.1.19-validation.md).
 Download **Del-0.1.13-arm64.dmg** from the [0.1.13 release](https://github.com/butter-computer/del/releases/tag/v0.1.13),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
@@ -38,7 +38,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.18-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.19-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
