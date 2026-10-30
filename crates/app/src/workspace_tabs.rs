@@ -279,8 +279,28 @@ impl WorkspaceTabs {
 
     fn restore_tabs(&mut self, saved: SavedSideTabs, window: &mut Window, cx: &mut Context<Self>) {
         let mut tabs = Vec::new();
+        let mut active_index = saved.active;
         if let Some(saved_tabs) = saved.tabs {
-            for saved in saved_tabs {
+            let mut expanded = Vec::new();
+            for (index, mut tab) in saved_tabs.into_iter().enumerate() {
+                if saved.active == Some(index) {
+                    active_index = Some(expanded.len());
+                }
+                if let Some(panel) = tab.panel.take() {
+                    for panel in panel.split_browser_pages() {
+                        expanded.push(SavedToolTab {
+                            kind: tab.kind,
+                            panel: Some(panel),
+                            url: None,
+                            profile: tab.profile.clone(),
+                            draft: tab.draft.clone(),
+                        });
+                    }
+                } else {
+                    expanded.push(tab);
+                }
+            }
+            for saved in expanded {
                 self.profile = saved.profile.clone();
                 let panel = saved.panel.map(|saved| {
                     cx.new(|cx| {
@@ -333,8 +353,7 @@ impl WorkspaceTabs {
                 });
             }
         }
-        let active = saved
-            .active
+        let active = active_index
             .and_then(|index| tabs.get(index))
             .map(|tab| tab.id);
         self.tabs.extend(tabs);
@@ -675,6 +694,28 @@ impl WorkspaceTabs {
             .filter_map(|tab| tab.panel.as_ref())
             .flat_map(|panel| panel.read(cx).agent_browser_tabs(cx))
             .collect()
+    }
+
+    pub(crate) fn close_browser_id(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.panel
+                    .as_ref()
+                    .is_some_and(|panel| RightPanel::find_browser_panel(panel, id, cx).is_some())
+            })
+            .map(|tab| tab.id);
+        if let Some(tab) = tab {
+            self.close(tab, window, cx);
+            return true;
+        }
+        false
     }
 
     pub(crate) fn take_browser_tab(

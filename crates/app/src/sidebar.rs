@@ -475,7 +475,13 @@ fn session_menu_item(
         .child(label)
 }
 
-fn working_mark(working: bool, group: SharedString) -> AnyElement {
+fn session_status_mark(
+    working: bool,
+    group: SharedString,
+    id: &del_agent::SessionId,
+    state: &AppState,
+    cx: &App,
+) -> AnyElement {
     div()
         .absolute()
         .right(zpx(8.))
@@ -486,8 +492,12 @@ fn working_mark(working: bool, group: SharedString) -> AnyElement {
         .justify_center()
         .flex_none()
         .group_hover(group, |mark| mark.opacity(0.0))
-        .when(working, |mark| {
-            mark.child(crate::icons::working_spinner().color(rgba(MUTED).into()))
+        .child(if working {
+            crate::icons::working_spinner()
+                .color(rgba(MUTED).into())
+                .into_any_element()
+        } else {
+            unread_dot(id, state, cx)
         })
         .into_any_element()
 }
@@ -624,25 +634,27 @@ fn row_item(
         let (pin_state, archive_state) = (state.clone(), state.clone());
         let (pin_id, archive_id) = (id.clone(), id.clone());
         let hover_group = group.clone();
+        let (unread_from, unread_target, unread_start) = state.read(cx).unread_motion(&row.id);
+        let unread_visible = unread_target > 0.
+            || (unread_from > 0.
+                && unread_start.is_some_and(|start| start.elapsed().as_millis() < 180));
         item = item
-            .child(working_mark(working, group.clone()))
+            .child(session_status_mark(
+                working,
+                group.clone(),
+                &row.id,
+                state.read(cx),
+                cx,
+            ))
             .child(
                 // Reserve space so titles never overlap the hover actions.
                 div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
                     crate::icons::BUTTON_SIZE * 2.0 + 4.0
-                } else if working {
+                } else if working || unread_visible {
                     crate::icons::BUTTON_SIZE
                 } else {
                     0.0
                 })),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .group_hover(group.clone(), |dot| dot.opacity(0.))
-                    .when(!working, |dot| {
-                        dot.child(unread_dot(&row.id, state.read(cx), cx))
-                    }),
             )
             .child(
                 // Always laid out and painted, only faded in on hover: toggling

@@ -115,6 +115,7 @@ fn default_panes() -> Vec<Pane> {
 pub(crate) enum SidebarTab {
     Tool(Pane),
     Terminal(String),
+    Browser(String),
     Blank(String),
     Hosted(String),
 }
@@ -218,6 +219,24 @@ pub struct SavedPanel {
 impl SavedPanel {
     pub fn restore_open(&self) -> bool {
         self.open && (self.active_hosted.is_some() || self.pane != Pane::Changes)
+    }
+
+    pub(crate) fn split_browser_pages(mut self) -> Vec<Self> {
+        if self.pane != Pane::Browser || self.browser_tabs.len() <= 1 {
+            return vec![self];
+        }
+        let active = self.browser_active.min(self.browser_tabs.len() - 1);
+        let mut pages = std::mem::take(&mut self.browser_tabs);
+        self.browser_tabs = vec![pages.remove(active)];
+        self.browser_active = 0;
+        self.tab_order.clear();
+        let mut result = vec![self.clone()];
+        for page in pages {
+            let mut panel = self.clone();
+            panel.browser_tabs = vec![page];
+            result.push(panel);
+        }
+        result
     }
 
     pub fn browser_profile(&self) -> &str {
@@ -401,6 +420,7 @@ pub struct RightPanel {
     tab_drag_origin: Rc<Cell<Point<Pixels>>>,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
+    file_hover: crate::hover_motion::HoverMotion,
     viewer: Viewer,
     document_preview: Option<crate::document_preview::DocumentPreview>,
     preview_visible: bool,
@@ -727,10 +747,22 @@ impl RightPanel {
         } else {
             None
         };
+        saved.browser_tabs = if pane == Pane::Browser {
+            vec![saved.browser_tabs[instance?].clone()]
+        } else {
+            vec![Default::default()]
+        };
+        saved.browser_active = 0;
         let browsers = if pane == Pane::Browser {
-            self.browser.take();
-            self.browser_watch = None;
-            std::mem::take(&mut self.browsers)
+            if let Some(browser) = self.browser.take() {
+                browser.hide();
+            }
+            let id = saved.browser_tabs[0].id.clone();
+            self.browsers
+                .remove(&id)
+                .map(|browser| (id, browser))
+                .into_iter()
+                .collect()
         } else {
             HashMap::new()
         };
@@ -788,6 +820,7 @@ impl RightPanel {
         });
         match (pane, instance) {
             (Pane::Terminal, Some(index)) => self.close_terminal_tab(index, window, cx),
+            (Pane::Browser, Some(index)) => self.close_browser_tab(index, window, cx),
             (Pane::NewTab, Some(index)) => self.close_blank_tab(index, window, cx),
             _ => self.close_tool(pane, window, cx),
         }
@@ -914,8 +947,8 @@ impl RightPanel {
         self.tab_order = self.sidebar_keys();
     }
 
-    /// Terminal instances occupy the same strip as the other tools. The saved
-    /// IDs also migrate older terminal subtabs without losing their order.
+    /// Terminal and browser instances occupy the same strip as other tools.
+    /// Stable IDs preserve selection and ordering across moves and restarts.
     fn sidebar_tabs(&self) -> Vec<(Pane, Option<usize>)> {
         let mut tabs: Vec<_> = self
             .open_panes
@@ -923,6 +956,10 @@ impl RightPanel {
             .flat_map(|pane| {
                 if *pane == Pane::Terminal {
                     (0..self.terminal_tabs.len())
+                        .map(|index| (*pane, Some(index)))
+                        .collect()
+                } else if *pane == Pane::Browser {
+                    (0..self.browser_tabs.len())
                         .map(|index| (*pane, Some(index)))
                         .collect()
                 } else if *pane == Pane::NewTab {
@@ -948,6 +985,9 @@ impl RightPanel {
         match (pane, instance) {
             (Pane::Terminal, Some(index)) => {
                 SidebarTab::Terminal(self.terminal_tabs[index].clone())
+            }
+            (Pane::Browser, Some(index)) => {
+                SidebarTab::Browser(self.browser_tabs[index].id.clone())
             }
             (Pane::NewTab, Some(index)) => SidebarTab::Blank(self.blank_tabs[index].id.clone()),
             _ => SidebarTab::Tool(pane),
@@ -1061,6 +1101,7 @@ impl RightPanel {
     fn pane_instance(&self, pane: Pane) -> Option<usize> {
         match pane {
             Pane::Terminal => Some(self.terminal_active),
+            Pane::Browser => Some(self.browser_active),
             Pane::NewTab if !self.blank_tabs.is_empty() => Some(self.blank_active),
             _ => None,
         }
@@ -1214,19 +1255,17 @@ impl RightPanel {
         let Some(url) = crate::new_tab::destination(self.address.read(cx).value().as_ref()) else {
             return;
         };
+        let had_browser = self.open_panes.contains(&Pane::Browser);
         let position = self.consume_blank(Pane::Browser);
         self.activate_pane(Pane::Browser);
-        self.place_active_tab(position);
         // Reuse an untouched initial browser page; preserve existing browsing tabs.
-        if self.browser_tabs.len() == 1
-            && self.browser_tabs[0].url == "about:blank"
-            && self.browser.is_none()
-        {
+        if !had_browser {
             self.browser_tabs[0].url = url;
             self.ensure_browser(cx);
         } else {
             self.new_browser_tab(Some(url), cx);
         }
+        self.place_active_tab(position);
         cx.notify();
     }
 
@@ -1301,6 +1340,8 @@ impl RightPanel {
             self.close_blank_tab(self.blank_active, window, cx);
         } else if self.pane == Pane::Terminal && !self.terminal_tabs.is_empty() {
             self.close_terminal_tab(self.terminal_active, window, cx);
+        } else if self.pane == Pane::Browser {
+            self.close_browser_tab(self.browser_active, window, cx);
         } else {
             self.close_tool(self.pane, window, cx);
         }
@@ -1489,9 +1530,29 @@ impl RightPanel {
         }
     }
 
-    pub fn restore(&mut self, saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore(&mut self, mut saved: SavedPanel, window: &mut Window, cx: &mut Context<Self>) {
         self.hosted.clear();
+        let mut hosted = Vec::new();
         for tab in saved.hosted {
+            let mut keys = Vec::new();
+            for (index, panel) in tab.panel.split_browser_pages().into_iter().enumerate() {
+                let id = if index == 0 {
+                    tab.id.clone()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
+                keys.push(SidebarTab::Hosted(id.clone()));
+                hosted.push(SavedHostedTab { id, panel });
+            }
+            if let Some(index) = saved
+                .tab_order
+                .iter()
+                .position(|key| *key == SidebarTab::Hosted(tab.id.clone()))
+            {
+                saved.tab_order.splice(index..=index, keys);
+            }
+        }
+        for tab in hosted {
             let panel = cx.new(|cx| {
                 let mut panel = RightPanel::new(self.root.clone(), window, cx);
                 panel.side_context = self.side_context.clone();
@@ -1513,10 +1574,6 @@ impl RightPanel {
         self.blank_active = saved
             .blank_active
             .min(self.blank_tabs.len().saturating_sub(1));
-        let unused_browser = saved
-            .browser_tabs
-            .iter()
-            .all(|tab| tab.url == "about:blank" || tab.url.is_empty());
         self.pane = if (saved.pane == Pane::Changes
             || (saved.pane == Pane::NewTab && self.blank_tabs.is_empty()))
             && !saved.open_panes.is_empty()
@@ -1531,7 +1588,6 @@ impl RightPanel {
             .filter(|p| {
                 !(*p == Pane::NewTab && self.blank_tabs.is_empty())
                     && !(*p == Pane::SideChat && self.side_chat_id.is_none())
-                    && !(*p == Pane::Browser && unused_browser)
             })
             .collect();
         self.open_panes.dedup();
@@ -1560,6 +1616,21 @@ impl RightPanel {
             saved.browser_tabs
         };
         self.browser_active = saved.browser_active.min(self.browser_tabs.len() - 1);
+        // Expand the legacy Browser group in place, preserving saved page IDs.
+        self.tab_order = self
+            .tab_order
+            .iter()
+            .flat_map(|key| {
+                if *key == SidebarTab::Tool(Pane::Browser) {
+                    self.browser_tabs
+                        .iter()
+                        .map(|tab| SidebarTab::Browser(tab.id.clone()))
+                        .collect()
+                } else {
+                    vec![key.clone()]
+                }
+            })
+            .collect();
         self.browsers.clear();
         self.browser = None;
         self.browser_watch = None;
@@ -1627,6 +1698,7 @@ impl RightPanel {
             tab_drag_origin: Rc::default(),
             root,
             expanded: HashSet::new(),
+            file_hover: Default::default(),
             viewer: Viewer::None,
             document_preview: None,
             preview_visible: true,
@@ -1773,25 +1845,33 @@ impl RightPanel {
             tab.url = url;
         }
         let id = tab.id.clone();
+        if !self.open_panes.contains(&Pane::Browser) {
+            self.browser_tabs.clear();
+            self.open_panes.push(Pane::Browser);
+        }
         self.browser_tabs.push(tab);
+        self.tab_order = self.sidebar_keys();
         self.select_browser_tab(self.browser_tabs.len() - 1, cx);
         id
     }
-    fn close_browser_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn close_browser_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser_tabs.len() == 1 {
+            self.close_tool(Pane::Browser, window, cx);
+            return;
+        }
+        self.browser_tabs = self.browser_snapshot();
         if let Some(browser) = self.browser.take() {
             browser.hide();
         }
         let closed = self.browser_tabs.remove(index);
         self.browsers.remove(&closed.id);
-        if self.browser_tabs.is_empty() {
-            self.browser_tabs.push(Default::default());
-        }
         self.browser_active = if index < self.browser_active {
             self.browser_active - 1
         } else {
             self.browser_active
         }
         .min(self.browser_tabs.len() - 1);
+        self.tab_order = self.sidebar_keys();
         self.ensure_browser(cx);
         cx.notify();
     }
@@ -1831,6 +1911,30 @@ impl RightPanel {
             // an embedded workspace (which would hide its tab strip).
             self.open_tool(Pane::SideChat, window, cx);
             self.focus_side_chat(window, cx);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn close_browser_id(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open_panes.contains(&Pane::Browser)
+            && let Some(index) = self.browser_tabs.iter().position(|tab| tab.id == id)
+        {
+            self.close_browser_tab(index, window, cx);
+            return true;
+        }
+        let hosted = self
+            .hosted
+            .iter()
+            .find(|tab| Self::find_browser_panel(&tab.panel, id, cx).is_some())
+            .map(|tab| tab.id.clone());
+        if let Some(key) = hosted {
+            self.close_hosted(&key, window, cx);
             return true;
         }
         false
@@ -1951,18 +2055,21 @@ impl RightPanel {
                 .ok_or("Unknown browser tab")?;
             self.select_browser_tab(index, cx);
         }
-        if request.action != "list_tabs" && !self.open_panes.contains(&Pane::Browser) {
+        if !matches!(
+            request.action.as_str(),
+            "list_tabs" | "new_tab" | "close_tab"
+        ) && !self.open_panes.contains(&Pane::Browser)
+        {
             self.open_panes.push(Pane::Browser);
             self.tab_order = self.sidebar_keys();
         }
-        self.ensure_browser(cx);
         let immediate = match request.action.as_str() {
             "new_tab" => {
                 self.new_browser_tab(request.url.clone(), cx);
                 true
             }
             "close_tab" => {
-                self.close_browser_tab(self.browser_active, cx);
+                self.close_browser_tab(self.browser_active, window, cx);
                 true
             }
             "select_tab" | "list_tabs" => true,
@@ -1971,9 +2078,17 @@ impl RightPanel {
         cx.notify();
         if immediate {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(Ok(serde_json::json!({"tabs":self.browser_snapshot(),"active_tab":self.browser_tabs[self.browser_active].id})));
+            let open = self.open_panes.contains(&Pane::Browser);
+            let tabs = if open {
+                self.browser_snapshot()
+            } else {
+                Vec::new()
+            };
+            let active = open.then(|| self.active_browser_id());
+            let _ = tx.send(Ok(serde_json::json!({"tabs":tabs,"active_tab":active})));
             return Ok(rx);
         }
+        self.ensure_browser(cx);
         let mut command = serde_json::to_value(&request).map_err(|e| e.to_string())?;
         if matches!(
             request.action.as_str(),
@@ -1988,97 +2103,13 @@ impl RightPanel {
             return div().into_any_element();
         }
         self.ensure_browser(cx);
-        let tabs = self.browser_snapshot();
-        v_flex()
+        div()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .child(
-                h_flex()
-                    .h(zpx(28.))
-                    .flex_none()
-                    .min_w_0()
-                    .px_2()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .id("browser-tabs")
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_scroll()
-                            .children(tabs.iter().enumerate().map(|(index, tab)| {
-                                let label = if tab.url == "about:blank" {
-                                    "New tab"
-                                } else {
-                                    tab.url
-                                        .split("://")
-                                        .last()
-                                        .unwrap_or(&tab.url)
-                                        .split('/')
-                                        .next()
-                                        .unwrap_or(&tab.url)
-                                };
-                                h_flex()
-                                    .id(("browser-tab", index))
-                                    .h(crate::icons::button_size())
-                                    .max_w(zpx(150.))
-                                    .px_2()
-                                    .gap_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(zpx(TEXT_SM))
-                                    .when(index == self.browser_active, |row| {
-                                        row.bg(rgba(0xffffff14))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_browser_tab(index, cx)
-                                    }))
-                                    .child(div().truncate().child(label.to_owned()))
-                                    .child(
-                                        div()
-                                            .id(("close-browser-tab", index))
-                                            .size(crate::icons::button_size())
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .role(gpui::Role::Button)
-                                            .aria_label("Close browser tab")
-                                            .child(
-                                                crate::icons::icon(IconName::Close)
-                                                    .with_size(zpx(14.)),
-                                            )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.close_browser_tab(index, cx);
-                                            })),
-                                    )
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("new-browser-tab")
-                            .size(crate::icons::button_size())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .role(gpui::Role::Button)
-                            .aria_label("New browser tab")
-                            .cursor_pointer()
-                            .child(crate::icons::icon(IconName::Plus))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.new_browser_tab(None, cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    // Leave the shell's 5px splitter above the GPUI surface.
-                    // Native WebKit subviews otherwise intercept its mouse-down.
-                    .pl(zpx(6.))
-                    .child(self.browser.as_ref().unwrap().element()),
-            )
+            // Native WebKit must leave the shell splitter's hit area uncovered.
+            .pl(zpx(6.))
+            .child(self.browser.as_ref().unwrap().element())
             .into_any_element()
     }
 
@@ -2217,6 +2248,9 @@ impl RightPanel {
                 Some(index) if pane == Pane::NewTab => {
                     format!("{base}-{}", self.blank_tabs[index].id).into()
                 }
+                Some(index) if pane == Pane::Browser => {
+                    format!("{base}-{}", self.browser_tabs[index].id).into()
+                }
                 Some(index) => format!("{base}-{}", self.terminal_tabs[index]).into(),
                 None => base.into(),
             }
@@ -2324,7 +2358,11 @@ impl RightPanel {
                         this.select_blank_tab(index, window, cx);
                         return;
                     }
-                    this.terminal_active = index;
+                    if pane == Pane::Browser {
+                        this.select_browser_tab(index, cx);
+                    } else {
+                        this.terminal_active = index;
+                    }
                 }
                 this.open_tool(pane, window, cx);
             }))
@@ -2366,6 +2404,8 @@ impl RightPanel {
                         if let Some(index) = instance {
                             if pane == Pane::NewTab {
                                 this.close_blank_tab(index, window, cx);
+                            } else if pane == Pane::Browser {
+                                this.close_browser_tab(index, window, cx);
                             } else {
                                 this.close_terminal_tab(index, window, cx);
                             }
@@ -2395,11 +2435,15 @@ impl RightPanel {
         let empty_default_split =
             selected.is_none() && self.file_tree_height == DEFAULT_TREE_HEIGHT;
 
+        // Match the tab strip + tab padding, less the row's own quarter-rem inset.
+        let tree_inset = window.rem_size() * 0.75;
         let tree = v_flex()
             .id("file-tree")
+            .relative()
             .flex_none()
             .h_full()
             .overflow_y_scroll()
+            .child(self.file_hover.layer(None, rgba(0)))
             .children(rows.into_iter().map(|(path, depth, is_dir)| {
                 let name = path
                     .file_name()
@@ -2408,15 +2452,20 @@ impl RightPanel {
                 let open = self.expanded.contains(&path);
                 let is_selected = selected.as_ref() == Some(&path);
                 let click = path.clone();
+                let hover = self.file_hover.clone();
+                let hover_key = path.display().to_string();
+                let marker_key = hover_key.clone();
                 h_flex()
                     .w_full()
                     .h(zpx(26.0))
                     .flex_none()
-                    .pl(zpx(4.0 + depth as f32 * 12.0))
+                    .pl(tree_inset + zpx(depth as f32 * 12.0))
                     .pr_1()
                     .child(
                         h_flex()
                             .id(SharedString::from(path.display().to_string()))
+                            .relative()
+                            .flex_1()
                             .h(zpx(26.0))
                             .min_w_0()
                             .px_1()
@@ -2430,11 +2479,19 @@ impl RightPanel {
                             } else {
                                 rgba(0xffffffcc)
                             })
-                            .when(is_selected, |r| {
-                                r.bg(ActionTone::Accent.surface(false))
-                                    .text_color(rgb(0xf5f5f5))
+                            .when(is_selected, |r| r.text_color(rgb(0xf5f5f5)))
+                            .on_hover(move |entered, window, cx| {
+                                hover.hover(&hover_key, *entered, window, cx);
                             })
-                            .when(!is_selected, |r| r.hover(|r| r.bg(rgba(0xffffff0a))))
+                            .child(self.file_hover.marker(
+                                marker_key,
+                                if is_selected {
+                                    ActionTone::Accent.surface(false)
+                                } else {
+                                    rgba(0)
+                                },
+                                rgba(0xffffff24),
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if is_dir {
                                     if !this.expanded.remove(&click) {
@@ -2456,8 +2513,11 @@ impl RightPanel {
                                 } else {
                                     IconName::File
                                 })
-                                .text_color(if is_dir {
-                                    ActionTone::Accent.foreground()
+                                .with_size(zpx(15.))
+                                .text_color(if is_dir && open {
+                                    rgb(0xf5f5f5)
+                                } else if is_dir {
+                                    rgba(0xffffffa6)
                                 } else {
                                     muted
                                 }),
@@ -4945,6 +5005,154 @@ mod tests {
             let editor = panel.editors[&path].read(cx);
             assert_eq!(editor.text().to_string(), source);
             assert!(editor.scroll_offset().y < px(0.));
+        });
+    }
+
+    #[::gpui::test]
+    fn browser_pages_are_independent_outer_tabs(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open_panes = vec![Pane::Files];
+                let original_pane = panel.pane;
+                for url in ["https://example.com/one", "https://example.com/two"] {
+                    panel
+                        .browser_command(
+                            serde_json::from_value(serde_json::json!({
+                                "action": "new_tab", "url": url
+                            }))
+                            .unwrap(),
+                            window,
+                            cx,
+                        )
+                        .unwrap();
+                }
+                assert!(
+                    panel.pane == original_pane,
+                    "agent pages must not steal focus"
+                );
+                assert_eq!(panel.browser_tabs.len(), 2, "no extra initial blank page");
+                let first = panel.browser_tabs[0].id.clone();
+                let second = panel.browser_tabs[1].id.clone();
+                assert!(
+                    panel
+                        .sidebar_keys()
+                        .contains(&SidebarTab::Browser(first.clone()))
+                );
+                assert!(
+                    panel
+                        .sidebar_keys()
+                        .contains(&SidebarTab::Browser(second.clone()))
+                );
+                panel.reveal_browser(&first, window, cx);
+                assert_eq!(panel.active_browser_id(), first);
+                let moved = panel
+                    .take_tab(&SidebarTab::Browser(first.clone()), window, cx)
+                    .unwrap();
+                assert_eq!(panel.agent_browser_tabs(cx).len(), 1);
+                assert_eq!(panel.active_browser_id(), second);
+                assert!(!panel.browsers.contains_key(&first));
+                assert_eq!(moved.read(cx).agent_browser_tabs(cx).len(), 1);
+                assert_eq!(moved.read(cx).active_browser_id(), first);
+                assert!(
+                    moved.read(cx).browsers.contains_key(&first),
+                    "move keeps the existing web view"
+                );
+                assert_eq!(moved.read(cx).browser_profile, panel.browser_profile);
+                panel.accept_tab(moved, window, cx);
+                assert_eq!(panel.agent_browser_tabs(cx).len(), 2);
+                assert!(panel.close_browser_id(&first, window, cx));
+                assert_eq!(panel.agent_browser_tabs(cx).len(), 1);
+                assert!(panel.close_browser_id(&second, window, cx));
+                assert!(panel.agent_browser_tabs(cx).is_empty());
+                assert!(!panel.open_panes.contains(&Pane::Browser));
+            });
+        });
+    }
+
+    #[::gpui::test]
+    fn browser_launcher_replaces_only_its_blank_tab(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open_panes = vec![Pane::Files];
+                for url in ["https://example.com/one", "https://example.com/two"] {
+                    panel.open_new_tab(window, cx);
+                    panel
+                        .address
+                        .update(cx, |input, cx| input.set_value(url, window, cx));
+                    panel.navigate_from_new_tab(cx);
+                }
+                assert_eq!(panel.browser_tabs.len(), 2);
+                assert!(panel.blank_tabs.is_empty());
+                assert_eq!(panel.browser_active, 1);
+                panel.close_active_tab(window, cx);
+                assert_eq!(panel.browser_tabs.len(), 1);
+                assert_eq!(panel.browser_tabs[0].url, "https://example.com/one");
+                panel.close_active_tab(window, cx);
+                assert!(!panel.open_panes.contains(&Pane::Browser));
+            });
+        });
+    }
+
+    #[::gpui::test]
+    fn legacy_browser_group_restores_as_outer_tabs(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let pages = vec![
+            crate::browser::SavedTab::default(),
+            crate::browser::SavedTab {
+                url: "https://example.com".into(),
+                ..Default::default()
+            },
+        ];
+        let first = pages[0].id.clone();
+        let second = pages[1].id.clone();
+        let saved = SavedPanel {
+            pane: Pane::Browser,
+            open_panes: vec![Pane::Files, Pane::Browser, Pane::Changes],
+            tab_order: vec![
+                SidebarTab::Tool(Pane::Files),
+                SidebarTab::Tool(Pane::Browser),
+                SidebarTab::Tool(Pane::Changes),
+            ],
+            browser_tabs: pages,
+            browser_active: 1,
+            ..Default::default()
+        };
+        let split = saved.clone().split_browser_pages();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].browser_tabs[0].id, second);
+        assert_eq!(split[1].browser_tabs[0].id, first);
+        assert_eq!(split[0].browser_profile, split[1].browser_profile);
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.restore(saved, window, cx);
+            panel
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.sidebar_keys(),
+                vec![
+                    SidebarTab::Tool(Pane::Files),
+                    SidebarTab::Browser(first),
+                    SidebarTab::Browser(second.clone()),
+                    SidebarTab::Tool(Pane::Changes)
+                ]
+            );
+            assert_eq!(panel.active_browser_id(), second);
+            let saved = panel.snapshot(false, cx);
+            assert_eq!(
+                saved.browser_tabs.len(),
+                2,
+                "including an intentionally blank browser page"
+            );
         });
     }
 

@@ -698,7 +698,10 @@ rows remember their tabs and placement across restarts. Blank tabs stay open unt
 last tab leaves a fresh **New tab** with the shared launcher. Tool icons match
 between the session tabs, sidebar tabs, and launcher. The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
-`target`/`node_modules` trees. Selection highlights fit the file label. The tree
+`target`/`node_modules` trees. File and folder rows share a full-width hover highlight
+that glides between rows like the session menus and respects reduced motion.
+Closed folder icons are grey; expanded folders are white, with root icons aligned
+to the Files tab icon. The tree
 and preview have a draggable split. The file tree has no edge overlays hiding its content.
 
 Text files are editable with line numbers and syntax highlighting. Use **Save** or
@@ -769,7 +772,11 @@ and MCP configuration are kept separate from saved launch history. See
 ### Browser
 
 On macOS 14 or later, the Browser pane embeds WebKit with an address field,
-back/forward navigation, reload/stop, and multiple tabs. HTTP(S) and localhost
+back/forward navigation, and reload/stop. Each page has its own Browser tab in
+the session or sidebar row—there is no nested browser tab strip. Use **+** and
+enter a URL to open another page; closing or moving a tab affects only that page.
+Existing saved browser groups restore as separate tabs, keeping their profiles
+and page IDs. Agent-created pages also appear as individual sidebar tabs. HTTP(S) and localhost
 pages open inside Del. Browser zoom follows the app's zoom setting. The sidebar
 remains resizable while a browser tab is open. Pop-up links currently open in the
 same tab; downloads and browser extensions are not supported.

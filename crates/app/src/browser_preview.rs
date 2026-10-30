@@ -642,6 +642,15 @@ mod tests {
             cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
         let preview = cx.new(|_| BrowserPreview::default());
         cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel
+                    .browser_command(
+                        serde_json::from_value(serde_json::json!({"action":"new_tab"})).unwrap(),
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+            });
             let blank = panel.read(cx).active_browser_id();
             panel.update(cx, |panel, cx| {
                 panel
@@ -756,7 +765,7 @@ mod tests {
             let moved = panel
                 .update(cx, |panel, cx| {
                     panel.take_tab(
-                        &crate::right_panel::SidebarTab::Tool(crate::right_panel::Pane::Browser),
+                        &crate::right_panel::SidebarTab::Browser(id.clone()),
                         window,
                         cx,
                     )

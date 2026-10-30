@@ -105,7 +105,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Working replaces unread in one trailing slot; never show a spinner and blue dot
   side by side. Preserve the unread state so the dot returns after work finishes
   unless the reply was actually read. Apply this to sidebar rows, drafts, top tabs,
-  and both inner tab zones.
+  and both inner tab zones. Sidebar dots and spinners share one centered status
+  container aligned with the rightmost hover action, so their centers never shift.
 
 - Show a thin rotating ring with a fading tail in sidebar rows and top tabs while a chat is running,
   matching the supplied ChatGPT reference. Use smooth constant rotation, not a segmented spoke spinner.
@@ -123,7 +124,12 @@ This records the final decisions, including corrections to earlier experiments.
 - Explicitly created sessions remain open. Replacing a preview preserves history
   and drafts; it is not deletion.
 - Top-level session tabs and both tool-tab zones share 11-point close glyphs
-  and 16-point hover buttons. Browser subtab close controls retain their own size.
+  and 16-point hover buttons, including Browser pages.
+- Each Browser tab owns one page, with no nested tab strip. Browser pages use the
+  same outer row, ordering, close controls, and cross-zone drag as other tools.
+  Moving a page preserves its live WebKit view, profile, and agent tab ID.
+  Restore legacy nested pages as separate outer tabs; never drop blank pages
+  that were explicitly opened. Agent new-tab requests create outer sidebar tabs.
 
 ## Search and command suggestions
 
@@ -567,6 +573,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Scroll edges and draft rows
 
+- File-tree rows share the session-menu moving hover highlight, clipped to the
+  scroll viewport and disabled as motion when reduced motion is enabled.
+  Closed folders use neutral grey icons; expanded folders use white. Root folder
+  icons align with the Files tab icon, while children retain their indentation.
 - Top-level session tabs use the same gradual overflow-edge fades as inner tabs.
   The add-tab button remains outside the fade. Fades disappear at the scroll limits.
 - The left sidebar session list fades at its scroll edges above the fixed Settings

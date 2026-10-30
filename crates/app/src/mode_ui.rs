@@ -923,15 +923,39 @@ impl AppShell {
                 let (tab, key, cwd) = places.swap_remove(target);
                 let panel = self.browser_panel(&tab, key.clone(), cwd, window, cx);
                 let host = panel.clone();
-                let panel = request
-                    .tab_id
-                    .as_ref()
-                    .and_then(|id| self.find_agent_browser(&tab, id, cx))
-                    .unwrap_or(panel);
+                // New pages belong to the session's outer sidebar strip, even
+                // when the caller is inspecting a page moved into the main zone.
+                let mut request = request;
+                let panel = if request.action == "new_tab" {
+                    request.tab_id = None;
+                    panel
+                } else {
+                    request
+                        .tab_id
+                        .as_ref()
+                        .and_then(|id| self.find_agent_browser(&tab, id, cx))
+                        .unwrap_or(panel)
+                };
                 let foreground = host == self.right;
                 let show_preview = !matches!(request.action.as_str(), "list_tabs" | "close_tab");
-                let result =
-                    panel.update(cx, |panel, cx| panel.browser_command(request, window, cx));
+                let result = if request.action == "close_tab" && panel != host {
+                    let id = panel.read(cx).active_browser_id();
+                    let id = request.tab_id.as_deref().unwrap_or(&id);
+                    let closed = host.update(cx, |host, cx| host.close_browser_id(id, window, cx));
+                    if !closed {
+                        let owner = self.state.read(cx).uid_of(&tab);
+                        if let Some(workspace) = self.workspaces.get(&owner) {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.close_browser_id(id, window, cx)
+                            });
+                        }
+                    }
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = tx.send(Ok(serde_json::json!({"tabs":host.read(cx).agent_browser_tabs(cx),"active_tab":null})));
+                    Ok(rx)
+                } else {
+                    panel.update(cx, |panel, cx| panel.browser_command(request, window, cx))
+                };
                 let browser_id = panel.read(cx).active_browser_id();
                 if !foreground {
                     // Keep tab_id lookups and restarts in sync with tabs the
