@@ -453,6 +453,11 @@ This records the final decisions, including corrections to earlier experiments.
   default to one New tab chooser only, without preopened tools. Closing a blank removes only that
   tab. If the sidebar would become empty,
   show one fresh New tab with its label and hover-close control.
+- Mount the right-sidebar tab strip and its plus in the top title bar, aligned
+  above the right panel beside the session tabs. Do not repeat the strip inside
+  the panel. Keep tool identity, close/reorder behavior, and shortcuts scoped to
+  the current session. Reveal the header and panel together; rapid toggles reverse
+  smoothly from the current position, and reduced motion skips the transition.
 - The right-sidebar plus follows the last tab instead of filling empty space.
   When tabs overflow, keep the plus reachable and gradually fade the clipped
   strip edges; fades must not intercept clicks or scrolling.
@@ -510,12 +515,11 @@ This records the final decisions, including corrections to earlier experiments.
   and their scopes. Start directly with the shortcut groups, without explanatory
   intro text. Do not imply remapping is available until it is implemented.
 
-- Keep the left-sidebar edge border invisible. Use matching faint 0.5-point
-  hairlines below the top bar and beside the right sidebar's tab row. Inset the
-  short vertical segment in the middle of the gutter, 6 points from each end
-  of the tab row so it floats;
-  do not draw a divider alongside the content. Keep line thickness independent
-  of app zoom; preserve the sidebar resize hit targets. Search result rows use
+- Keep the left-sidebar edge, the area below the top tab bar, and the right-sidebar
+  content gutter free of visible divider lines. In the title bar only, separate
+  session tabs from sidebar tools with a thin, vertically centered 20px line.
+  Leave breathing room before each tab strip's plus button.
+  Preserve the sidebar resize hit targets. Search result rows use
   the same provider and terminal marks as sidebar rows instead of visible
   Chat/Terminal type labels.
 - Top-level session tabs, sidebar tool tabs, and their drag previews share

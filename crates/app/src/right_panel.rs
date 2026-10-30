@@ -403,6 +403,7 @@ pub struct RightPanel {
     side_chat: Option<Entity<crate::side_chat::SideChat>>,
     side_chat_id: Option<String>,
     workspace: bool,
+    tabs_in_titlebar: bool,
     compact_tools: bool,
     pane: Pane,
     open_panes: Vec<Pane>,
@@ -1712,6 +1713,7 @@ impl RightPanel {
         let mut panel = Self {
             focus: cx.focus_handle(),
             workspace: false,
+            tabs_in_titlebar: false,
             compact_tools: true,
             watched_hosted: Default::default(),
             transfer_bounds: Default::default(),
@@ -3382,60 +3384,19 @@ impl RightPanel {
     }
 }
 
-impl Render for RightPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.set_preview_visible(self.preview_visible, cx);
+impl RightPanel {
+    /// The same tab controls can be mounted in the shell title bar without
+    /// duplicating the tool content or changing tab ownership.
+    pub fn set_tabs_in_titlebar(&mut self, detached: bool) {
+        self.tabs_in_titlebar = detached;
+    }
+
+    pub fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
-
-        if (!self.preview_visible
-            || self.pane != Pane::Files
-            || !matches!(self.viewer, Viewer::Document { .. }))
-            && let Some(preview) = &self.document_preview
-        {
-            preview.hide();
-        }
-        if (!self.preview_visible || self.active_hosted.is_some() || self.pane != Pane::Browser)
-            && let Some(browser) = &self.browser
-        {
-            browser.hide();
-        }
         let show_hidden = self.show_hidden;
         let transfer_bounds = self.transfer_bounds.clone();
-        let body = if let Some(tab) = self
-            .hosted
-            .iter()
-            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
-        {
-            div()
-                .size_full()
-                .child(tab.panel.clone())
-                .into_any_element()
-        } else {
-            match self.pane {
-                Pane::Files => self.render_files(window, cx).into_any_element(),
-                Pane::Terminal => self.render_terminal(cx),
-                Pane::Browser => self.render_browser(cx),
-                Pane::Changes => self.render_changes(window, cx),
-                Pane::SideChat => div()
-                    .size_full()
-                    .when_some(self.side_chat.clone(), |v, side| v.child(side))
-                    .into_any_element(),
-                Pane::NewTab => v_flex()
-                    .size_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(crate::new_tab::address_bar(&self.address))
-                    .child(crate::new_tab::tools(
-                        self.compact_tools,
-                        &self.new_tab_scroll,
-                        Self::choose_new_tool,
-                        cx,
-                    ))
-                    .into_any_element(),
-            }
-        };
         let mut tab_elements = Vec::new();
         let keys = self.sidebar_keys();
         let visuals = keys
@@ -3523,6 +3484,209 @@ impl Render for RightPanel {
                 tab_elements.push(slot.wrap(format!("sidebar-open-{key:?}").into(), tab));
             }
         }
+        h_flex()
+            .relative()
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        transfer_bounds.set(bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .bg(crate::appearance::shell_surface())
+            .id("sidebar-transfer-zone")
+            .debug_selector(|| "sidebar-transfer-zone".into())
+            .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
+            .flex_none()
+            .overflow_hidden()
+            .px_2()
+            .gap_0p5()
+            .items_center()
+            .child(
+                h_flex()
+                    .relative()
+                    .min_w_0()
+                    .flex_shrink_1()
+                    .overflow_hidden()
+                    .child(
+                        h_flex()
+                            .id("sidebar-tool-tabs")
+                            .debug_selector(|| "sidebar-tool-tabs".into())
+                            .on_drag_move(cx.listener(
+                                |this, event: &DragMoveEvent<DraggedSidebarTab>, _, cx| {
+                                    let drag = event.drag(cx).clone();
+                                    this.move_tab_drag(
+                                        drag.owner,
+                                        &drag.key,
+                                        event.event.position,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
+                            )
+                            .on_drop(cx.listener(|this, drag: &DraggedSidebarTab, _, cx| {
+                                if drag.owner == cx.entity_id() {
+                                    this.finish_tab_drag(cx);
+                                }
+                            }))
+                            .track_scroll(&self.tool_tab_scroll)
+                            .flex_shrink_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .gap_0p5()
+                            .children(tab_elements),
+                    )
+                    .children(crate::tab_transfer::edge_fades(
+                        &self.tool_tab_scroll,
+                        crate::appearance::shell_surface(),
+                    )),
+            )
+            .child(
+                div()
+                    .id("new-sidebar-tab")
+                    .ml_2()
+                    .debug_selector(|| "new-sidebar-tab".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("New sidebar tab")
+                    .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgba(0xffffff14)))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
+                    .child(crate::icons::icon(IconName::Plus)),
+            )
+            .when(
+                self.pane == Pane::Files && self.active_hosted.is_none(),
+                |row| {
+                    row.child(
+                        h_flex()
+                            .id("show-hidden-files")
+                            .ml_auto()
+                            .gap(zpx(5.0))
+                            .items_center()
+                            .cursor_pointer()
+                            .hover(|control| control.opacity(0.85))
+                            .text_size(zpx(TEXT_SM))
+                            .text_color(rgba(0xffffff8c))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_hidden = !this.show_hidden;
+                                this.directory_entries.clear();
+                                this.refresh_tree(cx);
+                                cx.notify();
+                            }))
+                            .child(".files")
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(zpx(22.0))
+                                    .h(zpx(12.0))
+                                    .rounded_full()
+                                    .bg(if show_hidden {
+                                        ActionTone::Accent.foreground()
+                                    } else {
+                                        rgba(0xffffff20)
+                                    })
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top(zpx(2.0))
+                                            .size(zpx(8.0))
+                                            .rounded_full()
+                                            .bg(rgba(0xffffffe6))
+                                            .with_animation(
+                                                SharedString::from(format!(
+                                                    "hidden-files-thumb-{}",
+                                                    show_hidden
+                                                )),
+                                                Animation::new(std::time::Duration::from_millis(
+                                                    120,
+                                                ))
+                                                .with_easing(ease_out_quint()),
+                                                move |thumb, t| {
+                                                    let (from, to) = if show_hidden {
+                                                        (2.0, 12.0)
+                                                    } else {
+                                                        (12.0, 2.0)
+                                                    };
+                                                    thumb.left(zpx(from + (to - from) * t))
+                                                },
+                                            ),
+                                    ),
+                            ),
+                    )
+                },
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .into_any_element()
+    }
+}
+
+impl Render for RightPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.set_preview_visible(self.preview_visible, cx);
+        if self.tab_drag.is_some() && !cx.has_active_drag() {
+            self.tab_drag = None;
+        }
+
+        if (!self.preview_visible
+            || self.pane != Pane::Files
+            || !matches!(self.viewer, Viewer::Document { .. }))
+            && let Some(preview) = &self.document_preview
+        {
+            preview.hide();
+        }
+        if (!self.preview_visible || self.active_hosted.is_some() || self.pane != Pane::Browser)
+            && let Some(browser) = &self.browser
+        {
+            browser.hide();
+        }
+        let body = if let Some(tab) = self
+            .hosted
+            .iter()
+            .find(|tab| Some(&tab.id) == self.active_hosted.as_ref())
+        {
+            div()
+                .size_full()
+                .child(tab.panel.clone())
+                .into_any_element()
+        } else {
+            match self.pane {
+                Pane::Files => self.render_files(window, cx).into_any_element(),
+                Pane::Terminal => self.render_terminal(cx),
+                Pane::Browser => self.render_browser(cx),
+                Pane::Changes => self.render_changes(window, cx),
+                Pane::SideChat => div()
+                    .size_full()
+                    .when_some(self.side_chat.clone(), |v, side| v.child(side))
+                    .into_any_element(),
+                Pane::NewTab => v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(crate::new_tab::address_bar(&self.address))
+                    .child(crate::new_tab::tools(
+                        self.compact_tools,
+                        &self.new_tab_scroll,
+                        Self::choose_new_tool,
+                        cx,
+                    ))
+                    .into_any_element(),
+            }
+        };
         if self.workspace {
             return v_flex()
                 .track_focus(&self.focus)
@@ -3542,157 +3706,9 @@ impl Render for RightPanel {
             // Nothing wraps while the panel's width animates.
             .whitespace_nowrap()
             .flex_none()
-            .child(
-                h_flex()
-                    .relative()
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                transfer_bounds.set(bounds);
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    .bg(crate::appearance::shell_surface())
-                    .id("sidebar-transfer-zone")
-                    .debug_selector(|| "sidebar-transfer-zone".into())
-                    .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
-                    .flex_none()
-                    .overflow_hidden()
-                    .px_2()
-                    .gap_0p5()
-                    .items_center()
-                    .child(
-                        h_flex()
-                            .relative()
-                            .min_w_0()
-                            .flex_shrink_1()
-                            .overflow_hidden()
-                            .child(
-                                h_flex()
-                                    .id("sidebar-tool-tabs")
-                                    .debug_selector(|| "sidebar-tool-tabs".into())
-                                    .on_drag_move(cx.listener(
-                                        |this, event: &DragMoveEvent<DraggedSidebarTab>, _, cx| {
-                                            let drag = event.drag(cx).clone();
-                                            this.move_tab_drag(
-                                                drag.owner,
-                                                &drag.key,
-                                                event.event.position,
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
-                                    )
-                                    .on_mouse_up_out(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| this.finish_tab_drag(cx)),
-                                    )
-                                    .on_drop(cx.listener(
-                                        |this, drag: &DraggedSidebarTab, _, cx| {
-                                            if drag.owner == cx.entity_id() {
-                                                this.finish_tab_drag(cx);
-                                            }
-                                        },
-                                    ))
-                                    .track_scroll(&self.tool_tab_scroll)
-                                    .flex_shrink_1()
-                                    .min_w_0()
-                                    .overflow_x_scroll()
-                                    .gap_0p5()
-                                    .children(tab_elements),
-                            )
-                            .children(crate::tab_transfer::edge_fades(
-                                &self.tool_tab_scroll,
-                                crate::appearance::shell_surface(),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("new-sidebar-tab")
-                            .debug_selector(|| "new-sidebar-tab".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("New sidebar tab")
-                            .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_none()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|button| button.bg(rgba(0xffffff14)))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)),
-                            )
-                            .child(crate::icons::icon(IconName::Plus)),
-                    )
-                    .when(
-                        self.pane == Pane::Files && self.active_hosted.is_none(),
-                        |row| {
-                            row.child(
-                                h_flex()
-                                    .id("show-hidden-files")
-                                    .ml_auto()
-                                    .gap(zpx(5.0))
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .hover(|control| control.opacity(0.85))
-                                    .text_size(zpx(TEXT_SM))
-                                    .text_color(rgba(0xffffff8c))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_hidden = !this.show_hidden;
-                                        this.directory_entries.clear();
-                                        this.refresh_tree(cx);
-                                        cx.notify();
-                                    }))
-                                    .child(".files")
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .w(zpx(22.0))
-                                            .h(zpx(12.0))
-                                            .rounded_full()
-                                            .bg(if show_hidden {
-                                                ActionTone::Accent.foreground()
-                                            } else {
-                                                rgba(0xffffff20)
-                                            })
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top(zpx(2.0))
-                                                    .size(zpx(8.0))
-                                                    .rounded_full()
-                                                    .bg(rgba(0xffffffe6))
-                                                    .with_animation(
-                                                        SharedString::from(format!(
-                                                            "hidden-files-thumb-{}",
-                                                            show_hidden
-                                                        )),
-                                                        Animation::new(
-                                                            std::time::Duration::from_millis(120),
-                                                        )
-                                                        .with_easing(ease_out_quint()),
-                                                        move |thumb, t| {
-                                                            let (from, to) = if show_hidden {
-                                                                (2.0, 12.0)
-                                                            } else {
-                                                                (12.0, 2.0)
-                                                            };
-                                                            thumb.left(zpx(from + (to - from) * t))
-                                                        },
-                                                    ),
-                                            ),
-                                    ),
-                            )
-                        },
-                    ),
-            )
+            .when(!self.tabs_in_titlebar, |panel| {
+                panel.child(self.render_tab_strip(cx))
+            })
             .child(
                 v_flex()
                     .flex_1()
@@ -3836,6 +3852,59 @@ mod tests {
                 assert_eq!(panel.sidebar_keys().len(), 1);
                 assert_eq!(panel.open_panes, vec![Pane::NewTab]);
             })
+        });
+    }
+
+    #[::gpui::test]
+    fn detached_header_controls_the_same_panel_without_an_extra_content_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture(Entity<RightPanel>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let header = self.0.update(cx, |panel, cx| panel.render_tab_strip(cx));
+                v_flex()
+                    .w(zpx(640.))
+                    .h(zpx(500.))
+                    .child(div().h(zpx(42.)).flex_none().child(header))
+                    .child(div().flex_1().min_h_0().child(self.0.clone()))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let panel = cx.new(|cx| {
+                let mut panel = RightPanel::new(dir.path().into(), window, cx);
+                panel.set_tabs_in_titlebar(true);
+                panel
+            });
+            cx.observe(&panel, |_, _, cx| cx.notify()).detach();
+            Fixture(panel)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let plus = cx.debug_bounds("new-sidebar-tab").unwrap();
+        assert!(plus.center().y < zpx(42.));
+        let panel = root.read_with(cx, |root, _| root.0.clone());
+        cx.simulate_mouse_move(plus.center(), None, Modifiers::default());
+        cx.simulate_mouse_down(plus.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(plus.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.sidebar_keys().len()),
+            2
+        );
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| panel.close_active_tab(window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.sidebar_keys().len()),
+            1
+        );
+        // Only the detached header owns the tab-strip bounds, above the body.
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.transfer_bounds.get().bottom() <= zpx(42.));
         });
     }
 
@@ -4305,7 +4374,11 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let tabs = cx.debug_bounds("sidebar-tool-tabs").unwrap();
         let plus = cx.debug_bounds("new-sidebar-tab").unwrap();
-        assert!((plus.left() - tabs.right()).abs() <= zpx(4.));
+        let gap = plus.left() - tabs.right();
+        assert!(
+            gap >= zpx(8.) && gap <= zpx(16.),
+            "plus should follow the tabs with a small breathing gap"
+        );
         assert!(
             plus.right() < zpx(500.),
             "plus must not fill the available width"

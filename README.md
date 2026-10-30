@@ -6,7 +6,7 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.20` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.21` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -15,8 +15,9 @@ when making future changes.
 
 ## Download and install
 
-The latest downloadable installer and source version are **0.1.20**;
-see its [release notes](docs/releases/0.1.20.md) and
+The current source version is **0.1.21**; see its [release notes](docs/releases/0.1.21.md)
+and [validation record](docs/releases/0.1.21-validation.md).
+The latest downloadable installer remains **0.1.20**; see its [release notes](docs/releases/0.1.20.md) and
 [validation record](docs/releases/0.1.20-validation.md).
 Download **Del-0.1.20-arm64.dmg** from the [0.1.20 release](https://github.com/butter-computer/del/releases/tag/v0.1.20),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
@@ -38,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.20-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.21-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -669,7 +670,12 @@ See [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
 ## Files, terminals, and browser
 
 The main area shows only the selected agent conversation or terminal session,
-without an inner tab bar. All tools live in the right sidebar. New sessions start
+without an inner tab bar. All tools live in the right sidebar; their tabs and plus
+button sit in the top title bar directly above that panel, alongside the session
+tabs, separated by a short, centered hairline with space around the plus controls.
+The sidebar content starts immediately below the title bar, without a second
+tab row. The header and panel open and close together with an interruptible reveal;
+reduced-motion settings show or hide them immediately. New sessions start
 with one **New tab** chooser and **+**, with no Files, Changes, Terminal, or Browser
 preopened. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.

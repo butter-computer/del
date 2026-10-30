@@ -41,6 +41,7 @@ mod mcp_bridge;
 mod mode_ui;
 mod model_picker;
 mod new_tab;
+mod panel_motion;
 mod projects;
 mod provider_updates;
 mod providers;
@@ -427,7 +428,7 @@ struct AppShell {
     right_visible: bool,
     /// Bumped on every toggle so each one starts a fresh animation.
     right_toggles: u64,
-    right_animate: bool,
+    right_motion: panel_motion::Reveal,
     /// One chat view per session opened in this run.
     chats: HashMap<SessionId, Entity<ChatView>>,
     search_index: Arc<std::sync::Mutex<conversation_search::Index>>,
@@ -845,7 +846,7 @@ impl AppShell {
             right_open: false,
             right_visible: false,
             right_toggles: 0,
-            right_animate: false,
+            right_motion: Default::default(),
             chats: HashMap::new(),
             search_index: search_ui::new_index(),
             usage,
@@ -1073,7 +1074,8 @@ impl AppShell {
             return;
         }
         self.right_open = open;
-        self.right_animate = true;
+        self.right_motion
+            .set(open, cx.reduce_motion(), std::time::Instant::now());
         self.right_toggles += 1;
         if open {
             self.right_visible = true;
@@ -1312,7 +1314,7 @@ impl AppShell {
             self.right_owner = owner;
             self.right_open = open;
             self.right_visible = open;
-            self.right_animate = false;
+            self.right_motion.settle(open);
             self.right_toggles += 1;
             if newly_created {
                 self.watch_right(cx);
@@ -1818,7 +1820,14 @@ impl AppShell {
     /// Session tabs in the top bar, with a plus button for a new session. The
     /// bar is also the window's drag area, so tabs stop mouse-down from
     /// starting a drag.
-    fn render_topbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_topbar(
+        &self,
+        window: &Window,
+        right_extent: f32,
+        right_progress: f32,
+        right_visible: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let muted = rgba(0xffffff8c);
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
@@ -1876,8 +1885,7 @@ impl AppShell {
             .h(zpx(self.metrics.topbar_height))
             .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
-            .border_b(px(0.5))
-            .border_color(appearance::separator())
+            .border_b(px(0.))
             // Painted once, here and on the gutter below, never underneath the
             // page: stacked translucent layers would make the page more
             // opaque than the bar.
@@ -2236,6 +2244,7 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
+                                    .ml_2()
                                     .role(gpui::Role::Button)
                                     .aria_label("New tab")
                                     .flex_none()
@@ -2261,6 +2270,46 @@ impl AppShell {
                             ),
                     )
                     .child(
+                        h_flex()
+                            .id("right-titlebar")
+                            .relative()
+                            .debug_selector(|| "right-titlebar".into())
+                            .flex_none()
+                            .h_full()
+                            .min_w_0()
+                            .w({
+                                let collapsed = crate::icons::button_size() + window.rem_size() * 0.5;
+                                collapsed + (zpx(right_extent) - collapsed) * right_progress
+                            })
+                            .when(right_visible, |header| {
+                                header.child(
+                                    tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Right)
+                                        .id("right-titlebar-tabs")
+                                        .debug_selector(|| "right-titlebar-tabs".into())
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .opacity(right_progress)
+                                        .child(self.right.update(cx, |panel, cx| panel.render_tab_strip(cx))),
+                                ).child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top_0()
+                                        .h_full()
+                                        .w(px(0.5))
+                                        .flex()
+                                        .items_center()
+                                        .opacity(right_progress)
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .h(zpx(20.0))
+                                                .bg(appearance::separator()),
+                                        ),
+                                )
+                            })
+                            .child(
                         div()
                             .id("toggle-right")
                             .role(gpui::Role::Button)
@@ -2288,6 +2337,7 @@ impl AppShell {
                                 })
                                 .text_color(muted),
                             ),
+                        ),
                     ),
             )
     }
@@ -2574,25 +2624,6 @@ impl Render for AppShell {
         self.sync_terminal_sidebar_actions(cx);
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
-        let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
-        let inset = zpx(self.metrics.page_inset);
-        let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
-        let left_width = sidebar_width(
-            self.sidebar_widths.left,
-            false,
-            viewport,
-            if right_visible {
-                self.sidebar_widths.right.min(400.0)
-            } else {
-                0.0
-            },
-        );
-        let right_width = sidebar_width(
-            self.sidebar_widths.right,
-            true,
-            viewport,
-            if sidebar_visible { left_width } else { 0.0 },
-        );
         if self
             .mode_slide_started
             .is_some_and(|started| started.elapsed() < Duration::from_millis(180))
@@ -2666,7 +2697,35 @@ impl Render for AppShell {
                 workspace.read(cx).persist(cx);
             }
         }
+        let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
+        let inset = zpx(self.metrics.page_inset);
+        let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
+        let left_width = sidebar_width(
+            self.sidebar_widths.left,
+            false,
+            viewport,
+            if right_visible {
+                self.sidebar_widths.right.min(400.0)
+            } else {
+                0.0
+            },
+        );
+        let right_width = sidebar_width(
+            self.sidebar_widths.right,
+            true,
+            viewport,
+            if sidebar_visible { left_width } else { 0.0 },
+        );
+        if cx.reduce_motion() {
+            self.right_motion.settle(self.right_open);
+        }
+        let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
+        let right_progress = if right_visible { progress } else { 0. };
+        if animating {
+            window.request_animation_frame();
+        }
         self.right.update(cx, |panel, cx| {
+            panel.set_tabs_in_titlebar(true);
             // Hide native content before the close animation squeezes its
             // viewport; a floating browser preview must retain the last size.
             panel.set_preview_visible(right_visible && self.right_open && !self.search_open, cx)
@@ -2927,7 +2986,13 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &ToggleProviders, _, cx| {
                 this.state.update(cx, |s, cx| s.toggle_providers(cx));
             }))
-            .child(self.render_topbar(window, cx))
+            .child(self.render_topbar(
+                window,
+                right_width + self.metrics.page_inset,
+                right_progress,
+                right_visible,
+                cx,
+            ))
             .child(
                 h_flex()
                     .flex_1()
@@ -2997,22 +3062,9 @@ impl Render for AppShell {
                                     }
                                 }
                             })
-                            .child(self.render_page(window, cx))
-                            .when(right_visible, |page| {
-                                page.child(
-                                    div()
-                                        .absolute()
-                                        .right(inset / 2. - px(0.25))
-                                        .top(zpx(6.))
-                                        .w(px(0.5))
-                                        .h(zpx(crate::icons::TOOL_ROW_HEIGHT - 12.))
-                                        .bg(appearance::separator()),
-                                )
-                            }),
+                            .child(self.render_page(window, cx)),
                     )
                     .when(right_visible, |row| {
-                        let opening = self.right_open;
-                        let animate = self.right_animate;
                         let full = right_width + self.metrics.page_inset;
                         row.child(
                             tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Right)
@@ -3042,20 +3094,7 @@ impl Render for AppShell {
                                     .left_0()
                                     .bottom(inset),
                                 )
-                                .with_animation(
-                                    ("right-panel", self.right_toggles),
-                                    Animation::new(PANEL_ANIM).with_easing(ease_out_quint()),
-                                    move |el, t| {
-                                        let t = if !animate {
-                                            1.0
-                                        } else if opening {
-                                            t
-                                        } else {
-                                            1.0 - t
-                                        };
-                                        el.w(zpx(full * t))
-                                    },
-                                ),
+                                .w(zpx(full * right_progress)),
                         )
                     }),
             )
