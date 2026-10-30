@@ -307,7 +307,9 @@ muted and italic. New chats remain open, and replaced previews retain their
 conversation history and composer drafts. Double-clicking a chat or terminal
 entry in the sidebar keeps its preview tab open.
 
-**⌘K** opens conversation search. Search message text or titles across saved Codex,
+**⌘K** opens conversation search. Results show their project name beside the title;
+recent conversations show the project name instead of a full directory path.
+Project labels follow sidebar names, including renamed projects and worktree roots. Search message text or titles across saved Codex,
 Claude, and OpenCode chats, including terminal conversations and archived sessions. Use
 **↑/↓** to select a match, **Enter** (or click) to open it, and **Escape** to close.
 Add **/c** for chats or **/t** for terminals to limit results; use either

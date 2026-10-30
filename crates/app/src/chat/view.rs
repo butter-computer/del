@@ -2552,6 +2552,7 @@ mod search_tests {
                 tab: crate::state::Tab::Session(SessionId::new("saved")),
                 title: "Task".into(),
                 provider: Some(del_agent::Provider::Codex),
+                project_name: "tmp".into(),
                 cwd: "/tmp".into(),
                 conversation_id: None,
                 archived: false,

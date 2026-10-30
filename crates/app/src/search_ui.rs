@@ -166,7 +166,7 @@ impl Palette {
                             document: document.clone(),
                             message: None,
                             range: 0..0,
-                            snippet: document.source.cwd.to_string_lossy().into_owned(),
+                            snippet: document.source.project_name.clone(),
                             snippet_range: 0..0,
                         })
                         .collect()
@@ -315,6 +315,7 @@ impl Palette {
             return div().into_any_element();
         };
         let action_count = self.actions(cx).len();
+        let recent = self.input.read(cx).value().trim().is_empty();
         let preview = if hit
             .message
             .is_some_and(|i| hit.document.messages[i].role == "Assistant")
@@ -386,7 +387,10 @@ impl Palette {
             .w_full()
             .id(("search-result", ix))
             .role(Role::Button)
-            .aria_label(format!("{kind}: {}: {}", source.title, hit.snippet))
+            .aria_label(format!(
+                "{kind}: {} · {}: {}",
+                source.title, source.project_name, hit.snippet
+            ))
             .px(zpx(8.))
             .h(zpx(36.))
             .gap(zpx(8.))
@@ -426,23 +430,44 @@ impl Palette {
                     .min_w_0()
                     .gap(zpx(0.))
                     .child(
-                        h_flex().items_center().gap(zpx(8.)).child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(zpx(12.))
-                                .text_color(rgb(0xeeeeef))
-                                .child(source.title.clone()),
-                        ),
+                        h_flex()
+                            .min_w_0()
+                            .items_center()
+                            .gap(zpx(8.))
+                            .child(
+                                div()
+                                    .flex_shrink_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(zpx(12.))
+                                    .text_color(rgb(0xeeeeef))
+                                    .child(source.title.clone()),
+                            )
+                            .when(!recent, |row| {
+                                row.child(
+                                    h_flex()
+                                        .flex_none()
+                                        .max_w(zpx(120.))
+                                        .gap(zpx(4.))
+                                        .text_size(zpx(11.))
+                                        .text_color(rgba(0xffffff88))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(source.project_name.clone()),
+                                        ),
+                                )
+                            }),
                     )
                     .child(
-                        div()
-                            .truncate()
+                        h_flex()
+                            .min_w_0()
+                            .gap(zpx(4.))
                             .text_size(zpx(12.))
                             .line_height(relative(1.15))
                             .text_color(rgba(0xffffff88))
-                            .child(preview),
+                            .child(div().min_w_0().truncate().child(preview)),
                     ),
             )
             .when(source.archived, |row| {
@@ -765,6 +790,7 @@ impl AppShell {
                     tab: Tab::Session(row.id.clone()),
                     title: row.title,
                     provider: Some(row.provider),
+                    project_name: state.project_name(&state.project_root(&row.cwd)),
                     cwd: row.cwd,
                     conversation_id: Some(row.id.0),
                     archived: row.archived,
@@ -781,6 +807,7 @@ impl AppShell {
                     tab: Tab::Terminal(record.id.clone()),
                     title: state.current_title(&record.id),
                     provider: record.launch.provider(),
+                    project_name: state.project_name(&state.project_root(&record.launch.cwd)),
                     cwd: record.launch.cwd.clone(),
                     conversation_id: record.conversation_id.clone(),
                     archived: state.terminal_archived(&record.id),
@@ -1101,6 +1128,7 @@ mod tests {
                         tab: Tab::Session(del_agent::SessionId::new("markdown")),
                         title: "Preview".into(),
                         provider: Some(del_agent::Provider::Claude),
+                        project_name: "tmp".into(),
                         cwd: "/tmp".into(),
                         conversation_id: None,
                         archived: false,
@@ -1161,6 +1189,7 @@ mod tests {
                         tab: Tab::Terminal(del_agent::SessionId::new("terminal")),
                         title: "Test task".into(),
                         provider: Some(del_agent::Provider::Claude),
+                        project_name: "tmp".into(),
                         cwd: "/tmp".into(),
                         conversation_id: None,
                         archived: false,

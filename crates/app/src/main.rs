@@ -3006,6 +3006,7 @@ impl Render for AppShell {
                     ))
                     .when(SIDEBAR_ENABLED && sidebar_visible, |row| {
                         let sidebar = div()
+                            .rounded_tr(zpx(self.metrics.page_radius))
                             .bg(appearance::sidebar_surface())
                             .relative()
                             .h_full()
