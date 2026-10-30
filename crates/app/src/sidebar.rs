@@ -876,6 +876,69 @@ fn session_menu(
     )
 }
 
+// Navigation uses the same rows and grouping as the rendered sidebar.
+fn session_rows(s: &AppState) -> Vec<Row> {
+    if !s.show_archived {
+        return s.unified_rows();
+    }
+    let mut rows = s.archived_rows();
+    rows.extend(
+        s.terminal_rows
+            .iter()
+            .filter(|r| s.terminal_archived(&r.id))
+            .map(|r| Row {
+                id: r.id.clone(),
+                provider: r.provider.unwrap_or(del_agent::Provider::Claude),
+                model: None,
+                cwd: r.cwd.clone(),
+                title: s.current_title(&r.id),
+                status: del_agent::SessionStatus::Idle,
+                updated_secs: 0,
+                archived: true,
+                pinned: false,
+                unread: false,
+            }),
+    );
+    rows
+}
+
+pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
+    use crate::state::Tab;
+    let rows = session_rows(s);
+    let tab = |row: &Row| {
+        if s.terminal_rows.iter().any(|terminal| terminal.id == row.id) {
+            Tab::Terminal(row.id.clone())
+        } else {
+            Tab::Session(row.id.clone())
+        }
+    };
+    let mut tabs = Vec::new();
+    if !s.project_preferences.collapsed_sections.contains("Pinned") {
+        tabs.extend(rows.iter().filter(|r| r.pinned && !r.archived).map(tab));
+    }
+    let section = if s.show_archived {
+        "Archived"
+    } else {
+        "Projects"
+    };
+    if !s.project_preferences.collapsed_sections.contains(section) {
+        for path in s.project_paths_for(rows.iter().map(|r| r.cwd.as_path())) {
+            if s.project_preferences.collapsed.contains(&path) {
+                continue;
+            }
+            if !s.show_archived {
+                tabs.extend(s.project_drafts(&path).into_iter().map(Tab::Draft));
+            }
+            tabs.extend(
+                rows.iter()
+                    .filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path)
+                    .map(tab),
+            );
+        }
+    }
+    tabs
+}
+
 pub fn render(
     state: &Entity<AppState>,
     rename: &Entity<InputState>,
@@ -884,41 +947,17 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
-    let mut rows = s.unified_rows();
-    // Archived rows are only cloned while the archive is shown.
-    let archived = if s.show_archived {
-        s.archived_rows()
-    } else {
-        Vec::new()
-    };
-    let archived_terminals: Vec<_> = s
-        .terminal_rows
-        .iter()
-        .filter(|row| s.terminal_archived(&row.id))
-        .collect();
+    let rows = session_rows(s);
     let active = match &s.selection {
         Selection::Session(id) | Selection::Terminal(id) => Some(id.clone()),
         Selection::Draft(_) => None,
     };
     let providers_open = s.panel == Panel::Providers;
     let show_archived = s.show_archived;
-    let has_archived = s.has_archived_chats() || !archived_terminals.is_empty();
-    if show_archived {
-        rows.clear();
-        rows.extend(archived.iter().cloned());
-        rows.extend(archived_terminals.iter().map(|r| Row {
-            id: r.id.clone(),
-            provider: r.provider.unwrap_or(del_agent::Provider::Claude),
-            model: None,
-            cwd: r.cwd.clone(),
-            title: s.current_title(&r.id),
-            status: del_agent::SessionStatus::Idle,
-            updated_secs: 0,
-            archived: true,
-            pinned: false,
-            unread: false,
-        }));
-    }
+    let has_archived = s.has_archived_chats()
+        || s.terminal_rows
+            .iter()
+            .any(|row| s.terminal_archived(&row.id));
 
     let pinned_state = state.clone();
     let section_state = state.clone();

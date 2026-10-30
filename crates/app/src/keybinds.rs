@@ -12,26 +12,40 @@ pub(crate) enum Picker {
     Branch,
 }
 
+pub(crate) fn bind_session_navigation(cx: &mut App) {
+    // Bind at the focused input context as well as the shell so editor cursor
+    // bindings cannot consume navigation. Shift-arrow selection is unchanged.
+    for context in ["SessionNavigation", "SessionNavigation > Input"] {
+        cx.bind_keys([
+            KeyBinding::new("cmd-left", crate::PrevSession, Some(context)),
+            KeyBinding::new("cmd-right", crate::NextSession, Some(context)),
+            KeyBinding::new("cmd-up", crate::PrevSidebarSession, Some(context)),
+            KeyBinding::new("cmd-down", crate::NextSidebarSession, Some(context)),
+        ]);
+    }
+}
+
 const GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
         "Sessions and tabs",
         &[
             ("New session", "⌘N"),
-            ("New inner tab in the last-used zone", "⌘T / ⌃T"),
+            ("New right-sidebar tab", "⌘T / ⌃T"),
             ("Close top-level session", "⌘⇧W"),
-            ("Close active inner tab in the last-used zone", "⌘W"),
+            ("Close active right-sidebar tab", "⌘W"),
             ("Select top-level session by position", "⌘1–9"),
-            ("Next / previous top-level session", "⌘⇧] / ⌘⇧["),
-            ("Next / previous main-area inner tab", "⌃Tab / ⌃⇧Tab"),
+            ("Next / previous top-level session", "⌘→ / ⌘← · ⌘⇧] / ⌘⇧["),
+            ("Next / previous left-sidebar session", "⌘↓ / ⌘↑"),
+            ("Next / previous right-sidebar tab", "⌃Tab / ⌃⇧Tab"),
         ],
     ),
     (
         "Workspace tools",
         &[
-            ("Open Changes in the last-used zone", "⌃⇧G"),
-            ("Open Files in the last-used zone", "⌘P"),
-            ("Open a new Terminal in the last-used zone", "⌃` / ⌘J"),
-            ("Open Side chat in the last-used zone", "⌥⌘S"),
+            ("Open Changes in the right sidebar", "⌃⇧G"),
+            ("Open Files in the right sidebar", "⌘P"),
+            ("Open a new Terminal in the right sidebar", "⌃` / ⌘J"),
+            ("Open Side chat in the right sidebar", "⌥⌘S"),
             ("Toggle left sidebar", "⌘B"),
             ("Toggle right sidebar", "⌘\\ / ⌘⇧B"),
             ("Save the focused file editor", "⌘S"),
@@ -160,6 +174,53 @@ mod tests {
     use super::*;
     use ::core::prelude::v1::test;
     use gpui_kit::component::{button::Button, menu::DropdownMenu};
+    #[::gpui::test]
+    fn session_arrows_override_cursor_motion_inside_a_focused_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture {
+            input: Entity<gpui_kit::component::input::InputState>,
+            calls: Vec<&'static str>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Shell SessionNavigation")
+                    .on_action(cx.listener(|s, _: &crate::NextSession, _, _| s.calls.push("right")))
+                    .on_action(cx.listener(|s, _: &crate::PrevSession, _, _| s.calls.push("left")))
+                    .on_action(
+                        cx.listener(|s, _: &crate::NextSidebarSession, _, _| s.calls.push("down")),
+                    )
+                    .on_action(
+                        cx.listener(|s, _: &crate::PrevSidebarSession, _, _| s.calls.push("up")),
+                    )
+                    .child(gpui_kit::component::input::Input::new(&self.input))
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_session_navigation(cx);
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| Fixture {
+            input: cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx)),
+            calls: Vec::new(),
+        });
+        cx.update(|window, cx| {
+            root.read(cx)
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-right cmd-left cmd-down cmd-up");
+        cx.run_until_parked();
+        assert_eq!(
+            root.read_with(cx, |s, _| s.calls.clone()),
+            vec!["right", "left", "down", "up"]
+        );
+    }
+
     #[::gpui::test]
     fn controlled_menu_can_open_dismiss_and_reopen(cx: &mut gpui::TestAppContext) {
         struct Controlled {

@@ -107,7 +107,7 @@ impl Pane {
 }
 
 fn default_panes() -> Vec<Pane> {
-    vec![Pane::Files, Pane::Changes, Pane::Terminal]
+    vec![Pane::NewTab]
 }
 
 /// Visual order is independent of the backing tool instances and selection.
@@ -122,8 +122,6 @@ pub(crate) enum SidebarTab {
 
 #[derive(Clone)]
 pub(crate) struct DraggedSidebarTab {
-    pub source: WeakEntity<RightPanel>,
-    pub placement: crate::tab_transfer::Placement,
     owner: EntityId,
     pub key: SidebarTab,
     pane: Pane,
@@ -136,9 +134,13 @@ impl Render for DraggedSidebarTab {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let natural = window.mouse_position() - self.offset;
         let source_y = self.origin.get().y - self.offset.y;
-        let rect = self
-            .placement
-            .preview(natural, source_y, zpx(crate::icons::TOOL_TAB_WIDTH));
+        let rect = Bounds::new(
+            point(natural.x, source_y),
+            size(
+                zpx(crate::icons::TOOL_TAB_WIDTH),
+                zpx(crate::icons::TOOL_TAB_HEIGHT),
+            ),
+        );
         let raw = window.mouse_position() - self.cursor_offset;
         // GPUI positions the drag root at the pointer. Offset its child to
         // the pointer while keeping a full-width, horizontally constrained preview.
@@ -201,6 +203,7 @@ pub struct SavedPanel {
     tab_order: Vec<SidebarTab>,
     hosted: Vec<SavedHostedTab>,
     active_hosted: Option<String>,
+    #[serde(default)]
     blank_tabs: Vec<BlankTab>,
     blank_active: usize,
     expanded: HashSet<PathBuf>,
@@ -246,14 +249,17 @@ impl SavedPanel {
 impl Default for SavedPanel {
     fn default() -> Self {
         Self {
-            open: false,
+            open: true,
             side_chat_id: None,
-            pane: Pane::Files,
+            pane: Pane::NewTab,
             open_panes: default_panes(),
             tab_order: Vec::new(),
             hosted: Vec::new(),
             active_hosted: None,
-            blank_tabs: Vec::new(),
+            blank_tabs: vec![BlankTab {
+                id: uuid::Uuid::new_v4().to_string(),
+                address: String::new(),
+            }],
             blank_active: 0,
             expanded: HashSet::new(),
             selected: None,
@@ -403,9 +409,6 @@ pub struct RightPanel {
     tab_order: Vec<SidebarTab>,
     hosted: Vec<HostedTab>,
     active_hosted: Option<String>,
-    pub(crate) transfer_peer: Option<WeakEntity<crate::workspace_tabs::WorkspaceTabs>>,
-    incoming: crate::tab_transfer::InsertionGap,
-    incoming_items: Vec<Bounds<Pixels>>,
     watched_hosted: HashSet<EntityId>,
     transfer_bounds: Rc<Cell<Bounds<Pixels>>>,
     blank_tabs: Vec<BlankTab>,
@@ -416,7 +419,6 @@ pub struct RightPanel {
     revealed_tab: Option<SidebarTab>,
     motion: crate::tab_motion::Strip<SidebarTab>,
     tab_drag: Option<SidebarDrag>,
-    tab_drag_outside: bool,
     tab_drag_origin: Rc<Cell<Point<Pixels>>>,
     root: PathBuf,
     expanded: HashSet<PathBuf>,
@@ -489,6 +491,7 @@ impl RightPanel {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn current_pane(&self) -> Pane {
         self.pane
     }
@@ -513,6 +516,7 @@ impl RightPanel {
     ) {
         self.workspace = true;
         self.open_panes.clear();
+        self.blank_tabs.clear();
         self.open_new_tab(window, cx);
         self.address
             .update(cx, |input, cx| input.set_value(draft, window, cx));
@@ -573,35 +577,6 @@ impl RightPanel {
         .detach();
     }
 
-    fn insertion_index(&self, pointer: Pixels) -> usize {
-        let mut x = pointer - self.tool_tab_scroll.offset().x;
-        if let Some(index) = self.incoming.index {
-            let left = self.insertion_left(index);
-            let width = zpx(self.incoming.width + 2.);
-            if x > left + width {
-                x -= width;
-            } else if x >= left {
-                x = left;
-            }
-        }
-        self.incoming_items
-            .iter()
-            .position(|bounds| x < bounds.center().x)
-            .unwrap_or(self.incoming_items.len())
-    }
-
-    fn insertion_left(&self, index: usize) -> Pixels {
-        self.incoming_items
-            .get(index)
-            .map(|bounds| bounds.left())
-            .or_else(|| {
-                self.incoming_items
-                    .last()
-                    .map(|bounds| bounds.right() + zpx(2.))
-            })
-            .unwrap_or(self.tool_tab_scroll.bounds().left())
-    }
-
     pub(crate) fn accept_tab(
         &mut self,
         panel: Entity<RightPanel>,
@@ -621,7 +596,6 @@ impl RightPanel {
         self.select_hosted(id, window, cx);
         self.tool_tab_scroll
             .scroll_to_item(self.sidebar_keys().len() - 1);
-        self.incoming = Default::default();
     }
 
     fn select_hosted(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -680,6 +654,7 @@ impl RightPanel {
 
     /// Detach live resources. A move is not a close: never kill a PTY, forget a
     /// side chat, reload a browser, or discard an editor's undo history.
+    #[cfg(test)]
     pub(crate) fn take_tab(
         &mut self,
         key: &SidebarTab,
@@ -1029,7 +1004,6 @@ impl RightPanel {
         if centers.len() != order.len() {
             return;
         }
-        self.tab_drag_outside = false;
         self.tab_drag = Some(SidebarDrag {
             key: key.clone(),
             pointer_offset: self.tab_drag_origin.get().x
@@ -1051,12 +1025,7 @@ impl RightPanel {
         if owner != cx.entity_id() {
             return;
         }
-        let outside = !self.transfer_bounds.get().contains(&pointer);
-        if self.tab_drag_outside != outside {
-            self.tab_drag_outside = outside;
-            cx.notify();
-        }
-        if outside {
+        if !self.transfer_bounds.get().contains(&pointer) {
             return;
         }
         let Some(drag) = &self.tab_drag else {
@@ -1095,6 +1064,77 @@ impl RightPanel {
     fn finish_tab_drag(&mut self, cx: &mut Context<Self>) {
         if self.tab_drag.take().is_some() {
             cx.notify();
+        }
+    }
+
+    pub(crate) fn select_relative(
+        &mut self,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keys = self.sidebar_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let active = self
+            .active_hosted
+            .as_ref()
+            .map(|id| SidebarTab::Hosted(id.clone()))
+            .unwrap_or_else(|| self.tab_key(self.pane, self.pane_instance(self.pane)));
+        let current = keys.iter().position(|key| *key == active).unwrap_or(0);
+        let next = (current as isize + direction).rem_euclid(keys.len() as isize) as usize;
+        match &keys[next] {
+            SidebarTab::Hosted(id) => self.select_hosted(id.clone(), window, cx),
+            key => {
+                if let Some((pane, instance)) = self
+                    .sidebar_tabs()
+                    .into_iter()
+                    .find(|(pane, instance)| self.tab_key(*pane, *instance) == *key)
+                {
+                    self.remember_blank(cx);
+                    match pane {
+                        Pane::NewTab => {
+                            self.blank_active = instance.unwrap_or(0);
+                        }
+                        Pane::Terminal => {
+                            self.terminal_active = instance.unwrap_or(0);
+                        }
+                        Pane::Browser => {
+                            self.browser_active = instance.unwrap_or(0);
+                        }
+                        _ => {}
+                    }
+                    self.activate_pane(pane);
+                    if pane == Pane::NewTab {
+                        self.show_blank_address(window, cx);
+                    }
+                    self.prepare_to_show(window, cx);
+                    self.focus_workspace(window, cx);
+                    self.reveal_active_tab();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn import_legacy_tab(
+        &mut self,
+        id: String,
+        panel: Entity<RightPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hosted.iter().any(|tab| tab.id == id) {
+            return;
+        }
+        self.accept_tab(panel, window, cx);
+        let old = self.active_hosted.replace(id.clone()).unwrap();
+        self.hosted.last_mut().unwrap().id = id.clone();
+        for key in &mut self.tab_order {
+            if *key == SidebarTab::Hosted(old.clone()) {
+                *key = SidebarTab::Hosted(id.clone());
+            }
         }
     }
 
@@ -1673,20 +1713,20 @@ impl RightPanel {
             focus: cx.focus_handle(),
             workspace: false,
             compact_tools: true,
-            transfer_peer: None,
-            incoming: Default::default(),
-            incoming_items: Vec::new(),
             watched_hosted: Default::default(),
             transfer_bounds: Default::default(),
             side_context: None,
             side_chat: None,
             side_chat_id: None,
-            pane: Pane::Files,
+            pane: Pane::NewTab,
             open_panes: default_panes(),
             tab_order: Vec::new(),
             hosted: Vec::new(),
             active_hosted: None,
-            blank_tabs: Vec::new(),
+            blank_tabs: vec![BlankTab {
+                id: uuid::Uuid::new_v4().to_string(),
+                address: String::new(),
+            }],
             blank_active: 0,
             address,
             new_tab_scroll: ScrollHandle::new(),
@@ -1694,7 +1734,6 @@ impl RightPanel {
             revealed_tab: None,
             motion: Default::default(),
             tab_drag: None,
-            tab_drag_outside: false,
             tab_drag_origin: Rc::default(),
             root,
             expanded: HashSet::new(),
@@ -2293,8 +2332,6 @@ impl RightPanel {
             .unwrap_or_else(|| self.tab_key(pane, instance));
         let dragging = self.tab_drag.as_ref().is_some_and(|drag| drag.key == key);
         let payload = DraggedSidebarTab {
-            source: cx.entity().downgrade(),
-            placement: Default::default(),
             owner: cx.entity_id(),
             key,
             pane,
@@ -3348,10 +3385,6 @@ impl RightPanel {
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.set_preview_visible(self.preview_visible, cx);
-        if !cx.has_active_drag() {
-            self.incoming.clear();
-            self.incoming_items.clear();
-        }
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
@@ -3408,11 +3441,6 @@ impl Render for RightPanel {
         let visuals = keys
             .iter()
             .filter_map(|key| {
-                if self.tab_drag_outside
-                    && self.tab_drag.as_ref().is_some_and(|drag| &drag.key == key)
-                {
-                    return None;
-                }
                 let pane = match key {
                     SidebarTab::Hosted(id) => self
                         .hosted
@@ -3474,18 +3502,11 @@ impl Render for RightPanel {
         {
             self.tool_tab_scroll.scroll_to_item(index);
         }
-        for (index, slot) in slots.iter().enumerate() {
+        for slot in &slots {
             let key = &slot.key;
             if slot.closing {
                 tab_elements.push(slot.ghost(format!("sidebar-close-{key:?}").into()));
                 continue;
-            }
-            if self.tab_drag_outside && self.tab_drag.as_ref().is_some_and(|drag| &drag.key == key)
-            {
-                continue;
-            }
-            if self.incoming.index == Some(index) {
-                tab_elements.push(self.incoming.element("sidebar-insertion-space"));
             }
             let tab = if let SidebarTab::Hosted(id) = key {
                 self.hosted
@@ -3501,9 +3522,6 @@ impl Render for RightPanel {
             if let Some(tab) = tab {
                 tab_elements.push(slot.wrap(format!("sidebar-open-{key:?}").into(), tab));
             }
-        }
-        if self.incoming.index == Some(keys.len()) {
-            tab_elements.push(self.incoming.element("sidebar-insertion-space"));
         }
         if self.workspace {
             return v_flex()
@@ -3541,85 +3559,6 @@ impl Render for RightPanel {
                     .id("sidebar-transfer-zone")
                     .debug_selector(|| "sidebar-transfer-zone".into())
                     .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
-                    .on_drag_move(cx.listener(
-                        |this,
-                         event: &DragMoveEvent<crate::workspace_tabs::DraggedWorkspaceTab>,
-                         _,
-                         cx| {
-                            let drag = event.drag(cx).clone();
-                            if this
-                                .transfer_peer
-                                .as_ref()
-                                .is_some_and(|peer| peer.entity_id() == drag.owner)
-                            {
-                                let inside = drag.placement.visit(
-                                    cx.entity_id(),
-                                    event.event.position,
-                                    event.bounds,
-                                );
-                                if inside {
-                                    if this.incoming_items.is_empty() {
-                                        this.incoming_items = (0..this.sidebar_keys().len())
-                                            .filter_map(|index| {
-                                                this.tool_tab_scroll.bounds_for_item(index)
-                                            })
-                                            .collect();
-                                    }
-                                    let index = this.insertion_index(event.event.position.x);
-                                    this.incoming
-                                        .update(Some(index), crate::icons::TOOL_TAB_WIDTH);
-                                    let mut offset = this.tool_tab_scroll.offset();
-                                    let viewport = this.tool_tab_scroll.bounds();
-                                    if event.event.position.x > viewport.right() - zpx(24.) {
-                                        offset.x = (offset.x - zpx(10.))
-                                            .max(-this.tool_tab_scroll.max_offset().x);
-                                    } else if event.event.position.x < viewport.left() + zpx(24.) {
-                                        offset.x = (offset.x + zpx(10.)).min(Pixels::ZERO);
-                                    }
-                                    this.tool_tab_scroll.set_offset(offset);
-                                } else {
-                                    this.incoming.clear();
-                                }
-                                cx.notify();
-                            }
-                        },
-                    ))
-                    .on_drop(cx.listener(
-                        |this, drag: &crate::workspace_tabs::DraggedWorkspaceTab, window, cx| {
-                            if this
-                                .transfer_peer
-                                .as_ref()
-                                .is_some_and(|peer| peer.entity_id() == drag.owner)
-                                && drag.placement.visit(
-                                    cx.entity_id(),
-                                    window.mouse_position(),
-                                    this.transfer_bounds.get(),
-                                )
-                                && let Ok(Some(panel)) = drag
-                                    .source
-                                    .update(cx, |source, cx| source.take_tab(drag.id, window, cx))
-                            {
-                                if this.incoming_items.is_empty() {
-                                    this.incoming_items = (0..this.sidebar_keys().len())
-                                        .filter_map(|index| {
-                                            this.tool_tab_scroll.bounds_for_item(index)
-                                        })
-                                        .collect();
-                                }
-                                let position = this.incoming.index.unwrap_or_else(|| {
-                                    this.insertion_index(window.mouse_position().x)
-                                });
-                                this.accept_tab(panel, window, cx);
-                                if let Some(id) = this.active_hosted.clone() {
-                                    let key = SidebarTab::Hosted(id);
-                                    this.tab_order.retain(|tab| tab != &key);
-                                    this.tab_order
-                                        .insert(position.min(this.tab_order.len()), key);
-                                    this.tool_tab_scroll.scroll_to_item(position);
-                                }
-                            }
-                        },
-                    ))
                     .flex_none()
                     .overflow_hidden()
                     .px_2()
@@ -3851,6 +3790,55 @@ fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
+    fn legacy_panel(
+        root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<RightPanel>,
+    ) -> RightPanel {
+        let mut panel = RightPanel::new(root, window, cx);
+        panel.pane = Pane::Files;
+        panel.open_panes = vec![Pane::Files, Pane::Changes, Pane::Terminal];
+        panel.blank_tabs.clear();
+        panel
+    }
+
+    #[::gpui::test]
+    fn fresh_sidebar_has_only_one_chooser_and_cycles_without_losing_drafts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                assert_eq!(panel.open_panes, vec![Pane::NewTab]);
+                assert_eq!(panel.sidebar_keys().len(), 1);
+                assert!(panel.terminals.is_empty());
+                assert!(panel.browsers.is_empty());
+                panel
+                    .address
+                    .update(cx, |input, cx| input.set_value("first draft", window, cx));
+                panel.open_new_tab(window, cx);
+                panel
+                    .address
+                    .update(cx, |input, cx| input.set_value("second draft", window, cx));
+                panel.select_relative(-1, window, cx);
+                assert_eq!(panel.address.read(cx).value().as_ref(), "first draft");
+                panel.select_relative(1, window, cx);
+                assert_eq!(panel.address.read(cx).value().as_ref(), "second draft");
+                panel.close_active_tab(window, cx);
+                panel.close_active_tab(window, cx);
+                assert_eq!(panel.sidebar_keys().len(), 1);
+                assert_eq!(panel.pane, Pane::NewTab);
+                let saved = panel.snapshot(true, cx);
+                panel.restore(saved, window, cx);
+                assert_eq!(panel.sidebar_keys().len(), 1);
+                assert_eq!(panel.open_panes, vec![Pane::NewTab]);
+            })
+        });
+    }
+
     #[test]
     fn older_sidebar_state_uses_default_tool_tabs() {
         let saved: SavedPanel = serde_json::from_str(r#"{"open":true,"pane":"Files"}"#).unwrap();
@@ -3874,7 +3862,7 @@ mod tests {
         let mut panel = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| {
-                let mut panel = RightPanel::new(dir.path().into(), window, cx);
+                let mut panel = legacy_panel(dir.path().into(), window, cx);
                 panel.terminal_tabs.push(uuid::Uuid::new_v4().to_string());
                 panel.open_new_tab(window, cx);
                 panel.open_new_tab(window, cx);
@@ -3974,7 +3962,7 @@ mod tests {
         let path = dir.path().join("move.md");
         std::fs::write(&path, "original").unwrap();
         let (right, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.viewer = read_viewer(path.clone());
             panel
         });
@@ -4108,7 +4096,7 @@ mod tests {
         let workspace_count = Rc::new(Cell::new(0));
         let (fixture, cx) = cx.add_window_view(|window, cx| {
             let right = cx.new(|cx| {
-                let mut right = RightPanel::new(dir.path().into(), window, cx);
+                let mut right = legacy_panel(dir.path().into(), window, cx);
                 right.set_side_context(context.clone());
                 right.open_tool(Pane::SideChat, window, cx);
                 right
@@ -4217,7 +4205,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (_panel, _cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             let saved =
                 serde_json::from_str(r#"{"open":true,"pane":"NewTab","open_panes":[]}"#).unwrap();
             panel.restore(saved, window, cx);
@@ -4235,7 +4223,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (_panel, _cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             assert!(panel.blank_tabs.is_empty());
             for index in 0..8 {
                 panel.open_new_tab(window, cx);
@@ -4306,7 +4294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut panel = None;
         let (fixture, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            let view = cx.new(|cx| legacy_panel(dir.path().into(), window, cx));
             panel = Some(view.clone());
             Fixture {
                 panel: view,
@@ -4371,7 +4359,7 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
-            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
         for _ in 0..3 {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let target = cx.debug_bounds("new-sidebar-tab").unwrap().center();
@@ -4409,7 +4397,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
-            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
         cx.update(|window, cx| {
             panel.update(cx, |panel, cx| {
                 // Closing a background tool must leave Files selected.
@@ -4471,7 +4459,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut panel = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            let view = cx.new(|cx| legacy_panel(dir.path().into(), window, cx));
             panel = Some(view.clone());
             let fixture = cx.new(|_| Fixture(view));
             gpui_kit::component::Root::new(fixture, window, cx)
@@ -4518,7 +4506,7 @@ mod tests {
         let path = dir.path().join("notes.txt");
         let mut panel = None;
         let (_root, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| RightPanel::new(dir.path().into(), window, cx));
+            let view = cx.new(|cx| legacy_panel(dir.path().into(), window, cx));
             panel = Some(view.clone());
             gpui_kit::component::Root::new(view, window, cx)
         });
@@ -4547,7 +4535,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (_panel, _cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.open_tool(Pane::Terminal, window, cx);
             let first_id = panel.terminal_tabs[0].clone();
             let first = panel.terminals[&first_id].clone();
@@ -4637,7 +4625,7 @@ mod tests {
         std::fs::write(dir.path().join("visible.txt"), "").unwrap();
         std::fs::write(dir.path().join(".hidden"), "").unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             assert!(
                 panel.rows.is_empty(),
                 "construction must never read a directory on the UI thread"
@@ -4683,7 +4671,7 @@ mod tests {
         let source = "# Heading\n\nA **formatted** paragraph.\n\n".repeat(100);
         std::fs::write(&path, &source).unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.viewer = read_viewer(path.clone());
             panel.markdown_preview = true;
             panel
@@ -4734,7 +4722,7 @@ mod tests {
         std::fs::write(&path, "before\n").unwrap();
         std::fs::write(dir.path().join("other.txt"), "another file\n").unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.pane = Pane::Changes;
             panel.prepare_to_show(window, cx);
             panel
@@ -4770,7 +4758,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.pane = Pane::Changes;
             panel.prepare_to_show(window, cx);
             panel
@@ -4793,7 +4781,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.open_tool(Pane::Terminal, window, cx);
             panel.open_new_tab(window, cx);
             panel
@@ -4852,7 +4840,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (_panel, _cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.ensure_terminal(window, cx);
             let first_id = panel.terminal_tabs[0].clone();
             let first = panel.terminals[&first_id].clone();
@@ -4895,7 +4883,7 @@ mod tests {
         let path = dir.path().join("notes.md");
         std::fs::write(&path, "original\n").unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.viewer = read_viewer(path.clone());
             panel
         });
@@ -4944,7 +4932,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
-            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
         cx.run_until_parked();
         let layout = cx.debug_bounds("files-layout").unwrap();
         let handle = cx.debug_bounds("file-preview-resize").unwrap();
@@ -4990,7 +4978,7 @@ mod tests {
         let source = ("long line ".repeat(40) + "\n").repeat(1000);
         std::fs::write(&path, &source).unwrap();
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.viewer = read_viewer(path.clone());
             panel
         });
@@ -5013,7 +5001,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
-            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
         cx.update(|window, cx| {
             panel.update(cx, |panel, cx| {
                 panel.open_panes = vec![Pane::Files];
@@ -5078,7 +5066,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let dir = tempfile::tempdir().unwrap();
         let (panel, cx) =
-            cx.add_window_view(|window, cx| RightPanel::new(dir.path().into(), window, cx));
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
         cx.update(|window, cx| {
             panel.update(cx, |panel, cx| {
                 panel.open_panes = vec![Pane::Files];
@@ -5123,6 +5111,7 @@ mod tests {
                 SidebarTab::Tool(Pane::Changes),
             ],
             browser_tabs: pages,
+            blank_tabs: Vec::new(),
             browser_active: 1,
             ..Default::default()
         };
@@ -5132,7 +5121,7 @@ mod tests {
         assert_eq!(split[1].browser_tabs[0].id, first);
         assert_eq!(split[0].browser_profile, split[1].browser_profile);
         let (panel, cx) = cx.add_window_view(|window, cx| {
-            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            let mut panel = legacy_panel(dir.path().into(), window, cx);
             panel.restore(saved, window, cx);
             panel
         });
@@ -5201,8 +5190,8 @@ mod tests {
         let restored = PanelStore::load(&path);
         assert!(restored.get("chat:a") == chat_a);
         assert!(restored.get("chat:b") == chat_b);
-        assert!(!restored.get("chat:b").open);
-        assert!(!restored.get("new-chat").open);
+        assert!(restored.get("chat:b").open);
+        assert!(restored.get("new-chat").open);
     }
 
     #[::core::prelude::v1::test]

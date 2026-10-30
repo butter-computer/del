@@ -1799,6 +1799,23 @@ impl AppState {
         self.select_nth(next, cx);
     }
 
+    /// Navigate visible sidebar rows in their displayed order, including drafts.
+    pub fn select_sidebar_relative(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let tabs = crate::sidebar::navigation_tabs(self);
+        if tabs.is_empty() {
+            return;
+        }
+        let next = match tabs
+            .iter()
+            .position(|tab| tab.selection() == self.selection)
+        {
+            Some(at) => (at as isize + delta).rem_euclid(tabs.len() as isize) as usize,
+            None if delta < 0 => tabs.len() - 1,
+            None => 0,
+        };
+        self.select_tab(&tabs[next], cx);
+    }
+
     /// Send a prompt to the open session, starting it first if it is a draft.
     #[cfg(test)]
     pub fn send(&mut self, text: String, cx: &mut Context<Self>) {
@@ -4275,6 +4292,66 @@ pub(crate) mod tests {
             assert!(!s.project_paths().contains(&path));
             s.show_archived = false;
             assert!(s.project_paths().contains(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_navigation_follows_group_order_and_skips_collapsed_projects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            s.tabs.clear();
+            s.new_project_session("/z-project".into(), cx);
+            let z = s.tabs.last().unwrap().clone();
+            s.new_project_session("/a-project".into(), cx);
+            let a = s.tabs.last().unwrap().clone();
+            let pinned = del_agent::SessionId::new("pinned-navigation");
+            let other = del_agent::SessionId::new("other-navigation");
+            for (id, is_pinned) in [(&pinned, true), (&other, false)] {
+                s.terminal_rows.push(crate::sessions::TerminalRow {
+                    id: id.clone(),
+                    title: "Shell".into(),
+                    cwd: "/a-project".into(),
+                    provider: None,
+                    account_id: None,
+                    active: false,
+                    summary: String::new(),
+                    pinned: is_pinned,
+                });
+            }
+            assert_eq!(
+                crate::sidebar::navigation_tabs(s),
+                vec![
+                    Tab::Terminal(pinned.clone()),
+                    a.clone(),
+                    Tab::Terminal(other),
+                    z.clone()
+                ]
+            );
+            // Top tabs follow insertion order, while sidebar navigation follows project order.
+            s.select_tab(&a, cx);
+            s.select_relative(1, cx);
+            assert_eq!(s.selection, z.selection());
+            s.select_sidebar_relative(1, cx);
+            assert_eq!(s.selection, Selection::Terminal(pinned.clone()));
+            s.select_sidebar_relative(1, cx);
+            assert_eq!(s.selection, a.selection());
+            s.project_preferences.collapsed.insert("/a-project".into());
+            assert_eq!(
+                crate::sidebar::navigation_tabs(s),
+                vec![Tab::Terminal(pinned), z.clone()]
+            );
+            s.select_sidebar_relative(-1, cx);
+            assert_eq!(s.selection, z.selection());
+            s.project_preferences
+                .collapsed_sections
+                .insert("Pinned".into());
+            s.project_preferences
+                .collapsed_sections
+                .insert("Projects".into());
+            s.select_sidebar_relative(1, cx);
+            assert_eq!(s.selection, z.selection());
         });
     }
 

@@ -1,4 +1,4 @@
-//! Routes inner-tab commands to the last pane the user interacted with.
+//! Tracks composer focus; tool-tab commands always target the right sidebar.
 use crate::{
     right_panel::{Pane, RightPanel},
     workspace_tabs::WorkspaceTabs,
@@ -22,42 +22,31 @@ pub(crate) fn track(div: Div, active: Rc<Cell<Zone>>, zone: Zone) -> Div {
 impl Zone {
     pub fn new_tab(
         self,
-        main: &Entity<WorkspaceTabs>,
+        _main: &Entity<WorkspaceTabs>,
         right: &Entity<RightPanel>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        match self {
-            Self::Main => main.update(cx, |tabs, cx| tabs.new_tab(window, cx)),
-            Self::Right => right.update(cx, |tabs, cx| tabs.open_new_tab(window, cx)),
-        }
+        right.update(cx, |tabs, cx| tabs.open_new_tab(window, cx));
     }
     pub fn close_tab(
         self,
-        main: &Entity<WorkspaceTabs>,
+        _main: &Entity<WorkspaceTabs>,
         right: &Entity<RightPanel>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        match self {
-            Self::Main => {
-                main.update(cx, |tabs, cx| tabs.close_active(window, cx));
-            }
-            Self::Right => right.update(cx, |tabs, cx| tabs.close_active_tab(window, cx)),
-        }
+        right.update(cx, |tabs, cx| tabs.close_active_tab(window, cx));
     }
     pub fn open_tool(
         self,
         pane: Pane,
-        main: &Entity<WorkspaceTabs>,
+        _main: &Entity<WorkspaceTabs>,
         right: &Entity<RightPanel>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        match self {
-            Self::Main => main.update(cx, |tabs, cx| tabs.open_tool(pane, window, cx)),
-            Self::Right => right.update(cx, |tabs, cx| tabs.choose_new_tool(pane, window, cx)),
-        }
+        right.update(cx, |tabs, cx| tabs.choose_new_tool(pane, window, cx));
     }
 }
 
@@ -68,7 +57,7 @@ mod tests {
     use gpui_kit::component::*;
 
     #[::gpui::test]
-    fn repeated_keyboard_commands_follow_clicked_zone(cx: &mut gpui::TestAppContext) {
+    fn keyboard_commands_always_use_sidebar_from_either_zone(cx: &mut gpui::TestAppContext) {
         struct Fixture {
             active: Rc<Cell<Zone>>,
             main: Entity<WorkspaceTabs>,
@@ -164,7 +153,7 @@ mod tests {
         };
         cx.run_until_parked();
         let click_zone = |cx: &mut gpui::VisualTestContext, selector| {
-            let p = cx.debug_bounds(selector).unwrap().center();
+            let p = cx.debug_bounds(selector).unwrap().origin + point(px(3.), px(3.));
             cx.simulate_mouse_move(p, None, Modifiers::default());
             cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::default());
             cx.simulate_mouse_up(p, MouseButton::Left, Modifiers::default());
@@ -175,22 +164,23 @@ mod tests {
             cx.simulate_keystrokes("cmd-t");
         }
         cx.run_until_parked();
-        assert_eq!(right_blanks(cx), 12);
+        assert_eq!(right_blanks(cx), 13);
         assert_eq!(main_tabs(cx), 0);
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
-        assert_eq!(right_blanks(cx), 11);
+        assert_eq!(right_blanks(cx), 12);
         click_zone(cx, "main-zone");
         cx.simulate_keystrokes("cmd-t cmd-t cmd-w");
         cx.run_until_parked();
-        assert_eq!(main_tabs(cx), 1);
-        assert_eq!(right_blanks(cx), 11);
+        assert_eq!(main_tabs(cx), 0);
+        assert_eq!(right_blanks(cx), 13);
         cx.simulate_keystrokes("ctrl-shift-g");
         cx.run_until_parked();
-        main.read_with(cx, |main, cx| {
-            let value = serde_json::to_value(main.snapshot(cx)).unwrap();
-            assert_eq!(value["tabs"][0]["kind"], "Changes");
+        right.read_with(cx, |right, cx| {
+            let value = serde_json::to_value(right.snapshot(true, cx)).unwrap();
+            assert_eq!(value["pane"], "Changes");
         });
+        assert_eq!(main_tabs(cx), 0);
         cx.simulate_keystrokes("cmd-w cmd-w");
         cx.run_until_parked();
         assert_eq!(main_tabs(cx), 0);

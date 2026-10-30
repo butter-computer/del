@@ -6,7 +6,7 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.19` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.20` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -15,10 +15,10 @@ when making future changes.
 
 ## Download and install
 
-The latest downloadable installer is **0.1.13**. The source version is **0.1.19**;
-see its [release notes](docs/releases/0.1.19.md) and
-[validation record](docs/releases/0.1.19-validation.md).
-Download **Del-0.1.13-arm64.dmg** from the [0.1.13 release](https://github.com/butter-computer/del/releases/tag/v0.1.13),
+The latest downloadable installer and source version are **0.1.20**;
+see its [release notes](docs/releases/0.1.20.md) and
+[validation record](docs/releases/0.1.20-validation.md).
+Download **Del-0.1.20-arm64.dmg** from the [0.1.20 release](https://github.com/butter-computer/del/releases/tag/v0.1.20),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -38,7 +38,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.19-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.20-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -668,35 +668,33 @@ See [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
 
 ## Files, terminals, and browser
 
-The right sidebar starts with **Files**, **Changes**, **Terminal**, and **+**.
-Use **+** for a new tool or browser page. Each terminal occupies its own tab in
-that row; choosing Terminal from a new tab starts an independent shell. Closing
-one terminal leaves the others running. Drag tabs to reorder them; each session
-remembers its sidebar order. Drag a tool between the session row and right-sidebar
-row to move it without closing its shell, browser, editor, or side chat. The original
-conversation stays fixed. Both rows use the same compact 128-point tab width, including during transfers.
-Command-T opens in the last-used zone, and newly selected tabs scroll into view.
-Command-W closes only that zone’s inner tab; Command-Shift-W closes the top-level session.
-Side chats use the same provider button and searchable model picker as main chat,
-including effort, Fast mode, and reset controls. Account names appear in the
-provider submenu; changes apply only to that side chat.
-The launcher centers its four options in a compact vertical stack below the URL bar,
-with shortcuts beside neutral icons. Card and URL-bar backgrounds are slightly
-lighter to remain visible against the page, with no divider below the URL bar.
-Entering either row opens a live
-insertion gap, and neighboring tabs move aside
-as you change slots. Dragging tracks the pointer horizontally, locked to the tab
-row with no vertical movement or magnetic effects. Top-level and inner tabs emit
-one native haptic tick when their reorder target changes, matching sidebar session
-reordering; movement within the same slot stays silent. The darker, full-width preview stays attached to the pointer at its original grab offset,
-including after crossing into the other zone. Keep dragging to rearrange there; the
-tab settles into its destination slot only when you release.
-The source slot collapses as soon as the tab leaves, so its plus button follows
-the remaining tabs. Both rows use the same background and small hover-close
-controls, and fade gradually at clipped edges. Both
-rows remember their tabs and placement across restarts. Blank tabs stay open until closed, and closing the
-last tab leaves a fresh **New tab** with the shared launcher. Tool icons match
-between the session tabs, sidebar tabs, and launcher. The file tree loads
+The main area shows only the selected agent conversation or terminal session,
+without an inner tab bar. All tools live in the right sidebar. New sessions start
+with one **New tab** chooser and **+**, with no Files, Changes, Terminal, or Browser
+preopened. Existing tools saved in the former main-area strip migrate into that
+session's sidebar, preserving their drafts, browser profiles, and side chats.
+
+Command-T opens a new right-sidebar tab and reveals the sidebar if hidden,
+regardless of where you last clicked. Tool shortcuts also target the right sidebar.
+Command-W closes its active tool tab; Command-Shift-W closes the top-level session.
+Control-Tab and Control-Shift-Tab cycle sidebar tabs. Composer/model shortcuts still
+follow the active main chat or side chat.
+
+Each terminal occupies its own tab; choosing Terminal starts an independent shell.
+Closing one leaves the others running. Sidebar tabs can be reordered horizontally,
+with a darker held preview and a haptic tick when the target position changes.
+Tabs cannot move into the main conversation. Tab rows retain their compact width,
+small hover-close controls, and gradual overflow fades. Each session remembers
+its sidebar order across restarts. Blank tabs stay open until closed, and closing
+the last tab leaves a fresh **New tab** chooser.
+
+Side chats use the main chat's provider button and searchable model picker,
+including effort, Fast mode, and reset controls. Account choices affect only that
+side chat. The launcher centers its four options in a compact vertical stack below
+the URL bar, with shortcuts beside neutral icons. Cards and the URL bar are slightly
+lighter than the page, without a divider below the URL bar.
+
+The file tree loads
 folders on demand, supports optional dotfiles, and excludes generated
 `target`/`node_modules` trees. File and folder rows share a full-width hover highlight
 that glides between rows like the session menus and respects reduced motion.
@@ -817,7 +815,7 @@ returning restores it unless dismissed. Background sessions never show their
 preview over the current session.
 The × dismisses only the preview and stays dismissed for subsequent actions on
 that tab. Another browser tab can show a new preview. List/close-tab requests do
-not create previews. An open Browser pane in either zone hides floating previews,
+not create previews. An open Browser pane in the sidebar hides floating previews,
 even when it displays a different browser tab, so native browser content cannot
 cover or clip the thumbnail. Hiding the Browser pane restores the preview unless
 it was dismissed. The preview fits the page’s aspect ratio without an outer frame
@@ -920,18 +918,19 @@ session shortcuts.
 | --- | --- |
 | Command-1–9 | Select a top tab by position |
 | Command-N | New session |
-| Command-T / Control-T | New inner tab in the last-used zone |
+| Command-T / Control-T | New right-sidebar tab |
 | Command-K | Open or close conversation search |
 | Command-Shift-W | Close the top-level session tab |
-| Command-W | Close the active inner tab in the focused zone |
-| Control-Shift-G | Open Changes in the focused zone |
-| Command-P | Open Files in the focused zone |
-| Option-Command-S | Open Side chat in the focused zone |
+| Command-W | Close the active right-sidebar tab |
+| Control-Shift-G | Open Changes in the right sidebar |
+| Command-P | Open Files in the right sidebar |
+| Option-Command-S | Open Side chat in the right sidebar |
 | Command-+ (Command-Shift-=) | Zoom the entire interface in |
 | Command-- | Zoom the entire interface out |
 | Command-0 | Reset zoom to 100% |
-| Control-Tab / Control-Shift-Tab | Next / previous tab |
-| Command-Shift-] / Command-Shift-[ | Next / previous tab |
+| Control-Tab / Control-Shift-Tab | Next / previous right-sidebar tab |
+| Command-Right / Command-Left (also Command-Shift-] / Command-Shift-[) | Next / previous top-level session |
+| Command-Down / Command-Up | Next / previous visible left-sidebar session |
 | Command-L | Focus composer |
 | Enter | Send when idle; queue while running |
 | Shift-Enter | Insert a newline |
@@ -939,7 +938,7 @@ session shortcuts.
 | Command-. | Stop the active chat turn |
 | Command-B | Toggle the left sidebar |
 | Command-Backslash / Command-Shift-B | Toggle the file sidebar |
-| Command-J / Control-Backtick | Open a new terminal in the last-used zone |
+| Command-J / Control-Backtick | Open a new terminal in the right sidebar |
 | Command-Comma | Settings |
 | Escape in Settings | Return to the previous workspace view |
 | Command-Q | Quit |
@@ -1052,7 +1051,7 @@ clang -fobjc-arc -mmacosx-version-min=11.0 scripts/test-dictation.m -framework A
 
 Use ⌃M to select a model, ⌃⇧M to open effort controls, and ⌃⇧P to select a
 provider or account in the active chat pane. These commands also work in Side
-chats, including tabs moved between zones. ⌃⇧B opens the starting-branch picker
+chats. ⌃⇧B opens the starting-branch picker
 in a new-session draft. Hover the controls for shortcut badges; Settings →
 Keybinds lists all four. Locked controls and non-chat tabs do not open a picker.
 

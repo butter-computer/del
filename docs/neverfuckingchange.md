@@ -74,7 +74,7 @@ This records the final decisions, including corrections to earlier experiments.
   Lock the preview horizontally inside the sidebar; use vertical movement for reordering.
   Hide the source row and its highlight while dragging; show only the floating preview.
   Neighbor rows use the top tabs’ 90 ms easing, with a dead zone to prevent jitter.
-- Top-level and inner tab drags use the same native level-change haptic as sidebar session reordering. Tick once when the reorder target changes, including entering a destination zone or changing its insertion slot; movement within the same slot stays silent.
+- Top-level and inner tab drags use the same native level-change haptic as sidebar session reordering. Tick once when the reorder target changes, while reordering within its row; movement within the same slot stays silent.
 - Persist manual order across restarts. Reordering must preserve selection and history.
 - Restrict dragging to the same project or the shared pinned section. Chats and
   terminals can reorder together. Cross-project or pinned/unpinned drops must not
@@ -105,7 +105,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Working replaces unread in one trailing slot; never show a spinner and blue dot
   side by side. Preserve the unread state so the dot returns after work finishes
   unless the reply was actually read. Apply this to sidebar rows, drafts, top tabs,
-  and both inner tab zones. Sidebar dots and spinners share one centered status
+  and sidebar tool tabs. Sidebar dots and spinners share one centered status
   container aligned with the rightmost hover action, so their centers never shift.
 
 - Show a thin rotating ring with a fading tail in sidebar rows and top tabs while a chat is running,
@@ -123,11 +123,11 @@ This records the final decisions, including corrections to earlier experiments.
   tab keeps it open. Merely receiving terminal output must not keep a preview.
 - Explicitly created sessions remain open. Replacing a preview preserves history
   and drafts; it is not deletion.
-- Top-level session tabs and both tool-tab zones share 11-point close glyphs
+- Top-level session tabs and sidebar tool tabs share 11-point close glyphs
   and 16-point hover buttons, including Browser pages.
 - Each Browser tab owns one page, with no nested tab strip. Browser pages use the
-  same outer row, ordering, close controls, and cross-zone drag as other tools.
-  Moving a page preserves its live WebKit view, profile, and agent tab ID.
+  same outer row, ordering, close controls, and reordering as other tools.
+  Reordering a page preserves its live WebKit view, profile, and agent tab ID.
   Restore legacy nested pages as separate outer tabs; never drop blank pages
   that were explicitly opened. Agent new-tab requests create outer sidebar tabs.
 
@@ -449,8 +449,8 @@ This records the final decisions, including corrections to earlier experiments.
 - The no-Git indicator is informational and must not accept clicks.
 - Each click of the right-sidebar plus adds an independent New tab with a
   hover-only close button. Switching tools preserves blank tabs and their address
-  drafts; restore explicitly created blanks across restarts. Fresh sidebars still
-  default to Files, Changes, and Terminal only. Closing a blank removes only that
+  drafts; restore explicitly created blanks across restarts. Fresh sidebars
+  default to one New tab chooser only, without preopened tools. Closing a blank removes only that
   tab. If the sidebar would become empty,
   show one fresh New tab with its label and hover-close control.
 - The right-sidebar plus follows the last tab instead of filling empty space.
@@ -458,35 +458,21 @@ This records the final decisions, including corrections to earlier experiments.
   strip edges; fades must not intercept clicks or scrolling.
 - Right-sidebar tabs can be reordered independently across tool kinds. Preserve
   the active instance, drafts, live shells, and each session’s saved order.
-- Move tool tabs between the session row and right sidebar by dragging. Keep the
-  original conversation fixed. Transfer live entities rather than reopening tools:
-  shells keep their PID, editors keep drafts and undo history, and side chats keep
-  their conversation, model/account selection, and storage identity.
-- Main and right-sidebar tool tabs share one compact 128-point width so transfers do not resize them. Top-level session tabs are 144 points wide. Overflow fades occupy only 16 points at each edge; selecting an overflowed tab reveals its full slot, including reordered and transferred tabs.
-- The left sidebar resize target fills the six-point page gutter, outside the sidebar rows and chat tabs/content.
-- Only transfer on a valid drop inside the same session. Entering the other row
-  immediately opens an insertion gap; neighboring tabs shift as the pointer moves
-  between slots. Do not replace this behavior with a blue zone highlight.
-- Keep tool-tab dragging simple: horizontal pointer tracking locked to the source
-  row outside a destination and aligned with the destination row while inside it,
-  with no vertical pointer following, magnetic resistance,
-  or spring effects. Use discrete native haptic ticks when the insertion target changes. Use a darker opaque preview of the normal tab
-  width. Collapse the source layout slot when it leaves its row; the plus button
-  must immediately follow the remaining tabs. Restore that slot if it returns.
-- Insertion gaps participate in layout; do not translate neighboring tabs beyond
-  their measured widths or underneath the plus button. Keep the dragged preview
-  attached to the pointer at its original horizontal grab offset in both zones;
-  entering a destination or changing insertion slots must not snap it into place.
-  Continue reordering under the held pointer and commit the transfer only on release.
-- Both inner tab rows use the same shell background. All three tab levels use
-  the sidebar's 11-point close glyph and 16-point hover button geometry.
-- Apply gradual, non-interactive overflow fades to both tool-tab rows.
-- Restore moved tools in their destination row after restart. Preserve the existing
-  side-chat manifest when migrating to full session-tool persistence. Restored
-  terminals start fresh shells and never replay previous commands.
-- Use matching tool icons in the launcher and both tab rows. New tab uses a page
-  icon; reserve the plus icon for adding tabs.
-- Each terminal appears directly in its session or right-sidebar tab row, with
+- The main area contains only the selected agent conversation or terminal session,
+  with no inner tab bar or plus button. Tool tabs live only in the right sidebar.
+  No drag target may transfer tools into the main area.
+- Migrate saved main-area tool tabs into their owning session's sidebar. Keep
+  browser identities/profiles, editor drafts, and side-chat storage identities.
+  Import IDs must be stable so retrying migration cannot duplicate tabs.
+- Sidebar tool tabs use a compact 128-point width; top-level session tabs are 144
+  points wide. Both share the shell background, 11-point close glyphs, 16-point
+  hover buttons, and gradual overflow fades. Keep the plus after the last tab.
+- Sidebar dragging stays horizontal with a darker held preview, no magnetic
+  resistance, and a haptic tick when its reorder target changes. Leaving the row
+  must not remove its tab or create another zone. Preserve selection and live tools.
+- The left sidebar resize target fills the six-point page gutter, outside rows
+  and chat content. Tool icons match the launcher; New tab uses a page icon.
+- Each terminal appears directly in the right-sidebar tab row, with
   no nested terminal subtab strip. All are labeled Terminal, without numbers.
   The plus icon stays neutral. Choosing Terminal
   from a new tab always creates a fresh shell, even when other terminals exist.
@@ -499,18 +485,21 @@ This records the final decisions, including corrections to earlier experiments.
   use computer.butter.del; never replace the local development signing identity
   or include user data, credentials, or provider account profiles in a release.
 
-- Command-T and Control-T create an inner tab in the last-used zone. Reveal the
+- Command-Left/Right cycle top session tabs. Command-Up/Down cycle visible left-sidebar
+  sessions in displayed order (pinned, then project drafts and sessions), skipping collapsed
+  groups. These shortcuts work from the composer too; Shift variants retain text selection.
+- Command-T and Control-T always create a right-sidebar tab and open the sidebar if hidden. Reveal the
   active tab immediately, including repeated opens after horizontal overflow.
-- Command-W closes only the active inner tab in that zone; it must never
+- Command-W closes only the active right-sidebar tab; it must never
   fall through to closing the top-level session. Command-Shift-W closes the top-level
   session even while an inner tool is active.
 - Changes (Control-Shift-G), Terminal (Control-backtick), Files (Command-P), and
-  Side chat (Option-Command-S) open in the same active zone. Show these shortcuts
+  Side chat (Option-Command-S) always open in the right sidebar. Show these shortcuts
   in the new-tab launcher with neutral icons and subtle surfaces. Stack the four
   options vertically in a centered column, capped at 320 points wide, below the
-  URL bar in both zones; allow scrolling in short panes. Keep cards and the URL
+  URL bar; allow scrolling in short panes. Keep cards and the URL
   field visibly lighter than the page background, without a horizontal divider
-  below the URL bar in either zone.
+  below the URL bar.
 - Empty left-sidebar space must not move the window. Its divider owns only
   sidebar resizing and stops mouse-down propagation.
 
@@ -529,14 +518,13 @@ This records the final decisions, including corrections to earlier experiments.
   of app zoom; preserve the sidebar resize hit targets. Search result rows use
   the same provider and terminal marks as sidebar rows instead of visible
   Chat/Terminal type labels.
-- Top-level session tabs, inner tabs in both zones, and their drag previews share
+- Top-level session tabs, sidebar tool tabs, and their drag previews share
   the same zoom-scaled height. Keep close targets and labels inside that height.
 
-- Side-chat tabs in either zone show a working spinner for their own live turn.
+- Side-chat tabs in the right sidebar show a working spinner for their own live turn.
   The parent session's top tab and left-sidebar row aggregate all its side chats
   and the main conversation. Finishing, failing, or closing one side chat must
-  not clear another chat's working indicator. Keep the original inner chat tab's
-  indicator scoped to the main conversation. Sending from a side chat keeps its
+  not clear another chat's working indicator. Sending from a side chat keeps its
   parent top-level preview tab open, including before a draft becomes a session.
 - The untouched Files split gives an empty preview only the bottom fifth of the
   pane. Preserve manually resized heights; clamp the tree in shorter windows.
@@ -550,15 +538,14 @@ This records the final decisions, including corrections to earlier experiments.
   an active window. Reading the main conversation must not clear hidden forks.
   Cancelled/failed turns and history hydration must not create new unread dots.
 - Tab opening uses a short eased expansion/fade (220 ms); closing is faster
-  (160 ms). Match top, main-inner, and right-sidebar strips. Release closed tools
+  (160 ms). Match top and right-sidebar strips. Release closed tools
   immediately; retain only a noninteractive visual for the exit. Reduced Motion
   settles instantly, as do cross-pane transfers and active drags.
 
 ## Composer picker shortcuts
 
 - ⌃M opens model selection, ⌃⇧M opens effort controls, and ⌃⇧P opens
-  provider/account selection for the active chat in the last-used zone. Follow
-  Side chat ownership after tab transfers; do not change the parent chat.
+  provider/account selection for the active chat in the last-used zone. Do not change the parent chat when using a side-chat picker.
 - ⌃⇧B opens starting-branch selection only in a new-session draft.
 - Show shortcut badges in control tooltips and list the bindings in Settings.
   Respect locked controls and ignore these actions on non-chat tabs.
@@ -613,8 +600,7 @@ button’s circle, without blurring the rest of the app.
 The floating preview frame follows the page snapshot’s aspect ratio within its
 size limit. Do not add an outer border or black letterbox padding around it.
 
-Hide floating browser previews while any Browser pane is visible in either
-zone of their session, including hosted/moved panes and a different selected
+Hide floating browser previews while any Browser pane is visible in the sidebar of their session, including hosted/moved panes and a different selected
 browser tab. Native WebKit surfaces paint above GPUI; leaving the thumbnail
 visible there clips it. This visibility suppression is not dismissal: hiding
 the Browser pane restores the preview.

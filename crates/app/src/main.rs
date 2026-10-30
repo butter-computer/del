@@ -246,6 +246,8 @@ actions!(
         PrevWorkspaceTab,
         NextSession,
         PrevSession,
+        NextSidebarSession,
+        PrevSidebarSession,
         FocusComposer,
         SearchConversations,
         StopSession,
@@ -1459,11 +1461,6 @@ impl AppShell {
         }
     }
 
-    fn new_workspace_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab_zone.set(tab_zone::Zone::Main);
-        self.new_inner_tab(window, cx);
-    }
-
     fn active_tab_zone(&self) -> tab_zone::Zone {
         if self.right_open {
             self.tab_zone.get()
@@ -1532,8 +1529,9 @@ impl AppShell {
             self.sync_workspaces(window, cx);
         }
         if let Some(workspace) = self.workspace(cx) {
-            self.active_tab_zone()
-                .new_tab(&workspace, &self.right, window, cx);
+            self.set_right(true, cx);
+            self.tab_zone.set(tab_zone::Zone::Right);
+            tab_zone::Zone::Right.new_tab(&workspace, &self.right, window, cx);
         }
     }
 
@@ -1547,8 +1545,9 @@ impl AppShell {
             return;
         }
         if let Some(workspace) = self.workspace(cx) {
-            self.active_tab_zone()
-                .open_tool(pane, &workspace, &self.right, window, cx);
+            self.set_right(true, cx);
+            self.tab_zone.set(tab_zone::Zone::Right);
+            tab_zone::Zone::Right.open_tool(pane, &workspace, &self.right, window, cx);
         }
     }
 
@@ -1560,12 +1559,6 @@ impl AppShell {
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_open {
-            return;
-        }
-        if let Some(workspace) = self.workspace(cx)
-            && !workspace.read(cx).is_chat()
-        {
-            workspace.update(cx, |w, cx| w.focus(window, cx));
             return;
         }
         if let Selection::Terminal(id) = &self.state.read(cx).selection
@@ -2300,105 +2293,13 @@ impl AppShell {
     }
 
     fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let workspace = self.workspace(cx);
-        let chat_active = workspace.as_ref().is_none_or(|w| w.read(cx).is_chat());
-        let (title, provider) = {
-            let state = self.state.read(cx);
-            let tab = match &state.selection {
-                Selection::Draft(id) => Tab::Draft(*id),
-                Selection::Session(id) => Tab::Session(id.clone()),
-                Selection::Terminal(id) => Tab::Terminal(id.clone()),
-            };
-            state.tab_info(&tab)
-        };
-        let working = match &self.state.read(cx).selection {
-            Selection::Session(id) | Selection::Terminal(id) => {
-                self.state.read(cx).main_session_working(id)
-            }
-            Selection::Draft(_) => false,
-        };
-        let tools = workspace
-            .as_ref()
-            .map(|w| w.update(cx, |w, cx| w.render_strip(false, cx)));
-        let tab_row = h_flex()
-            .id("session-workspace-tabs")
-            .debug_selector(|| "session-workspace-tabs".into())
-            .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
-            .flex_none()
-            .gap_1()
-            .overflow_x_scroll()
-            .child(
-                h_flex()
-                    .id("workspace-chat-tab")
-                    .role(gpui::Role::Button)
-                    .aria_label("Open session chat tab")
-                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                    .w(zpx(workspace_tabs::TAB_WIDTH))
-                    .flex_none()
-                    .px_2()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(zpx(TEXT_MD))
-                    .text_color(if chat_active {
-                        rgb(0xf5f5f5)
-                    } else {
-                        rgba(0xffffff8c)
-                    })
-                    .when(chat_active, |t| t.bg(rgba(0xffffff14)))
-                    .hover(|t| t.bg(rgba(0xffffff0a)))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(workspace) = this.workspace(cx) {
-                            workspace.update(cx, |w, cx| w.select_index(0, window, cx));
-                        }
-                        this.focus_composer(window, cx);
-                    }))
-                    .child(mode_ui::tab_mark(provider))
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .when(working, |tab| tab.child(crate::icons::working_spinner())),
-            )
-            .children(tools)
-            .child(
-                Button::new("new-session-workspace-tab")
-                    .accessibility_label("New session tab")
-                    .ghost()
-                    .icon(IconName::Plus)
-                    .tooltip("New tab (Ctrl+T)")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.new_workspace_tab(window, cx)),
-                    ),
-            );
-        let tab_row = if let Some(workspace) = workspace {
-            workspace.update(cx, |workspace, cx| workspace.render_row(tab_row, cx))
-        } else {
-            tab_row.into_any_element()
-        };
-        tab_zone::track(v_flex(), self.tab_zone.clone(), tab_zone::Zone::Main)
+        tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Main)
             .size_full()
             .min_w_0()
-            .child(tab_row)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_session_content(window, cx)),
-            )
+            .child(self.render_session_content(window, cx))
     }
 
     fn render_session_content(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(workspace) = self.workspace(cx)
-            && !workspace.read(cx).is_chat()
-        {
-            self.ambient
-                .update(cx, |ambient, cx| ambient.set_visible(false, window, cx));
-            return div()
-                .size_full()
-                .rounded(zpx(self.metrics.page_radius))
-                .overflow_hidden()
-                .bg(page_surface())
-                .child(workspace)
-                .into_any_element();
-        }
         let radius = zpx(self.metrics.page_radius);
         let (panel, selection) = {
             let st = self.state.read(cx);
@@ -2705,9 +2606,18 @@ impl Render for AppShell {
             self.state.read(cx).mode(),
         );
         if self.state.read(cx).panel == Panel::Chat && self.mode_focus.as_ref() != Some(&mode_key) {
-            self.mode_focus = Some(mode_key);
+            self.mode_focus = Some(mode_key.clone());
             self.tab_zone.set(tab_zone::Zone::Main);
-            self.focus_composer(window, cx);
+            // Session restoration can mount native tool views and move the
+            // composer between layouts. Focus after the new subtree is mounted.
+            let shell = cx.weak_entity();
+            window.on_next_frame(move |window, cx| {
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.mode_focus.as_ref() == Some(&mode_key) {
+                        shell.focus_composer(window, cx);
+                    }
+                });
+            });
         }
         self.ensure_chat(cx);
         self.sync_composer_draft(window, cx);
@@ -2747,12 +2657,14 @@ impl Render for AppShell {
             }
         }
         if let Some(workspace) = self.workspace(cx) {
-            workspace.update(cx, |workspace, _| {
-                workspace.transfer_peer = Some(self.right.downgrade())
+            let migrated = workspace.update(cx, |workspace, cx| {
+                workspace.migrate_to_sidebar(&self.right, window, cx)
             });
-            self.right.update(cx, |panel, _| {
-                panel.transfer_peer = Some(workspace.downgrade())
-            });
+            if migrated {
+                self.remember_right(cx);
+                self.persist_right(cx);
+                workspace.read(cx).persist(cx);
+            }
         }
         self.right.update(cx, |panel, cx| {
             // Hide native content before the close animation squeezes its
@@ -2824,7 +2736,13 @@ impl Render for AppShell {
                 shell.bg(gpui_kit::rgb(0xfcfcfc))
             })
             .track_focus(&self.shell_focus)
-            .key_context("Shell")
+            .key_context(
+                if !self.search_open && self.state.read(cx).panel == Panel::Chat {
+                    "Shell SessionNavigation"
+                } else {
+                    "Shell"
+                },
+            )
             .capture_action(
                 cx.listener(|this, _: &gpui_kit::component::input::MoveDown, _, cx| {
                     if this
@@ -2937,11 +2855,7 @@ impl Render for AppShell {
                 if this.state.read(cx).panel == Panel::Chat
                     && let Some(workspace) = this.workspace(cx)
                 {
-                    let zone = this.active_tab_zone();
-                    zone.close_tab(&workspace, &this.right, window, cx);
-                    if zone == tab_zone::Zone::Main {
-                        this.focus_composer(window, cx);
-                    }
+                    tab_zone::Zone::Right.close_tab(&workspace, &this.right, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
@@ -2975,16 +2889,16 @@ impl Render for AppShell {
                 this.focus_composer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NextWorkspaceTab, window, cx| {
-                if let Some(workspace) = this.workspace(cx) {
-                    workspace.update(cx, |w, cx| w.select_relative(1, window, cx));
-                }
-                this.focus_composer(window, cx);
+                this.set_right(true, cx);
+                this.tab_zone.set(tab_zone::Zone::Right);
+                this.right
+                    .update(cx, |panel, cx| panel.select_relative(1, window, cx));
             }))
             .on_action(cx.listener(|this, _: &PrevWorkspaceTab, window, cx| {
-                if let Some(workspace) = this.workspace(cx) {
-                    workspace.update(cx, |w, cx| w.select_relative(-1, window, cx));
-                }
-                this.focus_composer(window, cx);
+                this.set_right(true, cx);
+                this.tab_zone.set(tab_zone::Zone::Right);
+                this.right
+                    .update(cx, |panel, cx| panel.select_relative(-1, window, cx));
             }))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| {
                 this.state.update(cx, |s, cx| s.select_relative(1, cx));
@@ -2992,6 +2906,16 @@ impl Render for AppShell {
             }))
             .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
                 this.state.update(cx, |s, cx| s.select_relative(-1, cx));
+                this.focus_composer(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextSidebarSession, window, cx| {
+                this.state
+                    .update(cx, |state, cx| state.select_sidebar_relative(1, cx));
+                this.focus_composer(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevSidebarSession, window, cx| {
+                this.state
+                    .update(cx, |state, cx| state.select_sidebar_relative(-1, cx));
                 this.focus_composer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
@@ -3216,6 +3140,7 @@ fn main() {
                 KeyBinding::new("cmd-.", StopSession, None),
                 KeyBinding::new("cmd-,", ToggleProviders, None),
             ]);
+            keybinds::bind_session_navigation(cx);
             // Quit runs the shutdown hook, which ends every backend process.
             cx.on_action(|_: &Quit, cx| cx.quit());
             // Closing the window quits, which also runs the shutdown hook.
