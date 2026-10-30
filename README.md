@@ -426,6 +426,8 @@ conversation. Unloading a running session also stops its current work.
 - Running chats show a thin rotating ring with a fading tail in their sidebar row and top tab. Terminal
   sessions show it when their agent reports Working. Hover hides the spinner and
   reveals the usual actions in the same slot.
+- While working, the spinner replaces the unread dot in the same trailing slot;
+  unread state is preserved and the dot returns after work finishes if still unread.
 - A blue dot at the far right marks unread conversations, including background
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
@@ -629,7 +631,10 @@ No Codex, Claude, or third-party transcription API is used.
 Agents in the same Del project can discover each other, read recorded chat context,
 and exchange requests and replies across providers. Sibling worktrees use their
 parent project. A peer can ask for information or edits without changing the
-recipient's account, model, or permissions. Each exchange appears as a centered
+recipient's account, model, or permissions. Incoming requests are actionable tasks,
+including new assignments after a previous task completes. Agents carry them out
+and report back without requiring the user to resend them; standing user constraints
+and existing permissions still apply. Each exchange appears as a centered
 `Current agent ⇄ Other agent` row with provider logos and clickable names, without
 message text, status labels, or a card background. Exchanges also appear in conversation
 navigation and activity indicators. Failed or uncertain deliveries retain retry

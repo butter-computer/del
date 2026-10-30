@@ -2120,7 +2120,7 @@ impl AppShell {
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)
                                                                 .id(SharedString::from(format!("title-shimmer-{name}"))))
                                                     } else { tab_title(title).when(preview, |title| title.italic().opacity(0.65)) })
-                                                    .when_some(indicator_id.as_ref().filter(|id| { let (from, target, start) = self.state.read(cx).unread_motion(id); target > 0. || (from > 0. && start.is_some_and(|start| start.elapsed().as_millis() < 180)) }), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
+                                                    .when_some(indicator_id.as_ref().filter(|id| { let (from, target, start) = self.state.read(cx).unread_motion(id); !working && (target > 0. || (from > 0. && start.is_some_and(|start| start.elapsed().as_millis() < 180))) }), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
                                                     .child(
                                                         div()
                                                             .id(SharedString::from(format!(

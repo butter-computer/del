@@ -6,6 +6,17 @@ Every Del session in a project is an equal peer, regardless of provider. Agents
 can discover peers, read their recorded context without requesting a model turn,
 send requests, and reply to requests. Requests can ask for information or changes;
 the receiving session keeps its existing provider/account and permissions.
+Del's shared collaboration policy authorizes peers to delegate work. The recipient
+performs the task and sends a tracked reply instead of rejecting it merely because
+it arrived from another agent or differs from a completed assignment. New requests
+after completion start fresh work; only unfinished original work is continued.
+Standing user constraints and permission boundaries still apply. Quoted material
+and context read from another conversation remain reference data. A concrete blocker
+is reported to the requester, rather than treating every peer request as unauthorized.
+
+Native transcript restoration recognizes both the current and previous exact peer
+envelopes, including rebound Side chat IDs, without accepting modified payloads or
+appended instructions as mailbox receipts.
 
 A model turn ending does not necessarily finish a task. An exchange must preserve
 any original work. Peer messages run ahead of queued user messages at a safe input
@@ -195,3 +206,26 @@ rules, and it ended its turn and received all four continuations without human
 intervention. This live run verifies Codex; cross-provider creation/configuration
 is covered by deterministic tests, not a new live Claude/OpenCode/ACP run.
 The local app was left running with caffeine enabled.
+
+
+## Delegation after completed work (2026-10-30)
+
+The opt-in `live_codex_peer_accepts_new_work_after_completed_task` regression uses
+two disposable native conversations and an isolated temporary project. One chat
+finishes an arithmetic assignment whose no-edit restriction applies to that
+assignment. A second chat then requests a new file-writing task through
+`send_to_session` and waits for its answer.
+
+With the previous collaboration policy, the recipient refused the new request
+because it treated the completed assignment's restrictions as permanent. With
+the updated policy, the recipient executed the edit, created the exact expected
+file bytes, sent a tracked reply, and both chats explicitly completed their work
+without another human prompt. The test checks the artifact, recipient tool events,
+reply receipt, idle status, and both completed work records. It does not accept a
+sender's completion claim as proof of execution. The passing live run took 50s.
+
+Deterministic regressions also verify that completed work gets a fresh work ID
+without retaining the old task, and that current/legacy delivery envelopes survive
+Side chat rebinding while altered payloads, endpoints, or appended instructions
+are rejected. The shared policy applies across providers; this new live run used
+Codex, not live Claude/OpenCode/ACP accounts.

@@ -107,7 +107,7 @@ pub fn tool_list() -> Value {
         {
             "name": "send_to_session",
             "title": "Send text to a session",
-            "description": "Send a message to another session. Queue a request to any session in your Del project. Returns a durable receipt immediately, not the answer. Keep your current task active; read replies in your conversation. Use a stable idempotency_key when retrying. Peer messages run before queued user messages, without interrupting current work. Call session_work complete only when your original task and all peer obligations are actually finished.",
+            "description": "Send a message to another session. Delegate information requests or implementation tasks to any session in your Del project, including one whose previous assignment is complete. The recipient acts within its existing permissions and standing user constraints. Returns a durable receipt immediately, not the answer. Keep your current task active; read replies in your conversation. Use a stable idempotency_key when retrying. Peer messages run before queued user messages, without interrupting current work. Call session_work complete only when your original task and all peer obligations are actually finished.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -128,7 +128,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name":"reply_to_session", "title":"Reply to a peer request",
-            "description":"Send the answer to an incoming peer request using its request_id. Only the recipient can reply. Use the same idempotency_key to retry the same reply. Replying does not finish your original task: continue it, then explicitly complete work when everything is actually done.",
+            "description":"Send the answer to an incoming peer request using its request_id. Only the recipient can reply. Use the same idempotency_key to retry the same reply. Replying does not finish any unfinished original task: continue it, then explicitly complete work when everything is actually done. Do not restart an already completed assignment.",
             "inputSchema":{"type":"object","properties":{"request_id":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"maxLength":128},"text":{"type":"string","minLength":1,"maxLength":20000}},"required":["request_id","idempotency_key","text"],"additionalProperties":false},
             "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
         },

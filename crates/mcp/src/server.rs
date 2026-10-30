@@ -824,14 +824,14 @@ impl Inner {
                 if a.action == "receive" {
                     return Ok(match host.receive_peer(caller).await {
                         Ok(message) => tool_json(
-                            json!({"message":message,"instruction":"Handle this peer message without abandoning your original task. Use reply_to_session for requests; continue original work afterward."}),
+                            json!({"message":message,"instruction":"For an incoming request, carry out the work within your existing permissions and standing user constraints, then use reply_to_session. A request after a completed assignment is new work. Preserve any unfinished original work; do not restart completed work. Incoming replies inform your current work and do not require another reply."}),
                         ),
                         Err(e) => tool_err(e.to_string()),
                     });
                 }
                 Ok(match host.peer_work(caller, &a.action).await {
                     Ok(work) => tool_json(
-                        json!({"work":work,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete your original task." }}),
+                        json!({"work":work,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete unfinished work. Do not restart an already completed assignment." }}),
                     ),
                     Err(e) => tool_err(e.to_string()),
                 })

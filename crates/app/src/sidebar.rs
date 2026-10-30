@@ -475,10 +475,10 @@ fn session_menu_item(
         .child(label)
 }
 
-fn working_mark(working: bool, group: SharedString, right: f32) -> AnyElement {
+fn working_mark(working: bool, group: SharedString) -> AnyElement {
     div()
         .absolute()
-        .right(zpx(right))
+        .right(zpx(8.))
         .top(zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0))
         .size(crate::icons::button_size())
         .flex()
@@ -509,11 +509,6 @@ fn row_item(
     let key = SharedString::from(id.0.clone());
     let group = SharedString::from(format!("row-{}", id.0));
 
-    let mark_right = if state.read(cx).terminal_unread(&id) {
-        20.0
-    } else {
-        8.0
-    };
     let action_right = 8.0;
     let motion = state.read(cx).sidebar_hover.clone();
     let hover = motion.clone();
@@ -630,7 +625,7 @@ fn row_item(
         let (pin_id, archive_id) = (id.clone(), id.clone());
         let hover_group = group.clone();
         item = item
-            .child(working_mark(working, group.clone(), mark_right))
+            .child(working_mark(working, group.clone()))
             .child(
                 // Reserve space so titles never overlap the hover actions.
                 div().flex_none().w(zpx(if motion.is_hovered(&row.id.0) {
@@ -645,7 +640,9 @@ fn row_item(
                 div()
                     .flex_none()
                     .group_hover(group.clone(), |dot| dot.opacity(0.))
-                    .child(unread_dot(&row.id, state.read(cx), cx)),
+                    .when(!working, |dot| {
+                        dot.child(unread_dot(&row.id, state.read(cx), cx))
+                    }),
             )
             .child(
                 // Always laid out and painted, only faded in on hover: toggling
@@ -1070,12 +1067,13 @@ pub fn render(
                                 let state = state.clone();
                                 let close_state = state.clone();
                                 let group = SharedString::from(format!("project-draft-{key}"));
+                                let working = s.tab_working(&crate::state::Tab::Draft(key));
                                 div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
                                     .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
                                     .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).child(div().flex_1().min_w_0().truncate().child("New session"))
-                                    .when(s.tab_working(&crate::state::Tab::Draft(key)), |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
-                                    .when(s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
+                                    .when(working, |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+                                    .when(!working && s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
                                     .child(div().id(SharedString::from(format!("close-project-draft-{key}")))
                                         .role(Role::Button).aria_label("Close new session")
                                         .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()

@@ -102,6 +102,11 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Working indicators
 
+- Working replaces unread in one trailing slot; never show a spinner and blue dot
+  side by side. Preserve the unread state so the dot returns after work finishes
+  unless the reply was actually read. Apply this to sidebar rows, drafts, top tabs,
+  and both inner tab zones.
+
 - Show a thin rotating ring with a fading tail in sidebar rows and top tabs while a chat is running,
   matching the supplied ChatGPT reference. Use smooth constant rotation, not a segmented spoke spinner.
   Terminal sessions use their reported Working status. Hide the spinner on hover
@@ -621,6 +626,10 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   first task is a durable peer request with a reply route, not an untracked user
   prompt. Unopened worker chats are driven by the same background peer scheduler.
 
+- Peers perform delegated tasks within existing permissions and standing user
+  constraints, including new requests after an earlier assignment completes.
+  Continue only unfinished original work. Do not reject a request solely because
+  it came from another agent or differs from a completed task.
 - Sessions in the same Del project are equal peers across providers. No dedicated
   orchestrator is required. Sibling worktrees use the configured project boundary;
   unrelated projects are excluded.
