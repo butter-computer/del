@@ -310,6 +310,17 @@ struct SidebarWidths {
 
 const LEFT_SIDEBAR_MIN: f32 = 162.0;
 const LEFT_SIDEBAR_MAX: f32 = 234.0;
+const LEFT_SIDEBAR_COLLAPSE_THRESHOLD: f32 = LEFT_SIDEBAR_MIN - 80.0;
+const LEFT_SIDEBAR_REOPEN_THRESHOLD: f32 = LEFT_SIDEBAR_COLLAPSE_THRESHOLD + 32.0;
+const LEFT_SIDEBAR_RESIZE_TARGET: f32 = 16.0;
+
+fn left_sidebar_open_for_drag(requested: f32, open: bool) -> bool {
+    if open {
+        requested > LEFT_SIDEBAR_COLLAPSE_THRESHOLD
+    } else {
+        requested >= LEFT_SIDEBAR_REOPEN_THRESHOLD
+    }
+}
 
 impl Default for SidebarWidths {
     fn default() -> Self {
@@ -406,6 +417,7 @@ struct AppShell {
     sidebar_open: bool,
     sidebar_visible: bool,
     sidebar_toggles: u64,
+    sidebar_motion: panel_motion::Reveal,
     tab_scroll: ScrollHandle,
     tab_reveal: Option<(u64, std::time::Instant)>,
     workspaces: HashMap<u64, Entity<workspace_tabs::WorkspaceTabs>>,
@@ -508,8 +520,18 @@ impl AppShell {
     fn resize_sidebar(&mut self, drag: &SidebarResize, window: &Window, cx: &mut Context<Self>) {
         let delta =
             del_core::zoom::unscaled(window.mouse_position().x.as_f32() - drag.start_x.get());
+        let requested = drag.width + if drag.right { -delta } else { delta };
+        if !drag.right {
+            // Keep using the original drag anchor after collapse. Separate
+            // thresholds let the same held drag reopen without edge flicker.
+            let open = left_sidebar_open_for_drag(requested, self.sidebar_open);
+            self.set_sidebar(open, cx);
+            if !open {
+                return;
+            }
+        }
         let width = sidebar_width(
-            drag.width + if drag.right { -delta } else { delta },
+            requested,
             drag.right,
             del_core::zoom::unscaled(window.viewport_size().width.as_f32()),
             drag.other,
@@ -851,6 +873,7 @@ impl AppShell {
             sidebar_open: true,
             sidebar_visible: true,
             sidebar_toggles: 0,
+            sidebar_motion: Default::default(),
             tab_scroll: ScrollHandle::new(),
             tab_reveal: None,
             workspaces: HashMap::new(),
@@ -907,6 +930,7 @@ impl AppShell {
             drag_target: None,
             previous_drag_target: None,
         };
+        shell.sidebar_motion.settle(true);
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -1073,8 +1097,12 @@ impl AppShell {
             return;
         }
         self.sidebar_open = open;
+        self.sidebar_motion
+            .set(open, cx.reduce_motion(), std::time::Instant::now());
         self.sidebar_toggles += 1;
-        if open {
+        if cx.reduce_motion() {
+            self.sidebar_visible = open;
+        } else if open {
             self.sidebar_visible = true;
         } else {
             let toggle = self.sidebar_toggles;
@@ -2747,11 +2775,14 @@ impl Render for AppShell {
             if sidebar_visible { left_width } else { 0.0 },
         );
         if cx.reduce_motion() {
+            self.sidebar_motion.settle(self.sidebar_open);
             self.right_motion.settle(self.right_open);
         }
+        let (left_progress, left_animating) = self.sidebar_motion.sample(std::time::Instant::now());
+        let left_progress = if settings_open { 1. } else { left_progress };
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
-        if animating {
+        if animating || left_animating {
             window.request_animation_frame();
         }
         self.right.update(cx, |panel, cx| {
@@ -3049,19 +3080,7 @@ impl Render for AppShell {
                                 &self.updater,
                                 cx,
                             ));
-                        if settings_open || self.sidebar_toggles == 0 {
-                            row.child(sidebar.w(zpx(left_width)))
-                        } else {
-                            let opening = self.sidebar_open;
-                            row.child(sidebar.with_animation(
-                                ("left-sidebar", self.sidebar_toggles),
-                                Animation::new(PANEL_ANIM).with_easing(ease_out_quint()),
-                                move |element, t| {
-                                    let t = if opening { t } else { 1.0 - t };
-                                    element.w(zpx(left_width * t))
-                                },
-                            ))
-                        }
+                        row.child(sidebar.w(zpx(left_width * left_progress)))
                     })
                     .child(
                         div()
@@ -3071,18 +3090,6 @@ impl Render for AppShell {
                             .h_full()
                             .px(inset)
                             .pb(inset)
-                            .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
-                                page.child(
-                                    self.resize_handle(
-                                        false,
-                                        left_width,
-                                        if right_visible { right_width } else { 0.0 },
-                                        cx,
-                                    )
-                                    .left_0()
-                                    .w(inset),
-                                )
-                            })
                             .on_children_prepainted({
                                 let page_bounds = self.page_bounds.clone();
                                 move |bounds, window, _| {
@@ -3093,7 +3100,23 @@ impl Render for AppShell {
                                     }
                                 }
                             })
-                            .child(self.render_page(window, cx)),
+                            .child(self.render_page(window, cx))
+                            .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
+                                // Paint the target above both neighboring surfaces
+                                // so the entire invisible strip gets the resize cursor.
+                                page.child(
+                                    self.resize_handle(
+                                        false,
+                                        left_width,
+                                        if right_visible { right_width } else { 0.0 },
+                                        cx,
+                                    )
+                                    .left(zpx((self.metrics.page_inset
+                                        - LEFT_SIDEBAR_RESIZE_TARGET)
+                                        / 2.))
+                                    .w(zpx(LEFT_SIDEBAR_RESIZE_TARGET)),
+                                )
+                            }),
                     )
                     .when(right_visible, |row| {
                         let full = right_width + self.metrics.page_inset;
@@ -3260,7 +3283,31 @@ fn main() {
 
 #[cfg(test)]
 mod sidebar_width_tests {
-    use super::{SidebarWidths, sidebar_width};
+    use super::{SidebarWidths, left_sidebar_open_for_drag, sidebar_width};
+
+    #[test]
+    fn held_drag_can_collapse_reopen_and_continue_resizing() {
+        let mut open = true;
+        for (requested, expected) in [
+            (162., true),
+            (114., true),
+            (83., true),
+            (82., false),
+            (50., false),
+            (83., false),
+            (113., false),
+            (114., true),
+            (200., true),
+            (82., false),
+            (180., true),
+        ] {
+            open = left_sidebar_open_for_drag(requested, open);
+            assert_eq!(open, expected, "requested width: {requested}");
+            if open && requested >= 162. {
+                assert_eq!(sidebar_width(requested, false, 1600., 0.), requested);
+            }
+        }
+    }
 
     #[test]
     fn left_cap_preserves_default_minimum_and_right_widths() {

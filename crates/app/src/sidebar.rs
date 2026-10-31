@@ -1238,45 +1238,51 @@ pub fn render(
                 ),
         )
         .child(space_pages(state, rename, cx))
-        .child(
-            h_flex()
-                .id("space-switcher")
-                .w_full()
-                .min_w_0()
-                .flex_none()
-                .overflow_x_scroll()
-                .justify_center()
-                .items_center()
-                .gap_0()
-                .py_1()
-                .children(s.spaces.items.iter().map(|space| {
-                    let active = space.id == s.spaces.active;
-                    let id = space.id.clone();
-                    let state = state.clone();
-                    Button::new(SharedString::from(format!("space-dot-{id}")))
-                        .ghost()
-                        .w(zpx(18.))
-                        .h(zpx(24.))
-                        .p_0()
-                        .tooltip(space.name.clone())
-                        .accessibility_label(format!("Switch to {}", space.name))
-                        .child(
-                            div()
-                                .size(zpx(16.))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(active, |dot| dot.bg(rgba(0xffffff18)))
-                                .child(div().size(zpx(6.)).rounded_full().bg(rgba(if active {
-                                    0xfffffff0
-                                } else {
-                                    0xffffff50
-                                }))),
-                        )
-                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.switch_space(&id, cx)))
-                })),
-        )
+        .when(s.spaces.items.len() > 1, |sidebar| {
+            sidebar.child(
+                h_flex()
+                    .id("space-switcher")
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .overflow_x_scroll()
+                    .justify_center()
+                    .items_center()
+                    .gap_0()
+                    .py_1()
+                    .children(s.spaces.items.iter().map(|space| {
+                        let active = space.id == s.spaces.active;
+                        let id = space.id.clone();
+                        let state = state.clone();
+                        Button::new(SharedString::from(format!("space-dot-{id}")))
+                            .ghost()
+                            .w(zpx(18.))
+                            .h(zpx(24.))
+                            .p_0()
+                            .tooltip(space.name.clone())
+                            .accessibility_label(format!("Switch to {}", space.name))
+                            .child(
+                                div()
+                                    .size(zpx(16.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(active, |dot| dot.bg(rgba(0xffffff18)))
+                                    .child(
+                                        div().size(zpx(6.)).rounded_full().bg(rgba(if active {
+                                            0xfffffff0
+                                        } else {
+                                            0xffffff50
+                                        })),
+                                    ),
+                            )
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.switch_space(&id, cx))
+                            })
+                    })),
+            )
+        })
         .child(crate::app_updates::render(updater, cx))
         .child(
             h_flex()

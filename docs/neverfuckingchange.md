@@ -475,8 +475,10 @@ This records the final decisions, including corrections to earlier experiments.
 - Sidebar dragging stays horizontal with a darker held preview, no magnetic
   resistance, and a haptic tick when its reorder target changes. Leaving the row
   must not remove its tab or create another zone. Preserve selection and live tools.
-- The left sidebar resize target fills the six-point page gutter, outside rows
-  and chat content. Tool icons match the launcher; New tab uses a page icon.
+- The left sidebar has an invisible 16-point resize target centered on the
+  six-point page gutter, extending slightly over both neighboring surfaces.
+  The full target must show the resize cursor and accept drags.
+  Tool icons match the launcher; New tab uses a page icon.
 - Each terminal appears directly in the right-sidebar tab row, with
   no nested terminal subtab strip. All are labeled Terminal, without numbers.
   The plus icon stays neutral. Choosing Terminal
@@ -505,6 +507,12 @@ This records the final decisions, including corrections to earlier experiments.
   URL bar; allow scrolling in short panes. Keep cards and the URL
   field visibly lighter than the page background, without a horizontal divider
   below the URL bar.
+- Dragging the left sidebar divider 80 logical pixels past its minimum width
+  collapses it with a smooth, reversible reveal. Keep the same drag active after
+  collapse: dragging back across a reopen threshold 32 points above the close
+  threshold reopens it and allows continued resizing without releasing the mouse.
+  Preserve the last valid width while closed, avoid flicker near the threshold,
+  and respect Reduce Motion.
 - Empty left-sidebar space must not move the window. Its divider owns only
   sidebar resizing and stops mouse-down propagation.
 
@@ -679,6 +687,7 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   Switch one Space per gesture;
   vertical scrolling remains ordinary list scrolling. Clickable dots above Settings
   show all Spaces in a tight centered row and softly highlight the active one.
+  Hide the entire dot row when only one Space exists.
 - Session tabs are space-specific by default. Appearance settings has a Global
   session tabs toggle in a plain row matching Theme, without an extra card background. Returning to scoped tabs restores earlier decks and keeps
   newly opened global tabs in the active Space. Changing the toggle keeps Settings open.

@@ -6,7 +6,7 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.22` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.23` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -15,11 +15,9 @@ when making future changes.
 
 ## Download and install
 
-The current source version is **0.1.22**; see its [release notes](docs/releases/0.1.22.md)
-and [validation record](docs/releases/0.1.22-validation.md).
-The latest downloadable installer remains **0.1.20**; see its [release notes](docs/releases/0.1.20.md) and
-[validation record](docs/releases/0.1.20-validation.md).
-Download **Del-0.1.20-arm64.dmg** from the [0.1.20 release](https://github.com/butter-computer/del/releases/tag/v0.1.20),
+The latest release is **0.1.23**; see its [release notes](docs/releases/0.1.23.md)
+and [validation record](docs/releases/0.1.23-validation.md).
+Download **Del-0.1.23-arm64.dmg** from the [0.1.23 release](https://github.com/butter-computer/del/releases/tag/v0.1.23),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -39,7 +37,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.22-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.23-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -211,8 +209,9 @@ horizontally with two fingers over the left sidebar, or click the dots above
 Settings, to switch Spaces. Swipes slide both lists with your fingers; releasing
 after a quarter of the sidebar width completes the slide, while shorter or cancelled
 swipes settle back. The toolbar, dots, and Settings stay fixed, and Reduce Motion
-disables the sliding effect. The selected dot glows. Vertical scrolling still
-scrolls the session list; switching never stops an agent or closes its tools.
+disables the sliding effect. The dots appear only when more than one Space exists;
+the selected dot glows. Vertical scrolling still scrolls the session list; switching
+never stops an agent or closes its tools.
 
 Top session tabs are specific to each Space by default. **Settings → Appearance →
 Global session tabs** keeps one shared top bar while the sidebar continues to
@@ -464,7 +463,12 @@ conversation. Unloading a running session also stops its current work.
   the dot. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
 - Both sidebars resize from their panel boundaries. The right tab row has a thin,
   floating divider; the content area stays borderless. The left sidebar only
-  resizes at its boundary; its empty space does not drag
+  resizes at its boundary, with a 16-point hover target centered on the gutter.
+  Dragging 80 logical pixels past its minimum width smoothly collapses it.
+  Keep holding the mouse and drag back to reopen and continue resizing; a
+  32-point gap between the close and reopen thresholds prevents flickering.
+  The title-bar toggle or Command-B also reopens it at its last valid width.
+  Reduce Motion skips the transition. Its empty space does not drag
   the macOS window. Hover highlights slide between session/menu rows, and the
   keep-awake control animates yellow steam while active.
 - Session titles use the available sidebar width and fade at the edge instead
