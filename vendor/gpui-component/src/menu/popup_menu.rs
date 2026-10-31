@@ -61,6 +61,7 @@ pub enum PopupMenuItem {
         label: SharedString,
         disabled: bool,
         menu: Entity<PopupMenu>,
+        render: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
         handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     },
 }
@@ -106,6 +107,7 @@ impl PopupMenuItem {
             label: label.into(),
             disabled: false,
             menu,
+            render: None,
             handler: None,
         }
     }
@@ -729,6 +731,15 @@ impl PopupMenu {
         self.menu_items.push(
             PopupMenuItem::submenu(label, submenu).when_some(icon, |this, icon| this.icon(icon)),
         );
+        self
+    }
+
+    /// Customize the latest submenu's row contents while retaining its
+    /// keyboard navigation, hover behavior, and accessible label.
+    pub fn submenu_content<E: IntoElement>(mut self, render: impl Fn(&mut Window, &mut App) -> E + 'static) -> Self {
+        if let Some(PopupMenuItem::Submenu { render: target, .. }) = self.menu_items.last_mut() {
+            *target = Some(Box::new(move |window, cx| render(window, cx).into_any_element()));
+        }
         self
     }
 
@@ -1418,6 +1429,7 @@ impl PopupMenu {
                 label,
                 menu,
                 disabled,
+                render,
                 ..
             } => this
                 .when(matches!(item, PopupMenuItem::Submenu { handler: Some(_), .. }), |this| {
@@ -1427,31 +1439,35 @@ impl PopupMenu {
                 .disabled(*disabled)
                 .items_start()
                 .child(
-                    h_flex()
-                        .min_h(item_height)
-                        .size_full()
-                        .items_center()
-                        .gap_x_1()
-                        .children(Self::render_icon(
-                            has_left_icon,
-                            false,
-                            icon.clone(),
-                            window,
-                            cx,
-                        ))
-                        .child(
-                            h_flex()
-                                .flex_1()
-                                .gap_2()
-                                .items_center()
-                                .justify_between()
-                                .child(label.clone())
-                                .child(
-                                    Icon::new(IconName::ChevronRight)
-                                        .xsmall()
-                                        .text_color(cx.theme().muted_foreground),
-                                ),
-                        ),
+                    if let Some(render) = render {
+                        render(window, cx)
+                    } else {
+                        h_flex()
+                            .min_h(item_height)
+                            .size_full()
+                            .items_center()
+                            .gap_x_1()
+                            .children(Self::render_icon(
+                                has_left_icon,
+                                false,
+                                icon.clone(),
+                                window,
+                                cx,
+                            ))
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(label.clone())
+                                    .child(
+                                        Icon::new(IconName::ChevronRight)
+                                            .xsmall()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                            ).into_any_element()
+                    }
                 )
                 .when(selected, |this| {
                     this.child({

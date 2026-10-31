@@ -822,23 +822,31 @@ fn project_menu(
     let move_state = state.clone();
     let move_path = path.to_path_buf();
     let menu = menu.when(!destinations.is_empty(), |menu| {
-        menu.submenu_with_icon(
-            Some(crate::icons::icon(IconName::Copy)),
-            "Move to Space",
-            window,
-            cx,
-            move |mut menu, _, _| {
-                for (id, name) in &destinations {
-                    let state = move_state.clone();
-                    let path = move_path.clone();
-                    let id = id.clone();
-                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
-                        state.update(cx, |s, cx| s.move_project_to_space(&path, &id, cx));
-                    }));
-                }
-                menu
-            },
-        )
+        menu.submenu("Move to Space", window, cx, move |mut menu, _, _| {
+            for (id, name) in &destinations {
+                let state = move_state.clone();
+                let path = move_path.clone();
+                let id = id.clone();
+                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.move_project_to_space(&path, &id, cx));
+                }));
+            }
+            menu
+        })
+        .submenu_content(|_, cx| {
+            h_flex()
+                .flex_1()
+                .h(zpx(28.))
+                .items_center()
+                .gap(zpx(10.))
+                .text_size(zpx(TEXT_MD))
+                .child(crate::icons::icon(IconName::Copy))
+                .child(div().flex_1().child("Move to Space"))
+                .child(
+                    crate::icons::icon(IconName::ChevronRight)
+                        .text_color(cx.theme().muted_foreground),
+                )
+        })
     });
     let archived_only = state.read(cx).show_archived;
     let archived = archived_only;
