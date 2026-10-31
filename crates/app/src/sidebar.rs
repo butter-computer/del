@@ -122,7 +122,7 @@ fn draggable_row(
             return;
         }
         let state = moving_state.read(cx);
-        let ids: Vec<_> = state.unified_rows().into_iter().map(|row| row.id).collect();
+        let ids: Vec<_> = state.space_rows().into_iter().map(|row| row.id).collect();
         let from = ids.iter().position(|id| id == &drag.id);
         let to = ids.iter().position(|id| id == &moving_target.id);
         let (Some(from), Some(to)) = (from, to) else {
@@ -443,7 +443,7 @@ fn session_menu_item(
     icon: Icon,
     motion: &crate::hover_motion::HoverMotion,
 ) -> impl IntoElement {
-    let destructive = label == "Permanently delete";
+    let destructive = matches!(label, "Permanently delete" | "Delete Space");
     let hover = motion.clone();
     h_flex()
         .id(label)
@@ -808,8 +808,38 @@ fn project_menu(
     menu: PopupMenu,
     state: &Entity<AppState>,
     path: &std::path::Path,
-    cx: &mut App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let destinations: Vec<_> = state
+        .read(cx)
+        .spaces
+        .items
+        .iter()
+        .filter(|space| space.id != state.read(cx).spaces.active)
+        .map(|space| (space.id.clone(), space.name.clone()))
+        .collect();
+    let move_state = state.clone();
+    let move_path = path.to_path_buf();
+    let menu = menu.when(!destinations.is_empty(), |menu| {
+        menu.submenu_with_icon(
+            Some(crate::icons::icon(IconName::Copy)),
+            "Move to Space",
+            window,
+            cx,
+            move |mut menu, _, _| {
+                for (id, name) in &destinations {
+                    let state = move_state.clone();
+                    let path = move_path.clone();
+                    let id = id.clone();
+                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| s.move_project_to_space(&path, &id, cx));
+                    }));
+                }
+                menu
+            },
+        )
+    });
     let archived_only = state.read(cx).show_archived;
     let archived = archived_only;
     let motion = crate::hover_motion::HoverMotion::menu(cx);
@@ -879,7 +909,7 @@ fn session_menu(
 // Navigation uses the same rows and grouping as the rendered sidebar.
 fn session_rows(s: &AppState) -> Vec<Row> {
     if !s.show_archived {
-        return s.unified_rows();
+        return s.space_rows();
     }
     let mut rows = s.archived_rows();
     rows.extend(
@@ -899,6 +929,7 @@ fn session_rows(s: &AppState) -> Vec<Row> {
                 unread: false,
             }),
     );
+    rows.retain(|r| s.space_has_project(&r.cwd));
     rows
 }
 
@@ -939,26 +970,25 @@ pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
     tabs
 }
 
-pub fn render(
+fn space_contents(
     state: &Entity<AppState>,
     rename: &Entity<InputState>,
-    usage: &Entity<crate::usage::Usage>,
-    updater: &Entity<crate::app_updates::AppUpdater>,
+    space: &crate::state::spaces::Space,
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
-    let rows = session_rows(s);
+    let current = space.id == s.spaces.active;
+    let rows = if current {
+        session_rows(s)
+    } else {
+        s.space_rows_for(space)
+    };
     let active = match &s.selection {
         Selection::Session(id) | Selection::Terminal(id) => Some(id.clone()),
         Selection::Draft(_) => None,
     };
     let providers_open = s.panel == Panel::Providers;
-    let show_archived = s.show_archived;
-    let has_archived = s.has_archived_chats()
-        || s.terminal_rows
-            .iter()
-            .any(|row| s.terminal_archived(&row.id));
-
+    let show_archived = current && s.show_archived;
     let pinned_state = state.clone();
     let section_state = state.clone();
     let section = if show_archived {
@@ -969,11 +999,166 @@ pub fn render(
     let pinned_open = !s.project_preferences.collapsed_sections.contains("Pinned");
     let projects_open = !s.project_preferences.collapsed_sections.contains(section);
     let add_project_state = state.clone();
+    let tabs = if current || s.spaces.global_tabs {
+        &s.tabs
+    } else {
+        &space.deck.tabs
+    };
+    let drafts: Vec<_> = tabs
+        .iter()
+        .filter_map(|t| {
+            if let crate::state::Tab::Draft(k) = t {
+                Some(*k)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut paths = if current {
+        s.project_paths_for(rows.iter().map(|r| r.cwd.as_path()))
+    } else {
+        rows.iter()
+            .map(|r| s.project_root(&r.cwd))
+            .chain(space.projects.iter().cloned())
+            .chain(drafts.iter().filter_map(|k| s.draft_project(*k)))
+            .filter(|p| {
+                s.spaces.includes_in(space, p)
+                    && !s.project_preferences.archived.contains(p)
+                    && !s.project_preferences.deleted.contains(p)
+            })
+            .collect::<Vec<_>>()
+    };
+    paths.sort();
+    paths.dedup();
+    let scroll = if current {
+        s.sidebar_scroll.clone()
+    } else {
+        gpui::ScrollHandle::new()
+    };
+    div().relative().size_full().min_h_0().overflow_hidden()
+            .child(v_flex()
+                .id("session-list")
+                .relative()
+                .child(s.sidebar_hover.layer(None, rgba(0xffffff00)))
+                .h_full()
+                .track_scroll(&scroll)
+                .min_h_0()
+                .gap_0p5()
+                .overflow_y_scroll()
+                .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(
+                    gpui_kit::component::collapsible::Collapsible::new()
+                        .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
+                        .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
+                            .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
+                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
+                            .hover(|heading| heading.text_color(rgba(MUTED))).child("Pinned")
+                            .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
+                        .content(v_flex().w_full().gap_0p5()
+                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
+                .child(gpui_kit::component::collapsible::Collapsible::new()
+                    .motion_id(SharedString::from(format!("{section}-section-reveal"))).open(projects_open).flex_none()
+                    .child(h_flex().id("projects-section-heading").debug_selector(|| "projects-heading".into())
+                        .role(Role::Button).aria_label(format!("{} {}", if projects_open { "Collapse" } else { "Expand" }, if show_archived { "Archived" } else { "Spaces" }))
+                        .px_2().pt_0().pb_1().items_center().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
+                        .hover(|heading| heading.text_color(rgba(MUTED)))
+                        .on_click(move |_, _, cx| section_state.update(cx, |s, cx| s.toggle_sidebar_section(section, cx)))
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(fading_title(if show_archived { "Archived".to_string() } else { space.name.clone() })))
+                        .when(!show_archived, |heading| heading.child(SpaceActions { state: add_project_state })))
+                    .content(v_flex().w_full().gap_0p5()
+                .children(paths.into_iter().map(|path| {
+                    let collapsed = s.project_preferences.collapsed.contains(&path);
+                    let project_renaming = s.project_renaming.as_ref() == Some(&path);
+                    let toggle_state = state.clone();
+                    let toggle_path = path.clone();
+                    let new_state = state.clone();
+                    let new_path = path.clone();
+                    let menu_state = state.clone();
+                    let menu_path = path.clone();
+                    let cleanup_state = state.clone();
+                    let cleanup_path = path.clone();
+                    let group = SharedString::from(format!("project-{}", path.display()));
+                    gpui_kit::component::collapsible::Collapsible::new()
+                        .motion_id(SharedString::from(format!("project-reveal-{}", path.display())))
+                        .open(!collapsed).flex_none().gap_0p5()
+                        .child(h_flex().id(group.clone()).group(group.clone()).h(zpx(32.)).px_2().gap_2().items_center().rounded_md().cursor_pointer()
+                            .text_color(rgba(0xffffffcc)).text_size(zpx(TEXT_MD))
+                            .hover(|row| row.bg(rgba(0xffffff0a)))
+                            .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
+                            .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
+                            .context_menu(move |menu, _, _| {
+                                let state = cleanup_state.clone(); let path = cleanup_path.clone();
+                                menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
+                            })
+                            .child(if collapsed { crate::icons::icon(IconName::Folder) } else { crate::icons::path("icons/project-folder-open.svg") })
+                            .child(div().flex_1().min_w_0().child(if project_renaming {
+                                Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD)).into_any_element()
+                            } else { fading_title(s.project_name(&path)).into_any_element() }))
+                            .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
+                                .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                .dropdown_menu(move |menu, window, cx| project_menu(menu, &menu_state, &menu_path, window, cx)))
+                            .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact().icon(IconName::Plus)
+                                .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }))))
+                        .content(v_flex().w_full().debug_selector(|| "project-session-content".into()).gap_0p5()
+                            .children(drafts.iter().copied().filter(|key| s.draft_project(*key).is_some_and(|p| p == path)).collect::<Vec<_>>().into_iter().filter(|_| !show_archived).map(|key| {
+                                let state = state.clone();
+                                let close_state = state.clone();
+                                let group = SharedString::from(format!("project-draft-{key}"));
+                                let working = s.tab_working(&crate::state::Tab::Draft(key));
+                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
+                                    .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
+                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
+                                    .hover(|row| row.bg(rgba(0xffffff0a))).child(div().flex_1().min_w_0().truncate().child("New session"))
+                                    .when(working, |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+                                    .when(!working && s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
+                                    .child(div().id(SharedString::from(format!("close-project-draft-{key}")))
+                                        .role(Role::Button).aria_label("Close new session")
+                                        .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
+                                        .opacity(0.).group_hover(group, |button| button.opacity(1.))
+                                        .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
+                                        .child(crate::icons::icon(IconName::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            close_state.update(cx, |s, cx| s.close_tab(&crate::state::Tab::Draft(key), cx));
+                                        }))
+                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
+                            }))
+                            .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|
+                                div().pl(zpx(18.)).opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx)))))
+                }))))
+                .child(
+                    div()
+                        .id("sidebar-empty-space")
+                        .flex_1()
+                        .min_h(zpx(12.0))
+                        .w_full(),
+                ))
+            .children(crate::tab_transfer::vertical_edge_fades(&scroll, crate::appearance::sidebar_surface())).into_any_element()
+}
+
+pub fn render(
+    state: &Entity<AppState>,
+    rename: &Entity<InputState>,
+    usage: &Entity<crate::usage::Usage>,
+    updater: &Entity<crate::app_updates::AppUpdater>,
+    cx: &App,
+) -> AnyElement {
+    let s = state.read(cx);
+    let providers_open = s.panel == Panel::Providers;
+    let show_archived = s.show_archived;
+    let has_archived =
+        s.has_archived_chats() || s.terminal_rows.iter().any(|r| s.terminal_archived(&r.id));
     let new_state = state.clone();
     let prov_state = state.clone();
     let caffeine_state = state.clone();
     let arch_state = state.clone();
     v_flex()
+        .id("spaces-sidebar")
+        .relative()
+        .child(space_swipe_surface(state))
         .w_full()
         .min_w_0()
         .whitespace_nowrap()
@@ -1044,111 +1229,45 @@ pub fn render(
                         }),
                 ),
         )
+        .child(space_pages(state, rename, cx))
         .child(
-            div().relative().flex_1().min_h_0().overflow_hidden()
-            .child(v_flex()
-                .id("session-list")
-                .relative()
-                .child(s.sidebar_hover.layer(None, rgba(0xffffff00)))
-                .h_full()
-                .track_scroll(&s.sidebar_scroll)
-                .min_h_0()
-                .gap_0p5()
-                .overflow_y_scroll()
-                .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(
-                    gpui_kit::component::collapsible::Collapsible::new()
-                        .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
-                        .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
-                            .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
-                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
-                            .hover(|heading| heading.text_color(rgba(MUTED))).child("Pinned")
-                            .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
-                        .content(v_flex().w_full().gap_0p5()
-                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
-                .child(gpui_kit::component::collapsible::Collapsible::new()
-                    .motion_id(SharedString::from(format!("{section}-section-reveal"))).open(projects_open).flex_none()
-                    .child(h_flex().id("projects-section-heading").debug_selector(|| "projects-heading".into())
-                        .role(Role::Button).aria_label(format!("{} {section}", if projects_open { "Collapse" } else { "Expand" }))
-                        .px_2().pt_0().pb_1().items_center().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
-                        .hover(|heading| heading.text_color(rgba(MUTED)))
-                        .on_click(move |_, _, cx| section_state.update(cx, |s, cx| s.toggle_sidebar_section(section, cx)))
-                        .child(div().flex_1().child(section))
-                        .when(!show_archived, |heading| heading.child(Button::new("add-project").ghost().compact().icon(IconName::Plus).tooltip("Add project directory").accessibility_label("Add project directory")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| { cx.stop_propagation(); add_project_state.update(cx, |s, cx| s.add_project(cx)); }))))
-                    .content(v_flex().w_full().gap_0p5()
-                .children(s.project_paths_for(rows.iter().map(|row| row.cwd.as_path())).into_iter().map(|path| {
-                    let collapsed = s.project_preferences.collapsed.contains(&path);
-                    let project_renaming = s.project_renaming.as_ref() == Some(&path);
-                    let toggle_state = state.clone();
-                    let toggle_path = path.clone();
-                    let new_state = state.clone();
-                    let new_path = path.clone();
-                    let menu_state = state.clone();
-                    let menu_path = path.clone();
-                    let cleanup_state = state.clone();
-                    let cleanup_path = path.clone();
-                    let group = SharedString::from(format!("project-{}", path.display()));
-                    gpui_kit::component::collapsible::Collapsible::new()
-                        .motion_id(SharedString::from(format!("project-reveal-{}", path.display())))
-                        .open(!collapsed).flex_none().gap_0p5()
-                        .child(h_flex().id(group.clone()).group(group.clone()).h(zpx(32.)).px_2().gap_2().items_center().rounded_md().cursor_pointer()
-                            .text_color(rgba(0xffffffcc)).text_size(zpx(TEXT_MD))
-                            .hover(|row| row.bg(rgba(0xffffff0a)))
-                            .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
-                            .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
-                            .context_menu(move |menu, _, _| {
-                                let state = cleanup_state.clone(); let path = cleanup_path.clone();
-                                menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
-                            })
-                            .child(if collapsed { crate::icons::icon(IconName::Folder) } else { crate::icons::path("icons/project-folder-open.svg") })
-                            .child(div().flex_1().min_w_0().child(if project_renaming {
-                                Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD)).into_any_element()
-                            } else { fading_title(s.project_name(&path)).into_any_element() }))
-                            .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
-                                .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
-                                .dropdown_menu(move |menu, _, cx| project_menu(menu, &menu_state, &menu_path, cx)))
-                            .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact().icon(IconName::Plus)
-                                .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
-                                .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }))))
-                        .content(v_flex().w_full().debug_selector(|| "project-session-content".into()).gap_0p5()
-                            .children(s.project_drafts(&path).into_iter().filter(|_| !show_archived).map(|key| {
-                                let state = state.clone();
-                                let close_state = state.clone();
-                                let group = SharedString::from(format!("project-draft-{key}"));
-                                let working = s.tab_working(&crate::state::Tab::Draft(key));
-                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).ml(zpx(18.)).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
-                                    .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
-                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
-                                    .hover(|row| row.bg(rgba(0xffffff0a))).child(div().flex_1().min_w_0().truncate().child("New session"))
-                                    .when(working, |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
-                                    .when(!working && s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
-                                    .child(div().id(SharedString::from(format!("close-project-draft-{key}")))
-                                        .role(Role::Button).aria_label("Close new session")
-                                        .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
-                                        .opacity(0.).group_hover(group, |button| button.opacity(1.))
-                                        .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
-                                        .child(crate::icons::icon(IconName::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            close_state.update(cx, |s, cx| s.close_tab(&crate::state::Tab::Draft(key), cx));
-                                        }))
-                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
-                            }))
-                            .children(rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).map(|row|
-                                div().pl(zpx(18.)).opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx)))))
-                }))))
-                .child(
-                    div()
-                        .id("sidebar-empty-space")
-                        .flex_1()
-                        .min_h(zpx(12.0))
-                        .w_full(),
-                ))
-            .children(crate::tab_transfer::vertical_edge_fades(&s.sidebar_scroll, crate::appearance::sidebar_surface())),
+            h_flex()
+                .id("space-switcher")
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .overflow_x_scroll()
+                .justify_center()
+                .items_center()
+                .gap_0()
+                .py_1()
+                .children(s.spaces.items.iter().map(|space| {
+                    let active = space.id == s.spaces.active;
+                    let id = space.id.clone();
+                    let state = state.clone();
+                    Button::new(SharedString::from(format!("space-dot-{id}")))
+                        .ghost()
+                        .w(zpx(18.))
+                        .h(zpx(24.))
+                        .p_0()
+                        .tooltip(space.name.clone())
+                        .accessibility_label(format!("Switch to {}", space.name))
+                        .child(
+                            div()
+                                .size(zpx(16.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(active, |dot| dot.bg(rgba(0xffffff18)))
+                                .child(div().size(zpx(6.)).rounded_full().bg(rgba(if active {
+                                    0xfffffff0
+                                } else {
+                                    0xffffff50
+                                }))),
+                        )
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.switch_space(&id, cx)))
+                })),
         )
         .child(crate::app_updates::render(updater, cx))
         .child(
@@ -1184,14 +1303,30 @@ pub fn render(
                         .child(crate::icons::icon(IconName::Settings))
                         .child("Settings"),
                 )
-                .when(show_archived || has_archived, |footer| footer.child(
-                    Button::new("show-archived").ghost().compact().icon(ActionIcon::Archive)
-                        .selected(show_archived)
-                        .when(show_archived, |button| button.bg(rgba(0xffffff20)).text_color(rgb(0xffffff)))
-                        .tooltip(if show_archived { "Show active sessions" } else { "Show archived sessions and projects" })
-                        .accessibility_label("Toggle archived sessions")
-                        .on_click(move |_, _, cx| arch_state.update(cx, |s, cx| { s.show_archived = !s.show_archived; cx.notify(); }))
-                )),
+                .when(show_archived || has_archived, |footer| {
+                    footer.child(
+                        Button::new("show-archived")
+                            .ghost()
+                            .compact()
+                            .icon(ActionIcon::Archive)
+                            .selected(show_archived)
+                            .when(show_archived, |button| {
+                                button.bg(rgba(0xffffff20)).text_color(rgb(0xffffff))
+                            })
+                            .tooltip(if show_archived {
+                                "Show active sessions"
+                            } else {
+                                "Show archived sessions and projects"
+                            })
+                            .accessibility_label("Toggle archived sessions")
+                            .on_click(move |_, _, cx| {
+                                arch_state.update(cx, |s, cx| {
+                                    s.show_archived = !s.show_archived;
+                                    cx.notify();
+                                })
+                            }),
+                    )
+                }),
         )
         .into_any_element()
 }
@@ -1403,5 +1538,517 @@ mod menu_tests {
         cx.simulate_keystrokes("down down down enter");
         cx.run_until_parked();
         assert_eq!(&*clicked.borrow(), &["Pin", "Mark as unread"]);
+    }
+}
+
+#[derive(IntoElement)]
+struct SpaceActions {
+    state: Entity<AppState>,
+}
+
+impl RenderOnce for SpaceActions {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let open = window.use_keyed_state("space-actions-open", cx, |_, _| false);
+        let is_open = *open.read(cx);
+        let angle = gpui_kit::base::transition(
+            "space-actions-rotation",
+            if is_open {
+                std::f32::consts::FRAC_PI_4
+            } else {
+                0.
+            },
+            gpui_kit::base::Transition::new(std::time::Duration::from_millis(if is_open {
+                180
+            } else {
+                135
+            })),
+            window,
+            cx,
+        );
+        Button::new("add-project")
+            .ghost()
+            .compact()
+            .icon(crate::icons::icon(IconName::Plus).rotate(gpui::radians(angle)))
+            .tooltip("Space actions")
+            .accessibility_label("Space actions")
+            .dropdown_menu(move |menu, _, cx| space_menu(menu, &self.state, cx))
+            .on_open_change(move |value, _, cx| {
+                open.update(cx, |open, cx| {
+                    *open = *value;
+                    cx.notify();
+                })
+            })
+    }
+}
+
+fn space_menu(menu: PopupMenu, state: &Entity<AppState>, cx: &mut App) -> PopupMenu {
+    let deletable = state.read(cx).spaces.items.len() > 1;
+    let motion = crate::hover_motion::HoverMotion::menu(cx);
+    let clicks = motion.clone();
+    let state = state.clone();
+    menu.item(
+        PopupMenuItem::element(move |_, cx| {
+            let background: Rgba = cx.theme().popover.into();
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_w(zpx(152.))
+                .mx(gpui::px(-8.))
+                .gap_0p5()
+                .bg(background)
+                .child(motion.layer(Some(background), cx.theme().border.into()))
+                .child(session_menu_item(
+                    "Create Space",
+                    crate::icons::icon(IconName::Copy),
+                    &motion,
+                ))
+                .child(session_menu_item(
+                    "Create Project",
+                    crate::icons::icon(IconName::Folder),
+                    &motion,
+                ))
+                .child(session_menu_item(
+                    "Rename Space",
+                    crate::icons::icon(ActionIcon::Pencil),
+                    &motion,
+                ))
+                .when(deletable, |menu| {
+                    menu.child(motion.divider()).child(session_menu_item(
+                        "Delete Space",
+                        crate::icons::icon(ActionIcon::Trash),
+                        &motion,
+                    ))
+                })
+        })
+        .on_click(move |event, window, cx| {
+            let Some(action) = clicks.clicked(event) else {
+                return;
+            };
+            match action.as_str() {
+                "Create Space" => space_dialog(&state, false, window, cx),
+                "Rename Space" => space_dialog(&state, true, window, cx),
+                "Create Project" => state.update(cx, |s, cx| s.add_project(cx)),
+                "Delete Space" => {
+                    state.update(cx, |s, cx| s.delete_space(&s.spaces.active.clone(), cx))
+                }
+                _ => {}
+            }
+        }),
+    )
+}
+
+fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx: &mut App) {
+    let id = state.read(cx).spaces.active.clone();
+    let initial = if rename {
+        state.read(cx).spaces.current().name.clone()
+    } else {
+        String::new()
+    };
+    let input = cx.new(|cx| {
+        let mut input = InputState::new(window, cx).placeholder("Space name");
+        input.set_value(initial, window, cx);
+        input
+    });
+    let handle = window.window_handle();
+    cx.subscribe(
+        &input,
+        move |_, event: &gpui_kit::component::input::InputEvent, cx| {
+            if matches!(
+                event,
+                gpui_kit::component::input::InputEvent::PressEnter { .. }
+            ) {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(gpui_kit::component::dialog::Confirm { secondary: false }),
+                        cx,
+                    )
+                });
+            }
+        },
+    )
+    .detach();
+    let focus = input.clone();
+    let state = state.clone();
+    let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
+    window.open_dialog(cx, move |dialog, _, _| {
+        let input = input.clone();
+        let value = input.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let submitted = submitted.clone();
+        dialog
+            .title(if rename {
+                "Rename Space"
+            } else {
+                "Create Space"
+            })
+            .w(zpx(320.))
+            .close_button(false)
+            .p_4()
+            .gap_3()
+            .border_0()
+            .bg(crate::appearance::popup_surface())
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+            .child(Input::new(&input).bordered(false).focus_bordered(false))
+            .footer(
+                gpui_kit::component::dialog::DialogFooter::new()
+                    .pt_0()
+                    .gap_2()
+                    .child(
+                        Button::new("space-cancel")
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(|_, w, cx| w.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("space-confirm")
+                            .ghost()
+                            .label(if rename { "Save" } else { "Create" })
+                            .on_click(|_, w, cx| {
+                                w.dispatch_action(
+                                    Box::new(gpui_kit::component::dialog::Confirm {
+                                        secondary: false,
+                                    }),
+                                    cx,
+                                )
+                            }),
+                    ),
+            )
+            .on_ok(move |_, _, cx| {
+                let name = value.read(cx).value().trim().to_string();
+                if name.is_empty() {
+                    return false;
+                }
+                if submitted.replace(true) {
+                    return true;
+                }
+                state.update(cx, |s, cx| {
+                    if rename {
+                        s.rename_space(&id, name, cx)
+                    } else {
+                        s.create_space(name, cx)
+                    }
+                });
+                true
+            })
+    });
+    window.defer(cx, move |window, cx| {
+        focus.update(cx, |input, cx| input.focus(window, cx))
+    });
+}
+
+fn space_pages(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -> AnyElement {
+    let s = state.read(cx);
+    let offset = if cx.reduce_motion() {
+        0.
+    } else {
+        s.space_swipe.offset
+    };
+    let incoming = s
+        .space_swipe
+        .target
+        .as_ref()
+        .and_then(|id| s.spaces.items.iter().find(|space| &space.id == id));
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "space-page-{}",
+                    s.spaces.active
+                )))
+                .debug_selector(|| "space-outgoing".into())
+                .absolute()
+                .top_0()
+                .left(gpui::px(offset))
+                .size_full()
+                .child(space_contents(state, rename, s.spaces.current(), cx)),
+        )
+        .when(offset != 0., |pages| {
+            pages.children(incoming.map(|space| {
+                div()
+                    .id(SharedString::from(format!("space-page-{}", space.id)))
+                    .debug_selector(|| "space-incoming".into())
+                    .absolute()
+                    .top_0()
+                    .left(gpui::px(offset - offset.signum() * s.space_swipe.width))
+                    .size_full()
+                    .child(space_contents(state, rename, space, cx))
+            }))
+        })
+        .into_any_element()
+}
+
+fn settle_space_swipe(state: Entity<AppState>, window: &mut Window, _cx: &mut App) {
+    window.on_next_frame(move |window, cx| {
+        let reduced = cx.reduce_motion();
+        let again = state.update(cx, |s, cx| {
+            if let Some(target) = s.space_swipe.advance(std::time::Instant::now(), reduced) {
+                s.switch_space(&target, cx);
+            }
+            cx.notify();
+            s.space_swipe.settling()
+        });
+        if again {
+            settle_space_swipe(state, window, cx);
+        }
+    });
+    // on_next_frame schedules the frame itself; request_animation_frame requires a rendering view.
+}
+
+fn space_swipe_surface(state: &Entity<AppState>) -> impl IntoElement {
+    let state = state.clone();
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _| {
+            let state = state.clone();
+            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if !phase.capture() || !hitbox.id.should_handle_scroll(window) {
+                    return;
+                }
+                if !matches!(event.delta, gpui::ScrollDelta::Pixels(_)) {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(window.line_height());
+                let reduced = cx.reduce_motion();
+                let settle = state.update(cx, |s, cx| {
+                    if s.spaces.items.len() < 2 {
+                        return false;
+                    }
+                    let index = s
+                        .spaces
+                        .items
+                        .iter()
+                        .position(|v| v.id == s.spaces.active)
+                        .unwrap_or(0);
+                    let previous = index.checked_sub(1).map(|i| s.spaces.items[i].id.clone());
+                    let next = s.spaces.items.get(index + 1).map(|v| v.id.clone());
+                    let was_settling = s.space_swipe.settling();
+                    let horizontal = s.space_swipe.update(
+                        (delta.x.as_f32(), delta.y.as_f32()),
+                        event.touch_phase,
+                        std::time::Instant::now(),
+                        bounds.size.width.as_f32(),
+                        previous,
+                        next,
+                    );
+                    if horizontal || delta.x.abs() > delta.y.abs() {
+                        cx.stop_propagation();
+                    }
+                    if reduced
+                        && let Some(target) = s.space_swipe.advance(std::time::Instant::now(), true)
+                    {
+                        s.switch_space(&target, cx);
+                    }
+                    if horizontal {
+                        cx.notify();
+                    }
+                    !was_settling && s.space_swipe.settling()
+                });
+                if settle {
+                    settle_space_swipe(state.clone(), window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+#[cfg(test)]
+mod space_gesture_tests {
+    use crate::state::AppState;
+    use gpui::{
+        AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+        ScrollDelta, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement, Styled,
+        TouchPhase, Window, div, point, px,
+    };
+
+    struct Fixture {
+        state: Entity<AppState>,
+        scroll: ScrollHandle,
+    }
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .w(px(220.))
+                .h(px(300.))
+                .child(super::space_swipe_surface(&self.state))
+                .child(
+                    div()
+                        .id("scrolling-projects")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(div().h(px(1000.)).w_full()),
+                )
+        }
+    }
+    #[gpui::test]
+    fn horizontal_swipe_is_captured_before_vertical_list_scrolling(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            s.create_space("Work".into(), cx);
+            s.switch_space("default", cx);
+        });
+        let scroll = ScrollHandle::new();
+        let (_view, cx) = cx.add_window_view({
+            let state = state.clone();
+            let scroll = scroll.clone();
+            move |_, _| Fixture { state, scroll }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(-90.), px(0.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.spaces.current().name, "Default");
+            assert_eq!(s.space_swipe.offset, -90.);
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(0.))),
+            touch_phase: TouchPhase::Ended,
+            ..Default::default()
+        });
+        state.read_with(cx, |s, _| assert_eq!(s.spaces.current().name, "Work"));
+        assert_eq!(scroll.offset().y, px(0.));
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-90.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        state.read_with(cx, |s, _| assert_eq!(s.spaces.current().name, "Work"));
+        assert!(scroll.offset().y < px(0.));
+    }
+    struct PagesFixture {
+        state: Entity<AppState>,
+        input: Entity<gpui_kit::component::input::InputState>,
+    }
+    impl Render for PagesFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .w(px(220.))
+                .h(px(300.))
+                .child(super::space_swipe_surface(&self.state))
+                .child(super::space_pages(&self.state, &self.input, cx))
+        }
+    }
+    #[gpui::test]
+    fn both_space_lists_move_with_finger_distance_before_selection_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            s.create_space("Work".into(), cx);
+            s.switch_space("default", cx);
+        });
+        let (_view, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |window, cx| {
+                let input = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx));
+                PagesFixture { state, input }
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let original = cx.debug_bounds("space-outgoing").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(-70.), px(0.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let outgoing = cx.debug_bounds("space-outgoing").unwrap();
+        let incoming = cx.debug_bounds("space-incoming").unwrap();
+        assert_eq!(outgoing.origin.x, original.origin.x - px(70.));
+        assert_eq!(incoming.origin.x, outgoing.origin.x + original.size.width);
+        assert_eq!(outgoing.size, original.size);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(-40.), px(0.))),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            cx.debug_bounds("space-outgoing").unwrap().origin.x,
+            original.origin.x - px(110.)
+        );
+        state.read_with(cx, |s, _| assert_eq!(s.spaces.active, "default"));
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(40.), px(40.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(0.))),
+            touch_phase: TouchPhase::Ended,
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn enter_creates_exactly_one_space_and_rename_keeps_its_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = crate::state::tests::draft(cx);
+        let (_view, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |window, cx| {
+                let view = cx.new(|_| Fixture {
+                    state,
+                    scroll: ScrollHandle::new(),
+                });
+                gpui_kit::component::Root::new(view, window, cx)
+            }
+        });
+        cx.update(|window, cx| super::space_dialog(&state, false, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_input("Work");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let id = state.read_with(cx, |s, _| {
+            assert_eq!(s.spaces.items.len(), 2);
+            assert_eq!(s.spaces.current().name, "Work");
+            s.spaces.active.clone()
+        });
+        cx.update(|window, cx| super::space_dialog(&state, true, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("Studio");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.spaces.items.len(), 2);
+            assert_eq!(s.spaces.active, id);
+            assert_eq!(s.spaces.current().name, "Studio");
+        });
     }
 }

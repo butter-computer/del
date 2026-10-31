@@ -6,7 +6,7 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.21` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.22` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
 
 The agreed UI and behavior rules are documented in
@@ -15,8 +15,8 @@ when making future changes.
 
 ## Download and install
 
-The current source version is **0.1.21**; see its [release notes](docs/releases/0.1.21.md)
-and [validation record](docs/releases/0.1.21-validation.md).
+The current source version is **0.1.22**; see its [release notes](docs/releases/0.1.22.md)
+and [validation record](docs/releases/0.1.22-validation.md).
 The latest downloadable installer remains **0.1.20**; see its [release notes](docs/releases/0.1.20.md) and
 [validation record](docs/releases/0.1.20-validation.md).
 Download **Del-0.1.20-arm64.dmg** from the [0.1.20 release](https://github.com/butter-computer/del/releases/tag/v0.1.20),
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.21-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.22-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -200,10 +200,37 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 ## Conversations and workspace
 
-The sidebar has **Pinned** (hidden when empty) and **Projects**. Click either
+The sidebar has **Pinned** (hidden when empty) and the **active Space name** (for example, **Default**). Spaces
+are persistent collections of projects, with independent pinned chats and tab decks.
+Existing projects and pins start in **Default**. The **+** menu offers **Create
+Space**, **Create Project** (choose its directory), and **Rename Space**, each with an icon.
+The plus rotates smoothly while its menu is open and returns when dismissed,
+respecting Reduce Motion. When more than one Space exists, a red **Delete Space** action moves its projects,
+pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
+horizontally with two fingers over the left sidebar, or click the dots above
+Settings, to switch Spaces. Swipes slide both lists with your fingers; releasing
+after a quarter of the sidebar width completes the slide, while shorter or cancelled
+swipes settle back. The toolbar, dots, and Settings stay fixed, and Reduce Motion
+disables the sliding effect. The selected dot glows. Vertical scrolling still
+scrolls the session list; switching never stops an agent or closes its tools.
+
+Top session tabs are specific to each Space by default. **Settings → Appearance →
+Global session tabs** keeps one shared top bar while the sidebar continues to
+switch projects and pins. Turning it off restores the individual decks, keeping
+new global tabs in the current Space, without closing Settings. Space names, project collections, pins,
+manual ordering, and tab selections persist in `spaces.json`. A directory may be
+included in multiple Spaces: its underlying sessions remain the same, while pins
+are independent. A project’s menu offers **Move to Space** when another Space
+exists. Moving transfers its session tabs, drafts, pins, and ordering into the
+destination; an existing copy of the project is merged without duplicate tabs or
+sessions. Global tabs remain open. Files and running agents are unaffected.
+Spaces organize the UI; agent communication still uses the
+existing project boundary.
+
+Click either sidebar
 heading to smoothly collapse or expand its entire section; individual projects
 also expand independently. Section choices persist across restarts, with a separate
-collapse state for Archived. The Projects plus button opens the directory picker
+collapse state for Archived. The Spaces plus button opens its menu
 without toggling the section. Chats and
 terminals are sessions in the same project list; there is no separate terminal
 section. Projects are created automatically from session folders. Git subfolders
@@ -218,11 +245,11 @@ persist in `projects.json`. Hover a project for **+** and its three-dot menu;
 choose Chat or Terminal in the composer. Terminal rows show a terminal icon with
 a small provider badge. Each new-session action creates an independent draft in
 the selected session's directory, or the last directory when no tab is selected.
-The Projects heading's **+** opens a directory picker. Changing a draft's folder
+Choose **Create Project** from the Spaces menu to open a directory picker. Changing a draft's folder
 moves it to that project and expands the destination.
 
-Projects are directory groups, not separate containers: only sessions and explicit
-drafts make them visible. Rename changes the display name only. Archive hides the
+Projects are directory groups, not separate agent containers. Added project directories
+and those with sessions or drafts appear in their Space. Rename changes the display name only. Archive hides the
 project's sessions from the active list. Restoring one session restores only that
 session; archived siblings stay in Archived, so a project can appear in both views.
 Restoring a project restores all its archived sessions. Deleting from Projects

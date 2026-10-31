@@ -788,6 +788,29 @@ impl AppShell {
                 s.error = Some(error.clone());
             }
         });
+        state.update(cx, |s, cx| s.restore_spaces(cx));
+        let save_generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+        cx.observe(&state, move |_, state, cx| {
+            let generation = save_generation.get().wrapping_add(1);
+            save_generation.set(generation);
+            let counter = save_generation.clone();
+            let state = state.clone();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                if counter.get() == generation {
+                    cx.update(|cx| {
+                        if let Err(error) = state.read(cx).save_spaces() {
+                            eprintln!("Could not save spaces: {error}");
+                        }
+                        let _ = state.read(cx).save_draft_owners();
+                    });
+                }
+            })
+            .detach();
+        })
+        .detach();
         let branch_picker =
             cx.new(|cx| branch_picker::BranchPicker::new(state.clone(), window, cx));
         let model_picker = cx.new(|cx| model_picker::ModelPicker::new(state.clone(), window, cx));
@@ -916,6 +939,7 @@ impl AppShell {
             if let Err(error) = this.sidebar_widths.save() {
                 eprintln!("Could not save sidebar widths: {error}");
             }
+            let _ = this.state.read(cx).save_spaces();
             if let Err(error) = this.state.read(cx).save_draft_owners() {
                 eprintln!("Could not save draft owners: {error}");
             }
@@ -1287,8 +1311,11 @@ impl AppShell {
         };
         let owner = state.uid_of(&tab);
         let root = state.effective().2;
-        let open_uids: std::collections::HashSet<u64> =
-            state.tabs.iter().map(|tab| state.uid_of(tab)).collect();
+        let open_uids: std::collections::HashSet<u64> = state
+            .all_open_tabs()
+            .iter()
+            .map(|tab| state.uid_of(tab))
+            .collect();
         if self.right_owner != owner {
             self.remember_right(cx);
             let newly_created = !self.right_cache.contains_key(&owner);
@@ -1352,7 +1379,7 @@ impl AppShell {
 
     fn find_agent_browser(&self, session: &Tab, id: &str, cx: &App) -> Option<Entity<RightPanel>> {
         let owner = self.state.read(cx).uid_of(session);
-        if !self.state.read(cx).tabs.contains(session) {
+        if !self.state.read(cx).all_open_tabs().contains(session) {
             return None;
         }
         let root = if owner == self.right_owner {
@@ -1376,8 +1403,11 @@ impl AppShell {
         let owner = self.composer_owner(cx);
         let root = self.state.read(cx).effective().2;
         let state = self.state.read(cx);
-        let open: std::collections::HashSet<_> =
-            state.tabs.iter().map(|t| state.uid_of(t)).collect();
+        let open: std::collections::HashSet<_> = state
+            .all_open_tabs()
+            .iter()
+            .map(|t| state.uid_of(t))
+            .collect();
         let stale: Vec<_> = self
             .workspaces
             .keys()

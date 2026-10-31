@@ -650,3 +650,39 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   mark another conversation read or change the selected chat.
 - Terminal agents use a cooperative inbox; do not claim control over their CLI’s
   native user-input queue. See [peer-sessions.md](peer-sessions.md).
+
+
+## Spaces
+
+- The former Projects heading shows only the active Space name, without a Spaces prefix. Its + menu
+  offers Create Space, Create Project, and Rename Space with icons. A red Delete Space
+  action appears only with multiple Spaces and moves projects, pins, and tabs to the
+  first remaining Space without deleting chats or files. Existing projects and
+  pins belong to Default; new Spaces start empty. The menu stays compact. Rotate its
+  plus 45 degrees on open and back on dismissal using a short reversible transition;
+  Reduce Motion applies the final orientation immediately.
+- Create/Rename Space uses a compact dialog with a borderless name input, no blue
+  focus outline, and simple Cancel/Create or Save actions. Focus the name on open;
+  Enter submits exactly once and Escape dismisses.
+- Each Space owns its project collection, pins, and session tab deck. A project
+  may be included in more than one Space without copying sessions or changing
+  the project boundary for agent communication. Project menus offer Move to Space
+  when another Space exists. Move membership, pins, ordering, drafts, and tab references;
+  merge an existing destination project without duplicates. Preserve live processes,
+  global tabs, and files. A pin in either collection remains pinned in the merge.
+- Two-finger horizontal swipes over the left sidebar slide outgoing and incoming
+  project/pin lists directly with finger travel. Release past one quarter of the
+  width to complete; shorter/cancelled swipes ease back. Keep toolbar and footer fixed,
+  avoid switching the active tab deck until the slide finishes, and respect Reduce Motion.
+  Schedule settling via next-frame callbacks; never request a rendering-view
+  animation frame directly from an input event or next-frame callback.
+  Switch one Space per gesture;
+  vertical scrolling remains ordinary list scrolling. Clickable dots above Settings
+  show all Spaces in a tight centered row and softly highlight the active one.
+- Session tabs are space-specific by default. Appearance settings has a Global
+  session tabs toggle in a plain row matching Theme, without an extra card background. Returning to scoped tabs restores earlier decks and keeps
+  newly opened global tabs in the active Space. Changing the toggle keeps Settings open.
+- Switching Spaces must preserve drafts, running agents, terminal processes, side
+  chats, and browser ownership. Async startup updates the original Space's tab
+  without selecting it in another Space. Persist collections and selections across
+  app restarts; never delete or relocate project files when switching or renaming.

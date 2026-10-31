@@ -2,6 +2,8 @@
 //! session, provider status, and the bridge from the tokio runtime that owns
 //! the backends back into GPUI.
 
+pub mod spaces;
+
 use crate::providers;
 use crate::sessions::{self, Overrides, Row, TerminalRow};
 use del_agent::*;
@@ -45,7 +47,7 @@ pub struct Ghost {
 }
 
 /// One tab in the top bar.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Tab {
     Draft(u64),
     Session(SessionId),
@@ -113,6 +115,8 @@ struct RowsCache {
 }
 
 pub struct AppState {
+    pub spaces: spaces::Spaces,
+    pub space_swipe: spaces::Swipe,
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
     project_loading: std::collections::HashSet<PathBuf>,
     pub project_preferences: crate::projects::ProjectPreferences,
@@ -350,6 +354,8 @@ impl AppState {
             });
         }
         Self {
+            spaces: Default::default(),
+            space_swipe: Default::default(),
             project_info: HashMap::new(),
             project_loading: Default::default(),
             project_preferences,
@@ -468,6 +474,11 @@ impl AppState {
                     self.project_preferences.archived.remove(&info.root);
                     self.project_preferences.deleted.remove(&info.root);
                     self.project_preferences.collapsed.remove(&info.root);
+                }
+                for space in &mut self.spaces.items {
+                    if space.projects.remove(&path) {
+                        space.projects.insert(info.root.clone());
+                    }
                 }
                 let added = self.project_preferences.roots.insert(info.root.clone());
                 let previous = self
@@ -655,8 +666,13 @@ impl AppState {
                             self.uids.insert(Tab::Session(id.clone()), uid);
                         }
                     }
-                    None => self.add_tab(&id),
+                    None => {
+                        if !self.replace_space_tab(&Tab::Draft(key), Tab::Session(id.clone())) {
+                            self.add_tab(&id);
+                        }
+                    }
                 }
+                self.replace_space_tab(&Tab::Draft(key), Tab::Session(id.clone()));
                 self.overrides_mut()
                     .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
                 self.save_overrides();
@@ -727,17 +743,12 @@ impl AppState {
         else {
             return Ok(());
         };
-        let drafts: Vec<_> = self
-            .tabs
+        let mut drafts: Vec<_> = self
+            .drafts
             .iter()
-            .filter_map(|tab| match tab {
-                Tab::Draft(id) => self
-                    .drafts
-                    .get(id)
-                    .map(|config| (*id, config.clone(), self.draft_accounts.get(id).cloned())),
-                _ => None,
-            })
+            .map(|(id, config)| (*id, config.clone(), self.draft_accounts.get(id).cloned()))
             .collect();
+        drafts.sort_by_key(|(id, _, _)| *id);
         let bytes = serde_json::to_vec(&drafts)?;
         if std::fs::read(&path).ok().as_deref() != Some(&bytes) {
             sessions::write_atomic(&path, &bytes, sessions::PRIVATE)?;
@@ -1154,6 +1165,18 @@ impl AppState {
     }
 
     pub fn toggle_terminal_pin(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        if self.spaces.items.len() > 1
+            || !self.spaces.current().pins.is_empty()
+            || !self.spaces.current().order.is_empty()
+        {
+            let fallback = self
+                .terminal_rows
+                .iter()
+                .find(|r| &r.id == id)
+                .is_some_and(|r| r.pinned);
+            self.toggle_space_pin(id, fallback, cx);
+            return;
+        }
         let Some(row) = self.terminal_rows.iter_mut().find(|row| &row.id == id) else {
             return;
         };
@@ -1186,7 +1209,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let _ = terminal; // Session mode does not define sidebar membership.
-        let rows = self.unified_rows();
+        let rows = self.space_rows();
         let Some(source) = rows.iter().find(|r| &r.id == dragged) else {
             return;
         };
@@ -1227,7 +1250,16 @@ impl AppState {
             self.sidebar_drag.generation += 1;
             crate::haptics::tick();
         }
-        self.overrides_mut().set_order(&ids);
+        if self.spaces.items.len() > 1
+            || !self.spaces.current().pins.is_empty()
+            || !self.spaces.current().order.is_empty()
+        {
+            let order = &mut self.spaces.current_mut().order;
+            order.retain(|id| !ids.contains(id));
+            order.extend(ids);
+        } else {
+            self.overrides_mut().set_order(&ids);
+        }
         self.sort_terminal_rows();
         self.save_overrides();
         cx.notify();
@@ -1241,6 +1273,13 @@ impl AppState {
         let Some(row) = self.rows().into_iter().find(|row| &row.id == id) else {
             return;
         };
+        if self.spaces.items.len() > 1
+            || !self.spaces.current().pins.is_empty()
+            || !self.spaces.current().order.is_empty()
+        {
+            self.toggle_space_pin(id, row.pinned, cx);
+            return;
+        }
         self.invalidate_rows();
         self.overrides.initialize_pins(&self.records);
         self.overrides_mut().set_pinned(id, !row.pinned);
@@ -1320,6 +1359,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let id = row.id.clone();
+        let in_current_space = draft.is_none_or(|key| self.tabs.contains(&Tab::Draft(key)));
         self.project_info.remove(&row.cwd);
         if let Some(old) = self.terminal_rows.iter_mut().find(|r| r.id == id) {
             *old = row;
@@ -1334,6 +1374,7 @@ impl AppState {
                     self.uids.insert(tab, uid);
                 }
             }
+            self.replace_space_tab(&Tab::Draft(key), Tab::Terminal(id.clone()));
             self.overrides_mut()
                 .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
             self.save_overrides();
@@ -1343,8 +1384,11 @@ impl AppState {
             self.starting.remove(&key);
             self.pending_prompts.remove(&key);
         }
-        self.select_terminal(id.clone(), cx);
-        self.keep_tab(&Tab::Terminal(id), cx);
+        if in_current_space {
+            self.select_terminal(id.clone(), cx);
+            self.keep_tab(&Tab::Terminal(id), cx);
+        }
+        cx.notify();
     }
 
     /// Restoring a background terminal must not change the selected tab or its pin.
@@ -1570,7 +1614,7 @@ impl AppState {
     ) {
         // Replace an automatic empty composer rather than retaining a hidden draft.
         if let Selection::Draft(old) = self.selection
-            && !self.tabs.contains(&Tab::Draft(old))
+            && !self.all_open_tabs().contains(&Tab::Draft(old))
             && !self.starting.contains(&old)
         {
             self.drafts.remove(&old);
@@ -1629,7 +1673,7 @@ impl AppState {
 
     /// Keep an agent's browser host alive without changing the user's selection.
     pub(crate) fn open_background_tab(&mut self, tab: &Tab, cx: &mut Context<Self>) {
-        if !self.tabs.contains(tab) {
+        if !self.all_open_tabs().contains(tab) {
             if self.uid_of(tab) == 0 {
                 self.new_uid(tab.clone());
             }
@@ -1701,7 +1745,15 @@ impl AppState {
         self.keep_tab(tab, cx);
         let (title, provider) = self.tab_info(tab);
         let uid = self.uid_of(tab);
-        self.uids.remove(tab);
+        self.forget_space_tab(tab);
+        let shared = self
+            .spaces
+            .items
+            .iter()
+            .any(|space| space.id != self.spaces.active && space.deck.tabs.contains(tab));
+        if !shared {
+            self.uids.remove(tab);
+        }
         self.ghosts.push(Ghost {
             uid,
             at,
@@ -1717,13 +1769,17 @@ impl AppState {
         })
         .detach();
         self.tabs.remove(at);
-        if let Tab::Terminal(id) = tab {
+        if let Tab::Terminal(id) = tab
+            && !shared
+        {
             self.closed_terminals.push(id.clone());
             if let Some(row) = self.terminal_rows.iter_mut().find(|r| &r.id == id) {
                 row.active = false;
             }
         }
-        if let Tab::Draft(k) = tab {
+        if let Tab::Draft(k) = tab
+            && !shared
+        {
             self.drafts.remove(k);
             if !self.starting.contains(k) {
                 self.launch_options.remove(k);
@@ -1836,6 +1892,7 @@ impl AppState {
                 let Some(config) = self.drafts.get(&key).cloned() else {
                     return;
                 };
+                self.attach_space_project(&config.cwd);
                 if !self.starting.insert(key) {
                     return;
                 }
@@ -2767,6 +2824,20 @@ impl AppState {
                     .map(|draft| self.project_root(&draft.cwd)),
             );
         }
+        if !self.show_archived {
+            paths.extend(
+                self.spaces
+                    .current()
+                    .projects
+                    .iter()
+                    .filter(|p| {
+                        !self.project_preferences.archived.contains(*p)
+                            && !self.project_preferences.deleted.contains(*p)
+                    })
+                    .cloned(),
+            );
+        }
+        paths.retain(|path| self.space_has_project(path));
         paths.sort();
         paths.dedup();
         paths
@@ -2920,6 +2991,7 @@ impl AppState {
     }
 
     pub fn new_project_session(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.attach_space_project(&path);
         self.project_preferences.archived.remove(&path);
         self.project_preferences.deleted.remove(&path);
         self.project_preferences.roots.insert(path.clone());
@@ -2949,11 +3021,15 @@ impl AppState {
             multiple: false,
             prompt: Some("Choose project directory".into()),
         });
+        let space_id = self.spaces.active.clone();
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = picker.await
                 && let Some(path) = paths.pop()
             {
-                let _ = this.update(cx, |s, cx| s.new_project_session(path, cx));
+                let _ = this.update(cx, |s, cx| {
+                    s.switch_space(&space_id, cx);
+                    s.new_project_session(path, cx);
+                });
             }
         })
         .detach();
@@ -2998,6 +3074,7 @@ impl AppState {
         };
         draft.cwd = dir.clone();
         let root = self.project_root(&dir);
+        self.attach_space_project(&dir);
         self.project_preferences.collapsed.remove(&root);
         self.project_preferences.archived.remove(&root);
         self.project_preferences.deleted.remove(&root);
@@ -3214,6 +3291,8 @@ pub(crate) mod tests {
         let manager = SessionManager::new(dir.path().join("sessions.jsonl"), []).unwrap();
         let (tx, _rx) = unbounded_channel();
         cx.new(|_| AppState {
+            spaces: Default::default(),
+            space_swipe: Default::default(),
             project_info: HashMap::new(),
             project_loading: Default::default(),
             project_preferences: Default::default(),

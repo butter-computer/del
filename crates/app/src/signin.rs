@@ -278,6 +278,16 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             .when(crate::appearance::light() == light, |button| button.bg(rgba(0xffffff20)))
                             .on_click(move |_, _, cx| crate::appearance::set(light, cx))
                     }))))
+            .when(preferences, |content| {
+                let state = state.clone();
+                content.child(h_flex().w_full().p_4().gap_4().items_center()
+                    .child(v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().child("Global session tabs"))
+                        .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c)).child("Keep the same top tabs when switching Spaces.")))
+                    .child(gpui_kit::component::switch::Switch::new("global-space-tabs")
+                        .checked(s.spaces.global_tabs).accessibility_label("Global session tabs")
+                        .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_global_space_tabs(*checked, cx)))))
+            })
             .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
             .when(section == SettingsSection::Providers, |content| content
                 .children(providers::VISIBLE.into_iter().map(|provider| {
