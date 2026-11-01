@@ -805,7 +805,11 @@ impl AgentBackend for ClaudeBackend {
         written
     }
 
-    async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
+    async fn read_session_history(
+        &self,
+        config: &SessionConfig,
+        session: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
         let cwd = config.cwd.clone();
         let id = session.as_str().to_owned();
         let root = self.options.config_dir.clone();
@@ -815,6 +819,11 @@ impl AgentBackend for ClaudeBackend {
         })
         .await
         .map_err(|e| AgentError::Backend(e.to_string()))??;
+        Ok(history)
+    }
+
+    async fn resume(&self, config: SessionConfig, session: &SessionId) -> Result<SessionHandle> {
+        let history = self.read_session_history(&config, session).await?;
         Ok(self
             .spawn(&config, session.clone(), ["--resume", session.as_str()])?
             .with_history(history))

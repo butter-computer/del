@@ -139,6 +139,7 @@ impl AppShell {
             for host in this.terminals.values() {
                 host.update(cx, |host, cx| host.close(cx));
             }
+            this.mode_terminals.clear();
             del_terminal::shutdown_all(Duration::from_millis(200));
             async {}
         })
@@ -146,6 +147,16 @@ impl AppShell {
     }
 
     pub(super) fn ensure_modes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs = self.state.read(cx).all_open_tabs();
+        let closed_modes: Vec<_> = self
+            .mode_terminals
+            .keys()
+            .filter(|id| !tabs.contains(&crate::state::Tab::Session((*id).clone())))
+            .cloned()
+            .collect();
+        for id in closed_modes {
+            self.switch_terminal_to_chat(id, window, cx);
+        }
         let closed = self
             .state
             .update(cx, |s, _| std::mem::take(&mut s.closed_terminals));
@@ -171,6 +182,24 @@ impl AppShell {
                 .find(|r| r.id == id)
                 .cloned()
             {
+                if let Some(conversation) = &record.conversation_id {
+                    let chat_id = SessionId::new(conversation.clone());
+                    if self
+                        .state
+                        .read(cx)
+                        .backend()
+                        .manager
+                        .session_record(&chat_id)
+                        .is_ok()
+                    {
+                        self.state.update(cx, |s, cx| {
+                            s.close_tab(&crate::state::Tab::Terminal(id), cx);
+                            s.select(chat_id.clone(), cx);
+                        });
+                        self.switch_chat_to_terminal(chat_id, window, cx);
+                        return;
+                    }
+                }
                 self.begin_terminal(record.launch, None, Some(id), None, None, window, cx);
             }
         }
@@ -186,6 +215,24 @@ impl AppShell {
                 .find(|r| r.id == id)
                 .cloned()
         {
+            if let Some(conversation) = &record.conversation_id {
+                let chat_id = SessionId::new(conversation.clone());
+                if self
+                    .state
+                    .read(cx)
+                    .backend()
+                    .manager
+                    .session_record(&chat_id)
+                    .is_ok()
+                {
+                    self.state.update(cx, |s, cx| {
+                        s.close_tab(&crate::state::Tab::Terminal(id), cx);
+                        s.select(chat_id.clone(), cx);
+                    });
+                    self.switch_chat_to_terminal(chat_id, window, cx);
+                    return;
+                }
+            }
             self.begin_terminal(record.launch, None, Some(id), None, None, window, cx);
         }
     }
@@ -407,7 +454,11 @@ impl AppShell {
                     let host = TerminalHost::spawn_prepared(launch, args, env, window, cx)
                         .map_err(|e| e.to_string())?;
                     let event_id = id.clone();
-                    cx.subscribe(&host, move |this, _, event, cx| {
+                    cx.subscribe_in(&host, window, move |this, _, event, window, cx| {
+                        if matches!(event, TerminalHostEvent::ChatRequested) {
+                            this.import_terminal_chat(event_id.clone(), window, cx);
+                            return;
+                        }
                         if matches!(
                             event,
                             TerminalHostEvent::Terminal(del_terminal::TerminalEvent::Input)
@@ -1092,6 +1143,11 @@ impl AppShell {
                     let result = self
                         .terminals
                         .get(&target)
+                        .or_else(|| {
+                            self.mode_terminals
+                                .get(&target)
+                                .map(|terminal| &terminal.host)
+                        })
                         .ok_or_else(|| HostError::UnknownSession(target.to_string()))
                         .and_then(|host| {
                             host.update(cx, |h, cx| h.send_text(&text, true, cx))
@@ -1277,7 +1333,7 @@ impl AppShell {
                 if let Some(host) = self.terminals.get(&id) {
                     page = page.child(div().flex_1().min_h_0().min_w_0().child(host.clone()));
                     if host.read(cx).snapshot().status != TerminalHostStatus::Running {
-                        page = page.child(self.restart_button(id, cx));
+                        page = page.child(self.restart_button(id.clone(), cx));
                     }
                 } else {
                     if self.terminal_opening.contains(&id) || !self.terminal_attempts.contains(&id)
@@ -1289,12 +1345,35 @@ impl AppShell {
                                 .p_4()
                                 .gap_3()
                                 .child("Could not reopen this conversation.")
-                                .child(self.restart_button(id, cx)),
+                                .child(self.restart_button(id.clone(), cx)),
                         );
                     }
                 }
+                // Keep recovery reachable even after a /chat resume failure has
+                // closed the PTY, when typing the command again is impossible.
+                if self.terminals.contains_key(&id)
+                    && self.terminal_store.records.iter().any(|record| {
+                        record.id == id
+                            && record.conversation_id.is_some()
+                            && record.launch.provider().is_some()
+                    })
+                {
+                    page = page.child(
+                        Button::new("terminal-return-to-chat")
+                            .ghost()
+                            .small()
+                            .label("/chat — Return to chat")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.import_terminal_chat(id.clone(), window, cx);
+                            })),
+                    );
+                }
             }
             Selection::Draft(_) | Selection::Session(_) => {}
+        }
+
+        if let Some(error) = &self.state.read(cx).error {
+            page = page.child(div().p_2().child(error.clone()));
         }
 
         page.children(self.render_agent_messages(cx).map(|messages| {
@@ -1480,7 +1559,7 @@ impl AppShell {
 }
 
 /// Resume by exact identity; never replay the opening prompt or use --last.
-fn resume_args(
+pub(super) fn resume_args(
     provider: Option<Provider>,
     conversation: &str,
     resuming: bool,

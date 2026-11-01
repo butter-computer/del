@@ -28,7 +28,11 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+pub struct ChatRequested;
+impl EventEmitter<ChatRequested> for TerminalView {}
+
 pub struct TerminalView {
+    chat_command: Option<crate::local_command::ChatCommand>,
     session: TerminalSession,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
@@ -118,6 +122,7 @@ impl TerminalView {
             }
         });
         Self {
+            chat_command: None,
             events: std::cell::RefCell::new(Some(events)),
             session,
             focus,
@@ -134,6 +139,10 @@ impl TerminalView {
             last_motion: None,
             option_as_meta: true,
         }
+    }
+
+    pub fn enable_chat_command(&mut self) {
+        self.chat_command = Some(Default::default());
     }
 
     pub fn session(&self) -> &TerminalSession {
@@ -203,6 +212,17 @@ impl TerminalView {
         }
     }
     fn input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if self
+            .chat_command
+            .as_mut()
+            .is_some_and(|command| command.input(&bytes))
+        {
+            // Erase the TUI editor line, but never submit /chat to the provider.
+            self.session.write(vec![0x15]);
+            cx.emit(ChatRequested);
+            cx.notify();
+            return;
+        }
         if !bytes.is_empty() {
             cx.emit(TerminalEvent::Input);
         }
@@ -309,6 +329,9 @@ impl TerminalView {
         true
     }
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(command) = &mut self.chat_command {
+            command.invalidate();
+        }
         self.focus(window, cx);
         cx.stop_propagation();
         if self.report_mouse(

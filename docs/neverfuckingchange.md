@@ -528,6 +528,15 @@ This records the final decisions, including corrections to earlier experiments.
 - Side chat uses the shared main-chat provider chip and searchable model/effort
   picker, including Fast mode and reset. Keep account names in the provider
   submenu; all changes stay scoped to the side-chat fork.
+- Side chat remains available while the main conversation is open in Terminal.
+  Opening or refreshing it reads the provider's latest saved context without
+  resuming, stopping, or taking ownership of the terminal conversation. Replies
+  run in an independent fork for Claude, Codex, and OpenCode.
+- `/terminal` and `/chat` are local mode commands for Claude, Codex, and OpenCode.
+  Preserve the native conversation and saved account/settings. Wait for the
+  terminal to exit before Chat resumes; retain a button to return after terminal
+  exit or a failed resume. Mode changes preserve peer mail and tool ownership.
+  Main-chat picker shortcuts must not edit a hidden composer in Terminal mode.
 - Settings includes a read-only Keybinds category with grouped current shortcuts
   and their scopes. Start directly with the shortcut groups, without explanatory
   intro text. Do not imply remapping is available until it is implemented.

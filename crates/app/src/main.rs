@@ -48,6 +48,7 @@ mod providers;
 mod readiness;
 mod right_panel;
 mod search_ui;
+mod session_modes;
 mod sessions;
 mod side_chat;
 mod sidebar;
@@ -459,6 +460,8 @@ struct AppShell {
     metrics: ShellMetrics,
     ambient: Entity<ambient::LifeBackground>,
     terminals: HashMap<SessionId, Entity<TerminalHost>>,
+    mode_terminals: HashMap<SessionId, session_modes::ModeTerminal>,
+    mode_switching: HashSet<SessionId>,
     terminal_store: TerminalStore,
     terminal_attempts: HashSet<SessionId>,
     terminal_opening: HashSet<SessionId>,
@@ -847,6 +850,14 @@ impl AppShell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &command_menu,
+            window,
+            |this, _, _: &command_menu::ModeSelected, window, cx| {
+                this.submit_mode_command(window, cx);
+            },
+        )
+        .detach();
         let usage = cx.new(|_| usage::Usage::new(state.clone()));
         cx.observe(&usage, |_, _, cx| cx.notify()).detach();
         let mut shell = Self {
@@ -912,6 +923,8 @@ impl AppShell {
             metrics: ShellMetrics::default(),
             ambient: cx.new(|cx| ambient::LifeBackground::new(window, cx)),
             terminals: HashMap::new(),
+            mode_terminals: HashMap::new(),
+            mode_switching: HashSet::new(),
             terminal_store,
             terminal_attempts: HashSet::new(),
             terminal_opening: HashSet::new(),
@@ -1043,6 +1056,9 @@ impl AppShell {
         let Selection::Session(id) = self.state.read(cx).selection.clone() else {
             return;
         };
+        if self.mode_terminals.contains_key(&id) || self.mode_switching.contains(&id) {
+            return;
+        }
         if let Some(chat) = self.chats.get(&id) {
             // A completed transcript remains visible after its stream closes.
             // Rebuild only after that session is explicitly running again.
@@ -1552,7 +1568,10 @@ impl AppShell {
             });
             return;
         }
-        if matches!(self.state.read(cx).selection, Selection::Terminal(_)) {
+        if matches!(self.state.read(cx).selection, Selection::Terminal(_))
+            || matches!(&self.state.read(cx).selection, Selection::Session(id)
+                if self.mode_terminals.contains_key(id) || self.mode_switching.contains(id))
+        {
             return;
         }
         self.composer
@@ -1621,6 +1640,12 @@ impl AppShell {
         if self.search_open {
             return;
         }
+        if let Selection::Session(id) = &self.state.read(cx).selection
+            && let Some(terminal) = self.mode_terminals.get(id)
+        {
+            terminal.host.update(cx, |host, cx| host.focus(window, cx));
+            return;
+        }
         if let Selection::Terminal(id) = &self.state.read(cx).selection
             && let Some(terminal) = self.terminals.get(id)
         {
@@ -1633,7 +1658,12 @@ impl AppShell {
     /// The open session's chat view, if it has one.
     fn open_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
         match &self.state.read(cx).selection {
-            Selection::Session(id) => self.chats.get(id).cloned(),
+            Selection::Session(id)
+                if !self.mode_terminals.contains_key(id) && !self.mode_switching.contains(id) =>
+            {
+                self.chats.get(id).cloned()
+            }
+            Selection::Session(_) => None,
             Selection::Draft(_) | Selection::Terminal(_) => None,
         }
     }
@@ -1646,6 +1676,9 @@ impl AppShell {
 
     fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.is_some() {
+            return;
+        }
+        if self.submit_mode_command(window, cx) {
             return;
         }
         if self
@@ -2413,6 +2446,11 @@ impl AppShell {
             let st = self.state.read(cx);
             (Panel::Chat, st.selection.clone())
         };
+        if let Selection::Session(id) = &selection
+            && (self.mode_terminals.contains_key(id) || self.mode_switching.contains(id))
+        {
+            return self.render_mode_terminal(id, cx);
+        }
         let chat = self.open_chat(cx);
         let landing = panel == Panel::Chat
             && !matches!(selection, Selection::Terminal(_))
@@ -2675,10 +2713,16 @@ impl Render for AppShell {
         let terminal_processes = self
             .terminals
             .iter()
-            .map(|(id, host)| (id.clone(), host.read(cx).snapshot().pid))
+            .map(|(id, host)| (Tab::Terminal(id.clone()), host.read(cx).snapshot().pid))
+            .chain(self.mode_terminals.iter().map(|(id, terminal)| {
+                (
+                    Tab::Session(id.clone()),
+                    terminal.host.read(cx).snapshot().pid,
+                )
+            }))
             .collect();
         self.usage
-            .update(cx, |usage, _| usage.terminals = terminal_processes);
+            .update(cx, |usage, _| usage.terminal_processes = terminal_processes);
         self.sync_terminal_sidebar_actions(cx);
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
@@ -2887,9 +2931,11 @@ impl Render for AppShell {
                 |this, action: &gpui_kit::component::input::Enter, window, cx| {
                     if !action.shift
                         && !action.secondary
-                        && this
-                            .command_menu
-                            .update(cx, |menu, cx| menu.accept(window, cx))
+                        && ((this.composer.read(cx).focus_handle(cx).is_focused(window)
+                            && this.submit_mode_command(window, cx))
+                            || this
+                                .command_menu
+                                .update(cx, |menu, cx| menu.accept(window, cx)))
                     {
                         cx.stop_propagation();
                     }

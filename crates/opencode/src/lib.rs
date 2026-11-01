@@ -722,6 +722,24 @@ impl AgentBackend for OpenCodeBackend {
         Ok(handle)
     }
 
+    async fn read_session_history(
+        &self,
+        config: &SessionConfig,
+        id: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        let cwd = config.cwd.clone();
+        let id = id.as_str().to_owned();
+        let environment = self.environment.clone();
+        tokio::task::spawn_blocking(move || {
+            history::Cache::default()
+                .read_with_environment(&cwd, &id, &environment)
+                .map(|events| events.as_ref().clone())
+        })
+        .await
+        .map_err(err)?
+        .map_err(err)
+    }
+
     async fn resume(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
         if let Ok(live) = self.live(id) {
             if live.connected.load(Ordering::SeqCst) && live.server.is_alive() {

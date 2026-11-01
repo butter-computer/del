@@ -15,6 +15,7 @@ mod forks;
 mod peers;
 mod routed;
 mod switching;
+mod terminal;
 pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
 pub use peers::{ContextChunk, ContextCursor, SessionContext};
 
@@ -72,6 +73,7 @@ struct Shared {
     index: Mutex<SessionIndex>,
     live: Mutex<HashMap<SessionId, Live>>,
     resume_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+    terminal_owned: Mutex<HashSet<SessionId>>,
     all_tx: broadcast::Sender<ManagerEvent>,
     standby: Mutex<Option<Standby>>,
     preparation: tokio::sync::Mutex<()>,
@@ -349,6 +351,7 @@ impl SessionManager {
                 peers: Mutex::new(peers),
                 live: Mutex::new(HashMap::new()),
                 resume_locks: Mutex::new(HashMap::new()),
+                terminal_owned: Mutex::new(HashSet::new()),
                 all_tx,
                 standby: Mutex::new(None),
                 preparation: tokio::sync::Mutex::new(()),
@@ -820,6 +823,11 @@ impl SessionManager {
     /// Caller holds the session's resume/send lock. Failed sessions keep their
     /// history and subscribers, but their provider process must be reattached.
     async fn resume_locked(&self, id: &SessionId) -> Result<SessionHandle> {
+        if self.is_terminal_owned(id) {
+            return Err(AgentError::Busy(
+                "This conversation is open in Terminal. Use /chat to return.".into(),
+            ));
+        }
         if let Some(l) = self.shared.live.lock().unwrap().get(id)
             && l.status != SessionStatus::Error
         {
@@ -977,6 +985,11 @@ impl SessionManager {
             .or_default()
             .clone();
         let _sending = lock.lock().await;
+        if self.is_terminal_owned(id) {
+            return Err(AgentError::Busy(
+                "This conversation is open in Terminal. Use /chat to return.".into(),
+            ));
+        }
         if !matches!(origin, peers::SendOrigin::User)
             && matches!(
                 self.status(id),
@@ -1387,6 +1400,10 @@ impl SessionManager {
             .or_default()
             .clone();
         let _closing = lock.lock().await;
+        self.close_locked(id).await
+    }
+
+    async fn close_locked(&self, id: &SessionId) -> Result<()> {
         // Detach first so a failing backend lookup or close cannot leak the pump.
         let Some(live) = self.shared.live.lock().unwrap().remove(id) else {
             return Ok(());

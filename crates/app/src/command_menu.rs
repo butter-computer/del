@@ -14,6 +14,32 @@ use std::path::PathBuf;
 pub struct GoalSelected(pub ComposerCommand);
 impl EventEmitter<GoalSelected> for CommandMenu {}
 
+pub struct ModeSelected;
+impl EventEmitter<ModeSelected> for CommandMenu {}
+
+fn local_commands(provider: Provider) -> Vec<ComposerCommand> {
+    if provider == Provider::Acp {
+        return vec![];
+    }
+    [
+        (
+            "terminal",
+            "Continue this conversation in the provider terminal",
+        ),
+        ("chat", "Continue this conversation in Chat"),
+    ]
+    .into_iter()
+    .map(|(name, description)| ComposerCommand {
+        name: name.into(),
+        description: description.into(),
+        argument_hint: String::new(),
+        kind: CommandKind::Action,
+        source: "Del".into(),
+        target: None,
+    })
+    .collect()
+}
+
 pub struct CommandMenu {
     input: Entity<TextareaState>,
     state: Entity<AppState>,
@@ -190,6 +216,7 @@ impl CommandMenu {
         if self.open && self.context.is_none() {
             let (provider, _, cwd) = self.state.read(cx).effective();
             let account = self.state.read(cx).selected_account();
+            self.commands = local_commands(provider);
             self.context = Some((provider, account.clone(), cwd.clone()));
             self.loading = true;
             self.error = None;
@@ -211,6 +238,9 @@ impl CommandMenu {
                     this.loading = false;
                     match result {
                         Ok(Ok(mut commands)) => {
+                            let local = local_commands(provider);
+                            commands.retain(|c| !local.iter().any(|l| l.name == c.name));
+                            commands.extend(local);
                             commands.sort_by_key(|command| {
                                 (
                                     match command.kind {
@@ -358,6 +388,10 @@ impl CommandMenu {
             input.focus(window, cx);
         });
         self.open = false;
+        if command.source == "Del" && matches!(command.name.as_str(), "terminal" | "chat") {
+            self.chosen = None;
+            cx.emit(ModeSelected);
+        }
         cx.notify();
     }
 

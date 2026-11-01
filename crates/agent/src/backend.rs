@@ -205,6 +205,18 @@ pub trait AgentBackend: Send + Sync {
         self.session_title(session, cwd).await
     }
 
+    /// Read persisted context without resuming, attaching to, or changing the source session.
+    /// Used when a native terminal owns the conversation and side chats need a snapshot.
+    async fn read_session_history(
+        &self,
+        _config: &SessionConfig,
+        _session: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        Err(AgentError::Backend(
+            "This provider cannot read externally owned conversation history.".into(),
+        ))
+    }
+
     /// Start a fresh session. Backends need not emit `SessionStarted`: nobody can
     /// be subscribed yet, so `SessionManager` emits it as the first history event.
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle>;

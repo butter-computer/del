@@ -9,7 +9,7 @@ use crate::sessions::{self, Overrides, Row, TerminalRow};
 use del_agent::*;
 use del_mcp::SessionMode;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1352,6 +1352,57 @@ impl AppState {
         cx.notify();
     }
 
+    /// Replace a terminal-only row with its native chat, preserving tabs and tool ownership.
+    pub fn terminal_became_chat(
+        &mut self,
+        terminal: &SessionId,
+        chat: &SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let old = Tab::Terminal(terminal.clone());
+        let new = Tab::Session(chat.clone());
+        for tab in &mut self.tabs {
+            if *tab == old {
+                *tab = new.clone();
+            }
+        }
+        let mut seen = HashSet::new();
+        self.tabs.retain(|tab| seen.insert(tab.clone()));
+        self.replace_space_tab(&old, new.clone());
+        if self.preview_tab.as_ref() == Some(&old) {
+            self.preview_tab = None;
+        }
+        if self.selection == Selection::Terminal(terminal.clone()) {
+            self.selection = Selection::Session(chat.clone());
+        }
+        for space in &mut self.spaces.items {
+            if let Some(pin) = space.pins.remove(terminal.as_str()) {
+                space.pins.entry(chat.as_str().into()).or_insert(pin);
+            }
+            for id in &mut space.order {
+                if id == terminal {
+                    *id = chat.clone();
+                }
+            }
+            let mut seen = HashSet::new();
+            space.deck.tabs.retain(|tab| seen.insert(tab.clone()));
+        }
+        let pinned = self
+            .terminal_rows
+            .iter()
+            .find(|r| &r.id == terminal)
+            .is_some_and(|r| r.pinned);
+        self.overrides_mut().set_pinned(chat, pinned);
+        if let Some(title) = self.overrides.title(terminal).map(str::to_owned) {
+            self.overrides_mut().rename(chat, &title);
+        }
+        self.overrides_mut().move_side_chat_unread(terminal, chat);
+        self.overrides_mut().remove(terminal);
+        self.terminal_rows.retain(|row| &row.id != terminal);
+        self.save_overrides();
+        cx.notify();
+    }
+
     pub fn terminal_started(
         &mut self,
         draft: Option<u64>,
@@ -1833,7 +1884,12 @@ impl AppState {
         // Reattach in the background; a live session returns immediately.
         let (backend, tx) = (self.backend(), self.tx.clone());
         self.rt.spawn(async move {
-            if let Err(e) = backend.resume(&id).await {
+            if backend.manager.is_terminal_owned(&id) {
+                return;
+            }
+            if let Err(e) = backend.resume(&id).await
+                && !(matches!(e, AgentError::Busy(_)) && backend.manager.is_terminal_owned(&id))
+            {
                 let _ = tx.send(Msg::Error(format!("Could not reopen session: {e}")));
             }
             let _ = tx.send(Msg::Refresh);
@@ -3694,6 +3750,51 @@ pub(crate) mod tests {
             assert_eq!(s.tabs, vec![Tab::Terminal(id)]);
             assert!(!s.starting.contains(&key));
             assert!(!s.pending_prompts.contains_key(&key));
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_import_keeps_tab_identity_spaces_and_pin_without_duplicate_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::sessions::TerminalRow;
+        use del_agent::SessionId;
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let terminal = SessionId::new("terminal-original");
+            let chat = SessionId::new("native-conversation");
+            let old = Tab::Terminal(terminal.clone());
+            let new = Tab::Session(chat.clone());
+            s.terminal_rows.push(TerminalRow {
+                id: terminal.clone(),
+                title: "Test".into(),
+                provider: Some(Provider::Claude),
+                account_id: None,
+                cwd: std::env::temp_dir(),
+                active: true,
+                summary: String::new(),
+                pinned: true,
+            });
+            s.tabs = vec![old.clone()];
+            s.selection = Selection::Terminal(terminal.clone());
+            s.uids.insert(old.clone(), 42);
+            s.spaces.items[0].deck.tabs = vec![old.clone()];
+            s.spaces.items[0].deck.selected = Some(old);
+            s.spaces.items[0]
+                .pins
+                .insert(terminal.as_str().into(), true);
+            s.terminal_became_chat(&terminal, &chat, cx);
+            assert_eq!(s.tabs, vec![new.clone()]);
+            assert_eq!(s.selection, Selection::Session(chat));
+            assert_eq!(s.uid_of(&new), 42);
+            assert_eq!(s.spaces.items[0].deck.tabs, vec![new.clone()]);
+            assert_eq!(s.spaces.items[0].deck.selected, Some(new));
+            assert_eq!(
+                s.spaces.items[0].pins.get("native-conversation"),
+                Some(&true)
+            );
+            assert!(s.terminal_rows.is_empty());
+            assert!(s.deleted_panels.is_empty());
         });
     }
 

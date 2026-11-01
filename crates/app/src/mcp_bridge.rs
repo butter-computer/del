@@ -473,10 +473,15 @@ impl BridgeHandle {
     }
 
     pub fn remove_terminal(&self, id: &SessionId) {
-        self.revoke(id);
         if let Err(error) = self.service.host.manager.forget_peer_session(id) {
             eprintln!("[del peers] Could not remove terminal mailbox: {error}");
         }
+        self.detach_terminal(id);
+    }
+
+    /// Return an existing chat to its backend without deleting its peer mailbox.
+    pub fn detach_terminal(&self, id: &SessionId) {
+        self.revoke(id);
         if let Some(server) = self.service.server.lock().unwrap().as_ref() {
             server.forget_session(id);
         }
