@@ -62,7 +62,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Send or queue a message", "Return"),
             ("Insert a newline", "⇧Return"),
             (
-                "Steer draft or send first queued item in main chat",
+                "Steer draft or send first queued item in the focused chat",
                 "⌘Return",
             ),
             ("Stop the main chat turn", "⌘."),

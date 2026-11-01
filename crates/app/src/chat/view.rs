@@ -1417,7 +1417,7 @@ impl Render for ChatView {
                                                 ))
                                                 .group("message-tick")
                                                 .w_full()
-                                                .h(zpx(12.0))
+                                                .h(zpx(10.0))
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
@@ -1449,7 +1449,7 @@ impl Render for ChatView {
                                                         move |tick, t| {
                                                             let weight =
                                                                 previous + (next - previous) * t;
-                                                            let width = 7.0 + 15.0 * weight;
+                                                            let width = 6.0 + 12.0 * weight;
                                                             // Only the hovered marker (or current message when idle)
                                                             // is bright. Neighbor magnification changes width only.
                                                             let alpha =

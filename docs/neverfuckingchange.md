@@ -201,6 +201,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Message navigation highlights exactly one tick: the hovered tick while pointing,
   otherwise the current message. Nearby ticks may lengthen but stay gray. Emit a
   native haptic tick on entering a different marker, not on every pointer move.
+  Keep markers compact: 10 px spacing, 6 px idle width, and at most 18 px on hover.
 - Show the live elapsed-work label directly beneath the latest user message,
   scrolling with that message; never fix it at the top of the transcript. Do not invent historical timing.
 - Shimmer the inline “Working for…” text (static with Reduce Motion). Do not show
@@ -532,6 +533,11 @@ This records the final decisions, including corrections to earlier experiments.
 - Side chat uses the shared main-chat provider chip and searchable model/effort
   picker, including Fast mode and reset. Keep account names in the provider
   submenu; all changes stay scoped to the side-chat fork.
+- Side chat uses the same queued-message rows and actions as main chat: Steer,
+  Edit, Delete, drag reordering, attachment previews, and scrolling after four
+  rows. Enter queues during a turn; Cmd-Return steers the draft or sends the first
+  queued message when empty. Editing preserves the existing draft and attachments
+  in the queue. All actions stay scoped to that chat and share delivery/Stop rules.
 - Side chat remains available while the main conversation is open in Terminal.
   Opening or refreshing it reads the provider's latest saved context without
   resuming, stopping, or taking ownership of the terminal conversation. Replies
