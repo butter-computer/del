@@ -219,17 +219,15 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 
 The sidebar has **Pinned** (hidden when empty) and the **active Space name** (for example, **Default**). Spaces
 are persistent collections of projects, with independent pinned chats and tab decks.
-Existing projects and pins start in **Default**. The **+** menu offers **Create
-Space**, **Create Project** (choose its directory), and **Rename Space**, each with an icon.
-The plus rotates smoothly while its menu is open and returns when dismissed,
-respecting Reduce Motion. When more than one Space exists, a red **Delete Space** action moves its projects,
+Existing projects and pins start in **Default**. The Space switcher at the top of
+the sidebar lists your Spaces and offers **Create Space**, **Create Project** (choose
+its directory), and **Rename Space**, each with an icon. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
-horizontally with two fingers over the left sidebar, or click the dots above
-Settings, to switch Spaces. Swipes slide both lists with your fingers; releasing
-after a quarter of the sidebar width completes the slide, while shorter or cancelled
-swipes settle back. The toolbar, dots, and Settings stay fixed, and Reduce Motion
-disables the sliding effect. The dots appear only when more than one Space exists;
-the selected dot glows. Vertical scrolling still scrolls the session list; switching
+horizontally with two fingers over the left sidebar, or pick one from the Space
+switcher (or the status bar's Space item), to switch Spaces. Swipes slide both lists
+with your fingers; releasing after a quarter of the sidebar width completes the slide,
+while shorter or cancelled swipes settle back. The header and footer stay fixed, and
+Reduce Motion disables the sliding effect. Vertical scrolling still scrolls the session list; switching
 never stops an agent or closes its tools.
 
 Top session tabs are specific to each Space by default. **Settings → Appearance →
@@ -326,13 +324,22 @@ or pending-draft references, no changed/untracked/ignored files, and no commits 
 creation. Branches are always preserved. Worktrees containing work remain on disk
 for normal Git review and cleanup.
 
-The sidebar starts with four equal-sized buttons: **Search**, **New session (+)**,
-**Keep Mac awake**, and **Memory usage**. Keep-awake uses a neutral hover-colored
-background and animated yellow steam while enabled. A small right inset keeps
-the last toolbar button clear of the sidebar divider.
+The sidebar header has the Space switcher with **Search** (⌘K) and **Archive**
+(the archived view) beside it. Sessions are grouped by project, with a session count
+and an amber "N needs you" when sessions wait for approval. Each row shows its age and
+a status glyph: working, waiting for you, failed, done (filled while unread, with a
+bold title), or idle. The footer holds **Keep Mac awake**, **Memory usage**, and
+**Settings**. Keep-awake uses a neutral hover-colored background and animated gold
+steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
 
-Memory usage opens a compact popover below its button, clear of the top tabs, with a pointer
-on the top. It lists loaded chats and terminals by process-tree RAM usage,
+The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) and recent
+sessions sit in the title bar above the sidebar, session tabs start at the chat
+page's edge, and a 22 px status bar shows the Space and project, branch (with
+dirty and ahead marks), worktree, running and waiting agents, provider, model and
+effort, Chat/Terminal, keep-awake, queued follow-ups, and the version; each item
+opens its picker or menu. ⌘J opens a terminal panel below the page.
+
+Memory usage opens a compact popover above its footer button, clear of the top tabs, with a pointer. It lists loaded chats and terminals by process-tree RAM usage,
 refreshing every three seconds while open. Each row shows a fading session title
 and its RAM usage at the far right; click the title to open the session. Delete and
 unload icons appear to its right only on hover, taking no space while hidden.
@@ -1029,7 +1036,9 @@ session shortcuts.
 | Command-. | Stop the active chat turn |
 | Command-B | Toggle the left sidebar |
 | Command-Backslash / Command-Shift-B | Toggle the file sidebar |
-| Command-J / Control-Backtick | Open a new terminal in the right sidebar |
+| Control-Backtick | Open a new terminal in the right sidebar |
+| Command-J | Toggle the bottom terminal panel |
+| Command-[ / Command-] | Back / forward through visited sessions |
 | Command-Comma | Settings |
 | Escape in Settings | Return to the previous workspace view |
 | Command-Q | Quit |

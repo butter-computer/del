@@ -7,29 +7,38 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Colors and surfaces
 
-- Light mode follows the supplied reference: white workspace (`#FFFFFF`),
-  off-white chrome (`#FCFCFC`), and slightly darker input cards (`#F9F9F9`).
+- Both themes use the calm palette from the Harp design system: calm and
+  low-chrome, surfaces only a few steps apart, few and quiet borders.
+- Dark is graphite, not near-black: chrome (title bar, sidebar, gutters, status
+  bar) `#1D1E21`, page `#212225`, composer `#2A2B2F`, menus and dialogs `#28292D`.
+  Text is off-white `#ECECEA` / `#DCDCD8`, muted `#A3A39F`, faint `#83837F`.
+- Light is warm off-white, not stark white: chrome `#F7F6F3`, page `#FBFAF8`,
+  composer `#F1EFEB`, menus and dialogs `#F6F5F2`, ink `#2A2926`, muted `#6E6C66`.
+- The sidebar uses the same chrome surface as the title bar: no seam between them.
 - Keep the light-mode composer darker than the main workspace. Do not brighten
   the composer past the workspace or reverse the surface hierarchy.
-- The folder/mode footer matches the composer surface.
-- All light-mode menus and modals match the input surface: model list, effort
-  picker, slash-command suggestions, context menus, memory popup, search, and Settings.
+- Separators are quiet: white 6% in dark, warm ink 8% in light.
+- Neutral colour literals in the UI are mapped onto this palette centrally
+  (`appearance::rgb`/`rgba`), so one palette change reaches every pane.
 - Preserve readable selections, hover states, separators, and muted text.
 - Do not change unrelated colors when asked to adjust one surface. Keep dark-mode
   styling independent of light-mode adjustments.
-- Dark mode follows the supplied ChatGPT desktop reference: opaque near-black
-  chrome, black workspaces, a slightly darker left sidebar, and charcoal inputs.
-  Keep surfaces stable across wallpapers; avoid washed-out translucent greys.
-- Use blue for actions and selections, green for save/success, amber for revert or
-  caution, and red for destructive/error states. Ordinary tabs and text stay neutral.
-- Keep the existing light-mode palette. Do not restore an opacity slider or load
-  old saved opacity values.
+- Keep surfaces stable across wallpapers; avoid washed-out translucent greys.
+- Accents are desaturated and used only as small, purposeful cues: Del's softened
+  blue (`#8FB4E6` dark / `#2F5F9E` light) for actions and selections, muted green
+  for done/success, soft amber for "needs you"/caution, dusty red for failed or
+  destructive. Ordinary tabs and text stay neutral.
+- Do not restore an opacity slider or load old saved opacity values.
 
-## Sidebar toolbar and keep-awake
+## Sidebar header, footer and keep-awake
 
-- Four equally sized buttons, in order: Search, New session, Keep Mac awake,
-  Memory usage. Search must not expand wider than the others.
-  Leave a small gap between the toolbar’s final button and the sidebar divider.
+- The sidebar header holds the Space switcher on the left and two 28 px icon
+  buttons on the right, flush with the session rows: Search (opens ⌘K) and
+  Archive (toggles the archived view, with a selected background while on).
+  There is no new-session plus in the sidebar: new sessions come from the `+`
+  after the top tabs and ⌘N.
+- The footer holds three icon buttons: Keep Mac awake, Memory usage, Settings.
+  The archive button is not in the footer.
 - Cap control growth; empty space is fine. Do not stretch buttons to fill a wide sidebar.
 - Keep-awake uses a neutral hover-style background, never a yellow filled background.
 - When off, the keep-awake cup uses the same color as the other toolbar icons; never dim it.
@@ -41,7 +50,7 @@ This records the final decisions, including corrections to earlier experiments.
 ## Memory usage
 
 - The visible heading, tooltip, and accessibility label are **Memory usage**.
-- Anchor the memory popup below its toolbar button so it never overlaps the top tabs.
+- Anchor the memory popup above its footer button so it never overlaps the top tabs.
 - Keep it compact: about 240 logical pixels wide, at most four visible rows.
 - Sort loaded chat and terminal sessions by highest process RAM usage first.
 - Each single-line row contains the correct provider logo, a short fading title,
@@ -68,8 +77,8 @@ This records the final decisions, including corrections to earlier experiments.
 
 - Opening/closing the left sidebar slides it: contents keep their full width and
   move with the divider, clipped at the edge. Never squeeze or reflow the contents.
-- The sidebar footer's Settings and Archived buttons share the row height, with
-  equal left and right insets; the archive button must not touch the divider.
+- The sidebar footer's buttons share the row height, with equal left and right
+  insets; the last button must not touch the divider.
 
 - Keep a visible theme-aware vertical divider between the workspace and each sidebar,
   including the right Files/Terminal panel. Preserve its resize target.
@@ -91,13 +100,16 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Unread conversations
 
-- Show a blue dot for replies completed in chats the user is not viewing.
+- Mark replies completed in chats the user is not viewing as unread. Sidebar
+  rows show unread as semibold title text and a filled done check; top tabs keep
+  the blue dot.
 - Completion in the currently viewed, active chat stays read and clears any stale dot.
 - The selected chat must also become unread when it finishes in an inactive Del window.
 - Clear the blue dot when the user opens the chat, returns focus to its window,
   or submits another prompt in it. Do not clear unread markers in other chats.
-  Hide the sidebar dot on hover so the action icons occupy its space; keep actions
-  at the same right inset regardless of unread state. Hovering alone does not mark it read.
+  On hover, a row's time and status glyph give way to its action icons, laid out
+  through render state; keep actions at the same right inset regardless of unread
+  state. Hovering alone does not mark it read.
 
 ## Model and effort controls
 
@@ -118,6 +130,10 @@ This records the final decisions, including corrections to earlier experiments.
   and sidebar tool tabs. Sidebar dots and spinners share one centered status
   container aligned with the rightmost hover action, so their centers never shift.
 
+- Each sidebar row shows its relative age (now, 4m, 2h, 5d) and one status glyph:
+  working spinner, amber waiting ring (needs you), red failed mark, done check
+  (filled while unread), or a moon once idle for a day or more. Terminal rows
+  add a small mono `term` tag. Rows carry no provider logo.
 - Show a thin rotating ring with a fading tail in sidebar rows and top tabs while a chat is running,
   matching the supplied ChatGPT reference. Use smooth constant rotation, not a segmented spoke spinner.
   Terminal sessions use their reported Working status. Hide the spinner on hover
@@ -359,7 +375,11 @@ This records the final decisions, including corrections to earlier experiments.
 - Keep project expansion state and identities across restarts. Each project offers
   a new-session action, with Chat/Terminal chosen in the composer.
 - Below the new-session composer, keep the directory, starting branch, New worktree
-  toggle, and Chat/Terminal controls together on one row. Do not add a second row.
+  toggle, and Chat/Terminal controls on one row. Directory, branch and New worktree
+  form one container on the left and Chat/Terminal its own container on the
+  right, each flush with the composer's edge, with an empty middle and no
+  full-width row container. Do not add a second row. The new-tab page has no
+  "What are we building?" heading.
   Hide Git controls for non-repositories; disable them while launch is in progress.
 - Create unique owned worktrees and branches asynchronously, retain their directory
   on resume, and reuse the same worktree on a failed-start retry.
@@ -369,13 +389,16 @@ This records the final decisions, including corrections to earlier experiments.
 - Every new-session action creates an independent draft. A project's plus uses
   that project's directory; the general plus inherits the currently selected
   session or draft directory. Use the remembered directory only without a selected
-  tab. The Projects heading offers a directory picker, and project
-  row plus buttons appear only on hover.
+  tab. The Space switcher menu offers Create Project (a directory picker), and
+  project row plus buttons appear only on hover.
 - Terminal sessions use a terminal glyph with a small provider badge at its lower
   right. Chat sessions retain their provider glyph.
 - New worktree is a compact checkbox, not a switch. Keep keyboard activation
   and disabled state, without an extra outer outline.
-- Keep Projects close to the toolbar. Hide Pinned when empty. Project rows reveal a three-dot menu and plus on hover.
+- Projects follow the sidebar header directly, grouped without a section heading.
+  Each project row shows its name, session count and, in amber, "N needs you"
+  when sessions wait for approval; the badge gives way to the three-dot menu and
+  plus on hover. Session rows are not indented under it. Hide Pinned when empty.
   Project rename changes its display name only. Archive is reversible through the
   archived list. Permanent deletion confirms removal of the project and all its
   session histories; directory contents and Git worktrees remain untouched.
@@ -393,9 +416,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Archive view shows only archived projects and sessions, never active sessions or
   drafts. Keep the archive toggle available when this view becomes empty.
 
-- Label the archive sidebar “Archived” and hide its heading and project-row plus
-  buttons. The global New Session action remains available and returns to the
-  active Projects view.
+- Label the archive view “Archived” and hide its project-row plus buttons. The
+  global New Session action remains available and returns to the active view.
 
 - Restoring one session makes its project visible in Projects without restoring
   archived siblings. The project can appear in both views with disjoint sessions;
@@ -426,10 +448,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Animated project contents must fill the sidebar width throughout expansion and
   collapse; measuring content must not shrink or clip session titles.
 
-- Clicking Projects, Archived, or the nonempty Pinned heading toggles that entire
-  section with a reversible reveal. Persist each section independently from the
-  individual projects' expansion states. Keep contents full-width, respect Reduce
-  Motion, and keep the Projects plus action independent of the heading toggle.
+- Clicking the nonempty Pinned heading toggles that section with a reversible
+  reveal, persisted independently from the individual projects' expansion states.
+  Keep contents full-width and respect Reduce Motion.
 
 - Reasoning headers use shimmering Thinking while active and static Thought when
   finished. Click the header to expand/collapse; no spinner or show/hide text.
@@ -487,8 +508,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Migrate saved main-area tool tabs into their owning session's sidebar. Keep
   browser identities/profiles, editor drafts, and side-chat storage identities.
   Import IDs must be stable so retrying migration cannot duplicate tabs.
-- Sidebar tool tabs use a compact 128-point width; top-level session tabs are 144
-  points wide. Both share the shell background, 11-point close glyphs, 16-point
+- Sidebar tool tabs use a compact 128-point width; top-level session tabs are
+  220 × 26 points with an 8-point radius. Both share the shell background, 11-point close glyphs, 16-point
   hover buttons, and gradual overflow fades. Keep the plus after the last tab.
 - Sidebar dragging stays horizontal with a darker held preview, no magnetic
   resistance, and a haptic tick when its reorder target changes. Leaving the row
@@ -497,7 +518,7 @@ This records the final decisions, including corrections to earlier experiments.
   six-point page gutter, extending slightly over both neighboring surfaces.
   The full target must show the resize cursor and accept drags.
   Tool icons match the launcher; New tab uses a page icon.
-- Each terminal appears directly in the right-sidebar tab row, with
+- Each right-sidebar terminal appears directly in the right-sidebar tab row, with
   no nested terminal subtab strip. All are labeled Terminal, without numbers.
   The plus icon stays neutral. Choosing Terminal
   from a new tab always creates a fresh shell, even when other terminals exist.
@@ -510,6 +531,7 @@ This records the final decisions, including corrections to earlier experiments.
   use computer.butter.del; never replace the local development signing identity
   or include user data, credentials, or provider account profiles in a release.
 
+- Command-[ and Command-] step back and forward through visited sessions and tabs.
 - Command-Left/Right cycle top session tabs. Command-Up/Down cycle visible left-sidebar
   sessions in displayed order (pinned, then project drafts and sessions), skipping collapsed
   groups. These shortcuts work from the composer too; Shift variants retain text selection.
@@ -573,8 +595,9 @@ This records the final decisions, including corrections to earlier experiments.
 - The untouched Files split gives an empty preview only the bottom fifth of the
   pane. Preserve manually resized heights; clamp the tree in shorter windows.
   Anchor resize drags to the measured tree height at mouse-down.
-- Terminals always paint their default black background, including in light
-  appearance. Preserve explicit terminal colors and inverse-video rendering.
+- Terminals always paint their default dark background (graphite `#141517`),
+  including in light appearance. Preserve explicit terminal colors and
+  inverse-video rendering.
 
 - Successful Side chat replies completed out of view mark that fork unread and
   show the blue dot in its tab, its parent's top tab, and the left sidebar. Keep
@@ -694,13 +717,13 @@ the browser's last viewport instead of sampling a nearly zero-width page.
 
 ## Spaces
 
-- The former Projects heading shows only the active Space name, without a Spaces prefix. Its + menu
-  offers Create Space, Create Project, and Rename Space with icons. A red Delete Space
-  action appears only with multiple Spaces and moves projects, pins, and tabs to the
-  first remaining Space without deleting chats or files. Existing projects and
-  pins belong to Default; new Spaces start empty. The menu stays compact. Rotate its
-  plus 45 degrees on open and back on dismissal using a short reversible transition;
-  Reduce Motion applies the final orientation immediately.
+- The Space switcher in the sidebar header shows only the active Space name with
+  a chevron, without a Spaces prefix. Its menu lists the Spaces (the active one
+  checked) and then offers Create Space, Create Project, and Rename Space with
+  icons. A red Delete Space action appears only with multiple Spaces and moves
+  projects, pins, and tabs to the first remaining Space without deleting chats or
+  files. Existing projects and pins belong to Default; new Spaces start empty.
+  The menu stays compact. The status bar's Space item opens the same menu.
 - Create/Rename Space uses a compact dialog with a borderless name input, no blue
   focus outline, and simple Cancel/Create or Save actions. Focus the name on open;
   Enter submits exactly once and Escape dismisses.
@@ -717,9 +740,8 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   Schedule settling via next-frame callbacks; never request a rendering-view
   animation frame directly from an input event or next-frame callback.
   Switch one Space per gesture;
-  vertical scrolling remains ordinary list scrolling. Clickable dots above Settings
-  show all Spaces in a tight centered row and softly highlight the active one.
-  Hide the entire dot row when only one Space exists.
+  vertical scrolling remains ordinary list scrolling. There is no dot row; the
+  header switcher lists every Space.
 - Session tabs are space-specific by default. Appearance settings has a Global
   session tabs toggle in a plain row matching Theme, without an extra card background. Returning to scoped tabs restores earlier decks and keeps
   newly opened global tabs in the active Space. Changing the toggle keeps Settings open.
@@ -736,3 +758,37 @@ the browser's last viewport instead of sampling a nearly zero-width page.
 - Side chats and historical reads include previous segments and new persisted
   terminal turns. Keep exclusive ownership: return to Chat before switching
   provider or account again. Preserve recovery across restarts and failed returns.
+
+## Harp workbench
+
+The Harp redesign wraps Del's page in a calm, VS Code-like workbench with no
+activity bar. It supersedes earlier rules where they conflict.
+
+- Title bar (40 px), Linear layout. Above the sidebar, in its width: traffic
+  lights, sidebar toggle, then Recent sessions (clock), Back and Forward
+  right-aligned to the sidebar's padding. Back and Forward step through visited
+  sessions and tabs, disable at the ends, and use ⌘[ / ⌘]; a new visit drops the
+  forward history; entries that no longer exist are skipped. Recent lists the
+  distinct visited sessions, most recent first.
+- Session tabs start at the chat page's left edge (0 px), are 220 × 26 with an
+  8 px radius and active fill, and show the working spinner. The new-tab `+`
+  (24 px) sits 8.5 px after the last tab, not at the far edge. With the sidebar
+  hidden the tabs follow the navigation buttons. There is no search pill in the
+  title bar. At the far right: the terminal panel toggle (⌘J) and the right
+  sidebar toggle (⌘\\ / ⌘⇧B / ⌥⌘B), with the right sidebar's tool strip.
+- The chat page sits directly under the title bar with no header row (no session
+  name, path or status bar above it). Status shows as the tab spinner and in the
+  status bar. The composer radius is 8 px on every page.
+- Status bar (22 px, full width, chrome surface). Left: Space · project (Space
+  menu), branch with `*` when dirty and `↑N` when ahead (View changes; Choose
+  starting branch in drafts), worktree (shows Files), N running and N need you
+  (each jumps to the next such session). Right: provider (provider/account
+  picker), model · effort (model picker), Chat/Terminal (switches mode like
+  `/chat` and `/terminal`), keep awake, queued follow-up count (focuses the
+  composer), version (checks for updates). Git state refreshes when the shown
+  project changes and after each reply.
+- Bottom terminal panel (⌘J): a real shell per project (`zsh — <project>`),
+  framed like the page, kept alive while hidden. Resize with its top sash
+  (minimum 96 px), double-click the sash to reset to 200 px, maximize and
+  restore, close. Its height persists with the sidebar widths.
+- The left sidebar defaults to 264 px and resizes between 180 and 460 px.
