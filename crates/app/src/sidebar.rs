@@ -1084,6 +1084,8 @@ fn space_contents(
                     let cleanup_path = path.clone();
                     let group = SharedString::from(format!("project-{}", path.display()));
                     let project_rows: Vec<&Row> = rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).collect();
+                    let project_count = project_rows.len()
+                        + if show_archived { 0 } else { drafts.iter().filter(|key| s.draft_project(**key).is_some_and(|p| p == path)).count() };
                     let needs = project_rows.iter().filter(|r| r.status == del_agent::SessionStatus::WaitingApproval).count();
                     // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
@@ -1097,10 +1099,11 @@ fn space_contents(
                                 let state = cleanup_state.clone(); let path = cleanup_path.clone();
                                 menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
                             })
-                            .child(div().flex_initial().min_w_0().child(if project_renaming {
-                                Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD)).into_any_element()
-                            } else { fading_title(s.project_name(&path)).into_any_element() }))
-                            .child(div().flex_none().font_weight(FontWeight::NORMAL).text_color(rgba(FAINT)).child(project_rows.len().to_string()))
+                            // Content-sized so the count sits right after the name.
+                            .child(if project_renaming {
+                                div().flex_1().min_w_0().child(Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD))).into_any_element()
+                            } else { div().flex_initial().min_w_0().truncate().child(s.project_name(&path)).into_any_element() })
+                            .child(div().flex_none().font_weight(FontWeight::NORMAL).text_color(rgba(FAINT)).child(project_count.to_string()))
                             .child(div().flex_1())
                             .when(needs > 0, |row| row.child(div().flex_none().font_weight(FontWeight::NORMAL).text_size(zpx(TEXT_SM))
                                 .text_color(crate::appearance::ActionTone::Warning.foreground())
