@@ -51,6 +51,13 @@ actions targeting the same saved conversation.
 
 ## Ownership and recovery
 
+Restored history is presentation data: the native transcript is never rewritten.
+Claude's metadata-linked local commands and native task notifications become
+expandable activity with readable output. Literal XML/code in genuine messages
+is preserved. Complete history records from Claude, Codex, and OpenCode share
+ANSI-control cleanup, including color sequences and terminal hyperlink wrappers.
+Live deltas bypass this cleanup because an escape sequence may span chunks.
+
 `SessionManager` serializes sends, resumes, and handoffs with the same per-session
 lock. A terminal-owned session cannot resume or accept a chat prompt. Side chat
 creation takes a read-only snapshot under that lock and starts a separate native
@@ -117,3 +124,18 @@ Side chat layout and `/chat` return path.
 
 This covers the installed provider versions and the tested scenarios, not every
 possible future CLI version, network failure, or external native-editor action.
+
+### Terminal-history cleanup validation — 2026-11-02
+
+- Workspace suite: **599 passed**; Clippy, formatting, and whitespace checks passed.
+- Provider history fixtures verify ANSI cleanup, preserved user/assistant/tool
+  roles, Unicode, literal XML and escaped-code examples, native command output,
+  and background-notification provenance.
+- The reported native Claude transcript passed the opt-in read-only regression
+  check. Native files were not edited.
+- Live Claude, Codex, and OpenCode handoff suites passed again, including all nine
+  parent/Side chat provider combinations and repeated history restoration.
+- The signed app was rebuilt and relaunched. The reported conversation now shows
+  `Ran /terminal-setup` with expandable plain-text output. Its real messages and
+  navigation survive another typed `/terminal` → `/chat` round trip. Light and
+  dark appearance were checked; the app was left in its original dark appearance.

@@ -25,4 +25,5 @@ pub use types::*;
 mod models;
 pub use models::{EffortOption, ModelInfo};
 
+pub mod history;
 pub mod titles;

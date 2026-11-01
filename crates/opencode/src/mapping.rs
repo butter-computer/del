@@ -238,6 +238,12 @@ impl Stream {
         }
     }
     pub fn message(&mut self, m: &Value) -> Vec<AgentEvent> {
+        let mut events = self.history_message(m);
+        del_agent::history::clean_events(&mut events);
+        events
+    }
+
+    fn history_message(&mut self, m: &Value) -> Vec<AgentEvent> {
         match m["type"].as_str() {
             Some("user") => vec![AgentEvent::UserMessage {
                 text: string(m, "text"),
@@ -294,6 +300,31 @@ impl Stream {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn restored_terminal_records_keep_roles_and_strip_only_real_controls() {
+        let mut stream = Stream::default();
+        let literal = "<local-command-stdout>literal XML</local-command-stdout> \\x1b[2m";
+        assert!(
+            matches!(&stream.message(&json!({"type":"user","text":literal}))[0], AgentEvent::UserMessage {text} if text == literal)
+        );
+        let events = stream.message(&json!({"type":"assistant", "id":"a", "content":[
+            {"type":"text","text":"\u{1b}[32mAnswer 🐄\u{1b}[0m"},
+            {"type":"reasoning","text":"\u{1b}[2mThought\u{1b}[22m"},
+            {"type":"tool","id":"t","name":"shell","state":{"status":"completed","input":{},"content":[{"type":"text","text":"\u{1b}[2m/tmp\u{1b}[22m"}]}}
+        ]}));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::AssistantMessage {text, ..} if text == "Answer 🐄")
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ReasoningDelta {text, ..} if text == "Thought"))
+        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallFinished {output_summary, ..} if output_summary == "/tmp")));
+    }
+
     #[test]
     fn tool_summaries_are_capped() {
         let big = "é".repeat(5000);

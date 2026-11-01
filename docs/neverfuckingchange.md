@@ -186,6 +186,10 @@ This records the final decisions, including corrections to earlier experiments.
   including streamed, restored, and Side chat messages. Preserve raw saved text,
   literal code examples, and malformed directives; remap search-highlight offsets.
 - Keep search highlights, message navigation, and immediate streaming intact.
+- Restoring Terminal history into Chat must not expose native command wrappers
+  or ANSI control codes as user messages. Use provider metadata to distinguish
+  local commands and background notifications from literal user examples; keep
+  their useful output in expandable activity. Preserve native transcript files.
 - Keep intermediate responses visible while work is active, waiting, paused, or
   still streaming. Only after a finished final answer may earlier activity collapse
   under an expandable Worked row. Keep the final answer visible with the only Copy

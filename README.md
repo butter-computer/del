@@ -402,6 +402,9 @@ conversation. Unloading a running session also stops its current work.
   Finish or stop a chat response before switching. Returning closes the terminal
   process before Chat reloads its native history. In a new draft, these commands
   choose the mode for the first message. Ordinary sidebar shells are unaffected.
+  Restored terminal history removes ANSI formatting controls. Recognized native
+  commands and background notifications appear as expandable activity, rather
+  than raw internal tags or extra user messages; ordinary text/code stays intact.
   Codex Terminal maps Ask to its supported `on-request` approval policy with a
   read-only sandbox; the saved Chat permission mode is unchanged.
   See [Chat and Terminal handoff](docs/chat-terminal.md) for recovery behavior,

@@ -138,6 +138,7 @@ impl Mapper {
             events.extend(self.notification("turn/completed", &json!({"turn": turn})));
         }
         self.history_mode = false;
+        del_agent::history::clean_events(&mut events);
         events
     }
 
@@ -570,6 +571,27 @@ fn truncate(s: &str) -> String {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    #[test]
+    fn restored_terminal_text_is_plain_without_stripping_literal_markup() {
+        let literal = "Explain <command-name>/model</command-name> and \\x1b[2m";
+        let events = Mapper::default().history(&[json!({"id":"t", "status":"completed", "items":[
+            {"type":"userMessage","content":[{"type":"text","text":literal}]},
+            {"type":"agentMessage","id":"a","text":"\u{1b}[32mAnswer 🐄\u{1b}[0m"},
+            {"type":"commandExecution","id":"c","command":"pwd","status":"completed","aggregatedOutput":"\u{1b}[2m/tmp\u{1b}[22m", "exitCode":0}
+        ]})]);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserMessage {text} if text == literal))
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::AssistantMessage {text, ..} if text == "Answer 🐄")
+            )
+        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallFinished {output_summary, ..} if output_summary == "/tmp")));
+    }
 
     #[test]
     fn stale_in_progress_turns_are_closed_as_interrupted_and_errors_stay_quiet() {

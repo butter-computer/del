@@ -51,7 +51,8 @@ pub fn describe(tool: &ToolCall) -> (Kind, String) {
         "read" | "read_file" | "readfile" => Kind::Read,
         "grep" | "glob" | "search" | "web_search" | "file_search" => Kind::Search,
         "edit" | "write" | "write_file" | "apply_patch" | "multiedit" => Kind::Edit,
-        "shell" | "bash" | "exec_command" | "execute" | "run_command" | "write_stdin" => {
+        "shell" | "bash" | "exec_command" | "execute" | "run_command" | "write_stdin"
+        | "terminal_command" => {
             // Classify only simple commands. Compound scripts stay visible as commands.
             if !tool.input.contains([';', '\n', '|', '&']) {
                 let command = detail.split_whitespace().next().unwrap_or("");

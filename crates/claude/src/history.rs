@@ -1,7 +1,7 @@
 //! Restore the UI from Claude's on-disk transcript; resuming stream-json does
 //! not replay earlier messages. Never send these records back to the provider.
 use crate::protocol::Translator;
-use del_agent::{AgentEvent, TurnStatus};
+use del_agent::{AgentEvent, ToolStatus, TurnStatus};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -108,11 +108,94 @@ pub fn read(mut reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEven
     let mut out = vec![];
     let mut translator = Translator::new();
     let mut turn: Option<String> = None;
+    let mut local_parent: Option<&str> = None;
+    let mut local_tool: Option<String> = None;
     for (index, record) in records.iter().enumerate() {
         if !chain.contains(&index) {
             continue;
         }
         let content = &record["message"]["content"];
+        // Claude stores CLI-only commands as user records linked to a metadata
+        // caveat. Require that provenance: ordinary users may paste the same XML.
+        let native_text = content.as_str().or_else(|| {
+            let blocks = content.as_array()?;
+            (blocks.len() == 1 && blocks[0]["type"] == "text")
+                .then(|| blocks[0]["text"].as_str())
+                .flatten()
+        });
+        if record["type"] == "user"
+            && record["origin"]["kind"] == "task-notification"
+            && let Some(body) = native_text.and_then(|text| wrapped(text, "task-notification"))
+            && let Some(summary) = field(body, "summary")
+        {
+            let id = format!("notification-{}", record["uuid"].as_str().unwrap_or("task"));
+            out.push(AgentEvent::ToolCallStarted {
+                id: id.clone(),
+                name: "background_task".into(),
+                input_summary: summary.into(),
+            });
+            out.push(AgentEvent::ToolCallFinished {
+                id,
+                status: if field(body, "status") == Some("failed") {
+                    ToolStatus::Failed
+                } else {
+                    ToolStatus::Completed
+                },
+                output_summary: field(body, "output-file")
+                    .map(|path| format!("Output: {path}"))
+                    .unwrap_or_default(),
+            });
+            local_parent = None;
+            local_tool = None;
+            continue;
+        }
+        let caveat = record["type"] == "user"
+            && record["isMeta"] == true
+            && native_text.is_some_and(|text| wrapped(text, "local-command-caveat").is_some());
+        let local = record["type"] == "user"
+            && local_parent.is_some()
+            && record["parentUuid"].as_str() == local_parent;
+        if caveat {
+            local_parent = record["uuid"].as_str();
+            local_tool = None;
+            continue;
+        }
+        if local && let Some(text) = native_text {
+            if let Some(command) = local_command(text) {
+                let id = format!("local-{}", record["uuid"].as_str().unwrap_or("command"));
+                out.push(AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: "terminal_command".into(),
+                    input_summary: command,
+                });
+                out.push(AgentEvent::ToolCallFinished {
+                    id: id.clone(),
+                    status: ToolStatus::Completed,
+                    output_summary: String::new(),
+                });
+                local_tool = Some(id);
+                local_parent = record["uuid"].as_str();
+                continue;
+            }
+            let output = wrapped(text, "local-command-stdout")
+                .map(|text| (text, ToolStatus::Completed))
+                .or_else(|| {
+                    wrapped(text, "local-command-stderr").map(|text| (text, ToolStatus::Failed))
+                });
+            if let Some((output, status)) = output
+                && let Some(id) = &local_tool
+            {
+                out.push(AgentEvent::ToolCallFinished {
+                    id: id.clone(),
+                    status,
+                    output_summary: output.to_owned(),
+                });
+                local_parent = record["uuid"].as_str();
+                continue;
+            }
+        }
+        local_parent = None;
+        local_tool = None;
         if record["type"] == "user" && record["isMeta"] != true {
             let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
                 content
@@ -160,13 +243,160 @@ pub fn read(mut reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEven
             status: TurnStatus::Completed,
         });
     }
+    del_agent::history::clean_events(&mut out);
     Ok(out)
+}
+
+fn wrapped<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.trim()
+        .strip_prefix(&format!("<{tag}>"))?
+        .strip_suffix(&format!("</{tag}>"))
+}
+
+fn field<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.split_once(&format!("<{tag}>"))?
+        .1
+        .split_once(&format!("</{tag}>"))
+        .map(|(value, _)| value)
+}
+
+fn local_command(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("<command-name>")?;
+    let (name, rest) = rest.split_once("</command-name>")?;
+    if !name.starts_with('/') || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start().strip_prefix("<command-message>")?;
+    let (_, rest) = rest.split_once("</command-message>")?;
+    let args = wrapped(rest, "command-args")?.trim();
+    Some(if args.is_empty() {
+        name.into()
+    } else {
+        format!("{name} {args}")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn native_local_commands_become_activity_without_consuming_real_messages() {
+        let command = "<command-name>/terminal-setup</command-name>\n <command-message>terminal-setup</command-message>\n <command-args></command-args>";
+        let mut records = [
+            json!({"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>CLI output only</local-command-caveat>"}}),
+            json!({"type":"user","message":{"content":command}}),
+            json!({"type":"user","message":{"content":"<local-command-stdout>Setup note \u{1b}[2mwith formatting\u{1b}[22m</local-command-stdout>"}}),
+            json!({"type":"user","message":{"content":"cool twin cool"}}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"\u{1b}[32mAll good\u{1b}[0m"}]}}),
+            // Identical XML typed by the user has no native caveat provenance.
+            json!({"type":"user","message":{"content":command}}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"Literal <local-command-stdout>example</local-command-stdout>"}]}}),
+        ];
+        for (i, record) in records.iter_mut().enumerate() {
+            record["uuid"] = json!(i.to_string());
+            record["parentUuid"] = if i == 0 {
+                Value::Null
+            } else {
+                json!((i - 1).to_string())
+            };
+        }
+        let input = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = read(input.as_bytes(), "test").unwrap();
+        let users: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::UserMessage { text } = e {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(users, ["cool twin cool", command]);
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallStarted { name, input_summary, .. } if name == "terminal_command" && input_summary == "/terminal-setup")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallFinished { output_summary, .. } if output_summary == "Setup note with formatting")));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "All good")
+            )
+        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "Literal <local-command-stdout>example</local-command-stdout>")));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn native_task_notifications_are_activity_but_user_examples_are_preserved() {
+        let text = "<task-notification><status>completed</status><summary>Background command finished</summary><output-file>/tmp/output</output-file></task-notification>";
+        let records = [
+            json!({"type":"user","uuid":"n","origin":{"kind":"task-notification"},"message":{"content":text}}),
+            json!({"type":"user","uuid":"u","parentUuid":"n","message":{"content":text}}),
+        ];
+        let input = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = read(input.as_bytes(), "test").unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::UserMessage { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallStarted { input_summary, .. } if input_summary == "Background command finished")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallFinished { output_summary, .. } if output_summary == "Output: /tmp/output")));
+    }
+
+    #[test]
+    fn command_envelopes_require_exact_structure() {
+        assert_eq!(
+            local_command(
+                "<command-name>/model</command-name><command-message>model</command-message><command-args>sonnet</command-args>"
+            ),
+            Some("/model sonnet".into())
+        );
+        assert!(local_command("Explain <command-name>/model</command-name>").is_none());
+        assert!(
+            wrapped(
+                "<local-command-stdout>example</local-command-stdout> extra",
+                "local-command-stdout"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    #[ignore = "reads a user-selected native transcript via DEL_HISTORY_TEST_FILE"]
+    fn actual_terminal_transcript_restores_clean_command_activity() {
+        let path = std::env::var("DEL_HISTORY_TEST_FILE").unwrap();
+        let id = std::path::Path::new(&path)
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let events = read(BufReader::new(std::fs::File::open(&path).unwrap()), id).unwrap();
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallStarted {input_summary, ..} if input_summary == "/terminal-setup")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCallFinished {output_summary, ..} if output_summary.contains("Terminal setup cannot be run from del.") && !output_summary.contains('\u{1b}') && !output_summary.contains("<local-command-stdout>"))));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::UserMessage {text} if text.starts_with("<command-name>") || text.starts_with("<local-command-stdout>"))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserMessage {text} if text == "cool twin cool"))
+        );
+    }
+
     #[test]
     fn oversized_and_invalid_records_are_skipped_not_fatal() {
         let ok = json!({"type":"user","uuid":"u","parentUuid":null,"message":{"content":"hello"}});
