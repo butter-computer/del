@@ -392,7 +392,7 @@ pub struct TerminalSession {
     shared: Arc<Shared>,
     process: Arc<ProcessSession>,
     events: Option<UnboundedReceiver<TerminalEvent>>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl TerminalSession {
@@ -575,7 +575,7 @@ impl TerminalSession {
             shared,
             process,
             events: Some(rx),
-            worker: Mutex::new(Some(worker)),
+            worker: Arc::new(Mutex::new(Some(worker))),
         })
     }
 
@@ -642,27 +642,40 @@ impl TerminalSession {
     /// Blocks for up to `grace` plus process reaping; UI code should use
     /// [`Self::close_in_background`].
     pub fn close(&self, grace: Duration) {
+        self.shutdown_handle().close(grace);
+    }
+
+    /// A handle that can wait for shutdown off the UI thread without owning the view.
+    pub fn shutdown_handle(&self) -> TerminalShutdown {
+        TerminalShutdown {
+            shared: self.shared.clone(),
+            process: self.process.clone(),
+            worker: self.worker.clone(),
+        }
+    }
+
+    pub fn close_in_background(&self, grace: Duration) {
+        self.shared.disconnect();
+        let shutdown = self.shutdown_handle();
+        std::thread::spawn(move || shutdown.close(grace));
+    }
+}
+
+/// Waitable shutdown, serialized with view destruction and other close requests.
+pub struct TerminalShutdown {
+    shared: Arc<Shared>,
+    process: Arc<ProcessSession>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+impl TerminalShutdown {
+    pub fn close(self, grace: Duration) {
+        let mut worker = self.worker.lock().unwrap();
         self.shared.disconnect();
         self.process.terminate(grace);
         self.shared.closing.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.lock().unwrap().take() {
+        if let Some(worker) = worker.take() {
             let _ = worker.join();
         }
-    }
-    /// Like [`Self::close`], but returns immediately: termination, reaping
-    /// and thread joins happen on a background thread.
-    pub fn close_in_background(&self, grace: Duration) {
-        self.shared.disconnect();
-        let Some(worker) = self.worker.lock().unwrap().take() else {
-            return;
-        };
-        let process = self.process.clone();
-        let shared = self.shared.clone();
-        std::thread::spawn(move || {
-            process.terminate(grace);
-            shared.closing.store(true, Ordering::Release);
-            let _ = worker.join();
-        });
     }
 }
 

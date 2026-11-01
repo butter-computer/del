@@ -63,6 +63,8 @@ pub struct TerminalLaunchSpec {
     #[serde(default)]
     pub variant: Option<String>,
     #[serde(default)]
+    pub permission_mode: Option<del_agent::PermissionMode>,
+    #[serde(default)]
     pub model: Option<String>,
 }
 
@@ -107,6 +109,7 @@ impl TerminalLaunchSpec {
             title: "Shell".into(),
             login_env: true,
             variant: None,
+            permission_mode: None,
             model: None,
         }
     }
@@ -137,6 +140,7 @@ impl TerminalLaunchSpec {
             title: kind.label().into(),
             login_env: true,
             variant: None,
+            permission_mode: None,
             model: None,
         })
     }
@@ -159,6 +163,42 @@ impl TerminalLaunchSpec {
             spec.model = config.model.clone();
         }
         Ok(spec)
+    }
+
+    pub(super) fn chat_config(&self) -> Option<del_agent::SessionConfig> {
+        let value = |flag: &str| {
+            self.args
+                .windows(2)
+                .find(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+        };
+        let codex_value = |key: &str| {
+            self.args.windows(2).find_map(|pair| {
+                (pair[0] == "-c")
+                    .then(|| pair[1].strip_prefix(key))
+                    .flatten()
+                    .and_then(|value| serde_json::from_str::<String>(value).ok())
+            })
+        };
+        Some(del_agent::SessionConfig {
+            provider: self.provider()?,
+            cwd: self.cwd.clone(),
+            model: self.model.clone().or_else(|| value("--model")),
+            reasoning_effort: self
+                .variant
+                .clone()
+                .or_else(|| value("--effort"))
+                .or_else(|| codex_value("model_reasoning_effort=")),
+            service_tier: codex_value("service_tier=").or_else(|| {
+                value("--settings")
+                    .and_then(|settings| serde_json::from_str::<serde_json::Value>(&settings).ok())
+                    .filter(|settings| settings["fastMode"] == true)
+                    .map(|_| "fast".into())
+            }),
+            permission_mode: self
+                .permission_mode
+                .unwrap_or(del_agent::PermissionMode::FullAuto),
+        })
     }
 
     fn apply_model_settings(&mut self, config: &del_agent::SessionConfig) {
@@ -220,6 +260,7 @@ impl TerminalLaunchSpec {
             title: "Custom terminal".into(),
             login_env: false,
             variant: None,
+            permission_mode: None,
             model: None,
         })
     }
@@ -307,7 +348,44 @@ impl TerminalLaunchSpec {
             TerminalLaunchKind::OpenCode => Some("--auto"),
             _ => None,
         };
+        if let Some(mode) = self.permission_mode {
+            use del_agent::PermissionMode::*;
+            match self.kind {
+                TerminalLaunchKind::Codex if mode != FullAuto => {
+                    let (approval, sandbox) = match mode {
+                        // Current Codex TUI removed `untrusted`; retain the read-only sandbox.
+                        Ask => ("on-request", "read-only"),
+                        AutoEdit => ("on-request", "workspace-write"),
+                        Plan => ("never", "read-only"),
+                        FullAuto => unreachable!(),
+                    };
+                    args.extend([
+                        "--ask-for-approval".into(),
+                        approval.into(),
+                        "--sandbox".into(),
+                        sandbox.into(),
+                    ]);
+                }
+                TerminalLaunchKind::Claude if mode != FullAuto => {
+                    args.extend([
+                        "--permission-mode".into(),
+                        match mode {
+                            Ask => "default",
+                            AutoEdit => "acceptEdits",
+                            Plan => "plan",
+                            FullAuto => unreachable!(),
+                        }
+                        .into(),
+                    ]);
+                }
+                // OpenCode resumes the permissions and plan/build agent stored on the native session.
+                _ => {}
+            }
+        }
         if let Some(flag) = bypass
+            && self
+                .permission_mode
+                .is_none_or(|mode| mode == del_agent::PermissionMode::FullAuto)
             && !args.iter().any(|arg| arg == flag)
         {
             args.push(flag.into());
@@ -627,6 +705,7 @@ impl TerminalHostSnapshot {
 
 #[derive(Clone, Debug)]
 pub enum TerminalHostEvent {
+    ChatRequested,
     Changed(TerminalHostSnapshot),
     Terminal(TerminalEvent),
 }
@@ -700,7 +779,17 @@ impl TerminalHost {
         cx: &mut Context<Self>,
     ) -> Self {
         let pid = session.pid();
-        let terminal = cx.new(|cx| TerminalView::new(session, window, cx));
+        let terminal = cx.new(|cx| {
+            let mut view = TerminalView::new(session, window, cx);
+            if spec.provider().is_some() {
+                view.enable_chat_command();
+            }
+            view
+        });
+        cx.subscribe(&terminal, |_, _, _: &del_terminal::ChatRequested, cx| {
+            cx.emit(TerminalHostEvent::ChatRequested);
+        })
+        .detach();
         cx.subscribe(&terminal, |this, _, event: &TerminalEvent, cx| {
             cx.emit(TerminalHostEvent::Terminal(event.clone()));
             let before = this.snapshot.clone();
@@ -1021,7 +1110,7 @@ fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'s
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalLaunchKind, TerminalLaunchSpec};
+    use super::{TerminalHost, TerminalLaunchKind, TerminalLaunchSpec};
     use std::path::PathBuf;
 
     #[test]
@@ -1180,6 +1269,7 @@ mod tests {
             title: "Codex".into(),
             login_env: false,
             variant: None,
+            permission_mode: None,
             model: None,
         };
         let prepared = spec
@@ -1234,6 +1324,154 @@ mod tests {
         }
     }
 
+    #[::gpui::test]
+    fn chat_command_is_local_for_all_provider_terminals_but_not_shells(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::{
+            cell::Cell,
+            rc::Rc,
+            time::{Duration, Instant},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(del_terminal::init);
+        for kind in [
+            TerminalLaunchKind::Codex,
+            TerminalLaunchKind::Claude,
+            TerminalLaunchKind::OpenCode,
+            TerminalLaunchKind::Custom,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join("input");
+            let ready = dir.path().join("ready");
+            let spec = TerminalLaunchSpec {
+                account_id: None,
+                kind,
+                cwd: dir.path().into(),
+                program: Some("/bin/sh".into()),
+                args: vec![
+                    "-c".into(),
+                    "stty raw -echo; touch ready; cat > input".into(),
+                ],
+                title: "Test".into(),
+                login_env: false,
+                variant: None,
+                model: None,
+                permission_mode: Some(del_agent::PermissionMode::Ask),
+            };
+            let (host, cx) =
+                cx.add_window_view(|window, cx| TerminalHost::new(spec, window, cx).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !ready.exists() {
+                assert!(Instant::now() < deadline, "PTY did not start");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let commands = Rc::new(Cell::new(0));
+            cx.update(|window, cx| {
+                let commands = commands.clone();
+                cx.subscribe(&host, move |_, event: &super::TerminalHostEvent, _| {
+                    if matches!(event, super::TerminalHostEvent::ChatRequested) {
+                        commands.set(commands.get() + 1);
+                    }
+                })
+                .detach();
+                host.update(cx, |host, cx| host.focus(window, cx));
+            });
+            cx.simulate_input("hello");
+            cx.simulate_keystrokes("enter");
+            cx.simulate_input("/chat");
+            cx.simulate_keystrokes("enter");
+            let provider = kind != TerminalLaunchKind::Custom;
+            let expected: &[u8] = if provider {
+                b"hello\r/chat\x15"
+            } else {
+                b"hello\r/chat\r"
+            };
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let bytes = std::fs::read(&output).unwrap_or_default();
+                if bytes == expected {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{kind:?}: PTY input {bytes:?}, expected {expected:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(commands.get(), usize::from(provider), "{kind:?}");
+            cx.update(|_, cx| host.update(cx, |host, cx| host.close(cx)));
+        }
+    }
+
+    #[test]
+    fn handoff_preserves_permissions_and_configuration_for_all_providers() {
+        use del_agent::{PermissionMode::*, Provider};
+        for (kind, provider) in [
+            (TerminalLaunchKind::Codex, Provider::Codex),
+            (TerminalLaunchKind::Claude, Provider::Claude),
+            (TerminalLaunchKind::OpenCode, Provider::OpenCode),
+        ] {
+            for permission in [Ask, AutoEdit, Plan, FullAuto] {
+                let config = del_agent::SessionConfig {
+                    provider,
+                    cwd: std::env::temp_dir(),
+                    model: Some("test-model".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: None,
+                    permission_mode: permission,
+                };
+                let mut spec = TerminalLaunchSpec {
+                    account_id: None,
+                    kind,
+                    cwd: config.cwd.clone(),
+                    program: Some("/bin/cat".into()),
+                    args: vec![],
+                    title: "Test".into(),
+                    login_env: false,
+                    variant: (provider == Provider::OpenCode).then(|| "high".into()),
+                    model: (provider == Provider::OpenCode).then(|| "test-model".into()),
+                    permission_mode: Some(permission),
+                };
+                spec.apply_model_settings(&config);
+                assert_eq!(spec.chat_config().unwrap(), config);
+                let id = if provider == Provider::OpenCode {
+                    "ses_test123"
+                } else {
+                    "01a16585-21de-7e41-9a31-9857f8268084"
+                };
+                let resume = crate::mode_ui::resume_args(Some(provider), id, true).unwrap();
+                let prepared = spec.prepare(resume.clone(), vec![]).unwrap();
+                assert!(prepared.args.ends_with(&resume));
+                let bypass = prepared.args.iter().any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "--dangerously-skip-permissions"
+                            | "--dangerously-bypass-approvals-and-sandbox"
+                            | "--auto"
+                    )
+                });
+                assert_eq!(bypass, permission == FullAuto);
+                if provider == Provider::Claude && permission == Plan {
+                    assert!(
+                        prepared
+                            .args
+                            .windows(2)
+                            .any(|args| args == ["--permission-mode", "plan"])
+                    );
+                }
+                if provider == Provider::Codex && matches!(permission, Ask | Plan) {
+                    assert!(
+                        prepared
+                            .args
+                            .windows(2)
+                            .any(|args| args == ["--sandbox", "read-only"])
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn composer_settings_and_prompt_reach_terminal_argv() {
         for (kind, provider, effort_args) in [
@@ -1270,6 +1508,7 @@ mod tests {
                 title: "Test".into(),
                 login_env: false,
                 variant: None,
+                permission_mode: None,
                 model: None,
             };
             spec.apply_model_settings(&config);
@@ -1336,6 +1575,7 @@ mod tests {
                 title: "Test".into(),
                 login_env: false,
                 variant: None,
+                permission_mode: None,
                 model: None,
             };
             for _ in 0..2 {
@@ -1370,6 +1610,7 @@ mod tests {
             title: "Codex".into(),
             login_env: false,
             variant: None,
+            permission_mode: None,
             model: None,
         };
         let before = serde_json::to_string(&spec).unwrap();
@@ -1442,6 +1683,7 @@ mod tests {
             title: "Test terminal".into(),
             login_env: false,
             variant: None,
+            permission_mode: None,
             model: None,
         };
         let (session, actual_cwd) = super::spawn_session(
@@ -1483,6 +1725,7 @@ mod tests {
             title: "Missing program".into(),
             login_env: false,
             variant: None,
+            permission_mode: None,
             model: None,
         };
         assert!(super::spawn_session(&spec, Vec::new(), Vec::new()).is_err());
@@ -1503,6 +1746,7 @@ mod opencode_tests {
             title: "OpenCode".into(),
             login_env: false,
             variant: Some("high".into()),
+            permission_mode: None,
             model: Some("provider/model".into()),
         };
         let prepared = spec
@@ -1673,5 +1917,296 @@ mod opencode_tests {
             terminal.close(std::time::Duration::from_millis(300));
             result.unwrap_or_else(|screen| panic!("OpenCode terminal resume={resume}: {screen}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_handoff_live_tests {
+    use super::*;
+    use del_agent::{AgentEvent, Provider, SessionConfig, SessionId, SessionManager, UserInput};
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires installed, signed-in CLIs; invokes inference in a temporary workspace"]
+    async fn real_provider_chat_terminal_chat_preserves_native_history() {
+        let selected = std::env::var("DEL_MODE_TEST_PROVIDER").unwrap_or_else(|_| "codex".into());
+        let provider = match selected.as_str() {
+            "codex" => Provider::Codex,
+            "claude" => Provider::Claude,
+            "opencode" => Provider::OpenCode,
+            _ => panic!("unknown provider"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let manager = SessionManager::new(cwd.join("index.jsonl"), crate::backends()).unwrap();
+        let config = SessionConfig {
+            provider,
+            cwd: cwd.clone(),
+            model: (provider == Provider::OpenCode).then(|| "opencode/big-pickle".into()),
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: del_agent::PermissionMode::Ask,
+        };
+        let handle = manager.start_session(config.clone()).await.unwrap();
+        let mut events = manager.subscribe(&handle.id).unwrap();
+        manager
+            .send_prompt(
+                &handle.id,
+                UserInput::text("Reply exactly DEL_CHAT_MODE_OK. Do not use tools."),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    AgentEvent::TurnCompleted { status, .. } => {
+                        assert_eq!(status, del_agent::TurnStatus::Completed);
+                        break;
+                    }
+                    AgentEvent::Error { message, .. } => panic!("{selected}: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let record = manager.handoff_to_terminal(&handle.id).await.unwrap();
+        let mut spec = TerminalLaunchSpec::from_config(&record.config()).unwrap();
+        spec.permission_mode = Some(record.permission_mode);
+        let mut args = Vec::new();
+        if provider == Provider::Codex {
+            args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
+        }
+        args.extend(crate::mode_ui::resume_args(Some(provider), handle.id.as_str(), true).unwrap());
+        let (terminal, _) = spawn_session(&spec, args.clone(), vec![]).unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            let screen = screen_tail(&terminal);
+            assert!(!terminal.exited(), "{selected} exited: {screen}");
+            if screen.contains("DEL_CHAT_MODE_OK") {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(45),
+                "{selected} startup: {screen}"
+            );
+            let key = if provider == Provider::Claude {
+                claude_workspace_trust_key(&screen, &cwd)
+            } else {
+                codex_workspace_trust_key(&screen, &cwd)
+            };
+            if let Some(key) = key {
+                terminal.write(key.to_vec());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        terminal.write(del_terminal::keys::encode_paste(
+            "Reply exactly DEL_TERMINAL_MODE_OK. Do not use tools.",
+            terminal.mode(),
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        terminal.write(b"\r".to_vec());
+        let start = std::time::Instant::now();
+        loop {
+            let screen = screen_tail(&terminal);
+            if screen.matches("DEL_TERMINAL_MODE_OK").count() >= 2 {
+                break;
+            }
+            assert!(!terminal.exited(), "{selected} exited: {screen}");
+            assert!(
+                start.elapsed() < Duration::from_secs(120),
+                "{selected} response: {screen}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let side = manager
+            .fork(
+                del_agent::ForkSource::Session(handle.id.clone()),
+                del_agent::ForkLifetime::Temporary,
+            )
+            .await
+            .unwrap();
+        assert!(!terminal.exited(), "opening Side chat stopped the terminal");
+        assert!(!manager.is_live(&handle.id));
+        assert!(manager.is_terminal_owned(&handle.id));
+        let mut side_events = manager.subscribe(&side.handle.id).unwrap();
+        manager.send_prompt(&side.handle.id, UserInput::text(
+            "What exact marker did I ask for in the most recent message? Reply only with it. Do not use tools."
+        )).await.unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(120), async {
+            let mut answer = String::new();
+            loop {
+                match side_events.recv().await.unwrap() {
+                    AgentEvent::AssistantTextDelta { text, .. } => answer.push_str(&text),
+                    AgentEvent::AssistantMessage { text, .. } => answer = text,
+                    AgentEvent::TurnCompleted { status, .. } => {
+                        assert_eq!(status, del_agent::TurnStatus::Completed);
+                        break answer;
+                    }
+                    AgentEvent::Error { message, .. } => panic!("{selected} Side chat: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            answer.contains("DEL_TERMINAL_MODE_OK"),
+            "{selected} Side chat lost terminal context: {answer}"
+        );
+        // Refresh after new native turns, not just immediately after creating the fork.
+        terminal_marker(&terminal, &selected, "DEL_NEW_TERMINAL_CONTEXT").await;
+        manager.refresh_fork_context(&side.handle.id).await.unwrap();
+        let answer = side_answer(&manager, &side.handle.id).await;
+        assert!(
+            answer.contains("DEL_NEW_TERMINAL_CONTEXT"),
+            "{selected}: stale refresh: {answer}"
+        );
+        assert!(
+            !terminal.exited(),
+            "refreshing Side chat stopped the terminal"
+        );
+
+        // Every parent provider can seed a side chat on either of the other providers.
+        for target in [Provider::Codex, Provider::Claude, Provider::OpenCode] {
+            if target == provider {
+                continue;
+            }
+            let mut target_config = config.clone();
+            target_config.provider = target;
+            target_config.model =
+                (target == Provider::OpenCode).then(|| "opencode/big-pickle".into());
+            let cross = manager
+                .fork_with_settings(
+                    del_agent::ForkSource::Session(handle.id.clone()),
+                    target_config,
+                    None,
+                )
+                .await
+                .unwrap();
+            let answer = side_answer(&manager, &cross.handle.id).await;
+            assert!(
+                answer.contains("DEL_NEW_TERMINAL_CONTEXT"),
+                "{selected} → {target:?}: {answer}"
+            );
+            manager.delete(&cross.handle.id).await.unwrap();
+        }
+        // Side chat survives export/restore while the main terminal keeps running.
+        let snapshot = manager.export_fork(&side.handle.id).unwrap();
+        manager.delete(&side.handle.id).await.unwrap();
+        let restored_side = manager.restore_fork(snapshot).await.unwrap();
+        let answer = side_answer(&manager, &restored_side.handle.id).await;
+        assert!(
+            answer.contains("DEL_NEW_TERMINAL_CONTEXT"),
+            "{selected}: restored side: {answer}"
+        );
+        manager.delete(&restored_side.handle.id).await.unwrap();
+        assert!(!terminal.exited(), "closing Side chat stopped the terminal");
+        eprintln!(
+            "{selected}: fresh context, all cross-provider side chats, and side restore passed with terminal running"
+        );
+        terminal.close(Duration::from_millis(500));
+        manager.release_terminal(&handle.id);
+        assert_eq!(manager.resume(&handle.id).await.unwrap().id, handle.id);
+        let (history, _) = manager.subscribe_with_history(&handle.id).unwrap();
+        let restored = format!("{history:?}");
+        assert!(
+            restored.contains("DEL_CHAT_MODE_OK"),
+            "{selected}: missing first turn"
+        );
+        assert!(
+            restored.contains("DEL_TERMINAL_MODE_OK"),
+            "{selected}: missing terminal turn"
+        );
+        assert_eq!(manager.session_record(&handle.id).unwrap().config(), config);
+        // Repeat the handoff and restore through a fresh manager (terminal-first import).
+        let record = manager.handoff_to_terminal(&handle.id).await.unwrap();
+        let (second, _) = spawn_session(&spec, args, vec![]).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        while !screen_tail(&second).contains("DEL_NEW_TERMINAL_CONTEXT") {
+            assert!(
+                !second.exited(),
+                "{selected}: second terminal exited: {}",
+                screen_tail(&second)
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{selected}: second terminal: {}",
+                screen_tail(&second)
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        terminal_marker(&second, &selected, "DEL_SECOND_HANDOFF_OK").await;
+        second.close(Duration::from_millis(500));
+        manager.release_terminal(&handle.id);
+        let imported =
+            SessionManager::new(cwd.join("imported-index.jsonl"), crate::backends()).unwrap();
+        imported.import_terminal(record).unwrap();
+        imported.resume(&handle.id).await.unwrap();
+        let history = format!(
+            "{:?}",
+            imported.subscribe_with_history(&handle.id).unwrap().0
+        );
+        for marker in [
+            "DEL_CHAT_MODE_OK",
+            "DEL_TERMINAL_MODE_OK",
+            "DEL_NEW_TERMINAL_CONTEXT",
+            "DEL_SECOND_HANDOFF_OK",
+        ] {
+            assert!(history.contains(marker), "{selected}: import lost {marker}");
+        }
+        assert_eq!(
+            imported.session_record(&handle.id).unwrap().config(),
+            config
+        );
+        imported.shutdown().await;
+        manager.shutdown().await;
+        eprintln!("{selected}: native chat → terminal → chat passed with both turns restored");
+    }
+
+    async fn terminal_marker(terminal: &TerminalSession, provider: &str, marker: &str) {
+        terminal.write(del_terminal::keys::encode_paste(
+            &format!("Reply exactly {marker}. Do not use tools."),
+            terminal.mode(),
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        terminal.write(b"\r".to_vec());
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let screen = screen_tail(terminal);
+            if screen.matches(marker).count() >= 2 {
+                break;
+            }
+            assert!(!terminal.exited(), "{provider}: exited: {screen}");
+            assert!(std::time::Instant::now() < deadline, "{provider}: {screen}");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    async fn side_answer(manager: &SessionManager, id: &SessionId) -> String {
+        let mut events = manager.subscribe(id).unwrap();
+        manager.send_prompt(id, UserInput::text(
+            "What exact DEL_ marker did I most recently ask the main conversation to reply with? Reply only with that marker. Do not use tools."
+        )).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut answer = String::new();
+            loop {
+                match events.recv().await.unwrap() {
+                    AgentEvent::AssistantTextDelta { text, .. } => answer.push_str(&text),
+                    AgentEvent::AssistantMessage { text, .. } => answer = text,
+                    AgentEvent::TurnCompleted { status, .. } => {
+                        assert_eq!(status, del_agent::TurnStatus::Completed);
+                        return answer;
+                    }
+                    AgentEvent::Error { message, .. } => panic!("Side chat: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap()
     }
 }

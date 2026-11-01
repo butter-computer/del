@@ -393,6 +393,19 @@ conversation. Unloading a running session also stops its current work.
   the input, keeping workspace selection distinct from the message area.
 - **Chat / Terminal** selects how the first prompt will run. Choosing Terminal
   keeps the initial composer visible; the terminal opens after submission.
+- In an existing Codex, Claude, or OpenCode chat, type **`/terminal`** and press
+  Return to continue the same conversation in the provider's terminal. Type
+  **`/chat`** on an empty terminal prompt and press Return to return to Chat;
+  a Return to chat button is also available for chats opened this way. These
+  commands run locally, without sending a model prompt. The handoff retains the
+  native conversation ID, account, folder, and saved model/permission settings.
+  Finish or stop a chat response before switching. Returning closes the terminal
+  process before Chat reloads its native history. In a new draft, these commands
+  choose the mode for the first message. Ordinary sidebar shells are unaffected.
+  Codex Terminal maps Ask to its supported `on-request` approval policy with a
+  read-only sandbox; the saved Chat permission mode is unchanged.
+  See [Chat and Terminal handoff](docs/chat-terminal.md) for recovery behavior,
+  Side chat context, and provider validation commands.
 - A session's project folder is fixed after creation. Its folder label becomes
   informational rather than a clickable folder picker.
 - Chat renders streaming answers, reasoning, tool activity, diffs, and
@@ -736,6 +749,12 @@ Tabs cannot move into the main conversation. Tab rows retain their compact width
 small hover-close controls, and gradual overflow fades. Each session remembers
 its sidebar order across restarts. Blank tabs stay open until closed, and closing
 the last tab leaves a fresh **New tab** chooser.
+
+Side chats also work while the main conversation is open in Terminal. They read
+its latest persisted provider context without reopening or stopping the terminal.
+Refreshing Side chat context takes a new snapshot; side replies remain independent.
+Cross-provider Side chats use the same snapshot behavior. Queued peer messages
+survive switching modes and retain the terminal's normal safe-delivery rules.
 
 Side chats use the main chat's provider button and searchable model picker,
 including effort, Fast mode, and reset controls. Account choices affect only that

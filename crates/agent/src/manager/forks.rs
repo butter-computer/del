@@ -247,6 +247,20 @@ impl SessionManager {
         Ok(bounded(format!("{inherited}\n{own}")))
     }
 
+    /// Caller holds the parent resume lock so a mode handoff cannot race the snapshot.
+    async fn fork_snapshot_locked(&self, id: &SessionId) -> Result<String> {
+        if !self.is_terminal_owned(id) {
+            return self.fork_snapshot(id);
+        }
+        let record = self.session_record(id)?;
+        let history = self
+            .account_backend(record.provider, record.account_id.as_deref())?
+            .read_session_history(&record.config(), id)
+            .await?;
+        let inherited = record.fork.map(|fork| fork.inherited).unwrap_or_default();
+        Ok(bounded(format!("{inherited}\n{}", transcript(&history))))
+    }
+
     /// Branch from the latest available context. Account, project, model and
     /// permissions are inherited atomically with respect to parent sends.
     /// A running parent's response is a snapshot, not a continuously shared log.
@@ -317,13 +331,6 @@ impl SessionManager {
             ForkSource::Session(id) => Some(id.clone()),
             _ => None,
         };
-        if let Some(id) = &parent {
-            // A failed temporary provider cannot resume its ephemeral thread,
-            // but its local history can still move to a working provider.
-            if !(retain_history && self.is_temporary(id) && self.is_live(id)) {
-                self.resume(id).await?;
-            }
-        }
         let parent_lock = parent.as_ref().map(|id| {
             self.shared
                 .resume_locks
@@ -337,6 +344,15 @@ impl SessionManager {
             Some(lock) => Some(lock.lock().await),
             None => None,
         };
+        if let Some(id) = &parent {
+            // A failed temporary provider cannot resume its ephemeral thread,
+            // but its local history can still move to a working provider.
+            if !(self.is_terminal_owned(id)
+                || retain_history && self.is_temporary(id) && self.is_live(id))
+            {
+                self.resume_locked(id).await?;
+            }
+        }
         let (config, account_id, inherited) = match source {
             ForkSource::Session(ref id) => {
                 let record = self
@@ -347,7 +363,11 @@ impl SessionManager {
                     .get(id)
                     .cloned()
                     .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
-                (record.config(), record.account_id, self.fork_snapshot(id)?)
+                (
+                    record.config(),
+                    record.account_id,
+                    self.fork_snapshot_locked(id).await?,
+                )
             }
             ForkSource::New { config, account_id } => (config, account_id, String::new()),
         };
@@ -503,8 +523,19 @@ impl SessionManager {
             .ok_or_else(|| {
                 AgentError::Backend("This chat has no parent conversation yet".into())
             })?;
-        self.resume(&parent).await?;
-        let snapshot = self.fork_snapshot(&parent)?;
+        let parent_lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(parent.clone())
+            .or_default()
+            .clone();
+        let _parent_guard = parent_lock.lock().await;
+        if !self.is_terminal_owned(&parent) {
+            self.resume_locked(&parent).await?;
+        }
+        let snapshot = self.fork_snapshot_locked(&parent).await?;
         self.shared.index.lock().unwrap().update(child, |record| {
             if let Some(state) = &mut record.fork {
                 state.inherited = snapshot.clone();
@@ -542,18 +573,36 @@ mod tests {
         configs: Mutex<Vec<SessionConfig>>,
         fail: AtomicBool,
         native: bool,
+        provider: Option<Provider>,
+        saved_history: Mutex<Vec<AgentEvent>>,
+        history_reads: Mutex<Vec<(SessionConfig, SessionId)>>,
+        history_fail: AtomicBool,
     }
     #[async_trait::async_trait]
     impl AgentBackend for Recorder {
         fn provider(&self) -> Provider {
-            Provider::Codex
+            self.provider.unwrap_or(Provider::Codex)
+        }
+        async fn read_session_history(
+            &self,
+            config: &SessionConfig,
+            id: &SessionId,
+        ) -> Result<Vec<AgentEvent>> {
+            self.history_reads
+                .lock()
+                .unwrap()
+                .push((config.clone(), id.clone()));
+            if self.history_fail.load(Ordering::SeqCst) {
+                return Err(AgentError::Backend("history unavailable".into()));
+            }
+            Ok(self.saved_history.lock().unwrap().clone())
         }
         async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
             self.configs.lock().unwrap().push(config);
             let (tx, _) = broadcast::channel(32);
             Ok(SessionHandle::new(
                 SessionId::new(uuid::Uuid::new_v4().to_string()),
-                Provider::Codex,
+                self.provider(),
                 tx,
             ))
         }
@@ -624,6 +673,112 @@ mod tests {
             .unwrap()
             .history
             .push(AgentEvent::UserMessage { text: text.into() });
+    }
+
+    #[tokio::test]
+    async fn terminal_parent_supports_side_forks_and_fresh_context_without_resuming() {
+        for provider in [Provider::Codex, Provider::Claude, Provider::OpenCode] {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Arc::new(Recorder {
+                provider: Some(provider),
+                native: provider == Provider::Codex,
+                ..Default::default()
+            });
+            let manager = SessionManager::new(dir.path().join("index"), []).unwrap();
+            manager.register_account("parent-account".into(), backend.clone());
+            let config = SessionConfig {
+                provider,
+                ..config()
+            };
+            let parent = manager
+                .start_account_session(config.clone(), Some("parent-account".into()))
+                .await
+                .unwrap();
+            seed(&manager, &parent.id, "old chat context");
+            manager.handoff_to_terminal(&parent.id).await.unwrap();
+            *backend.saved_history.lock().unwrap() = vec![AgentEvent::UserMessage {
+                text: "new terminal context".into(),
+            }];
+            let child = manager
+                .fork(
+                    ForkSource::Session(parent.id.clone()),
+                    ForkLifetime::Temporary,
+                )
+                .await
+                .unwrap();
+            assert_ne!(child.handle.id, parent.id);
+            assert_eq!(
+                manager
+                    .session_record(&child.handle.id)
+                    .unwrap()
+                    .account_id
+                    .as_deref(),
+                Some("parent-account")
+            );
+            assert_eq!(
+                manager.session_record(&child.handle.id).unwrap().config(),
+                config
+            );
+            assert!(
+                manager
+                    .export_fork(&child.handle.id)
+                    .unwrap()
+                    .inherited
+                    .contains("new terminal context")
+            );
+            assert!(!manager.is_live(&parent.id));
+            assert!(manager.is_terminal_owned(&parent.id));
+            assert!(matches!(
+                manager.resume(&parent.id).await,
+                Err(AgentError::Busy(_))
+            ));
+            manager
+                .send_prompt(&child.handle.id, UserInput::text("side question"))
+                .await
+                .unwrap();
+            *backend.saved_history.lock().unwrap() = vec![AgentEvent::UserMessage {
+                text: "latest terminal context".into(),
+            }];
+            manager
+                .refresh_fork_context(&child.handle.id)
+                .await
+                .unwrap();
+            manager
+                .send_prompt(&child.handle.id, UserInput::text("follow-up"))
+                .await
+                .unwrap();
+            let prompts = backend.prompts.lock().unwrap().clone();
+            assert!(prompts.iter().all(|(id, _)| id == &child.handle.id));
+            assert!(prompts[1].1.text.contains("latest terminal context"));
+            assert!(!prompts[1].1.text.contains("old chat context"));
+            assert_eq!(
+                *backend.history_reads.lock().unwrap(),
+                vec![
+                    (config.clone(), parent.id.clone()),
+                    (config.clone(), parent.id.clone())
+                ]
+            );
+            backend.history_fail.store(true, Ordering::SeqCst);
+            assert!(
+                manager
+                    .refresh_fork_context(&child.handle.id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                manager
+                    .fork(
+                        ForkSource::Session(parent.id.clone()),
+                        ForkLifetime::Temporary
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(!manager.is_live(&parent.id));
+            assert!(manager.is_terminal_owned(&parent.id));
+            assert!(manager.is_live(&child.handle.id));
+            manager.shutdown().await;
+        }
     }
 
     #[tokio::test]

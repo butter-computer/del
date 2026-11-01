@@ -16,7 +16,7 @@ struct Entry {
 pub struct Usage {
     state: Entity<AppState>,
     pub open: bool,
-    pub terminals: Vec<(SessionId, u32)>,
+    pub terminal_processes: Vec<(Tab, u32)>,
     entries: Vec<Entry>,
     unloaded: HashSet<SessionId>,
     loading: bool,
@@ -30,7 +30,7 @@ impl Usage {
         Self {
             state,
             open: false,
-            terminals: vec![],
+            terminal_processes: vec![],
             entries: vec![],
             unloaded: HashSet::new(),
             loading: false,
@@ -59,7 +59,7 @@ impl Usage {
             .filter(|s| backend.manager.is_live(&s.id))
             .map(|s| s.id)
             .collect();
-        let terminals = self.terminals.clone();
+        let terminals = self.terminal_processes.clone();
         let generation = self.generation;
         self.loading = self.entries.is_empty();
         let job = backend.runtime.spawn(async move {
@@ -68,11 +68,11 @@ impl Usage {
                 let process = backend.manager.session_process(&id).await;
                 roots.push((id, false, process));
             }
-            roots.extend(
-                terminals
-                    .into_iter()
-                    .map(|(id, pid)| (id, true, Some((pid, false)))),
-            );
+            roots.extend(terminals.into_iter().filter_map(|(tab, pid)| match tab {
+                Tab::Terminal(id) => Some((id, true, Some((pid, false)))),
+                Tab::Session(id) => Some((id, false, Some((pid, false)))),
+                Tab::Draft(_) => None,
+            }));
             tokio::task::spawn_blocking(move || {
                 let output = std::process::Command::new("/bin/ps")
                     .args(["-axo", "pid=,ppid=,rss="])

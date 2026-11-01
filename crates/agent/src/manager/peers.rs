@@ -568,9 +568,10 @@ impl SessionManager {
     /// One scheduler step; callers keep running it while Del is open. The usual
     /// send lock arbitrates provider input, including races with user submission.
     pub async fn dispatch_peer(&self, session: &SessionId) -> Result<bool> {
-        if self
-            .peer_work(session)
-            .is_none_or(|w| w.status != WorkStatus::Active)
+        if self.is_terminal_owned(session)
+            || self
+                .peer_work(session)
+                .is_none_or(|w| w.status != WorkStatus::Active)
             || matches!(
                 self.status(session),
                 Some(SessionStatus::Running | SessionStatus::WaitingApproval)
@@ -584,7 +585,11 @@ impl SessionManager {
                 self.control_peer_work(session, "pause")?;
                 return Ok(false);
             }
-            self.resume(session).await?;
+            match self.resume(session).await {
+                Ok(_) => {}
+                Err(AgentError::Busy(_)) => return Ok(false),
+                Err(error) => return Err(error),
+            }
             return match self
                 .send_prompt_kind(
                     session,
@@ -614,6 +619,11 @@ impl SessionManager {
             return Err(error);
         }
         if let Err(error) = self.resume(session).await {
+            // A mode handoff can win the resume lock after the check above.
+            // The terminal dispatcher will deliver this still-queued message.
+            if matches!(error, AgentError::Busy(_)) {
+                return Ok(false);
+            }
             self.record_peer_delivery(&message.id, DeliveryState::Failed, Some(error.to_string()))?;
             return Err(error);
         }

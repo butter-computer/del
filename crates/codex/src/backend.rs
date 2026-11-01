@@ -672,6 +672,23 @@ impl AgentBackend for CodexBackend {
         Ok(models)
     }
 
+    async fn read_session_history(
+        &self,
+        _config: &SessionConfig,
+        session: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        let conn = self.connection().await?;
+        let response: ThreadResponse = conn
+            .client
+            .call(
+                "thread/read",
+                json!({"threadId": session.as_str(), "includeTurns": true}),
+            )
+            .await
+            .map_err(be)?;
+        Ok(Mapper::default().history(&response.thread.turns))
+    }
+
     async fn session_title(
         &self,
         session: &SessionId,
