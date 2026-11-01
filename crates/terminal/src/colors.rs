@@ -5,14 +5,15 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 pub const DEFAULT_FG: Rgb = Rgb {
-    r: 0xd4,
-    g: 0xd4,
-    b: 0xd4,
+    r: 0xdc,
+    g: 0xdc,
+    b: 0xd8,
 };
+/// Graphite, matching the app's calm palette; terminals stay dark in both themes.
 pub const DEFAULT_BG: Rgb = Rgb {
-    r: 0x00,
-    g: 0x00,
-    b: 0x00,
+    r: 0x14,
+    g: 0x15,
+    b: 0x17,
 };
 pub const CURSOR: Rgb = Rgb {
     r: 0xe6,

@@ -6,12 +6,13 @@
 //! left, right and bottom edges share one gutter. All lengths are in logical
 //! pixels.
 
-/// Opaque near-black chrome matching the dark desktop reference. Keeping this
-/// stable prevents the wallpaper or native material from washing out the UI.
-pub const SHELL_SURFACE_RGBA: u32 = 0x0c0c0cff;
+/// Opaque graphite chrome (calm palette). Keeping this stable prevents the
+/// wallpaper or native material from washing out the UI.
+pub const SHELL_SURFACE_RGBA: u32 = 0x1d1e21ff;
 
-/// Black workspace surface, distinct from chrome and raised input cards.
-pub const PAGE_SURFACE_RGBA: u32 = 0x000000ff;
+/// Graphite workspace surface, a step lighter than the chrome and darker than
+/// raised input cards.
+pub const PAGE_SURFACE_RGBA: u32 = 0x212225ff;
 
 /// Diameter of a macOS traffic light button, in logical pixels.
 pub const TRAFFIC_LIGHT_SIZE: f32 = 12.0;

@@ -2894,9 +2894,7 @@ impl Render for AppShell {
         v_flex()
             .relative()
             .size_full()
-            .when(appearance::light(), |shell| {
-                shell.bg(gpui_kit::rgb(0xfcfcfc))
-            })
+            .when(appearance::light(), |shell| shell.bg(shell_surface()))
             .track_focus(&self.shell_focus)
             .key_context(
                 if !self.search_open && self.state.read(cx).panel == Panel::Chat {
