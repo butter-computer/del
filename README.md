@@ -6,8 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.23` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.24` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
+See the [0.1.24 source release notes](docs/releases/0.1.24.md) and
+[validation record](docs/releases/0.1.24-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -37,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.23-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.24-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -424,7 +426,8 @@ conversation. Unloading a running session also stops its current work.
   jump-to-prompt navigation. Hover magnifies nearby ticks, but only the hovered
   tick is white; neighbors stay gray. Away from the rail, only the current-message
   tick is highlighted. Moving onto a different tick emits native haptic feedback
-  on supported macOS hardware.
+  on supported macOS hardware. Ticks use compact 10 px spacing, with 6 px idle
+  bars that grow to at most 18 px on hover.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
@@ -611,6 +614,10 @@ currently use that default rather than advertising commands they cannot execute.
 
 ## Follow-up queue and attachments
 
+Main chat and Side chat share the same queue rows and delivery behavior. Actions
+apply only to the chat containing that queue; Side chat works independently while
+the main conversation is in Terminal.
+
 While a reply runs, **Enter** queues the current draft. **⌘ + Enter** submits
 it as steering input; with an empty composer, it submits the top queued item.
 Completed turns advance remaining follow-ups in order. A busy provider leaves
@@ -622,7 +629,8 @@ queue and its order.
 
 Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
 attachments to the composer; an existing draft is preserved as another queued item.
-Drag from the left edge to reorder, without an extra hover icon. Rows have subtle
+Drag the queue icon to reorder, without an extra hover icon. Controls remain
+visible at the sidebar’s minimum width. Rows have subtle
 separators and a surface just darker than the composer. Around four rows fit
 before the list scrolls, with a bottom fade and no scrollbar.
 

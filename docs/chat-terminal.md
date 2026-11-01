@@ -132,3 +132,6 @@ Side chat layout and `/chat` return path.
 
 This covers the installed provider versions and the tested scenarios, not every
 possible future CLI version, network failure, or external native-editor action.
+
+For subsequent provider-switch compatibility and Side chat queue validation, see
+the [0.1.24 validation record](releases/0.1.24-validation.md).
