@@ -1183,13 +1183,12 @@ impl AppShell {
         let worktree = options.worktree;
         let branch = options.branch.clone();
         h_flex()
-            .size_full()
-            .px_2()
+            .h_full()
+            .min_w_0()
             .gap_2()
             .items_center()
             .child(
                 h_flex()
-                    .flex_1()
                     .min_w_0()
                     .items_center()
                     .gap_1()
@@ -1262,7 +1261,6 @@ impl AppShell {
                         }),
                 )
             })
-            .child(self.render_mode_picker(cx))
     }
 
     fn mode_slide_position(&self, cx: &App) -> f32 {

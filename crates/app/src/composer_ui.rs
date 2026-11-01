@@ -532,7 +532,7 @@ impl RenderOnce for ComposerCard {
             .max_w(zpx(max_width))
             .p_2()
             .gap_1()
-            .rounded(zpx(14.0))
+            .rounded(zpx(8.0))
             .bg(crate::appearance::composer_surface())
             .when_some(attachment_content, |card, content| card.child(content))
             .child(

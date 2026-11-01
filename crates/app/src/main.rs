@@ -72,7 +72,7 @@ use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
 use del_core::ShellMetrics;
-use del_core::typography::{TEXT_LG, TEXT_MD};
+use del_core::typography::TEXT_MD;
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -234,10 +234,21 @@ fn tab_action_content(
 const PANEL_ANIM: Duration = Duration::from_millis(220);
 
 /// The prompt above the composer.
-const HEADING: &str = "What are we building?";
 
 /// Widest the composer grows on a large window, in logical pixels.
 const COMPOSER_MAX_WIDTH: f32 = chat::COLUMN_MAX_WIDTH;
+
+/// One container under the new-tab composer: the composer surface at the
+/// composer's 8 px radius, sized to its controls.
+fn new_tab_group() -> Div {
+    h_flex()
+        .flex_none()
+        .h(zpx(32.0))
+        .px_1()
+        .items_center()
+        .rounded(zpx(8.0))
+        .bg(crate::appearance::composer_surface())
+}
 
 actions!(
     del,
@@ -2543,40 +2554,25 @@ impl AppShell {
                                     .max_w(zpx(COMPOSER_MAX_WIDTH))
                                     .items_start()
                                     .gap_2()
+                                    .child(div().relative().w_full().child(self.render_composer(cx)))
+                                    // Project, branch and New worktree on the left and
+                                    // Chat/Terminal on the right, each in its own container
+                                    // flush with the composer's edges; the middle stays empty.
                                     .child(
-                                        div()
-                                            // The composer's padding plus the input's own
-                                            // inset, so the heading and the input text
-                                            // share a left edge.
-                                            .pl(zpx(17.5))
-                                            .text_size(zpx(TEXT_LG))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(0xf5f5f5))
-                                            .child(HEADING),
-                                    )
-                                    .child(
-                                        div()
+                                        h_flex()
                                             .relative()
                                             .w_full()
-                                            .pb(zpx(40.0))
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
                                             .child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom_0()
-                                                    .left(zpx(16.0))
-                                                    .right(zpx(16.0))
-                                                    .h(zpx(40.0))
-                                                    .rounded_b(zpx(14.0))
-                                                    .bg(crate::appearance::composer_surface())
-                                                    .child(self.render_new_session_options(cx))
-                                                    .child(
-                                                        self.ambient
-                                                            .read(cx)
-                                                            .region_probe(1, zpx(14.0)),
-                                                    ),
+                                                new_tab_group()
+                                                    .min_w_0()
+                                                    .child(self.render_new_session_options(cx)),
                                             )
+                                            .child(new_tab_group().child(self.render_mode_picker(cx)))
                                             .child(
-                                                div().relative().child(self.render_composer(cx)),
+                                                self.ambient.read(cx).region_probe(1, zpx(8.0)),
                                             ),
                                     ),
                             ),
