@@ -612,6 +612,9 @@ impl AppState {
                 }
                 self.reply_finished(&id, cx);
                 self.set_records(self.manager.list_sessions());
+                if let Some(cwd) = self.records.iter().find(|r| r.id == id).map(|r| r.cwd.clone()) {
+                    self.refresh_git(cwd);
+                }
             }
             Msg::SigninFinished(provider) => {
                 if self.signin == Some(provider) {
@@ -2763,6 +2766,23 @@ impl AppState {
             .map(|info| info.root.clone())
             .or_else(|| self.project_preferences.directories.get(cwd).cloned())
             .unwrap_or_else(|| cwd.to_path_buf())
+    }
+
+    /// Re-reads Git state for one directory in the background, keeping the
+    /// previous answer on screen until the new one arrives.
+    pub fn refresh_git(&mut self, path: PathBuf) {
+        if !self.project_info.contains_key(&path) || !self.project_loading.insert(path.clone()) {
+            return;
+        }
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let dir = path.clone();
+            if let Ok(info) =
+                tokio::task::spawn_blocking(move || crate::projects::inspect(&dir)).await
+            {
+                let _ = tx.send(Msg::ProjectInspected(path, info));
+            }
+        });
     }
 
     fn inspect_projects(&mut self) {

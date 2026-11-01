@@ -10,6 +10,12 @@ pub struct GitInfo {
     pub root: PathBuf,
     pub current: String,
     pub branches: Vec<String>,
+    /// Uncommitted changes, including untracked files.
+    pub dirty: bool,
+    /// Commits ahead of the upstream branch, when one is configured.
+    pub ahead: u32,
+    /// The checkout's directory name when it is a linked worktree.
+    pub worktree: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -144,7 +150,7 @@ pub fn inspect(cwd: &Path) -> GitInfo {
         .filter(|p| p.file_name().is_some_and(|n| n == ".git"))
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(top));
+        .unwrap_or_else(|| PathBuf::from(&top));
     let current = git(cwd, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "HEAD".into());
     let branches = git(
         cwd,
@@ -160,10 +166,23 @@ pub fn inspect(cwd: &Path) -> GitInfo {
     .filter(|s| !s.ends_with("/HEAD"))
     .map(str::to_owned)
     .collect();
+    let dirty = git(cwd, &["status", "--porcelain", "--untracked-files=normal"])
+        .is_ok_and(|status| !status.is_empty());
+    let ahead = git(cwd, &["rev-list", "--count", "@{upstream}..HEAD"])
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0);
+    let top = PathBuf::from(&top);
+    let worktree = (top != root)
+        .then(|| top.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .flatten();
     GitInfo {
         root,
         current,
         branches,
+        dirty,
+        ahead,
+        worktree,
     }
 }
 

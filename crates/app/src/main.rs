@@ -65,6 +65,7 @@ mod terminal_store;
 mod usage;
 mod voice_ui;
 mod workspace_files;
+mod workbench;
 mod workspace_tabs;
 mod zoom;
 
@@ -325,10 +326,12 @@ pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
 struct SidebarWidths {
     left: f32,
     right: f32,
+    /// Height of the bottom terminal panel.
+    bottom: f32,
 }
 
-const LEFT_SIDEBAR_MIN: f32 = 162.0;
-const LEFT_SIDEBAR_MAX: f32 = 234.0;
+const LEFT_SIDEBAR_MIN: f32 = 180.0;
+const LEFT_SIDEBAR_MAX: f32 = 460.0;
 const LEFT_SIDEBAR_COLLAPSE_THRESHOLD: f32 = LEFT_SIDEBAR_MIN - 80.0;
 const LEFT_SIDEBAR_REOPEN_THRESHOLD: f32 = LEFT_SIDEBAR_COLLAPSE_THRESHOLD + 32.0;
 const LEFT_SIDEBAR_RESIZE_TARGET: f32 = 16.0;
@@ -346,6 +349,7 @@ impl Default for SidebarWidths {
         Self {
             left: sidebar::SIDEBAR_WIDTH.clamp(LEFT_SIDEBAR_MIN, LEFT_SIDEBAR_MAX),
             right: right_panel::PANEL_WIDTH,
+            bottom: workbench::PANEL_DEFAULT_HEIGHT,
         }
     }
 }
@@ -2355,8 +2359,20 @@ impl AppShell {
                                         this.state.update(cx, |s, cx| s.new_session(cx));
                                         this.focus_composer(window, cx);
                                     }))
-                                    .child(crate::icons::icon(IconName::Plus).text_color(muted)),
+                                    .child(
+                                        crate::icons::icon(IconName::Plus)
+                                            .with_size(zpx(13.0))
+                                            .text_color(muted),
+                                    ),
                             ),
+                    )
+                    .child(
+                        workbench::chrome_button("toggle-bottom-panel", "Toggle terminal panel", true)
+                            .when(self.state.read(cx).panel == Panel::Providers, |b| b.invisible())
+                            .when(self.bottom.open, |b| b.bg(rgba(0xffffff14)))
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Terminal panel (⌘J)").build(window, cx))
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_bottom_panel(window, cx)))
+                            .child(crate::icons::path("icons/panel-bottom.svg")),
                     )
                     .child(
                         h_flex()
@@ -2742,6 +2758,10 @@ impl Render for AppShell {
             self.tab_reveal = Some((selected_uid, std::time::Instant::now()));
         }
         self.sync_right(window, cx);
+        self.track_navigation(cx);
+        if self.bottom.open {
+            self.ensure_panel_terminal(window, cx);
+        }
         if let Some(requested) = self.pending_peer.clone() {
             let id = self
                 .state
@@ -3147,17 +3167,41 @@ impl Render for AppShell {
                             .h_full()
                             .px(inset)
                             .pb(inset)
-                            .on_children_prepainted({
-                                let page_bounds = self.page_bounds.clone();
-                                move |bounds, window, _| {
-                                    if let Some(bounds) = bounds.first()
-                                        && page_bounds.replace(*bounds) != *bounds
-                                    {
-                                        window.request_animation_frame();
-                                    }
-                                }
-                            })
-                            .child(self.render_page(window, cx))
+                            .child(
+                                v_flex()
+                                    .size_full()
+                                    .min_h_0()
+                                    .on_children_prepainted({
+                                        let page_bounds = self.page_bounds.clone();
+                                        move |bounds, window, _| {
+                                            if let Some(bounds) = bounds.first()
+                                                && page_bounds.replace(*bounds) != *bounds
+                                            {
+                                                window.request_animation_frame();
+                                            }
+                                        }
+                                    })
+                                    .on_drag_move(cx.listener(
+                                        |this, event: &DragMoveEvent<workbench::PanelResize>, window, cx| {
+                                            let drag = event.drag(cx).clone();
+                                            this.resize_bottom_panel(&drag, window, cx);
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .when(self.bottom.open && self.bottom.maximized, |page| {
+                                                page.h(zpx(0.0)).flex_none()
+                                            })
+                                            .when(!(self.bottom.open && self.bottom.maximized), |page| {
+                                                page.flex_1()
+                                            })
+                                            .child(self.render_page(window, cx)),
+                                    )
+                                    .children(self.render_bottom_panel(cx)),
+                            )
                             .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
                                 // Paint the target above both neighboring surfaces
                                 // so the entire invisible strip gets the resize cursor.
@@ -3209,6 +3253,7 @@ impl Render for AppShell {
                         )
                     }),
             )
+            .child(self.render_status_bar(cx))
             .child(self.browser_preview.clone())
             .when(self.search_open || settings_open, |shell| {
                 let shade = div()
@@ -3349,21 +3394,21 @@ mod sidebar_width_tests {
     fn held_drag_can_collapse_reopen_and_continue_resizing() {
         let mut open = true;
         for (requested, expected) in [
-            (162., true),
-            (114., true),
-            (83., true),
-            (82., false),
-            (50., false),
-            (83., false),
-            (113., false),
-            (114., true),
-            (200., true),
-            (82., false),
             (180., true),
+            (132., true),
+            (101., true),
+            (100., false),
+            (50., false),
+            (101., false),
+            (131., false),
+            (132., true),
+            (200., true),
+            (100., false),
+            (200., true),
         ] {
             open = left_sidebar_open_for_drag(requested, open);
             assert_eq!(open, expected, "requested width: {requested}");
-            if open && requested >= 162. {
+            if open && requested >= 180. {
                 assert_eq!(sidebar_width(requested, false, 1600., 0.), requested);
             }
         }
@@ -3371,13 +3416,13 @@ mod sidebar_width_tests {
 
     #[test]
     fn left_cap_preserves_default_minimum_and_right_widths() {
-        assert_eq!(SidebarWidths::default().left, 180.);
-        assert_eq!(sidebar_width(360., false, 1600., 0.), 234.);
-        assert_eq!(sidebar_width(170., false, 1600., 0.), 170.);
-        assert_eq!(sidebar_width(-100., false, 1600., 0.), 162.);
-        assert_eq!(sidebar_width(400., false, 450., 100.), 162.);
-        assert_eq!(sidebar_width(180., false, 550., 100.), 170.);
-        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 234.);
+        assert_eq!(SidebarWidths::default().left, 264.);
+        assert_eq!(sidebar_width(600., false, 1600., 0.), 460.);
+        assert_eq!(sidebar_width(190., false, 1600., 0.), 190.);
+        assert_eq!(sidebar_width(-100., false, 1600., 0.), 180.);
+        assert_eq!(sidebar_width(400., false, 450., 100.), 180.);
+        assert_eq!(sidebar_width(300., false, 650., 100.), 270.);
+        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 460.);
         assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
         assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
     }
@@ -3386,14 +3431,14 @@ mod sidebar_width_tests {
     fn persisted_left_width_is_clamped_and_right_width_is_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sidebar-widths.json");
-        for (saved, expected) in [(360., 234.), (216., 216.), (170., 170.), (20., 162.)] {
+        for (saved, expected) in [(600., 460.), (216., 216.), (190., 190.), (20., 180.)] {
             std::fs::write(&path, format!("{{\"left\":{saved},\"right\":725}}")).unwrap();
             let loaded = SidebarWidths::read(&path);
             assert_eq!(loaded.left, expected);
             assert_eq!(loaded.right, 725.);
         }
         std::fs::write(&path, b"invalid").unwrap();
-        assert_eq!(SidebarWidths::read(&path).left, 180.);
+        assert_eq!(SidebarWidths::read(&path).left, 264.);
     }
 }
 

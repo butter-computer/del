@@ -133,9 +133,25 @@ impl AppShell {
             return false;
         };
         self.command_menu.update(cx, |menu, cx| menu.dismiss(cx));
+        // A refused switch keeps the typed command in the composer.
+        if self.apply_mode(mode, window, cx) {
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        true
+    }
+
+    /// Switch the selected tab between Chat and Terminal, as `/chat` and
+    /// `/terminal` do. Returns false when the switch is refused.
+    pub(super) fn apply_mode(
+        &mut self,
+        mode: SessionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let selection = self.state.read(cx).selection.clone();
         if self.state.read(cx).is_starting() {
-            return true;
+            return false;
         }
         // Reject ACP before a handoff closes its chat backend and writes a
         // terminal checkpoint for a terminal that can never launch.
@@ -144,7 +160,7 @@ impl AppShell {
                 "Terminal mode supports Codex, Claude, and OpenCode.".into(),
                 cx,
             );
-            return true;
+            return false;
         }
         match selection {
             Selection::Draft(_) => {
@@ -160,8 +176,6 @@ impl AppShell {
                 }
             }
         }
-        self.composer
-            .update(cx, |input, cx| input.set_value("", window, cx));
         true
     }
 
