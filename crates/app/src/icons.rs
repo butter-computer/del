@@ -184,6 +184,11 @@ pub const SYMBOLS: &[(&str, &str)] = &[
     ("success", "checkmark.circle"),
     ("error", "exclamationmark.circle"),
     ("declined", "minus.circle"),
+    ("clock", "clock"),
+    ("git-branch", "arrow.triangle.branch"),
+    ("layers", "square.3.layers.3d"),
+    ("waiting-ring", "smallcircle.filled.circle"),
+    ("circle-check-filled", "checkmark.circle.fill"),
 ];
 
 /// SVG fallback aliases for symbols without a standalone local source asset.

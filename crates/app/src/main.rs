@@ -40,6 +40,7 @@ mod keybinds;
 mod mcp_bridge;
 mod mode_ui;
 mod model_picker;
+mod nav_history;
 mod new_tab;
 mod panel_motion;
 mod projects;
@@ -97,10 +98,13 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(1120.0), px(760.0));
 const SIDEBAR_ENABLED: bool = true;
 
 /// Every tab is this wide once settled; it animates to and from 0.
-const TAB_WIDTH: f32 = 144.0;
+const TAB_WIDTH: f32 = 220.0;
+
+/// Session tab height inside the 40 px title bar.
+const TAB_HEIGHT: f32 = 26.0;
 
 /// Space after each tab, animated together with it.
-const TAB_GAP: f32 = 2.0;
+const TAB_GAP: f32 = 4.0;
 
 /// Stable tab identity also survives a draft becoming a live session mid-drag.
 #[derive(Clone)]
@@ -125,7 +129,7 @@ impl Render for DraggedTab {
         // inside a fixed-size wrapper, keeping the original grab offset intact.
         div()
             .w(zpx(TAB_WIDTH))
-            .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+            .h(zpx(TAB_HEIGHT))
             .child(
                 h_flex()
                     .relative()
@@ -133,12 +137,12 @@ impl Render for DraggedTab {
                     .left(left - natural_left)
                     .w(width)
                     .overflow_hidden()
-                    .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .h(zpx(TAB_HEIGHT))
                     .px_2()
                     .gap_2()
                     .items_center()
-                    .rounded_md()
-                    .bg(rgb(0x303033))
+                    .rounded(zpx(8.0))
+                    .bg(appearance::dragged_tab_surface())
                     .text_color(rgb(0xf5f5f5))
                     .text_size(zpx(TEXT_MD))
                     .shadow_md()
@@ -287,6 +291,9 @@ actions!(
         Tab7,
         Tab8,
         Tab9,
+        NavigateBack,
+        NavigateForward,
+        ToggleTerminalPanel,
     ]
 );
 
@@ -489,6 +496,11 @@ struct AppShell {
     dragging_tab: Option<u64>,
     drag_target: Option<usize>,
     previous_drag_target: Option<usize>,
+    /// Visited sessions and tabs, for back/forward and the recent menu.
+    nav: nav_history::NavHistory,
+    /// The directory whose Git state was last refreshed for the status bar.
+    git_refreshed: Option<std::path::PathBuf>,
+    bottom: workbench::BottomPanel,
 }
 
 impl AppShell {
@@ -951,6 +963,9 @@ impl AppShell {
             dragging_tab: None,
             drag_target: None,
             previous_drag_target: None,
+            nav: Default::default(),
+            git_refreshed: None,
+            bottom: Default::default(),
         };
         shell.sidebar_motion.settle(true);
         shell.start_modes(window, cx);
@@ -1923,6 +1938,7 @@ impl AppShell {
     fn render_topbar(
         &self,
         window: &Window,
+        nav_width: Pixels,
         right_extent: f32,
         right_progress: f32,
         right_visible: bool,
@@ -1953,6 +1969,9 @@ impl AppShell {
         {
             self.tab_scroll.scroll_to_item(index);
         }
+        // The strip is as wide as its tabs, so the + follows the last tab; it
+        // shrinks and scrolls once the tabs overflow.
+        let strip_width = tabs.len() as f32 * (TAB_WIDTH + TAB_GAP) + self.metrics.page_inset;
         let dragging_tab = self.dragging_tab;
         let drag_target = self.drag_target;
         let previous_drag_target = self.previous_drag_target;
@@ -1965,14 +1984,12 @@ impl AppShell {
                 .id(id.clone())
                 .group(id)
                 // The close target must fit inside the tab's animated clip.
-                .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                .min_w(zpx(120.0))
-                .max_w(zpx(200.0))
+                .h(zpx(TAB_HEIGHT))
                 .pl_2()
                 .pr_1()
                 .gap_2()
                 .items_center()
-                .rounded_md()
+                .rounded(zpx(8.0))
                 .cursor_pointer()
                 .text_size(zpx(TEXT_MD))
                 .text_color(if active { rgb(0xf5f5f5) } else { muted })
@@ -2014,7 +2031,6 @@ impl AppShell {
                             .h_full()
                             .items_center()
                             .gap_0()
-                            .pl_2()
                             .on_children_prepainted({
                                 let strip_bounds = self.tab_strip_bounds.clone();
                                 move |bounds, _, _| {
@@ -2076,45 +2092,18 @@ impl AppShell {
                                     }
                                 }),
                             )
-                            .when(SIDEBAR_ENABLED, |row| {
-                                row.child(
-                                    div()
-                                        .id("toggle-sidebar")
-                                        .when(panel == Panel::Providers, |button| button.invisible())
-                                        .role(gpui::Role::Button)
-                                        .aria_label("Toggle left sidebar")
-                                        .flex_none()
-                                        .size(crate::icons::button_size())
-                                        .mr_1()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .hover(|b| b.bg(rgba(0xffffff0a)))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.set_sidebar(!this.sidebar_open, cx);
-                                        }))
-                                        .child(
-                                            crate::icons::icon(if self.sidebar_open {
-                                                IconName::PanelLeftClose
-                                            } else {
-                                                IconName::PanelLeftOpen
-                                            })
-                                            .text_color(muted),
-                                        ),
-                                )
-                            })
+                            // Linear layout: navigation above the sidebar, tabs from
+                            // the chat page's left edge.
+                            .child(self.render_nav(nav_width, cx))
                             .child(
                                 div()
                                     .relative()
-                                    .w_0()
-                                    .flex_1()
+                                    .flex_basis(zpx(strip_width))
+                                    .flex_grow_0()
+                                    .flex_shrink_1()
                                     .min_w_0()
                                     .h_full()
+                                    .pl(zpx(self.metrics.page_inset))
                                     .overflow_hidden()
                                     .child(h_flex()
                                     .id("tab-scroll")
@@ -2344,12 +2333,12 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
-                                    .ml_2()
+                                    .ml(zpx(8.5))
                                     .role(gpui::Role::Button)
                                     .aria_label("New tab")
                                     .flex_none()
                                     .when(dragging_tab.is_some(), |plus| plus.opacity(0.0))
-                                    .size(crate::icons::button_size())
+                                    .size(zpx(24.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2818,6 +2807,16 @@ impl Render for AppShell {
         }
         let (left_progress, left_animating) = self.sidebar_motion.sample(std::time::Instant::now());
         let left_progress = if settings_open { 1. } else { left_progress };
+        // The title bar's navigation spans the sidebar, so the first tab starts
+        // at the chat page's left edge; macOS reserves the traffic lights.
+        let left_extent = if SIDEBAR_ENABLED && sidebar_visible {
+            left_width * left_progress
+        } else {
+            0.0
+        };
+        let nav_width = (zpx(left_extent)
+            - gpui::px(if cfg!(target_os = "macos") { 80.0 } else { 12.0 }))
+        .max(zpx(workbench::NAV_MIN_WIDTH));
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
         if animating || left_animating {
@@ -2997,6 +2996,15 @@ impl Render for AppShell {
                     this.set_right(!this.right_open, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
+                this.navigate(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NavigateForward, window, cx| {
+                this.navigate(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminalPanel, window, cx| {
+                this.toggle_bottom_panel(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.open_inner_tool(right_panel::Pane::Terminal, window, cx);
             }))
@@ -3087,6 +3095,7 @@ impl Render for AppShell {
             }))
             .child(self.render_topbar(
                 window,
+                nav_width,
                 right_width + self.metrics.page_inset,
                 right_progress,
                 right_visible,
@@ -3252,8 +3261,11 @@ fn main() {
                 KeyBinding::new("cmd-k", SearchConversations, None),
                 KeyBinding::new("cmd-\\", ToggleFiles, None),
                 KeyBinding::new("cmd-shift-b", ToggleFiles, None),
+                KeyBinding::new("alt-cmd-b", ToggleFiles, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
-                KeyBinding::new("cmd-j", ToggleTerminal, None),
+                KeyBinding::new("cmd-j", ToggleTerminalPanel, None),
+                KeyBinding::new("cmd-[", NavigateBack, None),
+                KeyBinding::new("cmd-]", NavigateForward, None),
                 KeyBinding::new("cmd-t", NewWorkspaceTab, None),
                 KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
                 KeyBinding::new("cmd-n", NewSession, None),

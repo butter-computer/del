@@ -32,7 +32,7 @@ pub struct ShellMetrics {
 impl Default for ShellMetrics {
     fn default() -> Self {
         Self {
-            topbar_height: 42.0,
+            topbar_height: 40.0,
             page_inset: 6.0,
             page_radius: 10.0,
         }
