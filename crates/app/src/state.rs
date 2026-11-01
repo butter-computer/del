@@ -866,10 +866,6 @@ impl AppState {
             .collect()
     }
 
-    pub fn has_archived_chats(&self) -> bool {
-        self.all_rows().rows.iter().any(|r| r.archived)
-    }
-
     pub fn active_row(&self) -> Option<Row> {
         let Selection::Session(id) = &self.selection else {
             return None;
@@ -4769,7 +4765,7 @@ pub(crate) mod tests {
             window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("pinned-heading").is_none());
-        let projects = cx.debug_bounds("projects-heading").unwrap();
+        let projects = cx.debug_bounds("projects-list").unwrap();
 
         assert!(projects.size.width > gpui::px(100.));
         let content = cx.debug_bounds("project-session-content").unwrap();
