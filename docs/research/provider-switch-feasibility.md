@@ -1,6 +1,9 @@
 # Provider switching feasibility
 
-Research date: 2026-11-01. This is a source review and implementation assessment, not a claim that provider switching has been implemented or live-tested in Del.
+Research date: 2026-11-01. This historical assessment preceded implementation.
+Provider switching is now implemented; see the [0.1.24 release notes](../releases/0.1.24.md)
+and [validation record](../releases/0.1.24-validation.md). This document is retained
+as research background, not an active implementation plan.
 
 ## Confirmed user requirements after the initial assessment
 
@@ -41,8 +44,8 @@ session-instruction channel carries it. The budget limits loaded model context,
 not retained UI history or accessible earlier public records. Unsupported attachment
 must leave the source usable rather than silently concatenate the next prompt.
 
-The [updated specification](../spec/provider-switch.md) is authoritative for these
-clarifications. No provider-switch application code has been implemented in this pass.
+These clarifications are recorded in the [current behavior rules](../neverfuckingchange.md).
+The research pass itself preceded application-code implementation.
 
 ## Open-source reference: Agent Orchestrator
 
@@ -140,11 +143,11 @@ These are deterministic lifecycle/storage responsibilities. The model performs t
 | New model-generated handoff summary service | KILL for this scope | Neither provider selection nor deterministic transfer requires another inference call. Explicit bounded public context is sufficient for the initial feature. |
 | Reusing old native provider session on switch-back | KILL for this scope | The user selected a fresh native session every time, including switching back. |
 
-**Confirmed direction:** fresh native segment per switch, while keeping the entire visible Del chat and original native histories. The user explicitly selected this behavior after the initial assessment. The spec now reflects it.
+**Confirmed direction:** fresh native segment per switch, while keeping the entire visible Del chat and original native histories. The user explicitly selected this behavior after the initial assessment. The current behavior rules preserve it.
 
 The user-visible promise is conversation continuity. Provider-private reasoning, hidden compaction state, live approvals and internal tool execution state are not portable. Bounded model context may omit older content while the full saved chat remains visible. Attachment availability and any omissions must be represented honestly.
 
-The user's explicit request for same-chat switching supersedes the old behavior rule requiring a new draft. Update that rule and the README with the implementation. The broader [provider-switch spec](/Users/nihal/code/del/docs/spec/provider-switch.md) should be corrected to reflect the chosen switch-back behavior and the real persistence work.
+The user's explicit request for same-chat switching superseded the old behavior rule requiring a new draft. The implemented behavior is documented in the [README](../../README.md#models-and-reasoning) and [behavior rules](../neverfuckingchange.md).
 
 ### Required verification before shipping
 
