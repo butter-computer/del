@@ -33,6 +33,8 @@ struct Inner {
 #[derive(Clone)]
 pub struct MockBackend {
     #[cfg(test)]
+    pub saved_histories: Arc<Mutex<HashMap<SessionId, Vec<AgentEvent>>>>,
+    #[cfg(test)]
     pub attached_contexts: Arc<Mutex<HashMap<SessionId, String>>>,
     #[cfg(test)]
     pub submitted: Arc<Mutex<Vec<(SessionId, UserInput)>>>,
@@ -60,6 +62,8 @@ impl MockBackend {
         Self {
             #[cfg(test)]
             attached_contexts: Default::default(),
+            #[cfg(test)]
+            saved_histories: Default::default(),
             #[cfg(test)]
             submitted: Default::default(),
             #[cfg(test)]
@@ -329,6 +333,21 @@ async fn run_turn(
 
 #[async_trait]
 impl AgentBackend for MockBackend {
+    #[cfg(test)]
+    async fn read_session_history(
+        &self,
+        _: &SessionConfig,
+        id: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        Ok(self
+            .saved_histories
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     async fn agent_goal(
         &self,
         _: &SessionId,

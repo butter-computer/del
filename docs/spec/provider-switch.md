@@ -96,6 +96,22 @@ the user's next message.
   If the installed provider cannot attach the context, preserve the source session
   and report the failure instead of silently reverting to prompt concatenation.
 
+## Chat and Terminal
+
+`/terminal` grants exclusive ownership of the active native segment, using its
+current provider/account/settings rather than the stable Del chat ID as a native
+resume ID. Claude's separately attached context is included in the terminal launch;
+a session without a first user turn uses `--session-id` instead of `--resume`.
+
+For switched chats, a private durable checkpoint saves the native transcript and
+the boundary in Del's journal before launching the TUI. Side chats and
+`read_session` combine earlier provider history with new persisted terminal events
+without taking ownership. `/chat` appends those new events, preserving the existing
+UI history exactly. Return is retry-safe after a partial journal commit or restart.
+If the native transcript rewrites the saved prefix, return fails explicitly and
+keeps the original journal rather than guessing a merge. Provider/account switches
+remain blocked while the terminal owns the conversation.
+
 ## Ask
 
 - A composer action such as `Ask Codex` (or a slash command) sends the user's
@@ -136,8 +152,6 @@ the user's next message.
   history remains retrievable through the segment manifest and context-read tools.
 - Whether Ask answers count as unread in the sidebar when the user has left the
   chat.
-- How terminal (PTY) sessions take part. A Switch could open a chat segment
-  seeded from the terminal's conversation hint.
 
 ## Verification
 
@@ -173,3 +187,23 @@ controls, light/dark appearance, and restart.
 - Peer requests addressed to the chat reach the active segment after a switch.
 - Restart preserves segments, switch rows, attached context and the active provider,
   including a switch made before sending any message to the target.
+
+The combined real-provider regression runs a switch before the first target turn,
+then two Terminal handoffs, cross-provider Side chats, and a fresh-manager restore:
+
+```sh
+DEL_MODE_TEST_SWITCH=1 DEL_MODE_TEST_PROVIDER=claude cargo test --locked -p del-app \
+  real_provider_chat_terminal_chat_preserves_native_history -- --ignored --nocapture
+```
+
+Repeat for `codex` and `opencode`. The provider-switch acceptance test also asserts
+that every target returns a nonempty real model catalog.
+
+Validation after merging the Chat/Terminal feature: 605 workspace tests passed,
+45 opt-in tests skipped, and Clippy with `-D warnings` passed. Live checks passed
+for all six provider switches with nonempty model catalogs, plus two terminal
+handoffs per provider with a sibling session kept live, all cross-provider Side
+chats, refresh, and fresh-manager recovery. Native UI checks verified populated
+Codex/Claude/OpenCode model menus, model selection, light/dark appearance, typed
+`/terminal` and `/chat`, context recall, retained switch rows, and restart. The
+macOS debug app was rebuilt, signed, and relaunched with real providers.

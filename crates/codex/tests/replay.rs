@@ -578,7 +578,8 @@ async fn browser_credentials_are_bound_to_each_thread() {
         r#"> {"id":4,"method":"thread/start","params":{}}"#,
         r#"< {"id":4,"result":{"thread":{"id":"t2"}}}"#,
         r#"> {"id":5,"method":"thread/unsubscribe","params":{"threadId":"t1"}}"#,
-        r#"< {"id":5,"result":{}}"#,
+        r#"< {"id":5,"result":{"status":"unsubscribed"}}"#,
+        r#"< {"method":"thread/closed","params":{"threadId":"t1"}}"#,
         r#"> {"id":6,"method":"thread/resume","params":{"threadId":"t1"}}"#,
         r#"< {"id":6,"result":{"thread":{"id":"t1","turns":[]}}}"#,
         r#"> {"id":7,"method":"thread/goal/get","params":{"threadId":"t1"}}"#,
@@ -1035,12 +1036,15 @@ async fn closing_last_chat_does_not_interrupt_model_loading() {
                     ready.notify_one();
                     continue;
                 }
-                "thread/unsubscribe" => json!({}),
+                "thread/unsubscribe" => json!({"status":"unsubscribed"}),
                 method => panic!("unexpected request {method}"),
             };
             let reply = json!({"id":request["id"],"result":result});
             sw.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
             if request["method"] == "thread/unsubscribe" {
+                sw.write_all(b"{\"method\":\"thread/closed\",\"params\":{\"threadId\":\"t1\"}}\n")
+                    .await
+                    .unwrap();
                 let reply = json!({"id":model_request.take().unwrap(),"result":{
                     "data":[{"model":"available-model"}],"nextCursor":null
                 }});
@@ -1108,7 +1112,7 @@ async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns()
         HANDSHAKE[2],
         ACCOUNT_OK[0],
         ACCOUNT_OK[1],
-        r#"> {"id":3,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true}}"#,
+        r#"> {"id":3,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true,"config":{"thread_unload_delay_secs":0}}}"#,
         r#"< {"id":3,"result":{"thread":{"id":"child","turns":[{"id":"old","status":"completed","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"inherited"}]}]}]}}}"#,
     ]);
     let (client, rx, server) = replay(lines);
@@ -1122,4 +1126,85 @@ async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns()
     assert!(child.history().is_empty());
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn closing_one_of_two_chats_waits_for_native_lock_release() {
+    use serde_json::{Value, json};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (sr, mut sw) = tokio::io::split(server_io);
+    let (client, incoming) = del_codex::CodexClient::from_io(cr, cw);
+    let unsubscribed = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let immediate = Arc::new(AtomicBool::new(false));
+    let (ready, proceed, configured) = (unsubscribed.clone(), release.clone(), immediate.clone());
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(sr).lines();
+        let mut count = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({"userAgent":"test"}),
+                "initialized" => continue,
+                "account/read" => json!({"requiresOpenaiAuth":false}),
+                "thread/start" => {
+                    configured.store(
+                        request["params"]["config"]["thread_unload_delay_secs"] == 0,
+                        Ordering::SeqCst,
+                    );
+                    count += 1;
+                    json!({"thread":{"id":format!("t{count}")}})
+                }
+                "thread/unsubscribe" => json!({"status":"unsubscribed"}),
+                method => panic!("unexpected request {method}"),
+            };
+            sw.write_all(format!("{}\n", json!({"id":request["id"],"result":result})).as_bytes())
+                .await
+                .unwrap();
+            if request["method"] == "thread/unsubscribe" {
+                ready.notify_one();
+                proceed.notified().await;
+                sw.write_all(b"{\"method\":\"thread/closed\",\"params\":{\"threadId\":\"t1\"}}\n")
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let backend = Arc::new(
+        CodexBackend::attach(opts(), client, incoming)
+            .await
+            .unwrap(),
+    );
+    let first = backend.start_session(config()).await.unwrap();
+    let second = backend.start_session(config()).await.unwrap();
+    let closing = {
+        let backend = backend.clone();
+        tokio::spawn(async move { backend.close(&first.id).await })
+    };
+    unsubscribed.notified().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let waited = !closing.is_finished();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(backend.interrupt(&second.id).await.is_ok());
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+    assert!(
+        waited,
+        "unsubscribe acknowledgement did not release the native conversation lock"
+    );
+    assert!(
+        immediate.load(Ordering::SeqCst),
+        "server must not retain idle ownership after unsubscribe"
+    );
 }

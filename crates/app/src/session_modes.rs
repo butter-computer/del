@@ -61,6 +61,60 @@ pub(super) fn mode_command(text: &str) -> Option<SessionMode> {
     }
 }
 
+pub(super) async fn chat_terminal_spec(
+    record: &del_agent::SessionRecord,
+) -> Result<TerminalLaunchSpec, String> {
+    let mut spec = TerminalLaunchSpec::from_config(&record.config()).map_err(|e| e.to_string())?;
+    // Match Chat startup: an executable npm launcher can have a missing native binary.
+    let (program, _) = del_agent::detect::find_working_binary(record.provider.binary())
+        .await
+        .ok_or_else(|| format!("No working {} installation found", record.provider.binary()))?;
+    spec.program = Some(program.to_string_lossy().into_owned());
+    spec.account_id = record.account_id.clone();
+    spec.permission_mode = Some(record.permission_mode);
+    spec.account().map_err(|e| e.to_string())?;
+    spec.title = record.title.clone().unwrap_or_else(|| spec.label());
+    Ok(spec)
+}
+
+/// Resolve the current native segment only after the manager grants ownership.
+/// Claude's context is a launch setting, so carry it into its interactive CLI too.
+pub(super) fn chat_terminal_args(
+    record: &del_agent::SessionRecord,
+    mut args: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if record.provider == Provider::Claude
+        && let Some(path) = record.segments.last().and_then(|s| s.context.as_ref())
+    {
+        let mut context = String::new();
+        if let Some(index) = args.iter().position(|arg| arg == "--append-system-prompt") {
+            context.push_str(
+                args.get(index + 1)
+                    .ok_or("Missing terminal system prompt")?,
+            );
+            context.push_str("\n\n");
+            args.drain(index..=index + 1);
+        }
+        context.push_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?);
+        let combined = path.with_extension("terminal.txt");
+        del_agent::conversation::write_private(&combined, context.as_bytes())
+            .map_err(|e| e.to_string())?;
+        args.extend([
+            "--append-system-prompt-file".into(),
+            combined.to_string_lossy().into_owned(),
+        ]);
+    }
+    if record.provider == Provider::Codex {
+        args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
+    }
+    args.extend(crate::mode_ui::resume_args(
+        Some(record.provider),
+        record.native_id().as_str(),
+        del_agent::conversation::terminal_resume_existing(record).map_err(|e| e.to_string())?,
+    )?);
+    Ok(args)
+}
+
 impl AppShell {
     pub(super) fn submit_mode_command(
         &mut self,
@@ -117,28 +171,12 @@ impl AppShell {
             return;
         }
         let manager = self.state.read(cx).backend().manager;
-        let prepared = (|| {
-            let record = manager.session_record(&id).map_err(|e| e.to_string())?;
-            let mut spec =
-                TerminalLaunchSpec::from_config(&record.config()).map_err(|e| e.to_string())?;
-            spec.account_id = record.account_id.clone();
-            spec.permission_mode = Some(record.permission_mode);
-            spec.account().map_err(|e| e.to_string())?;
-            spec.title = record.title.clone().unwrap_or_else(|| spec.label());
-            let args = crate::mode_ui::resume_args(Some(record.provider), id.as_str(), true)?;
-            let bridge = self
-                .mcp
-                .as_ref()
-                .map(crate::mcp_bridge::McpBridge::handle)
-                .ok_or("Agent tools are still starting. Try again in a moment.")?;
-            Ok::<_, String>((spec, args, bridge))
-        })();
-        let (spec, resume, bridge) = match prepared {
-            Ok(value) => value,
-            Err(error) => {
-                self.set_mode_error(error, cx);
-                return;
-            }
+        let Some(bridge) = self.mcp.as_ref().map(crate::mcp_bridge::McpBridge::handle) else {
+            self.set_mode_error(
+                "Agent tools are still starting. Try again in a moment.".into(),
+                cx,
+            );
+            return;
         };
         self.mode_switching.insert(id.clone());
         self.state.update(cx, |s, cx| {
@@ -158,6 +196,7 @@ impl AppShell {
                 bridge,
                 _terminal: None,
             };
+            let spec = chat_terminal_spec(&record).await?;
             lease._terminal = lease
                 .bridge
                 .register_terminal(SessionInfo {
@@ -165,8 +204,8 @@ impl AppShell {
                     provider: Some(record.provider),
                     mode: SessionMode::Terminal,
                     command: Some(spec.kind.label().into()),
-                    cwd: record.cwd,
-                    title: record.title,
+                    cwd: record.cwd.clone(),
+                    title: record.title.clone(),
                     status: "running".into(),
                     reported_state: None,
                 })
@@ -176,11 +215,7 @@ impl AppShell {
                 .as_ref()
                 .ok_or("Missing terminal launch configuration")?
                 .config();
-            let mut args = config.args.clone();
-            if spec.provider() == Some(Provider::Codex) {
-                args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
-            }
-            args.extend(resume);
+            let args = chat_terminal_args(&record, config.args.clone())?;
             let env = config.env.clone();
             Ok::<_, String>((spec, args, env, lease))
         });
@@ -384,6 +419,7 @@ impl AppShell {
             backend
                 .manager
                 .import_terminal(del_agent::SessionRecord {
+                    segments: Vec::new(),
                     id: chat_id.clone(),
                     provider: config.provider,
                     account_id: record.launch.account_id,

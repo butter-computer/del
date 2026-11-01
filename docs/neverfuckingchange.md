@@ -101,6 +101,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Model and effort controls
 
+- An empty model catalog must show an explicit empty state with Refresh. Keep
+  Default distinct from an explicit model; catalog recommendations can differ
+  from the provider’s configured default.
+
 - Effort slider changes emit one native haptic tick per level transition on supported
   macOS hardware, for dragging, clicking stops, and arrow keys.
 - Repeated pointer movement within the same level stays silent. Opening the picker
@@ -713,3 +717,12 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   chats, and browser ownership. Async startup updates the original Space's tab
   without selecting it in another Space. Persist collections and selections across
   app restarts; never delete or relocate project files when switching or renaming.
+
+### Provider switching with Chat/Terminal
+
+- `/terminal` resumes the active provider segment, preserving its account and
+  separately attached context. `/chat` imports new terminal turns into the same
+  displayed conversation without replacing earlier provider segments or details.
+- Side chats and historical reads include previous segments and new persisted
+  terminal turns. Keep exclusive ownership: return to Chat before switching
+  provider or account again. Preserve recovery across restarts and failed returns.

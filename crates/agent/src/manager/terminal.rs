@@ -45,6 +45,14 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
         self.close_locked(id).await?;
+        if !record.segments.is_empty() {
+            let history = self
+                .session_backend(id)?
+                .read_session_history(&record.config(), id)
+                .await?;
+            crate::conversation::finish_terminal(&record, &history)?;
+            crate::conversation::begin_terminal(&record, &history)?;
+        }
         self.shared
             .terminal_owned
             .lock()

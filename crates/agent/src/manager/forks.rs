@@ -255,9 +255,10 @@ impl SessionManager {
         }
         let record = self.session_record(id)?;
         let history = self
-            .account_backend(record.provider, record.account_id.as_deref())?
+            .session_backend(id)?
             .read_session_history(&record.config(), id)
             .await?;
+        let history = crate::conversation::terminal_history(&record, &history)?.unwrap_or(history);
         let inherited = record.fork.map(|fork| fork.inherited).unwrap_or_default();
         Ok(bounded(format!("{inherited}\n{}", transcript(&history))))
     }

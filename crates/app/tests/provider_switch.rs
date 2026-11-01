@@ -126,6 +126,15 @@ async fn native_all_directions_attach_without_inference_and_read_saved_history()
             .await
             .unwrap();
         eprintln!("Native switch {from:?} → {provider:?} acknowledged");
+        let models = manager
+            .account_models(provider, None, dir.path())
+            .await
+            .unwrap();
+        assert!(
+            !models.is_empty(),
+            "{provider:?} returned an empty catalog after switch"
+        );
+        eprintln!("Native {provider:?}: {} available models", models.len());
         while let Ok(event) = rx.try_recv() {
             assert!(
                 !matches!(

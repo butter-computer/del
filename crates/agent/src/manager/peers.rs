@@ -458,6 +458,31 @@ impl SessionManager {
         let target = &target_id;
         self.authorize_peer(caller, target)?;
         let record = self.session_record(target)?;
+        if (self.is_terminal_owned(target) || crate::conversation::terminal_pending(&record)?)
+            && (requested == *target || requested == *record.native_id())
+        {
+            let native = self
+                .session_backend(target)?
+                .read_session_history(&record.config(), target)
+                .await?;
+            let events = match crate::conversation::terminal_history(&record, &native)? {
+                Some(history) => history,
+                None => match record.segments.last().and_then(|s| s.journal.as_ref()) {
+                    // A concurrent /chat return may already have committed the merge.
+                    Some(path) => crate::conversation::Journal::read(path)?,
+                    None => native,
+                },
+            };
+            return Self::page_peer_context(
+                &requested,
+                events
+                    .into_iter()
+                    .filter(crate::conversation::public_event)
+                    .collect(),
+                cursor,
+                max_characters,
+            );
+        }
         if !record.segments.is_empty() {
             let segment = if requested == *target {
                 record.segments.last()

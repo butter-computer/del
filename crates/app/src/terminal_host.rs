@@ -1947,7 +1947,17 @@ mod mode_handoff_live_tests {
             service_tier: None,
             permission_mode: del_agent::PermissionMode::Ask,
         };
-        let handle = manager.start_session(config.clone()).await.unwrap();
+        let switched = std::env::var_os("DEL_MODE_TEST_SWITCH").is_some();
+        let mut initial = config.clone();
+        if switched {
+            initial.provider = if provider == Provider::Codex {
+                Provider::Claude
+            } else {
+                Provider::Codex
+            };
+            initial.model = None;
+        }
+        let handle = manager.start_session(initial).await.unwrap();
         let mut events = manager.subscribe(&handle.id).unwrap();
         manager
             .send_prompt(
@@ -1970,19 +1980,41 @@ mod mode_handoff_live_tests {
         })
         .await
         .unwrap();
-        let record = manager.handoff_to_terminal(&handle.id).await.unwrap();
-        let mut spec = TerminalLaunchSpec::from_config(&record.config()).unwrap();
-        spec.permission_mode = Some(record.permission_mode);
-        let mut args = Vec::new();
-        if provider == Provider::Codex {
-            args.extend(["-c".into(), "check_for_update_on_startup=false".into()]);
+        if switched {
+            manager
+                .switch_provider(&handle.id, provider, None)
+                .await
+                .unwrap();
+            manager
+                .set_model_settings(&handle.id, config.model.clone(), None, None)
+                .unwrap();
+            let models = manager.account_models(provider, None, &cwd).await.unwrap();
+            assert!(
+                !models.is_empty(),
+                "{selected}: empty models after switching"
+            );
+            eprintln!(
+                "{selected}: {} real models after provider switch",
+                models.len()
+            );
         }
-        args.extend(crate::mode_ui::resume_args(Some(provider), handle.id.as_str(), true).unwrap());
+        // A desktop app usually keeps other chats/standbys on the same backend.
+        let sibling = manager.start_session(config.clone()).await.unwrap();
+        let before_terminal = manager.subscribe_with_history(&handle.id).unwrap().0;
+        let record = manager.handoff_to_terminal(&handle.id).await.unwrap();
+        let spec = crate::session_modes::chat_terminal_spec(&record)
+            .await
+            .unwrap();
+        let args = crate::session_modes::chat_terminal_args(&record, Vec::new()).unwrap();
         let (terminal, _) = spawn_session(&spec, args.clone(), vec![]).unwrap();
         let start = std::time::Instant::now();
         loop {
             let screen = screen_tail(&terminal);
             assert!(!terminal.exited(), "{selected} exited: {screen}");
+            assert!(
+                !screen.contains("This conversation is open in another app"),
+                "{selected}: native ownership was not released: {screen}"
+            );
             if screen.contains("DEL_CHAT_MODE_OK") {
                 break;
             }
@@ -1997,10 +2029,28 @@ mod mode_handoff_live_tests {
             };
             if let Some(key) = key {
                 terminal.write(key.to_vec());
+            } else if switched && start.elapsed() > Duration::from_secs(5) {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
+        if switched {
+            terminal.write(del_terminal::keys::encode_paste(
+                "What exact marker did I ask for before switching providers? Reply only with that marker. Do not use tools.", terminal.mode()));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            terminal.write(b"\r".to_vec());
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            while !screen_tail(&terminal).contains("DEL_CHAT_MODE_OK") {
+                assert!(
+                    !terminal.exited() && std::time::Instant::now() < deadline,
+                    "{selected}: terminal lost switched context: {}",
+                    screen_tail(&terminal)
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         terminal.write(del_terminal::keys::encode_paste(
             "Reply exactly DEL_TERMINAL_MODE_OK. Do not use tools.",
             terminal.mode(),
@@ -2111,6 +2161,16 @@ mod mode_handoff_live_tests {
         manager.release_terminal(&handle.id);
         assert_eq!(manager.resume(&handle.id).await.unwrap().id, handle.id);
         let (history, _) = manager.subscribe_with_history(&handle.id).unwrap();
+        if switched {
+            assert_eq!(&history[..before_terminal.len()], &before_terminal);
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::ProviderSwitched { .. }))
+                    .count(),
+                1
+            );
+        }
         let restored = format!("{history:?}");
         assert!(
             restored.contains("DEL_CHAT_MODE_OK"),
@@ -2123,6 +2183,7 @@ mod mode_handoff_live_tests {
         assert_eq!(manager.session_record(&handle.id).unwrap().config(), config);
         // Repeat the handoff and restore through a fresh manager (terminal-first import).
         let record = manager.handoff_to_terminal(&handle.id).await.unwrap();
+        let args = crate::session_modes::chat_terminal_args(&record, Vec::new()).unwrap();
         let (second, _) = spawn_session(&spec, args, vec![]).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
         while !screen_tail(&second).contains("DEL_NEW_TERMINAL_CONTEXT") {
@@ -2162,6 +2223,10 @@ mod mode_handoff_live_tests {
             config
         );
         imported.shutdown().await;
+        assert!(
+            manager.is_live(&sibling.id),
+            "handoff disrupted the sibling chat"
+        );
         manager.shutdown().await;
         eprintln!("{selected}: native chat → terminal → chat passed with both turns restored");
     }

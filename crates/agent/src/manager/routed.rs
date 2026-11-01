@@ -31,6 +31,13 @@ impl AgentBackend for RoutedBackend {
     async fn list_commands(&self, cwd: &Path) -> Result<Vec<crate::ComposerCommand>> {
         self.inner.list_commands(cwd).await
     }
+    async fn read_session_history(
+        &self,
+        config: &SessionConfig,
+        _: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        self.inner.read_session_history(config, &self.native).await
+    }
     async fn list_models(&self, cwd: &Path) -> Result<Vec<crate::ModelInfo>> {
         self.inner.list_models(cwd).await
     }

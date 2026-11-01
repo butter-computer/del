@@ -498,6 +498,14 @@ impl Render for ModelPanel {
                         })),
                 )
             });
+            if catalog.loaded && catalog.models.is_empty() && catalog.error.is_none() {
+                list = list.child(
+                    div()
+                        .p_2()
+                        .text_color(muted)
+                        .child("No models returned by this provider. Try Refresh."),
+                );
+            }
             if model_count == 0 && !catalog.loading {
                 list = list.child(div().p_2().text_color(muted).child("No matching models"));
             }

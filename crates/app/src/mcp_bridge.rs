@@ -816,6 +816,13 @@ impl McpHost for AppHost {
         let requested = target.clone();
         let target = self.manager.resolve_peer(target);
         let terminal = self.terminals.lock().unwrap().get(&target).cloned();
+        if self.manager.is_terminal_owned(&target) {
+            return self
+                .manager
+                .read_peer_context(caller, &requested, cursor, limit)
+                .await
+                .map_err(|e| failed(e.to_string()));
+        }
         if let Some(snapshot) = terminal {
             let mut events = vec![AgentEvent::AssistantMessage {
                 turn_id: "terminal-recorded-output".into(),

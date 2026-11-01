@@ -69,7 +69,7 @@ a small ring without a number. Claude usage comes from its native `get_usage`
 control request, without sending a prompt or reading credentials. Unavailable quota
 (including older Claude CLIs without this query) stays hidden.
 
-In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection.
+In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection. An empty model catalog is reported explicitly with a Refresh action. Default keeps the provider’s configured choice.
 A new chat remembers its account across restarts. Choosing a different account of the same provider
 resumes the existing chat with its native history under that account. Switching
 is blocked during a running response; a failed transfer reconnects the original
@@ -407,7 +407,11 @@ conversation. Unloading a running session also stops its current work.
   commands run locally, without sending a model prompt. The handoff retains the
   native conversation ID, account, folder, and saved model/permission settings.
   Finish or stop a chat response before switching. Returning closes the terminal
-  process before Chat reloads its native history. In a new draft, these commands
+  process before Chat reloads its native history. After a provider switch, Terminal
+  opens the current native segment with its attached context; returning appends
+  terminal turns below the existing chat without losing earlier provider segments.
+  Side chats and `read_session` can read both the saved conversation and new terminal
+  turns. Return to Chat before changing provider or account again. In a new draft, these commands
   choose the mode for the first message. Ordinary sidebar shells are unaffected.
   Codex Terminal maps Ask to its supported `on-request` approval policy with a
   read-only sandbox; the saved Chat permission mode is unchanged.

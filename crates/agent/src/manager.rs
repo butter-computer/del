@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 mod forks;
 mod peers;
 mod routed;
-mod switching;
+pub(crate) mod switching;
 mod terminal;
 pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
 pub use peers::{ContextChunk, ContextCursor, SessionContext};
@@ -844,6 +844,13 @@ impl SessionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        if crate::conversation::terminal_pending(&record)? {
+            let history = self
+                .session_backend(id)?
+                .read_session_history(&record.config(), id)
+                .await?;
+            crate::conversation::finish_terminal(&record, &history)?;
+        }
         let handle = self
             .session_backend(id)?
             .resume(record.config(), id)
@@ -1189,6 +1196,11 @@ impl SessionManager {
             .or_default()
             .clone();
         let _switching = lock.lock().await;
+        if self.is_terminal_owned(id) {
+            return Err(AgentError::Busy(
+                "This conversation is open in Terminal. Use /chat to return.".into(),
+            ));
+        }
         if matches!(
             self.status(id),
             Some(SessionStatus::Running | SessionStatus::WaitingApproval)

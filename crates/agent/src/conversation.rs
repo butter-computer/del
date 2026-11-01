@@ -17,6 +17,123 @@ pub struct Segment {
     pub journal: Option<PathBuf>,
 }
 
+/// A durable boundary between Del's exact displayed events and native TUI writes.
+/// Kept beside the journal so a crash during Terminal mode can recover on resume.
+#[derive(Serialize, Deserialize)]
+struct TerminalCheckpoint {
+    native: Vec<AgentEvent>,
+    journal_events: usize,
+}
+
+fn terminal_path(record: &crate::SessionRecord) -> Option<PathBuf> {
+    record
+        .segments
+        .last()?
+        .journal
+        .as_ref()
+        .map(|p| p.with_extension("terminal.json"))
+}
+
+fn native_events(events: &[AgentEvent]) -> Vec<AgentEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                AgentEvent::SessionStarted { .. } | AgentEvent::GoalUpdated { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn begin_terminal(record: &crate::SessionRecord, native: &[AgentEvent]) -> Result<()> {
+    let Some(path) = terminal_path(record) else {
+        return Ok(());
+    };
+    let journal = record
+        .segments
+        .last()
+        .and_then(|s| s.journal.as_ref())
+        .unwrap();
+    let checkpoint = TerminalCheckpoint {
+        native: native_events(native),
+        journal_events: Journal::read(journal)?.len(),
+    };
+    write_private(
+        &path,
+        &serde_json::to_vec(&checkpoint).map_err(|e| AgentError::Backend(e.to_string()))?,
+    )
+}
+
+fn checkpoint(record: &crate::SessionRecord) -> Result<Option<TerminalCheckpoint>> {
+    let Some(path) = terminal_path(record) else {
+        return Ok(None);
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| AgentError::Backend(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn terminal_pending(record: &crate::SessionRecord) -> Result<bool> {
+    Ok(checkpoint(record)?.is_some())
+}
+
+/// Claude does not create a resumable transcript before its first user turn.
+pub fn terminal_resume_existing(record: &crate::SessionRecord) -> Result<bool> {
+    Ok(record.provider != Provider::Claude
+        || checkpoint(record)?.is_none_or(|c| !c.native.is_empty()))
+}
+
+/// Read-only merge for Side chats and peer reads; never takes ownership of the TUI.
+pub fn terminal_history(
+    record: &crate::SessionRecord,
+    native: &[AgentEvent],
+) -> Result<Option<Vec<AgentEvent>>> {
+    let Some(checkpoint) = checkpoint(record)? else {
+        return Ok(None);
+    };
+    let native = native_events(native);
+    if !native.starts_with(&checkpoint.native) {
+        return Err(AgentError::Backend("The terminal rewrote earlier native history. Saved Chat history is intact; could not safely append the terminal changes.".into()));
+    }
+    let path = record
+        .segments
+        .last()
+        .and_then(|s| s.journal.as_ref())
+        .unwrap();
+    let mut history = Journal::read(path)?;
+    if history.len() < checkpoint.journal_events {
+        return Err(AgentError::Backend(
+            "Saved Chat history is shorter than its terminal checkpoint.".into(),
+        ));
+    }
+    // Truncating at the saved boundary makes retry after a partial return idempotent.
+    history.truncate(checkpoint.journal_events);
+    for mut event in native.into_iter().skip(checkpoint.native.len()) {
+        crate::manager::switching::namespace_event(&mut event, record.native_id());
+        history.push(event);
+    }
+    Ok(Some(history))
+}
+
+pub fn finish_terminal(record: &crate::SessionRecord, native: &[AgentEvent]) -> Result<()> {
+    if let Some(history) = terminal_history(record, native)? {
+        let path = record
+            .segments
+            .last()
+            .and_then(|s| s.journal.as_ref())
+            .unwrap();
+        Journal::create(path, &history)?;
+        std::fs::remove_file(terminal_path(record).unwrap())?;
+    }
+    Ok(())
+}
+
 pub struct Journal {
     path: PathBuf,
     file: std::fs::File,
@@ -160,7 +277,7 @@ pub fn context(
     {
         let record = serde_json::to_string(&serde_json::json!({"event": index, "data": event}))
             .map_err(|e| AgentError::Backend(e.to_string()))?;
-        if used + record.len() + 1 <= budget {
+        if used + record.len() < budget {
             used += record.len() + 1;
             records.push(record);
         } else {
@@ -187,6 +304,79 @@ pub fn context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_checkpoint_preserves_display_and_is_retry_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let old = AgentEvent::UserMessage {
+            text: "identical prompt".into(),
+        };
+        let detail = AgentEvent::ReasoningDelta {
+            turn_id: "old/turn".into(),
+            text: "preserve exact display".into(),
+        };
+        Journal::create(&path, &[old.clone(), detail.clone()]).unwrap();
+        let record = crate::SessionRecord {
+            id: SessionId::new("stable"),
+            provider: Provider::Claude,
+            account_id: None,
+            cwd: dir.path().into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: crate::PermissionMode::Ask,
+            title: None,
+            title_turns: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            status: crate::SessionStatus::Idle,
+            fork: None,
+            segments: vec![Segment {
+                session_id: SessionId::new("native"),
+                provider: Provider::Claude,
+                account_id: None,
+                started_at_ms: 0,
+                history: None,
+                context: None,
+                journal: Some(path.clone()),
+            }],
+        };
+        begin_terminal(&record, std::slice::from_ref(&old)).unwrap();
+        assert!(terminal_resume_existing(&record).unwrap());
+        let current = [
+            old.clone(),
+            old.clone(),
+            AgentEvent::AssistantMessage {
+                turn_id: "new".into(),
+                text: "terminal reply".into(),
+            },
+        ];
+        let merged = terminal_history(&record, &current).unwrap().unwrap();
+        assert_eq!(&merged[..2], &[old.clone(), detail]);
+        assert_eq!(
+            merged.iter().filter(|e| **e == old).count(),
+            2,
+            "repeated identical prompts are distinct turns"
+        );
+        assert!(
+            matches!(&merged[3], AgentEvent::AssistantMessage { turn_id, .. } if turn_id == "native/new")
+        );
+        // Simulate a crash after the journal rename, before checkpoint cleanup.
+        Journal::create(&path, &merged).unwrap();
+        assert_eq!(
+            terminal_history(&record, &current).unwrap().unwrap(),
+            merged
+        );
+        assert!(terminal_history(&record, &[]).is_err());
+        assert_eq!(Journal::read(&path).unwrap(), merged);
+        finish_terminal(&record, &current).unwrap();
+        finish_terminal(&record, &current).unwrap();
+        assert!(!terminal_pending(&record).unwrap());
+        assert_eq!(Journal::read(&path).unwrap(), merged);
+        begin_terminal(&record, &[]).unwrap();
+        assert!(!terminal_resume_existing(&record).unwrap());
+    }
+
     #[test]
     fn journal_recovers_a_partial_tail_and_refuses_middle_corruption() {
         use std::io::Write;

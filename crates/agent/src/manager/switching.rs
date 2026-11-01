@@ -1,7 +1,7 @@
 use super::*;
 use crate::conversation::{self, Journal, Segment};
 
-pub(super) fn namespace_event(event: &mut AgentEvent, native: &SessionId) {
+pub(crate) fn namespace_event(event: &mut AgentEvent, native: &SessionId) {
     match event {
         AgentEvent::TurnStarted { turn_id }
         | AgentEvent::AssistantTextDelta { turn_id, .. }
@@ -34,6 +34,11 @@ impl SessionManager {
             .or_default()
             .clone();
         let _switching = lock.lock().await;
+        if self.is_terminal_owned(id) {
+            return Err(AgentError::Busy(
+                "This conversation is open in Terminal. Use /chat to return.".into(),
+            ));
+        }
         let mut record = self.session_record(id)?;
         if provider == record.provider {
             return Err(AgentError::Backend(
@@ -237,6 +242,73 @@ mod tests {
                 if matches!(events.recv().await.unwrap(), ManagerEvent::Event { session, event: AgentEvent::TurnCompleted { .. } } if session == *id) { break; }
             }
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switched_terminal_side_chat_and_return_keep_all_segments() {
+        for target in [Provider::Claude, Provider::Codex, Provider::OpenCode] {
+            let dir = tempfile::tempdir().unwrap();
+            let (manager, backends) = manager(&dir.path().join("index.jsonl"));
+            let source = if target == Provider::Codex {
+                Provider::Claude
+            } else {
+                Provider::Codex
+            };
+            let chat = manager.start_session(config(source)).await.unwrap().id;
+            send(&manager, &chat, "original provider fact").await;
+            manager.switch_provider(&chat, target, None).await.unwrap();
+            let before = manager.subscribe_with_history(&chat).unwrap().0;
+            let record = manager.session_record(&chat).unwrap();
+            let backend = backends.iter().find(|b| b.provider() == target).unwrap();
+            manager.handoff_to_terminal(&chat).await.unwrap();
+            assert!(manager.switch_provider(&chat, source, None).await.is_err());
+            backend.saved_histories.lock().unwrap().insert(
+                record.native_id().clone(),
+                vec![
+                    AgentEvent::UserMessage {
+                        text: "new terminal fact".into(),
+                    },
+                    AgentEvent::AssistantMessage {
+                        turn_id: "terminal-turn".into(),
+                        text: "terminal reply".into(),
+                    },
+                ],
+            );
+            let side = manager
+                .fork(
+                    crate::ForkSource::Session(chat.clone()),
+                    crate::ForkLifetime::Temporary,
+                )
+                .await
+                .unwrap();
+            let snapshot = manager.export_fork(&side.handle.id).unwrap();
+            let context = serde_json::to_string(&snapshot).unwrap();
+            assert!(
+                context.contains("original provider fact"),
+                "lost original context: {context}"
+            );
+            assert!(
+                context.contains("new terminal fact"),
+                "wrong native identity: {context}"
+            );
+            assert!(manager.is_terminal_owned(&chat));
+            assert!(!manager.is_live(&chat));
+            let page = manager
+                .read_peer_context(&chat, &chat, None, 100_000)
+                .await
+                .unwrap();
+            let text = serde_json::to_string(&page).unwrap();
+            assert!(text.contains("original provider fact") && text.contains("new terminal fact"));
+            manager.release_terminal(&chat);
+            manager.resume(&chat).await.unwrap();
+            let restored = manager.subscribe_with_history(&chat).unwrap().0;
+            assert_eq!(&restored[..before.len()], &before);
+            assert_eq!(restored.iter().filter(|e| matches!(e, AgentEvent::UserMessage { text } if text == "new terminal fact")).count(), 1);
+            manager.close(&chat).await.unwrap();
+            manager.resume(&chat).await.unwrap();
+            assert_eq!(manager.subscribe_with_history(&chat).unwrap().0, restored);
+            manager.shutdown().await;
+        }
     }
 
     #[tokio::test]
