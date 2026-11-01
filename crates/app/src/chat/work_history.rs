@@ -64,11 +64,12 @@ pub fn request_start(model: &ChatModel, before: usize) -> usize {
         .rposition(|block| {
             matches!(
                 block,
-                Block::User {
-                    steer: false,
-                    goal: false,
-                    ..
-                }
+                Block::ProviderSwitch { .. }
+                    | Block::User {
+                        steer: false,
+                        goal: false,
+                        ..
+                    }
             )
         })
         .map_or(0, |ix| ix + 1)
@@ -84,11 +85,14 @@ pub fn sections(model: &ChatModel, work_pending: bool) -> Vec<Section> {
     for end in 0..=model.blocks.len() {
         let boundary = matches!(
             model.blocks.get(end),
-            Some(Block::User {
-                steer: false,
-                goal: false,
-                ..
-            })
+            Some(
+                Block::ProviderSwitch { .. }
+                    | Block::User {
+                        steer: false,
+                        goal: false,
+                        ..
+                    }
+            )
         );
         if end != model.blocks.len() && !boundary {
             continue;

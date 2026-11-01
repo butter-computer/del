@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod commands;
+pub mod conversation;
 pub use commands::{CommandKind, ComposerCommand, Goal, GoalAction, GoalStatus, split_command};
 pub mod detect;
 pub mod environment;

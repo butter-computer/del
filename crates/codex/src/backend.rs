@@ -593,6 +593,24 @@ impl AgentBackend for CodexBackend {
         Ok(())
     }
 
+    async fn agent_goal(
+        &self,
+        id: &SessionId,
+        action: Option<del_agent::GoalAction>,
+    ) -> Result<Option<del_agent::Goal>> {
+        if action.is_some() {
+            return Err(be("Use Codex's native goal controls to change this goal"));
+        }
+        let session = self.session(id)?;
+        let conn = self.thread_connection(id, &session).await?;
+        let response = conn
+            .client
+            .request("thread/goal/get", json!({"threadId": id.as_str()}))
+            .await
+            .map_err(be)?;
+        Ok(crate::commands::goal(&response["goal"]))
+    }
+
     async fn generate_title(&self, context: &str) -> Result<Option<String>> {
         let opening = OpeningGuard::new(&self.opening);
         let conn = self.connection().await?;
@@ -738,6 +756,37 @@ impl AgentBackend for CodexBackend {
             config.provider,
         )
         .await
+    }
+
+    async fn start_session_with_context(
+        &self,
+        config: SessionConfig,
+        path: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        let context = tokio::fs::read_to_string(path).await?;
+        let handle = self.start_session(config).await?;
+        let result = async {
+            let conn = self.connection().await?;
+            conn.client
+                .request(
+                    "thread/inject_items",
+                    json!({
+                        "threadId": handle.id.as_str(),
+                        "items": [{"type": "message", "role": "developer", "content": [
+                            {"type": "input_text", "text": context}
+                        ]}]
+                    }),
+                )
+                .await
+                .map_err(be)?;
+            Ok::<_, AgentError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = self.close(&handle.id).await;
+            return Err(error);
+        }
+        Ok(handle)
     }
 
     async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {

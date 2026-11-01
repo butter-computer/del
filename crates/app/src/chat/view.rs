@@ -2548,6 +2548,7 @@ mod search_tests {
     fn hit(messages: Vec<search::Message>, query: &str, n: usize) -> search::Hit {
         let doc = Arc::new(search::Document {
             source: search::Source {
+                journal: None,
                 account: None,
                 tab: crate::state::Tab::Session(SessionId::new("saved")),
                 title: "Task".into(),

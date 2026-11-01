@@ -278,6 +278,7 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
     let path = dir.path().join("sessions.jsonl");
     let id = SessionId::new("saved");
     let record = SessionRecord {
+        segments: Vec::new(),
         fork: None,
         id: id.clone(),
         provider: Provider::Codex,
@@ -365,6 +366,7 @@ async fn resumed_history_reaches_chat_subscribers() {
     del_agent::index::SessionIndex::open(&path)
         .unwrap()
         .upsert(SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: id.clone(),
             provider: Provider::Codex,

@@ -312,6 +312,20 @@ impl ChatView {
             Block::Tool(_) | Block::FileChange(_) | Block::Reasoning { .. }
         );
         let content = match block {
+            Block::ProviderSwitch { from, to } => h_flex()
+                .w_full()
+                .justify_center()
+                .py_2()
+                .gap_2()
+                .text_size(zpx(TEXT_SM))
+                .text_color(rgba(MUTED))
+                .child("Switched from")
+                .child(crate::composer_ui::provider_logo(*from).size(zpx(14.)))
+                .child(crate::providers::display_name(*from))
+                .child("⇄")
+                .child(crate::composer_ui::provider_logo(*to).size(zpx(14.)))
+                .child(crate::providers::display_name(*to))
+                .into_any_element(),
             Block::Peer(message) => {
                 let manager = &self.backend.manager;
                 let current = manager.resolve_peer(self.session.as_ref().unwrap_or(&message.to));

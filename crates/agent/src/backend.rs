@@ -102,6 +102,9 @@ pub trait BrowserCredentials: Send + Sync {
     /// Authenticate `from`'s tokens as `to`: a provisional id used before the
     /// provider assigned the session its real id.
     fn rebind(&self, from: &SessionId, to: &SessionId);
+    /// Route a native execution's credentials to its stable Del chat, while
+    /// retaining native ownership for revocation when that execution closes.
+    fn bind_chat(&self, _native: &SessionId, _chat: &SessionId) {}
     /// Invalidate every token of `session` (or of a shared `group`).
     fn revoke(&self, session: &SessionId);
     /// A token for `group`, one provider process that serves a single MCP
@@ -205,6 +208,29 @@ pub trait AgentBackend: Send + Sync {
     /// Start a fresh session. Backends need not emit `SessionStarted`: nobody can
     /// be subscribed yet, so `SessionManager` emits it as the first history event.
     async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle>;
+
+    /// Create a persistent session with historical reference material attached
+    /// outside user input. This must not start a model turn.
+    async fn start_session_with_context(
+        &self,
+        _config: SessionConfig,
+        _context: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        Err(AgentError::Backend(
+            "This provider cannot attach conversation context without sending a message".into(),
+        ))
+    }
+
+    /// Restore context-bearing launch settings. Wire-based attachments are
+    /// already persisted by the provider; CLI backends can override this.
+    async fn resume_with_context(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+        _context: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        self.resume(config, session).await
+    }
 
     /// Start without provider-side persistence when supported. The manager
     /// always excludes temporary sessions from Del's index and history UI.

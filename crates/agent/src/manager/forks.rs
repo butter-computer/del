@@ -186,6 +186,7 @@ impl SessionManager {
         handle = handle.with_history(snapshot.history);
         let now = now_ms();
         let record = SessionRecord {
+            segments: Vec::new(),
             id: handle.id.clone(),
             provider: snapshot.config.provider,
             account_id: snapshot.account_id,
@@ -221,7 +222,7 @@ impl SessionManager {
             return Err(error);
         }
         Ok(ForkResult {
-            handle: self.attach(handle, snapshot.config),
+            handle: self.attach(handle, snapshot.config)?,
             context: ForkContext::Transcript,
             parent: snapshot.parent,
         })
@@ -390,6 +391,7 @@ impl SessionManager {
             Some(id)
                 if native_allowed
                     && !self.is_temporary(id)
+                    && self.session_record(id)?.segments.is_empty()
                     && self.pending_fork_context(id).is_none() =>
             {
                 backend.fork_session(config.clone(), id, temporary).await?
@@ -431,6 +433,7 @@ impl SessionManager {
         };
         let now = now_ms();
         let record = SessionRecord {
+            segments: Vec::new(),
             fork: Some(ForkRecord {
                 parent: original_parent.clone(),
                 pending: (context == ForkContext::Transcript).then(|| inherited.clone()),
@@ -474,7 +477,7 @@ impl SessionManager {
             return Err(error);
         }
         Ok(ForkResult {
-            handle: self.attach(handle, config),
+            handle: self.attach(handle, config)?,
             context,
             parent: original_parent,
         })

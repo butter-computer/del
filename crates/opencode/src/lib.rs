@@ -696,6 +696,32 @@ impl AgentBackend for OpenCodeBackend {
         self.attach(config, SessionId::new(id), server, vec![])
             .await
     }
+    async fn start_session_with_context(
+        &self,
+        config: SessionConfig,
+        path: &Path,
+    ) -> Result<SessionHandle> {
+        let context = tokio::fs::read_to_string(path).await?;
+        let handle = self.start_session(config).await?;
+        let result = self
+            .live(&handle.id)?
+            .server
+            .json(
+                Method::PUT,
+                &format!(
+                    "/api/experimental/session/{}/instructions/entries/del-conversation",
+                    seg(handle.id.as_str())
+                ),
+                Some(&json!({"value": context})),
+            )
+            .await;
+        if let Err(error) = result {
+            let _ = self.close(&handle.id).await;
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
     async fn resume(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
         if let Ok(live) = self.live(id) {
             if live.connected.load(Ordering::SeqCst) && live.server.is_alive() {

@@ -278,7 +278,10 @@ This records the final decisions, including corrections to earlier experiments.
 - Persist the account on each chat. Switching accounts within the same provider
   keeps the same chat, native history, and workspace, including across restarts.
   Block switching during running turns and restore the original account on failure.
-  Changing providers still creates a new draft.
+  Changing between Codex, Claude, and OpenCode continues the same chat with a compact
+  switch row and a fresh native session on every switch. Preserve displayed history,
+  queue, browser, project, and tab identity. Attach public context separately from
+  user input; retain readable saved history across all provider segments.
 - Deduplicate full account identities while showing only the username. Close only
   the successful login attempt's own idle Terminal window. Show per-account Codex and Claude
   remaining usage as a slim bar and percentage only: no window labels, reset

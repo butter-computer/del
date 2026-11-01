@@ -13,6 +13,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<crate::manager::ForkRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<crate::conversation::Segment>,
     pub id: SessionId,
     pub provider: Provider,
     #[serde(default)]
@@ -33,6 +35,10 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
+    pub fn native_id(&self) -> &SessionId {
+        self.segments.last().map_or(&self.id, |s| &s.session_id)
+    }
+
     pub fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.clone(),
@@ -140,7 +146,7 @@ impl IndexFlush {
 
 /// Write `bytes` to a private, uniquely named temporary file beside `path`,
 /// sync it, rename it over `path`, then sync the directory.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -263,6 +269,41 @@ impl SessionIndex {
         self.flush()
     }
 
+    /// Publish a provider transition only after its entire index record is
+    /// durable. The caller holds the index lock; earlier background writes
+    /// finish first so they cannot overwrite this commit.
+    pub fn replace_durable(&mut self, record: SessionRecord) -> Result<()> {
+        self.flusher().wait()?;
+        let mut records = self.records.clone();
+        let slot = records
+            .iter_mut()
+            .find(|r| r.id == record.id)
+            .ok_or_else(|| crate::AgentError::UnknownSession(record.id.clone()))?;
+        *slot = record;
+        let mut out = self.unparsed.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        for record in records.iter().filter(|r| !self.temporary.contains(&r.id)) {
+            out.push_str(
+                &serde_json::to_string(record)
+                    .map_err(|e| crate::AgentError::Backend(e.to_string()))?,
+            );
+            out.push('\n');
+        }
+        if let Err(error) = write_atomic(&self.path, out.as_bytes()) {
+            // Rename may have succeeded before directory fsync failed. Resolve
+            // that uncertain outcome rather than restoring a different active
+            // provider in memory from the one a restart would load.
+            if std::fs::read(&self.path).ok().as_deref() != Some(out.as_bytes()) {
+                return Err(error.into());
+            }
+            eprintln!("[del] index replacement is visible but directory sync failed: {error}");
+        }
+        self.records = records;
+        Ok(())
+    }
+
     pub fn upsert_temporary(&mut self, record: SessionRecord) -> Result<()> {
         self.temporary.insert(record.id.clone());
         self.upsert(record)
@@ -341,6 +382,7 @@ mod tests {
 
     fn rec(id: &str, at: u64, status: SessionStatus) -> SessionRecord {
         SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: SessionId::new(id),
             provider: Provider::Claude,

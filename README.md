@@ -73,7 +73,14 @@ In the composer's provider picker, click a provider to select its default accoun
 A new chat remembers its account across restarts. Choosing a different account of the same provider
 resumes the existing chat with its native history under that account. Switching
 is blocked during a running response; a failed transfer reconnects the original
-account. Changing providers still opens a new draft. New chats use the provider’s chosen default
+account. Choosing Codex, Claude, or OpenCode in an existing chat switches providers
+in place, with a compact switch row. Every switch creates a fresh native session,
+including when switching back. Earlier messages, reasoning, tools, and attachment
+references remain in the chat. Public history is attached separately during setup;
+your next message stays unchanged. The initial attachment is bounded, and the agent
+can page through the full saved public history with `read_session`, including retired
+provider segments after a restart. Finish or stop the response and clear any unfinished
+native goal before switching. New chats use the provider’s chosen default
 account. Saved accounts work in Chat and Terminal modes. Terminal launches retain their
 selected account when reopened. OpenCode’s built-in account is labeled **System**.
 
@@ -527,7 +534,8 @@ same level stays silent; devices without haptic support receive no feedback.
 Model, effort, and service-tier selections are stored with the conversation.
 Existing chat settings apply on subsequent prompts through the backend's
 reconfiguration path; they do not rewrite a turn already in flight. Changing a
-model clears incompatible effort/tier choices. Provider changes use a new draft.
+model clears incompatible effort/tier choices. Provider changes in existing chats
+keep the same tab and working directory and reset model/effort/tier to the target's defaults.
 Catalog discovery submits no prompt, but can start a CLI process. ACP is no longer
 offered in the provider picker or Settings; its backend remains for legacy records.
 

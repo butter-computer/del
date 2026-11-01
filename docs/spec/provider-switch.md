@@ -18,14 +18,21 @@ Two actions inside any chat:
 - **Ask.** Get a one-off answer from another provider inline, without handing
   over the thread.
 
+The current requested implementation is Switch across Codex, Claude Code, and
+OpenCode. Ask remains a separate future feature. The behavior below incorporates
+the user's 2026-11-01 clarification: one intact displayed chat, a compact switch
+row, a fresh native session on every switch, and context attached separately from
+the user's next message.
+
 ## Existing implementation
 
 | Surface | Evidence | Reuse / change |
 | --- | --- | --- |
-| Cross-provider forks | `crates/agent/src/manager/forks.rs` | Native forks keep provider context. Other providers get a bounded, explicitly quoted transcript with their first question, and nothing is sent on creation. Reuse as-is for both actions. |
-| Fork context refresh | `refresh_fork_context`, `pending_fork_context` | Reuse to send only the turns since the last switch when switching back. |
+| Cross-provider forks | `crates/agent/src/manager/forks.rs` | Reuse context projection concepts, not the current first-user-prompt wrapper or temporary fork lifecycle. Switching requires durable main-chat identity and separate provider context attachment. |
+| Fork context refresh | `refresh_fork_context`, `pending_fork_context` | Currently refreshes a complete bounded snapshot, not a delta. Switching back starts a fresh native session and needs no dormant-session delta mechanism. |
 | Side chats | `crates/app/src/side_chat.rs` (`fork_with_settings`) | Ask can reuse the side-chat lifecycle. Its result renders inline in the main thread instead of a separate pane. |
-| Main-chat provider change | `AppState::fork_with` | Replace "open blank draft" with Switch. A blank chat stays available from the new-session action. |
+| Main-chat provider change | `AppState::select_account` → `SessionManager::switch_provider` | Switch in place. A blank chat stays available from the new-session action. |
+| Stable identity and historical segments | `SessionRecord::segments`, `manager/switching.rs`, `conversation.rs` | Del retains one chat ID, commits the new native identity durably, and records full displayed history independently of provider storage. |
 | Codex native fork | `thread/fork` in `crates/codex/src/backend.rs` | Used when Codex → Codex; the cross-provider path uses a transcript. |
 
 ## Switch
@@ -33,26 +40,61 @@ Two actions inside any chat:
 - From the composer's provider picker, choosing a different provider in an
   existing chat offers **Switch to <Provider>**. A chat with no turns still just
   changes the draft's provider.
-- Del creates a transcript fork for the target provider in the **same working
+- Del creates a fresh persistent native session for the target provider in the **same working
   directory and worktree**, using that provider's default account, model and
   effort (never copying an incompatible model, as with `spawn_session`).
 - **The tab and sidebar row stay the same.** On screen the conversation is one
   thread made of segments. Each segment is backed by its own provider session.
-- A thin divider marks each switch and says what was carried over, for example
-  "Switched to Codex · GPT-6.1 · got the last 40 turns". The divider expands to
-  show what was **not** carried over: reasoning, pending approvals, tool state,
-  and older turns past the limit.
-- Every assistant message shows a small provider glyph so the source of each
-  answer is always clear.
-- The previous provider session goes **dormant**. It is not closed, and its
-  history stays intact.
-- **Switching back** to a provider used earlier in the thread resumes its native
-  session and adds only a quoted summary of the turns since it was last active.
-  No full replay.
+- Preserve every existing displayed message, reasoning disclosure, tool detail,
+  attachment and reply timestamp. New replies append below the switch. Context
+  transfer limits must never remove or rewrite the displayed conversation.
+- Mark the boundary with a compact centered exchange row matching peer exchanges:
+  source and target provider logos/names and a switch label, such as
+  "Switched from Claude to Codex". No large card, transcript dump, or new
+  per-message glyph requirement. Keep transfer details available on inspection.
+- Provider/account/model/effort/usage controls describe the new active provider.
+- Retire the previous execution while preserving its native history and Del's
+  recorded segment. Never delete the old chat records as switch cleanup.
+- **Switching back also creates a fresh native session**, receiving context from
+  the whole Del conversation across all prior provider segments. Do not resume
+  an old provider session or require incremental catch-up semantics.
 - **Only one provider is active per thread.** A switch while a turn is running
   asks to stop or wait. Queued follow-ups move to the new active segment.
-- Peers, goals and browser ownership move to the active segment. To other
-  agents, the chat's peer identity stays stable.
+- Peers and browser ownership retain the stable Del chat identity and route to
+  the active execution. Handle native goals explicitly before switching; do not
+  pretend a provider-specific goal can migrate to an unsupported provider.
+
+## Context attachment and historical reads
+
+- Attach context through the target provider's supported history or session-context
+  mechanism during setup. Do not prepend a transcript to the user's next prompt,
+  fabricate a user message, or start an inference turn merely to switch providers.
+- Codex's pinned protocol supports `thread/inject_items`, which appends model-visible
+  history without starting a turn. Claude supports appended session context through
+  `--append-system-prompt-file`. OpenCode 2.x exposes durable session instruction
+  entries; current API documentation also describes synthetic input with
+  `resume: false`. Verify the installed version and acknowledgement/restart behavior
+  before choosing the precise OpenCode mechanism. Do not use V1 API assumptions.
+- Keep transcript data explicitly attributed and quoted as reference material,
+  even when carried in a session instruction channel. Preserve normal provider
+  instructions; never elevate historical tool output into new instructions.
+- Attach a snapshot of transferable conversation content within the target's
+  supported budget. Full displayed history remains in Del independently. Retain
+  whole records, source identities and attachment references; disclose omitted
+  coverage instead of silently slicing serialized text.
+- Include the stable Del chat ID and an ordered manifest of the original session
+  and every switch segment, with provider/session IDs and readable history references.
+  Extend the existing authenticated context-read tools to page through saved public
+  history across those segments, including when their original processes are stopped
+  or Del has restarted. A bare dead native-session ID is not a usable reference.
+- The agent can retrieve earlier public context on demand without waking the old
+  agent, changing user selection, or marking another chat read. Keep existing project
+  scope checks. Displayed reasoning remains in the UI; historical reads continue to
+  exclude private reasoning according to the peer contract.
+- Save context attachment state before activation. Restore it without duplication
+  after restart; an uncertain attachment acknowledgement needs reconciliation.
+  If the installed provider cannot attach the context, preserve the source session
+  and report the failure instead of silently reverting to prompt concatenation.
 
 ## Ask
 
@@ -90,8 +132,8 @@ Two actions inside any chat:
 
 ## Open questions
 
-- Default transcript limit per provider, and whether to summarize instead of
-  truncating very long threads.
+- Exact initial-context budgets and provider version requirements. Earlier public
+  history remains retrievable through the segment manifest and context-read tools.
 - Whether Ask answers count as unread in the sidebar when the user has left the
   chat.
 - How terminal (PTY) sessions take part. A Switch could open a chat segment
@@ -99,10 +141,35 @@ Two actions inside any chat:
 
 ## Verification
 
-- Claude → Codex → Claude in one tab: Codex gets a bounded quoted transcript;
-  switching back resumes Claude's native session plus a delta only.
+The native acceptance test is `crates/app/tests/provider_switch.rs`. It runs all
+six directed transitions using installed providers and the production MCP bridge,
+closes and resumes each target before its first user turn, then makes the target
+retrieve the original fact through `read_session`. It verifies that switching
+itself starts no inference. Run explicitly with:
+
+```sh
+cargo test --locked -p del-app --test provider_switch -- --ignored --nocapture
+```
+
+Manager regression tests also cover 24 repeated switches, 60,000-event history,
+restart before first target input, account transfer after a provider switch,
+queued input during setup, renaming during setup, busy/approval rejection,
+context failure, and rollback after a disk commit failure. Journal tests cover
+whole-record Unicode bounds, private-reasoning exclusion and partial-write recovery.
+Native UI checks cover the compact rows, preserved work disclosures, provider
+controls, light/dark appearance, and restart.
+
+- All six directed transitions among Codex, Claude and OpenCode, including
+  Claude → Codex → OpenCode → Claude: each switch gets a distinct native session,
+  while one Del chat retains its complete displayed history and tool state.
+- Context attachment starts no model turn and leaves the next user input unchanged.
+- Retrieve an older public fact omitted from initial context through the original
+  session/segment references after multiple switches and after restart.
+- Reasoning disclosures, tool details, attachment references and timestamps from
+  earlier providers remain visible; the active controls show the target provider.
 - Switching during a running turn asks the user and never drops queued messages.
 - The Ask answer is attributed, read-only, and never auto-sent to the active
   provider.
 - Peer requests addressed to the chat reach the active segment after a switch.
-- Restart preserves segments, dividers and the active provider.
+- Restart preserves segments, switch rows, attached context and the active provider,
+  including a switch made before sending any message to the target.

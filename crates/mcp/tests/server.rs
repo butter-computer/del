@@ -851,6 +851,46 @@ async fn chat_browser_credentials_are_bound_to_their_chat() {
 }
 
 #[tokio::test]
+async fn provider_execution_credentials_keep_chat_scope_and_revoke_independently() {
+    let e = env().await;
+    let chat = SessionId::new("stable-chat");
+    let old = SessionId::new("old-native");
+    let next = SessionId::new("new-native");
+    let a = e.server.register_chat_client(&old);
+    e.server.bind_chat(&old, &chat);
+    let b = e.server.register_chat_client(&next);
+    e.server.bind_chat(&next, &chat);
+    let allowed = call(
+        &b,
+        "browser",
+        json!({"action":"snapshot", "session_id":chat}),
+    )
+    .await;
+    assert_eq!(
+        allowed["result"]["content"][0]["text"],
+        "This host has no browser"
+    );
+    let denied = call(
+        &b,
+        "browser",
+        json!({"action":"snapshot", "session_id":"unrelated-chat"}),
+    )
+    .await;
+    assert!(
+        denied["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("own session")
+    );
+    e.server.revoke_session(&old);
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(post(&a.url, auth(&a), body.clone()).await.0, 401);
+    assert_eq!(post(&b.url, auth(&b), body.clone()).await.0, 200);
+    e.server.revoke_session(&next);
+    assert_eq!(post(&b.url, auth(&b), body).await.0, 401);
+}
+
+#[tokio::test]
 async fn chat_credentials_expose_project_peers_and_own_goal() {
     let e = env().await;
     let chat = e.server.register_chat_client(&SessionId::new("chat"));

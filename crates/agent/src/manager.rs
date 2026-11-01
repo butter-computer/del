@@ -13,6 +13,8 @@ use tokio::task::JoinHandle;
 
 mod forks;
 mod peers;
+mod routed;
+mod switching;
 pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
 pub use peers::{ContextChunk, ContextCursor, SessionContext};
 
@@ -37,36 +39,9 @@ pub enum ManagerEvent {
     },
 }
 
-/// Most events kept per session for late subscribers.
-const HISTORY_LIMIT: usize = 50_000;
-
-/// Drop the oldest tenth of an over-long history, keeping `SessionStarted`
-/// and the first user message so the history still opens the conversation.
-fn trim_history(history: &mut Vec<AgentEvent>) {
-    if history.len() < HISTORY_LIMIT {
-        return;
-    }
-    let start = usize::from(matches!(
-        history.first(),
-        Some(AgentEvent::SessionStarted { .. })
-    ));
-    let end = (start + HISTORY_LIMIT / 10).min(history.len());
-    match history[start..end]
-        .iter()
-        .position(|e| matches!(e, AgentEvent::UserMessage { .. }))
-    {
-        Some(first_user) => {
-            let pinned = start + first_user;
-            history.drain(pinned + 1..end);
-            history.drain(start..pinned);
-        }
-        None => {
-            history.drain(start..end);
-        }
-    }
-}
-
 struct Live {
+    generation: uuid::Uuid,
+    journal: Option<crate::conversation::Journal>,
     handle: SessionHandle,
     config: SessionConfig,
     status: SessionStatus,
@@ -263,8 +238,7 @@ impl SessionManager {
             {
                 continue;
             }
-            let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref())
-            else {
+            let Ok(backend) = self.session_backend(&record.id) else {
                 continue;
             };
             let Ok(Ok(Some(title))) = tokio::time::timeout(
@@ -324,7 +298,7 @@ impl SessionManager {
         if !crate::titles::due(record.title_turns, turns) {
             return Ok(false);
         }
-        let backend = self.account_backend(record.provider, record.account_id.as_deref())?;
+        let backend = self.session_backend(id)?;
         let _ = self.shared.all_tx.send(ManagerEvent::TitleLoading {
             session: id.clone(),
             loading: true,
@@ -438,7 +412,16 @@ impl SessionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
-        self.account_backend(record.provider, record.account_id.as_deref())
+        let inner = self.account_backend(record.provider, record.account_id.as_deref())?;
+        if record.segments.is_empty() {
+            return Ok(inner);
+        }
+        Ok(Arc::new(routed::RoutedBackend {
+            inner,
+            chat: id.clone(),
+            native: record.native_id().clone(),
+            context: record.segments.last().and_then(|s| s.context.clone()),
+        }))
     }
 
     pub async fn account_models(
@@ -486,10 +469,36 @@ impl SessionManager {
     /// one here, first in the session's history; any the backend emits itself
     /// is dropped. Returns the handle without its restored snapshot, which now
     /// lives only in the session history.
-    fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> SessionHandle {
+    fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> Result<SessionHandle> {
         let id = handle.id.clone();
+        if let Ok(record) = self.session_record(&id)
+            && let Some(tools) = self.shared.browser_tools.lock().unwrap().as_ref()
+        {
+            tools.credentials.bind_chat(record.native_id(), &id);
+        }
+        let has_journal = self
+            .shared
+            .live
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|l| l.journal.is_some());
+        let mut journal = if has_journal {
+            None
+        } else {
+            self.shared
+                .index
+                .lock()
+                .unwrap()
+                .get(&id)
+                .and_then(|r| r.segments.last())
+                .and_then(|s| s.journal.as_ref())
+                .map(|p| crate::conversation::Journal::open(p))
+                .transpose()?
+        };
         let mut rx = handle.subscribe();
         let mut restored = handle.take_history().to_vec();
+        restored.retain(|event| !matches!(event, AgentEvent::SessionStarted { .. }));
         let messages = self.peer_messages(&id);
         restored.retain(|event| !matches!(event, AgentEvent::UserMessage { text } if text == peers::CONTINUE_WORK));
         for event in &mut restored {
@@ -525,6 +534,7 @@ impl SessionManager {
         };
         let (fanout, history) = if let Some(old) = old {
             old.pump.abort();
+            journal = old.journal.or(journal);
             (old.fanout, old.history)
         } else {
             let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -538,6 +548,12 @@ impl SessionManager {
         };
         drop(restored);
         let shared = self.shared.clone();
+        let generation = uuid::Uuid::new_v4();
+        let native = self
+            .session_record(&id)
+            .ok()
+            .filter(|r| !r.segments.is_empty())
+            .map(|r| r.native_id().clone());
         let pump_id = id.clone();
         let pump = tokio::spawn(async move {
             // Set after events were lost: the turn state is unknown until the
@@ -546,7 +562,10 @@ impl SessionManager {
             loop {
                 let (event, status) = match rx.recv().await {
                     Ok(AgentEvent::SessionStarted { .. }) => continue,
-                    Ok(event) => {
+                    Ok(mut event) => {
+                        if let Some(native) = &native {
+                            switching::namespace_event(&mut event, native);
+                        }
                         let mut status = None;
                         if resyncing {
                             match event {
@@ -585,7 +604,26 @@ impl SessionManager {
                     let Some(l) = live.get_mut(&pump_id) else {
                         continue;
                     };
-                    trim_history(&mut l.history);
+                    if l.generation != generation {
+                        break;
+                    }
+                    if let Some(journal) = l.journal.as_mut()
+                        && let Err(error) = journal.append(&event)
+                    {
+                        let failure = AgentEvent::Error {
+                            message: format!("Could not save conversation: {error}"),
+                            recoverable: false,
+                        };
+                        l.history.push(failure.clone());
+                        let _ = l.fanout.send(failure.clone());
+                        l.status = SessionStatus::Error;
+                        shared.publish_status(&pump_id, SessionStatus::Error);
+                        let _ = shared.all_tx.send(ManagerEvent::Event {
+                            session: pump_id.clone(),
+                            event: failure,
+                        });
+                        break;
+                    }
                     match &event {
                         AgentEvent::ApprovalRequested { id, .. } => {
                             l.pending_approvals.insert(id.clone());
@@ -626,6 +664,8 @@ impl SessionManager {
         live.insert(
             id,
             Live {
+                generation,
+                journal,
                 handle: handle.clone(),
                 config,
                 status: SessionStatus::Idle,
@@ -635,7 +675,7 @@ impl SessionManager {
                 pending_approvals: HashSet::new(),
             },
         );
-        handle
+        Ok(handle)
     }
 
     /// Keep one unused session ready, without publishing a chat or sending a prompt.
@@ -733,6 +773,7 @@ impl SessionManager {
         );
         let now = now_ms();
         let recorded = self.shared.index.lock().unwrap().upsert(SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: handle.id.clone(),
             provider: config.provider,
@@ -759,7 +800,7 @@ impl SessionManager {
             let _ = backend.close(&handle.id).await;
             return Err(error);
         }
-        Ok(self.attach(handle, applied_config))
+        self.attach(handle, applied_config)
     }
 
     /// Reattach a session from the index (or return the live one).
@@ -796,10 +837,29 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
         let handle = self
-            .account_backend(record.provider, record.account_id.as_deref())?
+            .session_backend(id)?
             .resume(record.config(), id)
             .await?;
-        let handle = self.attach(handle, record.config());
+        let handle = if let Some(path) = record.segments.last().and_then(|s| s.journal.as_ref()) {
+            let mut history = crate::conversation::Journal::restore(path)?;
+            if let Some(event) = handle
+                .history()
+                .iter()
+                .rev()
+                .find(|e| matches!(e, AgentEvent::GoalUpdated { .. }))
+            {
+                crate::conversation::Journal::open(path)?.append(event)?;
+                history.push(event.clone());
+            }
+            handle.with_history(history)
+        } else if let Some(path) = record.segments.last().and_then(|s| s.history.as_ref()) {
+            let mut history = crate::conversation::load_history(path)?;
+            history.extend_from_slice(handle.history());
+            handle.with_history(history)
+        } else {
+            handle
+        };
+        let handle = self.attach(handle, record.config())?;
         // `attach` starts live sessions Idle; clear a persisted Error too.
         if record.status != SessionStatus::Idle {
             let _live = self.shared.live.lock().unwrap();
@@ -809,6 +869,15 @@ impl SessionManager {
     }
 
     pub async fn control_goal(&self, id: &SessionId, action: crate::GoalAction) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _control = lock.lock().await;
         self.live_provider(id)?;
         self.session_backend(id)?.control_goal(id, action).await
     }
@@ -818,6 +887,19 @@ impl SessionManager {
         id: &SessionId,
         action: Option<crate::GoalAction>,
     ) -> Result<Option<crate::Goal>> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _control = if action.is_some() {
+            Some(lock.lock().await)
+        } else {
+            None
+        };
         self.session_backend(id)?.agent_goal(id, action).await
     }
 
@@ -941,7 +1023,7 @@ impl SessionManager {
                 .await
             {
                 Ok(handle) => {
-                    self.attach(handle, config.clone());
+                    self.attach(handle, config.clone())?;
                 }
                 Err(error) => {
                     // The old process may already be closed. Keep the history,
@@ -996,7 +1078,19 @@ impl SessionManager {
                 .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
             let position = session.history.len();
             if let Some(event) = &title_input {
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.append(event)?;
+                }
                 session.history.push(event.clone());
+                if !input.attachments.is_empty() {
+                    let event = AgentEvent::UserAttachments {
+                        attachments: input.attachments.clone(),
+                    };
+                    if let Some(journal) = session.journal.as_mut() {
+                        journal.append(&event)?;
+                    }
+                    session.history.push(event);
+                }
             }
             position
         };
@@ -1017,6 +1111,15 @@ impl SessionManager {
                     .is_some_and(|event| session.history.get(title_position) == Some(event))
             {
                 session.history.remove(title_position);
+                if matches!(
+                    session.history.get(title_position),
+                    Some(AgentEvent::UserAttachments { .. })
+                ) {
+                    session.history.remove(title_position);
+                }
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.replace(&session.history)?;
+                }
             }
             // Only undo our own Running; events may already have moved on.
             self.shared.transition(id, |current| {
@@ -1093,10 +1196,17 @@ impl SessionManager {
             return Ok(());
         }
         let old = self.session_backend(id)?;
-        let target = self.account_backend(record.provider, account.as_deref())?;
+        let target: Arc<dyn AgentBackend> = Arc::new(routed::RoutedBackend {
+            inner: self.account_backend(record.provider, account.as_deref())?,
+            chat: id.clone(),
+            native: record.native_id().clone(),
+            context: record.segments.last().and_then(|s| s.context.clone()),
+        });
         old.close(id).await?;
         let result = async {
-            let path = transfer(record.clone()).await?;
+            let mut native_record = record.clone();
+            native_record.id = record.native_id().clone();
+            let path = transfer(native_record).await?;
             let handle = target
                 .resume_transferred(record.config(), id, path.as_deref())
                 .await?;
@@ -1107,24 +1217,29 @@ impl SessionManager {
                         .into(),
                 ));
             }
-            self.shared
-                .index
-                .lock()
-                .unwrap()
-                .update(id, |r| r.account_id = account)?;
+            let mut index = self.shared.index.lock().unwrap();
+            let mut updated = index
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+            updated.account_id = account.clone();
+            if let Some(segment) = updated.segments.last_mut() {
+                segment.account_id = account;
+            }
+            index.replace_durable(updated)?;
             Ok(handle)
         }
         .await;
         match result {
             Ok(handle) => {
-                self.attach(handle, record.config());
+                self.attach(handle, record.config())?;
                 Ok(())
             }
             Err(error) => {
                 let _ = target.close(id).await;
                 match old.resume(record.config(), id).await {
                     Ok(handle) => {
-                        self.attach(handle, record.config());
+                        self.attach(handle, record.config())?;
                     }
                     Err(restore) => {
                         return Err(AgentError::Backend(format!(
@@ -1179,6 +1294,15 @@ impl SessionManager {
     }
 
     pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _steering = lock.lock().await;
         if self.pending_fork_context(id).is_some() {
             return Err(AgentError::Busy(
                 "updated fork context is waiting; queue a normal message instead of steering"
@@ -1203,9 +1327,21 @@ impl SessionManager {
             }
         }
         let text = input.text.clone();
+        let attachments = input.attachments.clone();
         backend.steer_input(id, input).await?;
         if let Some(session) = self.shared.live.lock().unwrap().get_mut(id) {
-            session.history.push(AgentEvent::UserMessage { text });
+            let event = AgentEvent::UserMessage { text };
+            if let Some(journal) = session.journal.as_mut() {
+                journal.append(&event)?;
+            }
+            session.history.push(event);
+            if !attachments.is_empty() {
+                let event = AgentEvent::UserAttachments { attachments };
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.append(&event)?;
+                }
+                session.history.push(event);
+            }
         }
         let _ = self.shared.all_tx.send(ManagerEvent::PromptSent {
             session: id.clone(),
@@ -2051,33 +2187,6 @@ mod tests {
         wait_status(&mut all, &h.id, SessionStatus::Idle).await;
         m.shutdown().await;
         m.shutdown().await;
-    }
-
-    #[test]
-    fn trimming_keeps_session_start_and_first_prompt() {
-        let delta = |i: usize| AgentEvent::AssistantTextDelta {
-            turn_id: "t".into(),
-            text: i.to_string(),
-        };
-        let mut history = vec![
-            AgentEvent::SessionStarted {
-                session_id: SessionId::new("s"),
-            },
-            delta(0),
-            AgentEvent::UserMessage {
-                text: "first".into(),
-            },
-        ];
-        history.extend((1..HISTORY_LIMIT).map(delta));
-        for _ in 0..3 {
-            let len = history.len();
-            trim_history(&mut history);
-            assert!(history.len() < len);
-            assert!(matches!(history[0], AgentEvent::SessionStarted { .. }));
-            assert!(matches!(&history[1], AgentEvent::UserMessage { text } if text == "first"));
-            history.extend((0..HISTORY_LIMIT).map(delta));
-        }
-        assert_eq!(history.last(), Some(&delta(HISTORY_LIMIT - 1)));
     }
 
     #[tokio::test]

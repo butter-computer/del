@@ -306,10 +306,18 @@ impl del_agent::backend::BrowserCredentials for ChatBrowserCredentials {
 
     fn revoke(&self, session: &SessionId) {
         let _ = self.with_server(|service, server| {
+            let chat = server.chat_identity(session);
             server.revoke_session(session);
-            if let Some(cancel) = service.host.revocations.lock().unwrap().remove(session) {
+            if let Some(cancel) = service.host.revocations.lock().unwrap().remove(&chat) {
                 cancel.send_replace(true);
             }
+        });
+    }
+
+    fn bind_chat(&self, native: &SessionId, chat: &SessionId) {
+        let _ = self.with_server(|service, server| {
+            server.bind_chat(native, chat);
+            service.track(chat);
         });
     }
 
@@ -357,6 +365,7 @@ impl BridgeHandle {
                             del_agent::AgentError::Backend("Question UI closed".into())
                         })?;
                         let host = &service.host;
+                        let caller = host.manager.resolve_peer(&caller);
                         let request_id = host.next_question.fetch_add(1, Ordering::Relaxed);
                         let (reply, rx) = oneshot::channel();
                         host.events
@@ -799,6 +808,7 @@ impl McpHost for AppHost {
         limit: usize,
     ) -> HostResult<del_agent::manager::SessionContext> {
         self.authorize_peer(caller, target)?;
+        let requested = target.clone();
         let target = self.manager.resolve_peer(target);
         let terminal = self.terminals.lock().unwrap().get(&target).cloned();
         if let Some(snapshot) = terminal {
@@ -818,7 +828,7 @@ impl McpHost for AppHost {
             return Ok(page);
         }
         self.manager
-            .read_peer_context(caller, &target, cursor, limit)
+            .read_peer_context(caller, &requested, cursor, limit)
             .await
             .map_err(|e| failed(e.to_string()))
     }

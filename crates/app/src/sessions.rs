@@ -362,6 +362,7 @@ mod tests {
 
     fn record(id: &str, title: Option<&str>, updated_ms: u64) -> SessionRecord {
         SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: SessionId::new(id),
             provider: Provider::Claude,

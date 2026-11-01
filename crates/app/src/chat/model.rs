@@ -72,6 +72,10 @@ pub struct ApprovalBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
+    ProviderSwitch {
+        from: del_agent::Provider,
+        to: del_agent::Provider,
+    },
     Peer(del_agent::peers::PeerMessage),
     User {
         text: String,
@@ -280,6 +284,37 @@ impl ChatModel {
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::ProviderSwitched { from, to, .. } => {
+                self.seal();
+                self.goal = None;
+                self.goal_updated_at = None;
+                self.current_turn = None;
+                self.phase = Phase::Idle;
+                self.last_status = None;
+                Some(self.push(Block::ProviderSwitch {
+                    from: *from,
+                    to: *to,
+                }))
+            }
+            AgentEvent::UserAttachments { attachments } => {
+                let (index, block) = self
+                    .blocks
+                    .iter_mut()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, b)| matches!(b, Block::User { .. }))?;
+                if let Block::User {
+                    attachments: summary,
+                    ..
+                } = block
+                {
+                    *summary = AttachmentSummary::from_input(&del_agent::UserInput {
+                        attachments: attachments.clone(),
+                        ..Default::default()
+                    });
+                }
+                Some(Change::Updated(index))
+            }
             AgentEvent::PeerMessage { message } => {
                 if let Some(ix) = self
                     .blocks

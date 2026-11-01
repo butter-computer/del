@@ -35,8 +35,9 @@ Every spec below serves one loop:
 
 ## Build order
 
-1. **Provider switch.** Cross-provider transcript forks already exist for side
-   chats, so this is mostly wiring.
+1. **Provider switch.** Reuse the side-chat context foundation, adding stable main-chat
+   identity, durable provider segments, separate context attachment and historical
+   reads across switches. Every switch starts a fresh native session.
 2. **Agent state.** Attention is only as good as this signal. A wrong "needs
    you" is worse than none.
 3. **Attention.** Needs-you queue, status lines, recaps.

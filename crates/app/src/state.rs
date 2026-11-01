@@ -498,7 +498,7 @@ impl AppState {
                 self.switching_accounts.remove(&id);
                 self.set_records(self.manager.list_sessions());
                 if let Err(error) = result {
-                    self.error = Some(format!("Could not switch account: {error}"));
+                    self.error = Some(format!("Could not switch provider or account: {error}"));
                 }
                 self.load_models(true, cx);
             }
@@ -2246,15 +2246,14 @@ impl AppState {
         if self.effective().0 == provider && self.selected_account() == account {
             return;
         }
-        if let Selection::Session(id) = self.selection.clone()
-            && self.effective().0 == provider
-        {
+        if let Selection::Session(id) = self.selection.clone() {
             if matches!(
                 self.manager.status(&id),
                 Some(SessionStatus::Running | SessionStatus::WaitingApproval)
             ) {
-                self.error =
-                    Some("Wait for the response to finish before switching accounts.".into());
+                self.error = Some(
+                    "Finish or stop the response before switching providers or accounts.".into(),
+                );
                 cx.notify();
                 return;
             }
@@ -2263,13 +2262,18 @@ impl AppState {
                 .and_then(|id| self.accounts.iter().find(|a| &a.id == id))
                 .cloned();
             self.switching_accounts.insert(id.clone());
+            let same_provider = self.effective().0 == provider;
             let (manager, tx) = (self.manager.clone(), self.tx.clone());
             self.rt.spawn(async move {
-                let result = manager
-                    .switch_account(&id, account, |record| {
-                        crate::accounts::transfer_conversation(record, target)
-                    })
-                    .await;
+                let result = if same_provider {
+                    manager
+                        .switch_account(&id, account, |record| {
+                            crate::accounts::transfer_conversation(record, target)
+                        })
+                        .await
+                } else {
+                    manager.switch_provider(&id, provider, account).await
+                };
                 let _ = tx.send(Msg::AccountSwitched(id, result.map_err(|e| e.to_string())));
             });
             cx.notify();
@@ -4513,6 +4517,7 @@ pub(crate) mod tests {
             let chat = SessionId::new("chat");
             s.invalidate_rows();
             s.records.push(SessionRecord {
+                segments: Vec::new(),
                 fork: None,
                 id: chat.clone(),
                 provider: Provider::Codex,
