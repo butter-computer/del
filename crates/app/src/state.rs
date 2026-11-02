@@ -162,6 +162,8 @@ pub struct AppState {
     pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
     pub sidebar_scroll: ScrollHandle,
+    pub space_switcher_open: bool,
+    pub expanded_sidebar_projects: std::collections::HashSet<(String, PathBuf)>,
     pub providers: Vec<ProviderStatus>,
     /// Provider whose sign-in is running in the user's terminal.
     pub signin: Option<Provider>,
@@ -399,6 +401,8 @@ impl AppState {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            space_switcher_open: false,
+            expanded_sidebar_projects: Default::default(),
             providers: Provider::ALL
                 .iter()
                 .map(|&provider| ProviderStatus {
@@ -3443,6 +3447,8 @@ pub(crate) mod tests {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            space_switcher_open: false,
+            expanded_sidebar_projects: Default::default(),
             providers: vec![],
             signin: None,
             checking: Default::default(),
@@ -4508,6 +4514,46 @@ pub(crate) mod tests {
             assert!(!s.project_paths().contains(&path));
             s.show_archived = false;
             assert!(s.project_paths().contains(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn project_show_more_limits_navigation_but_keeps_drafts_and_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            s.tabs.clear();
+            s.drafts.clear();
+            let path = std::path::PathBuf::from("/many-sessions");
+            s.new_project_session(path.clone(), cx);
+            let draft = s.tabs.last().unwrap().clone();
+            for index in 0..9 {
+                s.terminal_rows.push(crate::sessions::TerminalRow {
+                    id: del_agent::SessionId::new(format!("many-{index}")),
+                    title: format!("Shell {index}"),
+                    cwd: path.clone(),
+                    provider: None,
+                    account_id: None,
+                    active: false,
+                    summary: String::new(),
+                    pinned: false,
+                });
+            }
+            let visible = crate::sidebar::navigation_tabs(s);
+            assert_eq!(visible.len(), 6);
+            assert!(visible.contains(&draft));
+            let key = (s.spaces.active.clone(), path.clone());
+            s.expanded_sidebar_projects.insert(key.clone());
+            let expanded = crate::sidebar::navigation_tabs(s);
+            assert_eq!(expanded.len(), 10);
+            let selected = expanded.last().unwrap().clone();
+            s.select_tab(&selected, cx);
+            s.expanded_sidebar_projects.remove(&key);
+            let compact = crate::sidebar::navigation_tabs(s);
+            assert_eq!(compact.len(), 7);
+            assert!(compact.contains(&selected));
+            assert!(compact.contains(&draft));
         });
     }
 

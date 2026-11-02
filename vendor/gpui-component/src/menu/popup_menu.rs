@@ -1376,7 +1376,9 @@ impl PopupMenu {
                         .items_center()
                         .gap_x_1()
                         .children(Self::render_icon(
-                            has_left_icon,
+                            // A custom-highlight group owns its entire row layout,
+                            // including icons; checked sibling items must not indent it.
+                            has_left_icon && *highlight,
                             is_left_check,
                             icon.clone(),
                             window,

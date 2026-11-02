@@ -3365,16 +3365,24 @@ impl RightPanel {
             .into_any_element()
     }
 
-    fn terminal_body(&self, cx: &App) -> AnyElement {
+    fn terminal_body(&self, cx: &mut Context<Self>) -> AnyElement {
         if let Some(terminal) = self
             .terminals
             .get(&self.terminal_tabs[self.terminal_active])
         {
-            return div()
-                .size_full()
-                .min_h_0()
-                .child(terminal.read(cx).terminal_view())
-                .into_any_element();
+            let view = terminal.read(cx).terminal_view();
+            let theme = del_terminal::TerminalTheme::new(
+                crate::appearance::rgb(0xf5f5f5),
+                crate::appearance::page_surface(),
+            );
+            view.update(cx, |view, cx| {
+                view.set_appearance(
+                    theme,
+                    zpx(del_core::ShellMetrics::default().page_radius),
+                    cx,
+                )
+            });
+            return div().size_full().min_h_0().child(view).into_any_element();
         }
         div()
             .p_3()
@@ -4364,7 +4372,11 @@ mod tests {
                     .child(self.panel.clone())
             }
         }
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            // This checks settled geometry, independently of tab entrance timing.
+            cx.set_reduce_motion(true);
+        });
         let dir = tempfile::tempdir().unwrap();
         let mut panel = None;
         let (fixture, cx) = cx.add_window_view(|window, cx| {

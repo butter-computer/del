@@ -325,6 +325,7 @@ struct Shared {
     /// Bumped whenever grid content may have changed (output or reflow).
     output_generation: AtomicU64,
     size: Mutex<TerminalSize>,
+    theme: Mutex<colors::TerminalTheme>,
 }
 
 impl Shared {
@@ -365,9 +366,9 @@ impl EventListener for TerminalEventProxy {
                 None
             }
             Event::ColorRequest(index, format) => {
-                let _ = s
-                    .input
-                    .send(Some(format(colors::palette(index)).into_bytes()));
+                let _ = s.input.send(Some(
+                    format(s.theme.lock().unwrap().palette(index)).into_bytes(),
+                ));
                 None
             }
             Event::TextAreaSizeRequest(format) => {
@@ -448,6 +449,7 @@ impl TerminalSession {
             closing: AtomicBool::new(false),
             output_generation: AtomicU64::new(0),
             size: Mutex::new(spec.size),
+            theme: Mutex::new(Default::default()),
         });
         let proxy = TerminalEventProxy(shared.clone());
         let term = Arc::new(FairMutex::new(Term::new(
@@ -577,6 +579,13 @@ impl TerminalSession {
             events: Some(rx),
             worker: Arc::new(Mutex::new(Some(worker))),
         })
+    }
+
+    pub(crate) fn theme(&self) -> colors::TerminalTheme {
+        *self.shared.theme.lock().unwrap()
+    }
+    pub(crate) fn set_theme(&self, theme: colors::TerminalTheme) {
+        *self.shared.theme.lock().unwrap() = theme;
     }
 
     pub fn take_events(&mut self) -> Option<UnboundedReceiver<TerminalEvent>> {

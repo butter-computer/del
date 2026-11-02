@@ -777,6 +777,10 @@ with one **New tab** chooser and **+**, with no Files, Changes, Terminal, or Bro
 preopened. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.
 
+Project lists initially show five sessions, plus the active session when it sits
+farther down. Drafts stay visible; **Show more** reveals the rest and **Show less**
+restores the compact list. Space dots above the sidebar footer switch between Spaces.
+
 Command-T opens a new right-sidebar tab and reveals the sidebar if hidden,
 regardless of where you last clicked. Tool shortcuts also target the right sidebar.
 Command-W closes the active tab in the last-used zone: the top-level session from
@@ -1018,7 +1022,8 @@ Onyx offers softer monochrome black; the other near-black options add subtle
 undertones. Each has coordinated light and dark palettes for the
 workspace, chrome, composer, menus, text, and controls. Changes apply immediately
 and persist across launches. Provider logos and semantic status colors retain
-their meaning; terminals retain their dark background and ANSI colors.
+their meaning. Right-sidebar terminals follow the theme's default text, background,
+and cursor colors while preserving ANSI colors and program overrides.
 **Background animation** is a separate saved dropdown: Off, Life, Liquid, Contours,
 Drift, Fluted Glass, Curtains, Rain, Clouds, Falling Leaves, Pudding, Window Curtains,
 or Seafloor. With nothing saved yet it starts Off on Vercel and on Life elsewhere; the

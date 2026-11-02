@@ -21,6 +21,54 @@ pub const CURSOR: Rgb = Rgb {
     b: 0xe6,
 };
 
+/// Host colors for the terminal's default ink, surface and cursor. Explicit
+/// ANSI colors and application OSC overrides remain owned by the program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalTheme {
+    pub(crate) foreground: Rgb,
+    pub(crate) background: Rgb,
+    pub(crate) cursor: Rgb,
+}
+impl Default for TerminalTheme {
+    fn default() -> Self {
+        Self {
+            foreground: DEFAULT_FG,
+            background: DEFAULT_BG,
+            cursor: CURSOR,
+        }
+    }
+}
+impl TerminalTheme {
+    pub fn new(foreground: gpui::Rgba, background: gpui::Rgba) -> Self {
+        let rgb = |c: gpui::Rgba| Rgb {
+            r: (c.r.clamp(0., 1.) * 255.).round() as u8,
+            g: (c.g.clamp(0., 1.) * 255.).round() as u8,
+            b: (c.b.clamp(0., 1.) * 255.).round() as u8,
+        };
+        Self {
+            foreground: rgb(foreground),
+            background: rgb(background),
+            cursor: rgb(foreground),
+        }
+    }
+    pub(crate) fn palette(self, index: usize) -> Rgb {
+        match index {
+            256 | 267 => self.foreground,
+            257 => self.background,
+            258 => self.cursor,
+            268 => dim(self.foreground),
+            _ => palette(index),
+        }
+    }
+    pub(crate) fn resolve(self, color: Color, overrides: &Colors) -> Rgb {
+        match color {
+            Color::Spec(rgb) => rgb,
+            Color::Indexed(i) => overrides[i as usize].unwrap_or_else(|| self.palette(i as usize)),
+            Color::Named(n) => overrides[n as usize].unwrap_or_else(|| self.palette(n as usize)),
+        }
+    }
+}
+
 const ANSI: [(u8, u8, u8); 16] = [
     (0x1c, 0x1c, 0x1c),
     (0xe0, 0x6c, 0x75),
@@ -81,15 +129,9 @@ fn dim(c: Rgb) -> Rgb {
 }
 
 /// Resolve a cell colour, honouring runtime overrides (OSC 4/10/11).
+#[cfg(test)]
 pub fn resolve(color: Color, overrides: &Colors) -> Rgb {
-    match color {
-        Color::Spec(rgb) => rgb,
-        Color::Indexed(i) => overrides[i as usize].unwrap_or_else(|| palette(i as usize)),
-        Color::Named(n) => {
-            let i = n as usize;
-            overrides[i].unwrap_or_else(|| palette(i))
-        }
-    }
+    TerminalTheme::default().resolve(color, overrides)
 }
 
 /// Bright variant of an ansi colour, used for bold text.
@@ -115,6 +157,39 @@ pub fn bold_variant(color: Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_theme_changes_defaults_and_queries_without_recoloring_program_output() {
+        for (foreground, background) in [(0xdcebef, 0x102528), (0x182528, 0xf4fafb)] {
+            let theme = TerminalTheme::new(gpui::rgb(foreground), gpui::rgb(background));
+            let mut overrides = Colors::default();
+            assert_eq!(
+                theme.resolve(Color::Named(NamedColor::Foreground), &overrides),
+                theme.foreground
+            );
+            assert_eq!(
+                theme.resolve(Color::Named(NamedColor::Background), &overrides),
+                theme.background
+            );
+            assert_eq!(
+                theme.palette(NamedColor::Background as usize),
+                theme.background
+            );
+            assert_eq!(theme.palette(NamedColor::Cursor as usize), theme.foreground);
+            assert_eq!(theme.resolve(Color::Indexed(1), &overrides), palette(1));
+            let custom = Rgb {
+                r: 200,
+                g: 50,
+                b: 90,
+            };
+            assert_eq!(theme.resolve(Color::Spec(custom), &overrides), custom);
+            overrides[NamedColor::Background] = Some(custom);
+            assert_eq!(
+                theme.resolve(Color::Named(NamedColor::Background), &overrides),
+                custom
+            );
+        }
+    }
 
     #[test]
     fn cube_and_ramp() {

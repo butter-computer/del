@@ -143,6 +143,8 @@ This records the final decisions, including corrections to earlier experiments.
   Change their layout through render state, never paint-time group-hover display
   changes: GPUI must lay out/prepaint the buttons before painting them.
 - Use one row hover background, not a second nested highlight on the title.
+  Clear the shared session hover when the pointer moves onto a project heading,
+  draft, or gap; only visible session bounds count as part of that hover group.
 - Fade long titles like the sidebar; do not allot most of a wide popup to the title.
 - Allow scrolling, hide the scrollbar, and fade content at the lower edge.
 - Do not show “Process RAM · highest first,” “shared” suffixes, or shared-RAM
@@ -491,6 +493,9 @@ This records the final decisions, including corrections to earlier experiments.
   Each project row shows its name without a session count. When sessions wait for
   approval, show an amber "N needs you" badge; it gives way to the three-dot menu and
   plus on hover. Indent session and draft rows 12 px under their project heading. Hide Pinned when empty.
+  Show the first five sessions per project by default, plus the selected session if
+  it is farther down. Keep drafts visible. Show more reveals all sessions; Show less
+  restores the limit. Keyboard navigation follows the same visible rows.
   Project rename changes its display name only. Archive is reversible through the
   archived list. Permanent deletion confirms removal of the project and all its
   session histories; directory contents and Git worktrees remain untouched.
@@ -600,7 +605,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Migrate saved main-area tool tabs into their owning session's sidebar. Keep
   browser identities/profiles, editor drafts, and side-chat storage identities.
   Import IDs must be stable so retrying migration cannot duplicate tabs.
-- Sidebar tool tabs use a compact 128-point width; top-level session tabs are
+- Sidebar tool tabs use a compact 112-point width; top-level session tabs are
   144 × 26 points with an 8-point radius. Both share the shell background, 11-point close glyphs, 16-point
   hover buttons, and gradual overflow fades. Keep the plus after the last tab.
 - Sidebar dragging stays horizontal with a darker held preview, no magnetic
@@ -690,9 +695,10 @@ This records the final decisions, including corrections to earlier experiments.
 - The untouched Files split gives an empty preview only the bottom fifth of the
   pane. Preserve manually resized heights; clamp the tree in shorter windows.
   Anchor resize drags to the measured tree height at mouse-down.
-- Terminals always paint their default dark background (graphite `#141517`),
-  including in light appearance. Preserve explicit terminal colors and
-  inverse-video rendering.
+- Right-sidebar shell terminals follow the selected theme, including light mode,
+  and use rounded page corners. Provider-session terminals retain their dark
+  default/glass treatment. Preserve explicit terminal colors and inverse-video
+  rendering in both surfaces.
 
 - Successful Side chat replies completed out of view mark that fork unread and
   show the blue dot in its tab, its parent's top tab, and the left sidebar. Keep
@@ -887,3 +893,10 @@ activity bar. It supersedes earlier rules where they conflict.
   (minimum 96 px), double-click the sash to reset to 200 px, maximize and
   restore, close. Its height persists with the sidebar widths.
 - The left sidebar defaults to 264 px and resizes between 180 and 320 px.
+
+- The Space switcher arrow morphs down/up with menu open state, including Escape
+  and outside-click dismissal. Space menu dividers span the menu width. Restore
+  clickable Space dots above the utility footer when more than one Space exists.
+- Right-sidebar terminals use the current theme's default foreground, background,
+  and cursor with rounded page corners. ANSI colors and program overrides remain
+  intact; default color queries report the themed values.

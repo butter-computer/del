@@ -8,6 +8,8 @@ mod search;
 mod session;
 mod view;
 
+pub use colors::TerminalTheme;
+
 pub use view::{ChatRequested, TerminalView, init};
 
 pub use session::{

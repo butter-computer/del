@@ -1008,6 +1008,22 @@ fn session_rows(s: &AppState) -> Vec<Row> {
     rows
 }
 
+const PROJECT_SESSION_LIMIT: usize = 5;
+
+fn visible_project_rows<'a>(
+    s: &AppState,
+    rows: &[&'a Row],
+    path: &std::path::Path,
+) -> Vec<&'a Row> {
+    let expanded = s
+        .expanded_sidebar_projects
+        .contains(&(s.spaces.active.clone(), path.to_path_buf()));
+    rows.iter().copied().enumerate().filter_map(|(index, row)| {
+        let selected = matches!(&s.selection, Selection::Session(id) | Selection::Terminal(id) if *id == row.id);
+        (expanded || index < PROJECT_SESSION_LIMIT || selected).then_some(row)
+    }).collect()
+}
+
 pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
     use crate::state::Tab;
     let rows = session_rows(s);
@@ -1031,9 +1047,13 @@ pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
             if !s.show_archived {
                 tabs.extend(s.project_drafts(&path).into_iter().map(Tab::Draft));
             }
+            let project_rows = rows
+                .iter()
+                .filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path)
+                .collect::<Vec<_>>();
             tabs.extend(
-                rows.iter()
-                    .filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path)
+                visible_project_rows(s, &project_rows, &path)
+                    .into_iter()
                     .map(tab),
             );
         }
@@ -1180,6 +1200,11 @@ fn space_contents(
                     let group = SharedString::from(format!("project-{}", path.display()));
                     let project_rows: Vec<&Row> = rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).collect();
                     let needs = project_rows.iter().filter(|r| r.status == del_agent::SessionStatus::WaitingApproval).count();
+                    let visible_rows = visible_project_rows(s, &project_rows, &path);
+                    let remaining = project_rows.len() - visible_rows.len();
+                    let expanded = s.expanded_sidebar_projects.contains(&(s.spaces.active.clone(), path.clone()));
+                    let expand_state = state.clone();
+                    let expand_key = (s.spaces.active.clone(), path.clone());
                     // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
                         .open(!collapsed).flex_none().gap_0p5()
@@ -1236,8 +1261,19 @@ fn space_contents(
                                         }).motion_child(true, |feedback| feedback.glyph(Glyph::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))))
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
-                            .children(project_rows.iter().map(|row|
-                                div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx)))))
+                            .children(visible_rows.iter().map(|row|
+                                div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx))))
+                            .when(remaining > 0 || (expanded && project_rows.len() > PROJECT_SESSION_LIMIT), |list| list.child(
+                                Button::new(SharedString::from(format!("project-show-more-{}", path.display())))
+                                    .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px_2()
+                                    .text_color(rgba(MUTED)).text_size(zpx(TEXT_SM))
+                                    .label(if expanded { "Show less".into() } else { format!("Show more ({remaining})") })
+                                    .on_click(move |_, _, cx| expand_state.update(cx, |s, cx| {
+                                        if !s.expanded_sidebar_projects.remove(&expand_key) {
+                                            s.expanded_sidebar_projects.insert(expand_key.clone());
+                                        }
+                                        cx.notify();
+                                    })))))
                 })))
                 .child(
                     div()
@@ -1263,6 +1299,7 @@ pub fn render(
     let prov_state = state.clone();
     let caffeine_state = state.clone();
     let switcher_state = state.clone();
+    let switcher_open_state = state.clone();
     let space_actions_state = state.clone();
     let space_name = s
         .spaces
@@ -1312,13 +1349,23 @@ pub fn render(
                                 .text_color(rgb(0xf5f5f5))
                                 .child(div().min_w_0().truncate().child(space_name))
                                 .child(
-                                    crate::icons::icon(IconName::ChevronDown)
-                                        .with_size(zpx(12.))
-                                        .text_color(rgba(MUTED)),
+                                    crate::micro_motion::MorphIcon::new(
+                                        "space-switcher-arrow",
+                                        crate::animated_icons::Morph::Disclosure,
+                                        s.space_switcher_open,
+                                    )
+                                    .with_size(zpx(12.))
+                                    .text_color(rgba(MUTED)),
                                 ),
                         )
                         .dropdown_menu(move |menu, _, cx| {
                             space_switch_menu(menu, &switcher_state, cx)
+                        })
+                        .on_open_change(move |open, _, cx| {
+                            switcher_open_state.update(cx, |s, cx| {
+                                s.space_switcher_open = *open;
+                                cx.notify();
+                            })
                         }),
                 )
                 .child(div().flex_1())
@@ -1339,6 +1386,51 @@ pub fn render(
                 )),
         )
         .child(space_pages(state, rename, cx))
+        .when(s.spaces.items.len() > 1, |sidebar| {
+            sidebar.child(
+                h_flex()
+                    .id("space-indicators")
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .overflow_x_scroll()
+                    .justify_center()
+                    .items_center()
+                    .gap_0()
+                    .py_1()
+                    .children(s.spaces.items.iter().map(|space| {
+                        let active = space.id == s.spaces.active;
+                        let id = space.id.clone();
+                        let state = state.clone();
+                        Button::new(SharedString::from(format!("space-dot-{id}")))
+                            .ghost()
+                            .w(zpx(18.))
+                            .h(zpx(24.))
+                            .p_0()
+                            .tooltip(space.name.clone())
+                            .accessibility_label(format!("Switch to {}", space.name))
+                            .child(
+                                div()
+                                    .size(zpx(16.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(active, |dot| dot.bg(rgba(0xffffff18)))
+                                    .child(
+                                        div().size(zpx(6.)).rounded_full().bg(rgba(if active {
+                                            0xfffffff0
+                                        } else {
+                                            0xffffff50
+                                        })),
+                                    ),
+                            )
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.switch_space(&id, cx))
+                            })
+                    })),
+            )
+        })
         .child(crate::app_updates::render(updater, cx))
         .child(
             footer_row()
@@ -1444,6 +1536,25 @@ mod menu_tests {
                 .debug_selector(|| "menu-fixture".into())
                 .child(self.0.clone())
         }
+    }
+
+    #[gpui::test]
+    fn space_delete_divider_spans_checked_menu_width(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| s.create_space("Work".into(), cx));
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            window.set_rem_size(px(14.));
+            let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
+                super::space_switch_menu(menu, &state, cx)
+            });
+            MenuFixture(menu)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let line = cx.debug_bounds("space-menu-divider").unwrap();
+        let menu = cx.debug_bounds("menu-fixture").unwrap();
+        assert_eq!(line.left(), menu.left());
+        assert_eq!(line.right(), menu.right());
     }
 
     #[gpui::test]
@@ -1568,7 +1679,13 @@ fn space_menu(
                     &motion,
                 ))
                 .when(deletable, |menu| {
-                    menu.child(motion.divider()).child(session_menu_item(
+                    menu.child(
+                        motion
+                            .divider()
+                            .mx_neg_1()
+                            .debug_selector(|| "space-menu-divider".into()),
+                    )
+                    .child(session_menu_item(
                         "Delete Space",
                         crate::icons::icon(ActionIcon::Trash),
                         &motion,

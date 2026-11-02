@@ -34,6 +34,7 @@ impl EventEmitter<ChatRequested> for TerminalView {}
 pub struct TerminalView {
     /// When set, how much of the terminal's dark colour covers what's behind it.
     glass: Option<f32>,
+    corner_radius: Pixels,
     /// A solid theme colour the running program paints as its own background.
     painted_background: Option<Rgb>,
     chat_command: Option<crate::local_command::ChatCommand>,
@@ -127,6 +128,7 @@ impl TerminalView {
         });
         Self {
             glass: None,
+            corner_radius: px(0.),
             painted_background: None,
             chat_command: None,
             events: std::cell::RefCell::new(Some(events)),
@@ -144,6 +146,19 @@ impl TerminalView {
             search_generation: 0,
             last_motion: None,
             option_as_meta: true,
+        }
+    }
+
+    pub fn set_appearance(
+        &mut self,
+        theme: crate::TerminalTheme,
+        corner_radius: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.theme() != theme || self.corner_radius != corner_radius {
+            self.session.set_theme(theme);
+            self.corner_radius = corner_radius;
+            cx.notify();
         }
     }
 
@@ -521,6 +536,7 @@ impl TerminalView {
             cell_width: f32::from(self.cell_width).ceil() as u16,
             cell_height: zoom_px(LINE_HEIGHT).as_f32().ceil() as u16,
         });
+        let theme = self.session.theme();
         self.session.with_term(|term| {
             let content = term.renderable_content();
             let mut cells = Vec::new();
@@ -534,7 +550,7 @@ impl TerminalView {
                     continue;
                 }
                 let cell = indexed.cell;
-                let mut fg = colors::resolve(
+                let mut fg = theme.resolve(
                     if cell.flags.contains(Flags::BOLD) {
                         colors::bold_variant(cell.fg)
                     } else {
@@ -542,7 +558,7 @@ impl TerminalView {
                     },
                     content.colors,
                 );
-                let mut bg = colors::resolve(cell.bg, content.colors);
+                let mut bg = theme.resolve(cell.bg, content.colors);
                 let themed = !cell.flags.contains(Flags::INVERSE) && painted == Some(bg);
                 if glass {
                     total += 1;
@@ -769,14 +785,16 @@ impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let before = cx.entity();
         let painted = before.clone();
+        let theme = self.session.theme();
         let mut root = div()
             .id("terminal")
             .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
+            .rounded(self.corner_radius)
             .bg(match self.glass {
-                Some(cover) => color(crate::colors::DEFAULT_BG).opacity(cover),
-                None => color(crate::colors::DEFAULT_BG),
+                Some(cover) => color(theme.background).opacity(cover),
+                None => color(theme.background),
             })
             .flex()
             .flex_col()
@@ -848,7 +866,7 @@ impl Render for TerminalView {
                                         origin,
                                         size(frame.width * cells, zoom_px(LINE_HEIGHT)),
                                     ),
-                                    color(colors::CURSOR),
+                                    color(theme.cursor),
                                 ));
                             }
                             for span in text_spans(&frame.cells, block) {
@@ -879,7 +897,7 @@ impl Render for TerminalView {
                                             size(frame.width, zoom_px(2.)),
                                         )
                                     };
-                                    window.paint_quad(fill(b, color(colors::CURSOR)));
+                                    window.paint_quad(fill(b, color(theme.cursor)));
                                 }
                                 if !composition.is_empty() {
                                     paint_text(

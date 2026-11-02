@@ -104,21 +104,14 @@ impl HoverMotion {
         let mut state = self.0.borrow_mut();
         if !entered {
             let mouse = window.mouse_position();
-            let min_y = state
-                .bounds
+            // Rows can be separated by project headers, drafts, or clipped gaps.
+            // Being inside the group's overall rectangle does not mean a row is
+            // still hovered. Keep the moving highlight only over a visible row.
+            let over_row = state
+                .presentation
                 .values()
-                .map(|b| b.origin.y.as_f32())
-                .fold(f32::INFINITY, f32::min);
-            let max_y = state
-                .bounds
-                .values()
-                .map(|b| b.bottom().as_f32())
-                .fold(f32::NEG_INFINITY, f32::max);
-            let in_width = state
-                .bounds
-                .values()
-                .any(|b| mouse.x >= b.left() && mouse.x <= b.right());
-            if !in_width || mouse.y.as_f32() < min_y || mouse.y.as_f32() > max_y {
+                .any(|row| row.visible.contains(&mouse));
+            if !over_row {
                 state.current = None;
                 state.started = None;
                 drop(state);
@@ -333,8 +326,77 @@ impl HoverMotion {
 #[cfg(test)]
 mod tests {
     use super::HoverMotion;
-    use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px, rgba};
+    use gpui::{
+        Context, InteractiveElement, IntoElement, ParentElement, Render,
+        StatefulInteractiveElement, Styled, Window, div, px, rgba,
+    };
+    use gpui_kit::prelude::FluentBuilder;
     use std::{cell::Cell, rc::Rc};
+
+    struct SidebarRows(HoverMotion);
+
+    impl Render for SidebarRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .w(px(200.))
+                .h(px(120.))
+                .child(self.0.layer(None, rgba(0)))
+                .children(
+                    [
+                        ("pinned", 0., true),
+                        ("project", 32., false),
+                        ("session", 64., true),
+                    ]
+                    .map(|(key, top, tracked)| {
+                        let motion = self.0.clone();
+                        div()
+                            .id(key)
+                            .debug_selector(move || key.into())
+                            .absolute()
+                            .top(px(top))
+                            .w_full()
+                            .h(px(28.))
+                            .when(tracked, |row| {
+                                row.on_hover(move |entered, window, cx| {
+                                    motion.hover(key, *entered, window, cx);
+                                })
+                                .child(self.0.marker(
+                                    key.into(),
+                                    rgba(0),
+                                    rgba(0xffffff0a),
+                                ))
+                            })
+                            .when(!tracked, |row| row.hover(|row| row.bg(rgba(0xffffff0a))))
+                    }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn moving_from_session_to_project_clears_shared_hover(cx: &mut gpui::TestAppContext) {
+        let motion = HoverMotion::default();
+        let rendered = motion.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| SidebarRows(rendered));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let session = cx.debug_bounds("session").unwrap().center();
+        let project = cx.debug_bounds("project").unwrap().center();
+        let pinned = cx.debug_bounds("pinned").unwrap().center();
+        for _ in 0..5 {
+            cx.simulate_mouse_move(session, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(motion.is_hovered("session"));
+            cx.simulate_mouse_move(project, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                !motion.is_hovered("session"),
+                "session remains highlighted over project header"
+            );
+            cx.simulate_mouse_move(pinned, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert!(motion.is_hovered("pinned"));
+        }
+    }
 
     struct FadingRows {
         motion: HoverMotion,
