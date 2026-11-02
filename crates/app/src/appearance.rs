@@ -61,8 +61,25 @@ pub fn separator() -> Rgba {
 struct Preferences {
     light: bool,
     theme: ThemePreset,
-    background: BackgroundAnimation,
+    /// None when nothing valid is saved, including the removed "theme_default".
+    #[serde(deserialize_with = "saved_background")]
+    background: Option<BackgroundAnimation>,
     mouse_reactive: bool,
+}
+impl Preferences {
+    fn starting_background(&self) -> BackgroundAnimation {
+        self.background
+            .unwrap_or_else(|| BackgroundAnimation::starting_for(self.theme))
+    }
+}
+/// One unrecognised animation name must not cost someone their other preferences.
+fn saved_background<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BackgroundAnimation>, D::Error> {
+    use serde::Deserialize;
+    Ok(serde_json::Value::deserialize(deserializer)
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 pub fn light() -> bool {
@@ -76,13 +93,8 @@ pub fn preset() -> ThemePreset {
         .unwrap_or_default()
 }
 pub fn background() -> BackgroundAnimation {
-    BackgroundAnimation::ALL
-        .get(BACKGROUND.load(Ordering::Relaxed) as usize)
-        .copied()
-        .unwrap_or_default()
-}
-pub fn effective_background() -> BackgroundAnimation {
-    background().resolve(preset())
+    BackgroundAnimation::from_index(BACKGROUND.load(Ordering::Relaxed))
+        .unwrap_or(BackgroundAnimation::Life)
 }
 pub fn set_background(animation: BackgroundAnimation, cx: &mut App) {
     BACKGROUND.store(animation as u8, Ordering::Relaxed);
@@ -150,7 +162,7 @@ pub fn load(cx: &mut App) {
     let preferences = std::fs::read(path())
         .map(|bytes| parse(&bytes))
         .unwrap_or_default();
-    BACKGROUND.store(preferences.background as u8, Ordering::Relaxed);
+    BACKGROUND.store(preferences.starting_background() as u8, Ordering::Relaxed);
     MOUSE_REACTIVE.store(preferences.mouse_reactive, Ordering::Relaxed);
     apply(preferences.light, preferences.theme, cx);
 }
@@ -158,7 +170,7 @@ fn save() {
     if let Ok(bytes) = serde_json::to_vec(&Preferences {
         light: light(),
         theme: preset(),
-        background: background(),
+        background: Some(background()),
         mouse_reactive: mouse_reactive(),
     }) {
         let _ = crate::sessions::write_atomic(&path(), &bytes, 0o644);
@@ -445,25 +457,28 @@ mod tests {
     #[test]
     fn background_preferences_migrate_and_round_trip_independently() {
         let legacy = parse(br#"{"light":false,"theme":"vercel"}"#);
-        assert_eq!(
-            legacy.background.resolve(legacy.theme),
-            BackgroundAnimation::Off
-        );
+        assert_eq!(legacy.starting_background(), BackgroundAnimation::Off);
+        // The removed Theme default option becomes what it was showing, for that theme.
+        let vercel = parse(br#"{"theme":"vercel","background":"theme_default"}"#);
+        assert_eq!(vercel.starting_background(), BackgroundAnimation::Off);
+        let tide = parse(br#"{"theme":"tide","background":"theme_default","mouse_reactive":true}"#);
+        assert_eq!(tide.starting_background(), BackgroundAnimation::Life);
+        assert!(tide.mouse_reactive);
         for background in BackgroundAnimation::ALL {
             let bytes = serde_json::to_vec(&Preferences {
                 light: true,
                 theme: ThemePreset::Tide,
-                background,
+                background: Some(background),
                 ..Preferences::default()
             })
             .unwrap();
             let restored = parse(&bytes);
-            assert_eq!(restored.background, background);
+            assert_eq!(restored.background, Some(background));
             assert_eq!(restored.theme, ThemePreset::Tide);
             assert!(restored.light);
         }
         let future = parse(br#"{"light":true,"theme":"tide","background":"future"}"#);
-        assert_eq!(future.background, BackgroundAnimation::ThemeDefault);
+        assert_eq!(future.starting_background(), BackgroundAnimation::Life);
         assert_eq!(future.theme, ThemePreset::Tide);
         assert!(future.light);
     }
@@ -471,6 +486,11 @@ mod tests {
     fn mouse_reactivity_migrates_and_persists_with_other_preferences() {
         let legacy = parse(br#"{"light":true,"theme":"tide","background":"liquid"}"#);
         assert!(!legacy.mouse_reactive);
+        // Files saved before rain haptics were removed still load, keeping everything else.
+        assert_eq!(
+            parse(br#"{"background":"rain","rain_haptics":true}"#).background,
+            Some(BackgroundAnimation::Rain)
+        );
         for mouse_reactive in [false, true] {
             let preferences = Preferences {
                 mouse_reactive,
@@ -480,7 +500,7 @@ mod tests {
             assert_eq!(restored.mouse_reactive, mouse_reactive);
             assert!(restored.light);
             assert_eq!(restored.theme, ThemePreset::Tide);
-            assert_eq!(restored.background, BackgroundAnimation::Liquid);
+            assert_eq!(restored.background, Some(BackgroundAnimation::Liquid));
         }
     }
 }

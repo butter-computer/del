@@ -1325,10 +1325,17 @@ impl AppShell {
 
     pub(super) fn render_terminal_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let selection = self.state.read(cx).selection.clone();
-        let mut page = v_flex().id("terminal-page").size_full().min_h_0().min_w_0();
+        let mut page = v_flex()
+            .id("terminal-page")
+            .relative()
+            .size_full()
+            .min_h_0()
+            .min_w_0();
         match selection {
             Selection::Terminal(id) => {
                 if let Some(host) = self.terminals.get(&id) {
+                    let glass = crate::ambient::terminal_glass(cx);
+                    host.update(cx, |host, cx| host.set_terminal_glass(glass, cx));
                     page = page.child(div().flex_1().min_h_0().min_w_0().child(host.clone()));
                     if host.read(cx).snapshot().status != TerminalHostStatus::Running {
                         page = page.child(self.restart_button(id.clone(), cx));

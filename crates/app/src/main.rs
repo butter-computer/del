@@ -2447,6 +2447,9 @@ impl AppShell {
         if let Selection::Session(id) = &selection
             && (self.mode_terminals.contains_key(id) || self.mode_switching.contains(id))
         {
+            self.ambient.update(cx, |ambient, cx| {
+                ambient.set_surface(ambient::AmbientSurface::Terminal, window, cx)
+            });
             return self.render_mode_terminal(id, cx);
         }
         let chat = self.open_chat(cx);
@@ -2454,15 +2457,26 @@ impl AppShell {
             && !matches!(selection, Selection::Terminal(_))
             && chat.is_none()
             && self.state.read(cx).pending_prompt().is_none();
-        self.ambient.update(cx, |ambient, cx| {
-            ambient.set_visible(landing && !self.search_open, window, cx)
-        });
+        let surface = if panel != Panel::Chat || self.search_open {
+            ambient::AmbientSurface::Hidden
+        } else if matches!(selection, Selection::Terminal(_)) {
+            ambient::AmbientSurface::Terminal
+        } else if landing {
+            ambient::AmbientSurface::Landing
+        } else {
+            // A message has been sent: the background stays, softly blurred.
+            ambient::AmbientSurface::Chat
+        };
+        self.ambient
+            .update(cx, |ambient, cx| ambient.set_surface(surface, window, cx));
         if panel == Panel::Chat && matches!(selection, Selection::Terminal(_)) {
             return div()
+                .relative()
                 .size_full()
                 .rounded(radius)
                 .overflow_hidden()
                 .bg(page_surface())
+                .child(self.ambient.clone())
                 .child(self.render_terminal_page(cx))
                 .into_any_element();
         }
@@ -2479,8 +2493,9 @@ impl AppShell {
             })
             .when(panel == Panel::Chat, |page| match chat {
                 // Chat page: transcript above, the shared composer below.
-                Some(chat) => page.child(
+                Some(chat) => page.child(self.ambient.clone()).child(
                     v_flex()
+                        .relative()
                         .size_full()
                         .child(div().flex_1().min_h_0().child(chat))
                         .child(

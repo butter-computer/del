@@ -6,7 +6,7 @@
 #import <simd/simd.h>
 #include <assert.h>
 #include <math.h>
-struct Params { simd_float4 geometry,pointer,impulse,clock,life,composer,footer,blur,tint,animation,stroke; };
+struct Params { simd_float4 geometry,pointer,impulse,clock,life,composer,footer,blur,tint,animation,stroke; simd_float4 rain[48]; };
 int main(int argc,const char **argv) { @autoreleasepool {
     if(argc!=2){fprintf(stderr,"Usage: test-liquid path/to/fluid.metal\n");return 1;}
     id<MTLDevice> device=MTLCreateSystemDefaultDevice();

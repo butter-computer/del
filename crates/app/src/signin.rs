@@ -270,6 +270,7 @@ fn appearance_controls() -> impl IntoElement {
     use crate::appearance::{self, ThemePreset};
     let theme = appearance::preset();
     let light = appearance::light();
+    let animated = appearance::background() != appearance::BackgroundAnimation::Off;
     v_flex()
         .w_full()
         .gap_4()
@@ -372,19 +373,7 @@ fn appearance_controls() -> impl IntoElement {
                 .w_full()
                 .gap_4()
                 .items_center()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(div().child("Background animation"))
-                        .child(
-                            div()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(appearance::secondary_text())
-                                .child(appearance::background().description()),
-                        ),
-                )
+                .child(div().flex_1().min_w_0().child("Background animation"))
                 .child(
                     Button::new("appearance-background")
                         .ghost()
@@ -422,34 +411,23 @@ fn appearance_controls() -> impl IntoElement {
                 .gap_4()
                 .items_center()
                 .child(
-                    v_flex()
+                    div()
                         .flex_1()
                         .min_w_0()
-                        .gap_1()
-                        .child(div().child("Mouse reactive"))
-                        .child(
-                            div()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(appearance::secondary_text())
-                                .child("Let the background respond gently to your cursor."),
-                        ),
+                        .when(!animated, |label| {
+                            label.text_color(appearance::secondary_text())
+                        })
+                        .child("Mouse reactive"),
                 )
                 .child(
                     gpui_kit::component::switch::Switch::new("background-mouse-reactive")
-                        .checked(appearance::mouse_reactive())
-                        .disabled(
-                            appearance::effective_background()
-                                == appearance::BackgroundAnimation::Off,
-                        )
+                        // With nothing animating it reads as off; the saved choice returns
+                        // when an animation is picked again.
+                        .checked(animated && appearance::mouse_reactive())
+                        .disabled(!animated)
                         .accessibility_label("Mouse reactive background")
                         .on_click(|enabled, _, cx| appearance::set_mouse_reactive(*enabled, cx)),
                 ),
-        )
-        .child(
-            div()
-                .text_size(zpx(TEXT_SM))
-                .text_color(appearance::secondary_text())
-                .child("Matches your theme. Pauses when inactive; hidden with Reduce Motion."),
         )
 }
 

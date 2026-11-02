@@ -188,7 +188,14 @@ impl RenderOnce for Switch {
         // would let the track show through the thumb. Fading the track alone
         // lands on the pixels a grouped fade would: the thumb is `background`.
         let disabled_bg = if checked { checked_bg } else { unchecked_bg }.opacity(0.5);
-        let toggle_bg: Background = cx.theme().tokens.switch_thumb.into();
+        // On a checked track the thumb takes the color made to read on `primary`. One thumb
+        // color for both states vanishes on themes whose primary matches it, leaving a blank
+        // pill that shows neither state.
+        let toggle_bg: Background = if checked {
+            cx.theme().primary_foreground.into()
+        } else {
+            cx.theme().tokens.switch_thumb.into()
+        };
         let disabled_label_color = cx.theme().muted_foreground;
 
         let (bg_width, bg_height) = match self.size {

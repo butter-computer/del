@@ -32,6 +32,10 @@ pub struct ChatRequested;
 impl EventEmitter<ChatRequested> for TerminalView {}
 
 pub struct TerminalView {
+    /// When set, how much of the terminal's dark colour covers what's behind it.
+    glass: Option<f32>,
+    /// A solid theme colour the running program paints as its own background.
+    painted_background: Option<Rgb>,
     chat_command: Option<crate::local_command::ChatCommand>,
     session: TerminalSession,
     focus: FocusHandle,
@@ -122,6 +126,8 @@ impl TerminalView {
             }
         });
         Self {
+            glass: None,
+            painted_background: None,
             chat_command: None,
             events: std::cell::RefCell::new(Some(events)),
             session,
@@ -141,6 +147,12 @@ impl TerminalView {
         }
     }
 
+    pub fn set_glass(&mut self, glass: Option<f32>, cx: &mut Context<Self>) {
+        if self.glass != glass {
+            self.glass = glass;
+            cx.notify();
+        }
+    }
     pub fn enable_chat_command(&mut self) {
         self.chat_command = Some(Default::default());
     }
@@ -453,6 +465,17 @@ fn color(c: Rgb) -> Hsla {
     rgb((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).into()
 }
 
+/// Some TUIs (OpenCode, for one) paint an explicit theme colour behind everything rather
+/// than leaving the default background. A single colour covering most of the screen is
+/// that program's background, not content, so it can become glass too. Anything else it
+/// paints, such as panels, selections and highlights, keeps its colour.
+fn painted_background(
+    colors: &std::collections::HashMap<(u8, u8, u8), usize>,
+    total: usize,
+) -> Option<Rgb> {
+    let (&(r, g, b), &count) = colors.iter().max_by_key(|(_, count)| **count)?;
+    (count * 2 > total).then_some(Rgb { r, g, b })
+}
 fn transparent_background(background: Color, flags: Flags) -> bool {
     // Explicit colours, even black matching the default palette, are content.
     background == Color::Named(NamedColor::Background) && !flags.contains(Flags::INVERSE)
@@ -500,6 +523,10 @@ impl TerminalView {
         self.session.with_term(|term| {
             let content = term.renderable_content();
             let mut cells = Vec::new();
+            let glass = self.glass.is_some();
+            let painted = self.painted_background;
+            let mut counts = std::collections::HashMap::new();
+            let mut total = 0usize;
             for indexed in content.display_iter {
                 let row = indexed.point.line.0 + content.display_offset as i32;
                 if row < 0 {
@@ -515,6 +542,15 @@ impl TerminalView {
                     content.colors,
                 );
                 let mut bg = colors::resolve(cell.bg, content.colors);
+                let themed = !cell.flags.contains(Flags::INVERSE) && painted == Some(bg);
+                if glass {
+                    total += 1;
+                    if !cell.flags.contains(Flags::INVERSE)
+                        && !transparent_background(cell.bg, cell.flags)
+                    {
+                        *counts.entry((bg.r, bg.g, bg.b)).or_insert(0usize) += 1;
+                    }
+                }
                 if cell.flags.contains(Flags::DIM) {
                     fg = Rgb {
                         r: fg.r / 2,
@@ -540,7 +576,7 @@ impl TerminalView {
                         Some(rgba(0xe8b04a66).into())
                     } else if selected {
                         Some(rgba(0x43556fff).into())
-                    } else if transparent_background(cell.bg, cell.flags) {
+                    } else if transparent_background(cell.bg, cell.flags) || (glass && themed) {
                         None
                     } else {
                         Some(color(bg))
@@ -552,6 +588,11 @@ impl TerminalView {
             let row = c.point.line.0 + content.display_offset as i32;
             let cursor = (row >= 0 && row < rows as i32 && c.shape != CursorShape::Hidden)
                 .then_some((c.point.column.0, row as usize, c.shape));
+            self.painted_background = if glass {
+                painted_background(&counts, total)
+            } else {
+                None
+            };
             Frame {
                 cells,
                 cursor,
@@ -732,7 +773,10 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
-            .bg(color(crate::colors::DEFAULT_BG))
+            .bg(match self.glass {
+                Some(cover) => color(crate::colors::DEFAULT_BG).opacity(cover),
+                None => color(crate::colors::DEFAULT_BG),
+            })
             .flex()
             .flex_col()
             .min_h_0()
@@ -992,8 +1036,8 @@ fn zoom_px(value: f32) -> Pixels {
 #[cfg(test)]
 mod tests {
     use super::{
-        Color, Flags, Hsla, NamedColor, PaintCell, Rgb, byte_range, rgb, text_spans,
-        transparent_background,
+        Color, Flags, Hsla, NamedColor, PaintCell, Rgb, byte_range, painted_background, rgb,
+        text_spans, transparent_background,
     };
 
     fn row(text: &str, row: usize, fg: Hsla) -> Vec<PaintCell> {
@@ -1076,6 +1120,24 @@ mod tests {
         assert_eq!(spans(&cells, None), [(0, 0, "a  ".into())]);
     }
 
+    #[test]
+    fn a_program_background_is_the_one_colour_covering_most_of_the_screen() {
+        let colors = |entries: &[((u8, u8, u8), usize)]| {
+            entries
+                .iter()
+                .copied()
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        // An OpenCode-style theme fill becomes glass.
+        let theme =
+            painted_background(&colors(&[((10, 10, 12), 900), ((60, 60, 70), 50)]), 1000).unwrap();
+        assert_eq!((theme.r, theme.g, theme.b), (10, 10, 12));
+        // Claude/Codex-style sparse highlights over the default background stay content.
+        assert!(painted_background(&colors(&[((60, 60, 70), 80)]), 1000).is_none());
+        // Half the screen in one panel colour isn't enough to be sure.
+        assert!(painted_background(&colors(&[((60, 60, 70), 500)]), 1000).is_none());
+        assert!(painted_background(&colors(&[]), 1000).is_none());
+    }
     #[test]
     fn glass_only_replaces_default_background_not_explicit_colours_or_inverse() {
         assert!(transparent_background(

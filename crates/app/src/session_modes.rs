@@ -522,14 +522,13 @@ impl AppShell {
         id: &SessionId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut page = v_flex()
-            .size_full()
-            .min_h_0()
-            .rounded_lg()
-            .overflow_hidden()
-            .bg(crate::appearance::page_surface());
+        let mut page = v_flex().relative().size_full().min_h_0();
         if let Some(terminal) = self.mode_terminals.get(id) {
             let id = id.clone();
+            let glass = crate::ambient::terminal_glass(cx);
+            terminal
+                .host
+                .update(cx, |host, cx| host.set_terminal_glass(glass, cx));
             page = page
                 .child(div().flex_1().min_h_0().child(terminal.host.clone()))
                 .child(
@@ -547,11 +546,19 @@ impl AppShell {
         if let Some(error) = &self.state.read(cx).error {
             page = page.child(div().p_2().child(error.clone()));
         }
-        page.children(
+        let page = page.children(
             self.render_agent_messages(cx)
                 .map(|messages| div().p_3().child(messages)),
-        )
-        .into_any_element()
+        );
+        div()
+            .relative()
+            .size_full()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(crate::appearance::page_surface())
+            .child(self.ambient.clone())
+            .child(page)
+            .into_any_element()
     }
 }
 

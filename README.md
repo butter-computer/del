@@ -1017,22 +1017,64 @@ undertones. Each has coordinated light and dark palettes for the
 workspace, chrome, composer, menus, text, and controls. Changes apply immediately
 and persist across launches. Provider logos and semantic status colors retain
 their meaning; terminals retain their dark background and ANSI colors.
-**Background animation** is a separate saved dropdown: Theme default, Off, Life,
-Liquid, Contours, Drift, or Fluted Glass. Theme default keeps Vercel still and uses Life
-elsewhere; an explicit choice stays selected when switching themes. All five
-animations use the current theme accent (including monochrome for Vercel/Onyx),
-with subdued opacity in light and dark modes. Liquid uses flowing folds and soft
-specular highlights; Fluted Glass refracts a moving light field through fixed
-vertical ribs. Old Waves/Orbit preferences migrate to Liquid/Fluted Glass. Animations pause while the window
-is inactive or hidden, and Reduce Motion hides the animated layer entirely.
-Light-mode backgrounds have extra opacity so their details remain visible.
-The saved **Mouse reactive** switch enables a smooth, localized cursor response
-for every style; it starts off and is unavailable when the background is Off.
-It highlights Life cells, stirs Liquid with spreading ripples and a settling wake,
-gently distorts Contours/Drift, and refracts the
-light behind Fluted Glass without moving its ribs.
+**Background animation** is a separate saved dropdown: Off, Life, Liquid, Contours,
+Drift, Fluted Glass, Curtains, Rain, Clouds, Falling Leaves, Pudding, Window Curtains,
+or Seafloor. With nothing saved yet it starts Off on Vercel and on Life elsewhere; the
+choice then stays selected when switching themes. Every animation
+uses the current theme accent (including monochrome for Vercel/Onyx). Light themes
+draw lit scenes as ink, so sunlit areas stay paper-white. The new-chat page shows the
+background sharp. Once a message is sent it stays behind the conversation as a soft
+blur, and terminals of every provider show the same blur through their default
+background (or through a program's own solid background colour, such as OpenCode's).
+
+- **Life** runs exact Conway rules. **Contours** draws constant-width isolines over
+  slowly shifting terrain, with heavier index lines and faint hill shading.
+- **Liquid** uses flowing folds and soft highlights. **Fluted Glass** refracts moving
+  lights through fixed ribs with Snell's law and Fresnel transmission.
+- **Curtains** is 3D position-based cloth: 65,000 simulated points with gathered
+  pleats, sewn hems, bending stiffness, gravity and aerodynamic pressure. Sun falls
+  through a window, so hard-edged panes and mullions bend across every fold.
+- **Window Curtains** is the same cloth hung apart in front of a bright window. Light
+  is razor sharp through the gaps; through fabric it refracts at each fold and diffuses
+  in a screen-space subsurface transmission. Sunbeams cross the room: each pixel marches a
+  volume of air, testing at every depth whether the sun gets past the branches outside and
+  the cloth. Light through a gap stays a hard beam with dust in it; fabric blocks that beam
+  and passes on only a faint, wide glow.
+- **Rain** falls at an angle, with motion-blurred near and far drops. Each is one straight
+  slanted line that stops where it first meets the measured input bar, including its
+  upwind side wall, and the bar shelters what's downwind of it. Each landed drop leaves a bead that creeps along the edge, merges with others,
+  runs round the corner and down the side, then falls.
+- **Clouds** is a volume render through Perlin-Worley noise with a shadow ray per step.
+  **Falling Leaves** turn and flutter with tapered silhouettes and veins. **Drift**
+  carries dust on a curl-noise airflow, lit by passing shafts of light.
+- **Pudding** is a soft-body caramel flan on the input bar. It wobbles when nudged and
+  when the bar itself moves.
+- **Seafloor** traces a mesh of light rays through a surface made of real gravity waves,
+  onto a floor seen at a low angle. Brightness comes from how much each patch of light
+  shrinks, so true caustics form: subtle thin lines with pale bands between them, edge to
+  edge, since the water extends past the window on every side.
+
+**Mouse reactive** is a separate saved switch; it starts off and is unavailable when the
+background is Off. The cursor only affects the background on the new-session page, never
+behind a chat or terminal. Each style has its own response rather than a shared distortion:
+
+| Style | What the cursor does |
+| --- | --- |
+| Life | Glows around the cursor, and moving it scatters new living cells for Conway to take over |
+| Liquid | Stirs a settling wake of ripples |
+| Contours | A low, broad swell that gently bends the nearby lines |
+| Drift | Stirs the air so dust swirls and follows, and holds a small light |
+| Fluted Glass | A light behind the glass, bending through the fixed ribs |
+| Curtains, Window Curtains | A hand that presses into the cloth and drags it as it sweeps, up to a firm limit however fast it moves |
+| Rain | An umbrella: drops land on it, and it's dry underneath |
+| Clouds | Clears a trail through the cloud that slowly fills back in |
+| Falling Leaves | Blows leaves aside and sets them spinning |
+| Pudding | Nothing on hover; press and hold on it to stretch and pull it around |
+| Seafloor | Nothing on hover; a click drops a stone, and the caustics follow its rings |
+
 Rendering stays on the GPU, with a shared fade toward the bottom and soft blur
-behind the composer. Only Life runs the cellular simulation.
+behind the composer. Heavier styles (Curtains, Clouds, Fluted Glass) use more GPU.
+`scripts/render-backgrounds.m` renders any style to PNG and reports its GPU time.
 Providers shows sign-in status and account controls. **Keybinds** lists app shortcuts
 and contextual controls, grouped by area; it is read-only.
 Settings uses the same fade-and-slide entrance as search, with a strongly blurred

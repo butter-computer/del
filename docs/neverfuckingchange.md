@@ -23,26 +23,58 @@ This records the final decisions, including corrections to earlier experiments.
   Selecting either updates the whole app immediately. Existing boolean appearance
   preferences migrate to Graphite; unknown preset names fall back to Graphite.
   Preserve provider hues, semantic status meanings, and terminal ANSI colors.
-- Appearance includes an independent Background animation dropdown: Theme default,
-  Off, Life, Liquid, Contours, Drift, Fluted Glass. Persist the choice across restarts and
-  theme changes. Theme default resolves to Off for Vercel, Life otherwise; users
-  can explicitly enable any animation on Vercel. Older appearance files keep
-  these defaults. Unknown animation names fall back to Theme default. Waves and
+- Appearance includes an independent Background animation dropdown: Off, Life, Liquid,
+  Contours, Drift, Fluted Glass, Curtains, Rain, Clouds, Falling Leaves, Pudding, Window Curtains, Seafloor. Persist the choice across restarts and
+  theme changes. With nothing saved it starts Off for Vercel and Life otherwise; users
+  can explicitly enable any animation on Vercel. Older files saved as Theme default, and
+  unknown animation names, start the same way without losing other preferences. Waves and
   Orbit are removed from the picker; saved values migrate to Liquid and Fluted Glass.
   Liquid uses flowing folds and highlights; Fluted Glass keeps vertical ribs fixed
   while the refracted light field moves behind them.
-- Backgrounds use the current theme accent, never a fixed orange hue. Light mode
-  uses the darker accent at 16% opacity (dark stays at 14%); monochrome palettes remain neutral.
+- Backgrounds use the current theme accent, never a fixed orange hue. The base tint is
+  the darker accent at 16% in light mode and 14% in dark; simulated styles may exceed it
+  in their brightest areas, capped so chat text stays readable. Monochrome palettes remain neutral.
   Preserve the rounded clipping, downward opacity fade, and composer-region blur.
-  Off/Reduce Motion omit the animation surface. Pause GPU motion while inactive
-  or hidden; only Life executes the cellular simulation.
-- The saved Mouse reactive switch under Background animation starts off, is
-  disabled when the effective background is Off, and applies to every style.
-  Smooth the cursor response and fade it away on exit. Life changes highlights,
-  never topology; Liquid uses a separate damped height/velocity simulation driven
-  by cursor strokes, with no lens scaling; Contours/Drift use local displacement; Fluted Glass
-  refracts the light field while its ribs stay fixed. Toggling off removes
-  cursor influence immediately. Inactive/reduced-motion behavior still wins.
+  Off/Reduce Motion omit the animation surface. Pause all GPU motion while inactive
+  or hidden.
+- The saved Mouse reactive switch under Background animation starts off, is disabled and
+  reads as off while the effective background is Off, keeping the saved choice for later.
+  Its on and off states must be clearly different in every theme, including those whose
+  primary is white. It applies to every style, but only on
+  the new-session page: behind a chat or terminal the background ignores the cursor.
+  Smooth the cursor response and fade it away on exit. Every style has its own physically
+  motivated response, never a shared warp of the picture; see the README table. Life is
+  stirred by a moving cursor, with Conway rules untouched everywhere else. Pudding reacts
+  only to a press that starts on it: it stretches when pulled and rebounds when released.
+  Seafloor makes ripples only on click, never on movement. Cloth response has a hard ceiling:
+  however fast the cursor moves it must never whip fabric round itself or clip through it.
+  Toggling off stops all new cursor influence immediately; simulated motion settles.
+  Inactive/reduced-motion behavior still wins.
+- Curtains are real 3D cloth, simulated and meshed at high resolution: pleats form from
+  gathered fabric on a pinned rail, with hems and bending stiffness so folds stay round.
+  Sunlight comes through a mullioned window behind the fabric: pane edges are hard,
+  bend across the folds, and soften only with cloth speed and distance. Fold shadows
+  use a real shadow map. Never fake this with drifting bands or displaced textures.
+- Window Curtains keep the same cloth in front of a real window: sharp where no fabric
+  hangs, refracted and diffused through fabric, with hard-edged sunbeams marched through a
+  real volume. Cloth divides the light: beams stay sharp only through real gaps, and fabric
+  blocks them, passing on only a soft glow. The cursor can never lift a panel.
+- Seafloor caustics come from refracting a mesh of light rays through a wave surface, never
+  a scrolling caustic texture. They fill the whole page edge to edge, stay subtle, and have
+  no sand or other visible floor.
+- Clouds are volume rendered with self-shadowing. Pudding is a soft body on the input bar
+  and wobbles when nudged or when the bar moves. Falling Leaves use tapered silhouettes,
+  veins, flutter and tumbling motion.
+- The new-chat page shows the background sharp. After a message is sent it stays behind
+  the conversation as a soft blur. Page-level terminals of every provider show the same
+  blur through default-background cells and a program's dominant solid background;
+  other program colours stay opaque. Off/Reduce Motion return terminals to fully opaque.
+- Rain falls at a clear angle. Each drop is one straight line colliding with the measured
+  rounded composer/footer outline, including side walls. Landed water beads
+  along the edge, merges, runs round the corners and down the sides, then falls. Rain has no
+  haptics and uses no GPU readbacks. Layout changes reset impact detection.
+- Prefer quality over GPU cost in backgrounds, but they must hold frame rate. Check any
+  change with `scripts/render-backgrounds.m`, in dark and light.
 - The sidebar uses the same chrome surface as the title bar: no seam between them.
 - Keep the light-mode composer darker than the main workspace. Do not brighten
   the composer past the workspace or reverse the surface hierarchy.

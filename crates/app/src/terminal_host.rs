@@ -727,6 +727,11 @@ impl Focusable for TerminalHost {
     }
 }
 impl TerminalHost {
+    /// Let the page's blurred background show through this terminal.
+    pub fn set_terminal_glass(&mut self, glass: Option<f32>, cx: &mut Context<Self>) {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.set_glass(glass, cx));
+    }
     pub fn terminal_view(&self) -> Entity<TerminalView> {
         self.terminal.clone()
     }

@@ -1,5 +1,6 @@
 //! Display-synchronized native Metal backgrounds, composited as one GPUI alpha surface.
-//! CPU work is O(1) pointer/uniform updates; simulation and pixel shading are GPU-only.
+//! Every simulation and all shading stay on the GPU, including cloth, soft bodies and
+//! volumes. Rain uses analytic trajectories shared with impact feedback, without readback.
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -18,6 +19,7 @@ mod native {
         ) -> *mut c_void;
         fn del_fluid_release(renderer: *mut c_void);
         fn del_fluid_running(renderer: *mut c_void, running: bool);
+        fn del_fluid_blurred(renderer: *mut c_void, blurred: bool);
         fn del_fluid_frame(
             renderer: *mut c_void,
             width: f64,
@@ -67,6 +69,14 @@ mod native {
         pub fn running(&self, running: bool) {
             unsafe { del_fluid_running(self.0, running) };
         }
+        pub fn blurred(&self, blurred: bool) {
+            unsafe { del_fluid_blurred(self.0, blurred) };
+        }
+        /// Forget a measured bar that the current page does not show, so rain and
+        /// pudding don't land on UI that isn't there.
+        pub fn clear_region(&self, slot: u32) {
+            unsafe { del_fluid_region(self.0, slot, 0., 0., 0., 0., 0.) };
+        }
         pub fn region(&self, slot: u32, bounds: Bounds<Pixels>, radius: Pixels) {
             unsafe {
                 del_fluid_region(
@@ -84,6 +94,7 @@ mod native {
             &self,
             bounds: Bounds<Pixels>,
             window: &Window,
+            interactive: bool,
         ) -> Option<CFRetained<CVPixelBuffer>> {
             let mouse = window.mouse_position() - bounds.origin;
             let tint = crate::appearance::background_tint();
@@ -100,12 +111,12 @@ mod native {
                     bounds.origin.x.as_f32() as f64,
                     bounds.origin.y.as_f32() as f64,
                     crate::appearance::light(),
-                    crate::appearance::effective_background() as u32,
+                    crate::appearance::background() as u32,
                     tint.r,
                     tint.g,
                     tint.b,
                     tint.a,
-                    crate::appearance::mouse_reactive(),
+                    interactive,
                 )
             };
             NonNull::new(pointer.cast::<CVPixelBuffer>())
@@ -119,8 +130,36 @@ mod native {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmbientSurface {
+    Hidden,
+    Landing,
+    Chat,
+    Terminal,
+}
+
+/// How much the terminal's own dark colour covers the blurred background, or `None`
+/// when no background is showing and the terminal should stay fully opaque.
+pub fn terminal_glass(cx: &App) -> Option<f32> {
+    let showing = crate::appearance::background() != crate::appearance::BackgroundAnimation::Off
+        && !cx.reduce_motion();
+    // Terminals stay dark in both themes, so a light page needs far more cover.
+    showing.then_some(if crate::appearance::light() {
+        0.92
+    } else {
+        0.56
+    })
+}
+
+/// The cursor only plays with the background on the new-session page. Behind a chat or
+/// terminal the pointer is busy with real work, so the background ignores it.
+fn surface_follows_cursor(surface: AmbientSurface) -> bool {
+    surface == AmbientSurface::Landing
+}
+
 pub struct LifeBackground {
     visible: bool,
+    surface: AmbientSurface,
     #[cfg(target_os = "macos")]
     fluid: std::rc::Rc<native::Fluid>,
 }
@@ -138,6 +177,7 @@ impl LifeBackground {
         .detach();
         Self {
             visible: false,
+            surface: AmbientSurface::Hidden,
             #[cfg(target_os = "macos")]
             fluid: std::rc::Rc::new(native::Fluid::new()),
         }
@@ -162,8 +202,7 @@ impl LifeBackground {
     }
     fn animates(&self, window: &Window, cx: &App) -> bool {
         self.visible
-            && crate::appearance::effective_background()
-                != crate::appearance::BackgroundAnimation::Off
+            && crate::appearance::background() != crate::appearance::BackgroundAnimation::Off
             && window.is_visible()
             && window.is_window_active()
             && !cx.reduce_motion()
@@ -172,8 +211,29 @@ impl LifeBackground {
         #[cfg(target_os = "macos")]
         self.fluid.running(self.animates(window, cx));
     }
-    pub fn set_visible(&mut self, visible: bool, window: &Window, cx: &mut Context<Self>) {
-        self.visible = visible;
+    /// Which page the background sits behind. The landing page shows it sharp; once a
+    /// conversation has started it melts into a soft blur, and terminals do the same.
+    pub fn set_surface(
+        &mut self,
+        surface: AmbientSurface,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.visible = surface != AmbientSurface::Hidden;
+        self.surface = surface;
+        #[cfg(target_os = "macos")]
+        {
+            self.fluid.blurred(matches!(
+                surface,
+                AmbientSurface::Chat | AmbientSurface::Terminal
+            ));
+            if surface != AmbientSurface::Landing {
+                self.fluid.clear_region(1); // Only the landing page has the options footer.
+            }
+            if surface == AmbientSurface::Terminal {
+                self.fluid.clear_region(0); // Terminals have no input bar to land on.
+            }
+        }
         self.sync(window, cx);
     }
 }
@@ -181,7 +241,7 @@ impl Render for LifeBackground {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
         // Off and reduced motion omit the surface entirely, including pointer effects.
-        if crate::appearance::effective_background() == crate::appearance::BackgroundAnimation::Off
+        if crate::appearance::background() == crate::appearance::BackgroundAnimation::Off
             || cx.reduce_motion()
         {
             return div().absolute().inset_0().into_any_element();
@@ -195,10 +255,12 @@ impl Render for LifeBackground {
                 window.request_animation_frame();
             }
             let fluid = self.fluid.clone();
+            let interactive =
+                crate::appearance::mouse_reactive() && surface_follows_cursor(self.surface);
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    if let Some(buffer) = fluid.frame(bounds, window) {
+                    if let Some(buffer) = fluid.frame(bounds, window, interactive) {
                         window.paint_surface(bounds, buffer);
                     }
                 },
@@ -210,5 +272,22 @@ impl Render for LifeBackground {
         }
         #[cfg(not(target_os = "macos"))]
         div().absolute().inset_0().into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AmbientSurface, surface_follows_cursor};
+
+    #[test]
+    fn only_the_new_session_page_follows_the_cursor() {
+        assert!(surface_follows_cursor(AmbientSurface::Landing));
+        for surface in [
+            AmbientSurface::Hidden,
+            AmbientSurface::Chat,
+            AmbientSurface::Terminal,
+        ] {
+            assert!(!surface_follows_cursor(surface));
+        }
     }
 }
