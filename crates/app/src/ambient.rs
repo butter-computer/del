@@ -148,7 +148,11 @@ impl LifeBackground {
         div().absolute().inset_0().into_any_element()
     }
     fn animates(&self, window: &Window, cx: &App) -> bool {
-        self.visible && window.is_visible() && window.is_window_active() && !cx.reduce_motion()
+        self.visible
+            && crate::appearance::preset() != crate::appearance::ThemePreset::Vercel
+            && window.is_visible()
+            && window.is_window_active()
+            && !cx.reduce_motion()
     }
     fn sync(&self, window: &Window, cx: &App) {
         #[cfg(target_os = "macos")]
@@ -162,6 +166,10 @@ impl LifeBackground {
 impl Render for LifeBackground {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
+        // The focused monochrome preset keeps the workspace completely still.
+        if crate::appearance::preset() == crate::appearance::ThemePreset::Vercel {
+            return div().absolute().inset_0().into_any_element();
+        }
         #[cfg(target_os = "macos")]
         {
             // GPUI schedules this view at display refresh (including ProMotion),
@@ -182,8 +190,9 @@ impl Render for LifeBackground {
             .absolute()
             .inset_0()
             .size_full()
+            .into_any_element()
         }
         #[cfg(not(target_os = "macos"))]
-        div().absolute().inset_0()
+        div().absolute().inset_0().into_any_element()
     }
 }

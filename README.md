@@ -1008,13 +1008,19 @@ or terminal has focus.
 
 Settings has **Appearance**, **Providers**, and **Keybinds** navigation,
 with icons aligned to the left of their labels. Appearance includes persisted
-Light/Dark appearance; Providers shows sign-in status and account controls.
-**Keybinds** lists app shortcuts and contextual controls, grouped by area; it is read-only.
-Light mode uses a white workspace, off-white chrome, and slightly darker `#F9F9F9`
-composer cards. Menus, model and effort pickers, command suggestions, search, and
-Settings share that light surface. The shell opacity setting is fixed at 85%;
-light surfaces remain opaque to preserve their colors. Settings uses the same
-fade-and-slide entrance as search, with a strongly blurred and dimmed backdrop.
+Light/Dark color modes and a Theme dropdown with color swatches. Choose Graphite
+(the original), Dune, Grove, Tide, Rosewood, Ember, Midnight, Aubergine, Olive,
+Porcelain, Cocoa, Iris, Onyx, Obsidian, Soot, Pine, Oxblood, Eclipse, or Vercel.
+Vercel offers a pitch-black, monochrome workspace inspired by Vercel, with the animated backdrop hidden.
+Onyx offers softer monochrome black; the other near-black options add subtle
+undertones. Each has coordinated light and dark palettes for the
+workspace, chrome, composer, menus, text, and controls. Changes apply immediately
+and persist across launches. Provider logos and semantic status colors retain
+their meaning; terminals retain their dark background and ANSI colors.
+Providers shows sign-in status and account controls. **Keybinds** lists app shortcuts
+and contextual controls, grouped by area; it is read-only.
+Settings uses the same fade-and-slide entrance as search, with a strongly blurred
+and dimmed backdrop.
 **Escape**, Done, or clicking outside closes Settings and returns to the workspace.
 Top-tab titles use an edge fade instead of ellipses and fill the available space
 up to the action slot, including the close-button space while idle and not hovered.
@@ -1076,7 +1082,7 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | `right-panels.json` | Per-session file/terminal/browser state, profile IDs, and tabs |
 | `browser-profile-deletions.json` | Pending WebKit profile cleanup |
 | `sidebar-widths.json` | Sidebar sizes |
-| `appearance.json` | Light/Dark preference |
+| `appearance.json` | Color mode and theme preset |
 | `zoom.json` | Interface zoom percentage |
 | `acp-agents.json` | ACP registry overrides |
 

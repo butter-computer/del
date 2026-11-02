@@ -2,22 +2,13 @@
 use crate::zoom::px as zpx;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Rgba};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+mod themes;
+pub use themes::ThemePreset;
+static PRESET: AtomicU8 = AtomicU8::new(0);
 static LIGHT: AtomicBool = AtomicBool::new(false);
 
-// The calm palette (docs/neverfuckingchange.md, "Colors and surfaces"): graphite
-// dark and warm off-white light, surfaces a few steps apart, quiet borders.
-// Shared neutral dark tones used by both custom chrome and component defaults.
-const DARK_PAGE: u32 = 0x212225;
-const DARK_SURFACE: u32 = 0x27282c;
-const DARK_HOVER: u32 = 0x2b2c30;
-const DARK_ACTIVE: u32 = 0x34353a;
-const DARK_FAINT_TEXT: u32 = 0x83837f;
-const DARK_MUTED: u32 = DARK_FAINT_TEXT;
-const DARK_SECONDARY_TEXT: u32 = 0xa3a39f;
-const DARK_TEXT: u32 = 0xdcdcd8;
-const DARK_PRIMARY_TEXT: u32 = 0xececea;
-/// Terminals stay dark in both themes: graphite rather than pure black.
+/// Terminals stay dark in every theme: graphite rather than pure black.
 pub const TERMINAL_BACKGROUND: u32 = 0x141517;
 
 /// Semantic action colors; neutrals stay neutral and color signals intent.
@@ -30,8 +21,7 @@ pub enum ActionTone {
 impl ActionTone {
     pub fn foreground(self) -> Rgba {
         let value = match (self, light()) {
-            (Self::Accent, false) => 0x8fb4e6,
-            (Self::Accent, true) => 0x2f5f9e,
+            (Self::Accent, _) => colors().accent,
             (Self::Success, false) => 0x86b596,
             (Self::Success, true) => 0x3f7a54,
             (Self::Warning, false) => 0xd3b07a,
@@ -52,7 +42,13 @@ pub fn sidebar_surface() -> Rgba {
 }
 
 pub fn separator() -> Rgba {
-    gpui_kit::rgba(if light() { 0x3c321e14 } else { 0xffffff0f })
+    gpui_kit::rgba(if light() {
+        0x3c321e14
+    } else if preset() == ThemePreset::Vercel {
+        0xffffff24
+    } else {
+        0xffffff0f
+    })
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -60,43 +56,40 @@ pub fn separator() -> Rgba {
 #[derive(Default)]
 struct Preferences {
     light: bool,
+    theme: ThemePreset,
 }
 
 pub fn light() -> bool {
     LIGHT.load(Ordering::Relaxed)
 }
 
-/// Stable input surface, distinct from the black workspace.
-/// Light keeps the composer darker than the page.
+pub fn preset() -> ThemePreset {
+    ThemePreset::ALL
+        .get(PRESET.load(Ordering::Relaxed) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+fn colors() -> themes::Palette {
+    preset().palette(light())
+}
+
+pub fn secondary_text() -> Rgba {
+    gpui_kit::rgb(colors().neutral[5])
+}
 pub fn composer_surface() -> Rgba {
-    gpui_kit::rgb(if light() { 0xf1efeb } else { 0x2a2b2f })
+    gpui_kit::rgb(colors().composer)
 }
-
-/// Shared raised surface for menus and dialogs in both themes.
 pub fn popup_surface() -> Rgba {
-    gpui_kit::rgb(if light() { 0xf6f5f2 } else { 0x28292d })
+    gpui_kit::rgb(colors().popup)
 }
-
-/// One chrome surface for the title bar, sidebar, gutters and status bar.
 pub fn shell_surface() -> Rgba {
-    gpui_kit::rgba(if light() {
-        0xf7f6f3ff
-    } else {
-        del_core::SHELL_SURFACE_RGBA
-    })
+    gpui_kit::rgb(colors().shell)
 }
-
-/// Opaque neutral backing keeps a dragged tab readable over either pane.
 pub fn dragged_tab_surface() -> Rgba {
-    gpui_kit::rgb(if light() { 0xe9e6e0 } else { 0x2b2c30 })
+    gpui_kit::rgb(colors().neutral[2])
 }
-
 pub fn page_surface() -> Rgba {
-    gpui_kit::rgba(if light() {
-        0xfbfaf8ff
-    } else {
-        del_core::PAGE_SURFACE_RGBA
-    })
+    gpui_kit::rgb(colors().neutral[0])
 }
 
 fn path() -> std::path::PathBuf {
@@ -108,7 +101,10 @@ fn path() -> std::path::PathBuf {
 /// as an opacity value are ignored. Unreadable files fall back to dark.
 fn parse(bytes: &[u8]) -> Preferences {
     if let Ok(light) = serde_json::from_slice::<bool>(bytes) {
-        Preferences { light }
+        Preferences {
+            light,
+            ..Preferences::default()
+        }
     } else {
         serde_json::from_slice::<Preferences>(bytes).unwrap_or_default()
     }
@@ -117,19 +113,28 @@ pub fn load(cx: &mut App) {
     let preferences = std::fs::read(path())
         .map(|bytes| parse(&bytes))
         .unwrap_or_default();
-    apply(preferences.light, cx);
+    apply(preferences.light, preferences.theme, cx);
 }
 fn save() {
-    if let Ok(bytes) = serde_json::to_vec(&Preferences { light: light() }) {
+    if let Ok(bytes) = serde_json::to_vec(&Preferences {
+        light: light(),
+        theme: preset(),
+    }) {
         let _ = crate::sessions::write_atomic(&path(), &bytes, 0o644);
     }
 }
 pub fn set(light: bool, cx: &mut App) {
-    apply(light, cx);
+    apply(light, preset(), cx);
     save();
     cx.refresh_windows();
 }
-fn apply(light: bool, cx: &mut App) {
+pub fn set_preset(theme: ThemePreset, cx: &mut App) {
+    apply(light(), theme, cx);
+    save();
+    cx.refresh_windows();
+}
+fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
+    PRESET.store(preset as u8, Ordering::Relaxed);
     LIGHT.store(light, Ordering::Relaxed);
     Theme::change(
         if light {
@@ -143,142 +148,126 @@ fn apply(light: bool, cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.colors.background = gpui_kit::transparent_black();
         theme.font_size = zpx(del_core::typography::TEXT_MD);
-        theme.colors.popover = popup_surface().into();
-        theme.colors.popover_foreground = rgb(0xf0f0f0).into();
-        theme.colors.border = rgba(0xffffff14).into();
-        theme.colors.accent = rgba(0xffffff14).into();
-        theme.colors.accent_foreground = rgb(0xf5f5f5).into();
-        if !light {
-            let c = &mut theme.colors;
-            let surface = gpui_kit::rgb(DARK_SURFACE).into();
-            let hover = gpui_kit::rgb(DARK_HOVER).into();
-            let active = gpui_kit::rgb(DARK_ACTIVE).into();
-            let text = gpui_kit::rgb(DARK_PRIMARY_TEXT).into();
-            let secondary = gpui_kit::rgb(DARK_SECONDARY_TEXT).into();
-            let white = gpui_kit::rgb(DARK_PRIMARY_TEXT).into();
-            let black = shell_surface().into();
-            let border = separator().into();
-            c.foreground = text;
-            c.popover = popup_surface().into();
-            c.popover_foreground = text;
-            c.border = border;
-            c.input = border;
-            c.accent = hover;
-            c.accent_foreground = text;
-            c.muted = hover;
-            c.muted_foreground = secondary;
-            c.button = surface;
-            c.button_hover = hover;
-            c.button_active = active;
-            c.button_foreground = text;
-            c.primary = gpui_kit::rgb(0x3b6db3).into();
-            c.primary_hover = gpui_kit::rgb(0x4579bf).into();
-            c.primary_active = gpui_kit::rgb(0x335f9c).into();
-            c.primary_foreground = gpui_kit::rgb(0xffffff).into();
-            c.button_primary = c.primary;
-            c.button_primary_hover = c.primary_hover;
-            c.button_primary_active = c.primary_active;
-            c.button_primary_foreground = c.primary_foreground;
-            c.secondary = surface;
-            c.secondary_hover = hover;
-            c.secondary_active = active;
-            c.secondary_foreground = text;
-            c.button_secondary = surface;
-            c.button_secondary_hover = hover;
-            c.button_secondary_active = active;
-            c.button_secondary_foreground = text;
-            c.ring = ActionTone::Accent.foreground().into();
-            c.selection = gpui_kit::rgba(0x8fb4e640).into();
-            c.link = ActionTone::Accent.foreground().into();
-            c.link_hover = gpui_kit::rgb(0xb3cdef).into();
-            c.link_active = c.link;
-            c.list = surface;
-            c.list_head = surface;
-            c.list_even = surface;
-            c.list_hover = hover;
-            c.list_active = active;
-            c.list_active_border = border;
-            c.sidebar = black;
-            c.sidebar_foreground = text;
-            c.sidebar_accent = hover;
-            c.sidebar_accent_foreground = text;
-            c.sidebar_border = border;
-            c.sidebar_primary = white;
-            c.sidebar_primary_foreground = black;
-            c.skeleton = hover;
-            c.slider_bar = secondary;
-            c.slider_thumb = white;
-            c.switch = active;
-            c.switch_thumb = white;
-            c.scrollbar = gpui_kit::transparent_black();
-            c.scrollbar_thumb = active;
-            c.scrollbar_thumb_hover = gpui_kit::rgb(DARK_MUTED).into();
-            c.tab = surface;
-            c.tab_bar = black;
-            c.tab_bar_segmented = surface;
-            c.tab_foreground = secondary;
-            c.tab_active = hover;
-            c.tab_active_foreground = text;
-            c.title_bar = black;
-            c.title_bar_border = border;
-            c.status_bar = black;
-            c.status_bar_border = border;
-            c.drag_border = secondary;
-            c.drop_target = gpui_kit::rgba(0xffffff14).into();
-        } else {
-            let c = &mut theme.colors;
-            c.popover = popup_surface().into();
-            c.border = separator().into();
-            c.input = separator().into();
-            c.sidebar = shell_surface().into();
-            c.title_bar = shell_surface().into();
-            c.status_bar = shell_surface().into();
-            c.tab_bar = shell_surface().into();
-            c.foreground = gpui_kit::rgb(0x2a2926).into();
-            c.muted_foreground = gpui_kit::rgb(0x6e6c66).into();
-            c.ring = ActionTone::Accent.foreground().into();
-            c.link = ActionTone::Accent.foreground().into();
-            c.primary = ActionTone::Accent.foreground().into();
-            c.button_primary = c.primary;
-        }
+        let palette = colors();
+        let c = &mut theme.colors;
+        let surface = gpui_kit::rgb(palette.neutral[1]).into();
+        let hover = gpui_kit::rgb(palette.neutral[2]).into();
+        let active = gpui_kit::rgb(palette.neutral[3]).into();
+        let text = gpui_kit::rgb(palette.neutral[7]).into();
+        let secondary = gpui_kit::rgb(palette.neutral[5]).into();
+        let white = gpui_kit::rgb(palette.neutral[7]).into();
+        let black = shell_surface().into();
+        let border = separator().into();
+        c.foreground = text;
+        c.popover = popup_surface().into();
+        c.popover_foreground = text;
+        c.border = border;
+        c.input = border;
+        c.accent = hover;
+        c.accent_foreground = text;
+        c.muted = hover;
+        c.muted_foreground = secondary;
+        c.button = surface;
+        c.button_hover = hover;
+        c.button_active = active;
+        c.button_foreground = text;
+        c.primary = gpui_kit::rgb(palette.primary).into();
+        c.primary_hover = mix(
+            gpui_kit::rgb(palette.primary),
+            gpui_kit::rgb(0xffffff),
+            0.10,
+        )
+        .into();
+        c.primary_active = mix(
+            gpui_kit::rgb(palette.primary),
+            gpui_kit::rgb(0x000000),
+            0.10,
+        )
+        .into();
+        c.primary_foreground = gpui_kit::rgb(palette.primary_foreground).into();
+        c.button_primary = c.primary;
+        c.button_primary_hover = c.primary_hover;
+        c.button_primary_active = c.primary_active;
+        c.button_primary_foreground = c.primary_foreground;
+        c.secondary = surface;
+        c.secondary_hover = hover;
+        c.secondary_active = active;
+        c.secondary_foreground = text;
+        c.button_secondary = surface;
+        c.button_secondary_hover = hover;
+        c.button_secondary_active = active;
+        c.button_secondary_foreground = text;
+        c.ring = ActionTone::Accent.foreground().into();
+        c.selection = ActionTone::Accent.foreground().opacity(0.25).into();
+        c.link = ActionTone::Accent.foreground().into();
+        c.link_hover = mix(
+            ActionTone::Accent.foreground(),
+            gpui_kit::rgb(palette.neutral[7]),
+            0.2,
+        )
+        .into();
+        c.link_active = c.link;
+        c.list = surface;
+        c.list_head = surface;
+        c.list_even = surface;
+        c.list_hover = hover;
+        c.list_active = active;
+        c.list_active_border = border;
+        c.sidebar = black;
+        c.sidebar_foreground = text;
+        c.sidebar_accent = hover;
+        c.sidebar_accent_foreground = text;
+        c.sidebar_border = border;
+        c.sidebar_primary = white;
+        c.sidebar_primary_foreground = black;
+        c.skeleton = hover;
+        c.slider_bar = secondary;
+        c.slider_thumb = white;
+        c.switch = active;
+        c.switch_thumb = white;
+        c.scrollbar = gpui_kit::transparent_black();
+        c.scrollbar_thumb = active;
+        c.scrollbar_thumb_hover = gpui_kit::rgb(palette.neutral[4]).into();
+        c.tab = surface;
+        c.tab_bar = black;
+        c.tab_bar_segmented = surface;
+        c.tab_foreground = secondary;
+        c.tab_active = hover;
+        c.tab_active_foreground = text;
+        c.title_bar = black;
+        c.title_bar_border = border;
+        c.status_bar = black;
+        c.status_bar_border = border;
+        c.drag_border = secondary;
+        c.drop_target = ActionTone::Accent.foreground().opacity(0.08).into();
     });
 }
-// Normalize neutral literals onto the calm palette, preserving alpha. Dark
-// snaps them to the graphite scale; light inverts them onto warm ink and
-// off-whites. Provider marks and status colours keep their hue; the few
-// saturated status literals are softened by `status`.
-fn palette(mut color: Rgba) -> Rgba {
+fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a,
+    }
+}
+
+// Map legacy neutral literals to the selected palette; preserve alpha and
+// provider/status hues. Both custom chrome and component controls share it.
+fn palette(color: Rgba) -> Rgba {
+    map_neutral(color, colors())
+}
+fn map_neutral(mut color: Rgba, palette: themes::Palette) -> Rgba {
     let neutral = color.r.max(color.g).max(color.b) - color.r.min(color.g).min(color.b) < 0.06;
     if neutral {
         let value = (color.r + color.g + color.b) / 3.;
-        let (r, g, b) = if light() {
-            // White text becomes #2a2926 ink, black becomes a warm off-white.
-            let t = 0.975 - value * 0.81;
-            (t, (t - 0.005).max(0.), (t - 0.016).max(0.))
-        } else {
-            let tone = if value < 0.08 {
-                DARK_PAGE
-            } else if value < 0.18 {
-                DARK_SURFACE
-            } else if value < 0.26 {
-                DARK_HOVER
-            } else if value < 0.36 {
-                DARK_ACTIVE
-            } else if value < 0.52 {
-                DARK_FAINT_TEXT
-            } else if value < 0.75 {
-                DARK_SECONDARY_TEXT
-            } else if value < 0.94 {
-                DARK_TEXT
-            } else {
-                DARK_PRIMARY_TEXT
-            };
-            let channel = |shift: u32| ((tone >> shift) & 0xff) as f32 / 255.;
-            (channel(16), channel(8), channel(0))
-        };
-        color.r = r;
-        color.g = g;
-        color.b = b;
+        let index = [0.08, 0.18, 0.26, 0.36, 0.52, 0.75, 0.94]
+            .into_iter()
+            .position(|threshold| value < threshold)
+            .unwrap_or(7);
+        let mapped = gpui_kit::rgb(palette.neutral[index]);
+        color.r = mapped.r;
+        color.g = mapped.g;
+        color.b = mapped.b;
     }
     color
 }
@@ -321,7 +310,90 @@ mod tests {
         assert!(parse(br#"{"light":true,"opacity":0.4,"future":[1]}"#).light);
         assert!(!parse(br#"{}"#).light);
         assert!(!parse(b"{not json").light);
-        let bytes = serde_json::to_vec(&Preferences { light: true }).unwrap();
+        let bytes = serde_json::to_vec(&Preferences {
+            light: true,
+            ..Preferences::default()
+        })
+        .unwrap();
         assert!(parse(&bytes).light);
+    }
+    #[test]
+    fn every_preset_round_trips_and_unknown_names_preserve_color_mode() {
+        for theme in ThemePreset::ALL {
+            for light in [false, true] {
+                let bytes = serde_json::to_vec(&Preferences { light, theme }).unwrap();
+                let restored = parse(&bytes);
+                assert_eq!(restored.theme, theme);
+                assert_eq!(restored.light, light);
+            }
+            assert_eq!(ThemePreset::ALL[theme as usize], theme);
+        }
+        let future = parse(br#"{"light":true,"theme":"future-theme"}"#);
+        assert!(future.light);
+        assert_eq!(future.theme, ThemePreset::Graphite);
+        assert_eq!(parse(b"true").theme, ThemePreset::Graphite);
+    }
+
+    fn luminance(value: u32) -> f32 {
+        let color = gpui_kit::rgb(value);
+        let linear = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+    fn contrast(a: u32, b: u32) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn all_palettes_keep_readable_text_accents_and_surface_hierarchy() {
+        for theme in ThemePreset::ALL {
+            for light in [false, true] {
+                let p = theme.palette(light);
+                for background in [
+                    p.shell,
+                    p.composer,
+                    p.popup,
+                    p.neutral[0],
+                    p.neutral[1],
+                    p.neutral[2],
+                    p.neutral[3],
+                ] {
+                    for text in [p.neutral[5], p.neutral[6], p.neutral[7], p.accent] {
+                        assert!(
+                            contrast(text, background) >= 4.5,
+                            "{theme:?} light={light}: {text:06x} on {background:06x}: {}",
+                            contrast(text, background)
+                        );
+                    }
+                }
+                assert!(
+                    contrast(p.primary_foreground, p.primary) >= 4.5,
+                    "{theme:?}"
+                );
+                assert_eq!(luminance(p.composer) < luminance(p.neutral[0]), light);
+                assert!(luminance(p.shell) <= luminance(p.neutral[0]));
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_mapping_preserves_transparency_and_provider_colors() {
+        for theme in ThemePreset::ALL {
+            for light in [false, true] {
+                let p = theme.palette(light);
+                let neutral = gpui_kit::rgba(0xffffff80);
+                let mapped = map_neutral(neutral, p);
+                assert_eq!(mapped.a, neutral.a);
+                assert_eq!(mapped.r, gpui_kit::rgb(p.neutral[7]).r);
+                let provider = gpui_kit::rgb(0xd97757);
+                assert_eq!(map_neutral(provider, p), provider);
+            }
+        }
     }
 }

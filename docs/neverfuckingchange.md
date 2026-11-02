@@ -7,13 +7,22 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Colors and surfaces
 
-- Both themes use the calm palette from the Harp design system: calm and
+- Theme presets retain the calm palette principles: calm and
   low-chrome, surfaces only a few steps apart, few and quiet borders.
-- Dark is graphite, not near-black: chrome (title bar, sidebar, gutters, status
+- The default Graphite dark palette uses: chrome (title bar, sidebar, gutters, status
   bar) `#1D1E21`, page `#212225`, composer `#2A2B2F`, menus and dialogs `#28292D`.
   Text is off-white `#ECECEA` / `#DCDCD8`, muted `#A3A39F`, faint `#83837F`.
-- Light is warm off-white, not stark white: chrome `#F7F6F3`, page `#FBFAF8`,
-  composer `#F1EFEB`, menus and dialogs `#F6F5F2`, ink `#2A2926`, muted `#6E6C66`.
+- The default Graphite light palette uses warm off-white: chrome `#F7F6F3`, page `#FBFAF8`,
+  composer `#F1EFEB`, menus and dialogs `#F6F5F2`, ink `#2A2926`, muted `#625F59`.
+- Appearance has a Theme dropdown with swatches: Graphite, Dune, Grove, Tide,
+  Rosewood, Ember, Midnight, Aubergine, Olive, Porcelain, Cocoa, Iris, Onyx,
+  Obsidian, Soot, Pine, Oxblood, Eclipse, and Vercel. Vercel uses pitch-black
+  chrome and workspace with crisp monochrome controls and no animated backdrop. Onyx uses monochrome near-black;
+  Obsidian, Soot, Pine, Oxblood, and Eclipse add subtle tints to near-black.
+  Each has a light and dark variant; color mode and preset persist independently.
+  Selecting either updates the whole app immediately. Existing boolean appearance
+  preferences migrate to Graphite; unknown preset names fall back to Graphite.
+  Preserve provider hues, semantic status meanings, and terminal ANSI colors.
 - The sidebar uses the same chrome surface as the title bar: no seam between them.
 - Keep the light-mode composer darker than the main workspace. Do not brighten
   the composer past the workspace or reverse the surface hierarchy.
@@ -24,8 +33,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Do not change unrelated colors when asked to adjust one surface. Keep dark-mode
   styling independent of light-mode adjustments.
 - Keep surfaces stable across wallpapers; avoid washed-out translucent greys.
-- Accents are desaturated and used only as small, purposeful cues: Del's softened
-  blue (`#8FB4E6` dark / `#2F5F9E` light) for actions and selections, muted green
+- Accents are desaturated and used only as small, purposeful cues. Graphite uses
+  softened blue (`#8FB4E6` dark / `#2F5F9E` light); other presets coordinate their
+  action and selection accent with the palette. Retain muted green
   for done/success, soft amber for "needs you"/caution, dusty red for failed or
   destructive. Ordinary tabs and text stay neutral.
 - Do not restore an opacity slider or load old saved opacity values.

@@ -4,6 +4,7 @@ use crate::zoom::px as zpx;
 use crate::{composer_ui::provider_brand, providers, state::AppState};
 use del_agent::{LoginState, Provider, ProviderStatus};
 use del_core::typography::{TEXT_MD, TEXT_SM};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     *,
@@ -87,11 +88,7 @@ fn provider_row(
         .gap_3()
         .items_center()
         .rounded(zpx(14.))
-        .bg(if crate::appearance::light() {
-            gpui_kit::rgb(0xf9f9f9)
-        } else {
-            gpui_kit::rgb(0x171719)
-        })
+        .bg(crate::appearance::composer_surface())
         .child(crate::icons::path(logo).text_color(rgb(color)))
         .child(
             div()
@@ -255,6 +252,122 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
         )
 }
 
+fn theme_swatches(theme: crate::appearance::ThemePreset, light: bool) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .flex_none()
+        .children(theme.swatches(light).into_iter().map(|color| {
+            div()
+                .size(zpx(12.))
+                .rounded_full()
+                .bg(gpui_kit::rgb(color))
+                .border_1()
+                .border_color(crate::appearance::separator())
+        }))
+}
+
+fn appearance_controls() -> impl IntoElement {
+    use crate::appearance::{self, ThemePreset};
+    let theme = appearance::preset();
+    let light = appearance::light();
+    v_flex()
+        .w_full()
+        .gap_4()
+        .p_4()
+        .rounded(zpx(14.))
+        .bg(appearance::composer_surface())
+        .child(
+            h_flex()
+                .w_full()
+                .gap_4()
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().child("Color mode"))
+                        .child(
+                            div()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(appearance::secondary_text())
+                                .child("Every theme comes in light and dark."),
+                        ),
+                )
+                .children(
+                    [("Light", true), ("Dark", false)]
+                        .into_iter()
+                        .map(|(label, mode)| {
+                            Button::new(label)
+                                .ghost()
+                                .small()
+                                .label(label)
+                                .when(light == mode, |button| button.bg(rgba(0xffffff20)))
+                                .on_click(move |_, _, cx| appearance::set(mode, cx))
+                        }),
+                ),
+        )
+        .child(div().h(zpx(1.)).bg(appearance::separator()))
+        .child(
+            h_flex()
+                .w_full()
+                .gap_4()
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().child("Theme"))
+                        .child(
+                            div()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(appearance::secondary_text())
+                                .child(theme.description()),
+                        ),
+                )
+                .child(
+                    Button::new("appearance-theme")
+                        .ghost()
+                        .small()
+                        .accessibility_label(format!("Theme: {}", theme.name()))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(theme_swatches(theme, light))
+                                .child(theme.name())
+                                .child(crate::icons::icon(IconName::ChevronDown)),
+                        )
+                        .dropdown_menu(move |menu, _, _| {
+                            ThemePreset::ALL.into_iter().fold(
+                                menu.scrollable(true).max_h(zpx(360.)),
+                                |menu, option| {
+                                    menu.item(
+                                        PopupMenuItem::element(move |_, _| {
+                                            h_flex()
+                                                .id(option.name())
+                                                .role(Role::MenuItem)
+                                                .aria_label(option.name())
+                                                .min_w(zpx(210.))
+                                                .py_1()
+                                                .gap_3()
+                                                .items_center()
+                                                .child(theme_swatches(option, light))
+                                                .child(option.name())
+                                        })
+                                        .checked(option == theme)
+                                        .on_click(
+                                            move |_, _, cx| appearance::set_preset(option, cx),
+                                        ),
+                                    )
+                                },
+                            )
+                        }),
+                ),
+        )
+}
+
 pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
     let section = s.settings_section;
@@ -268,16 +381,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
         .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_4()
-            .when(preferences, |content| content
-                .child(h_flex().w_full().p_4().gap_4().items_center().rounded(zpx(14.)).bg(if crate::appearance::light() { gpui_kit::rgb(0xf9f9f9) } else { gpui_kit::rgb(0x171719) })
-                    .child(v_flex().flex_1().min_w_0().gap_1()
-                        .child(div().text_color(rgb(0xf5f5f5)).child("Theme"))
-                        .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c)).child("Choose a theme for Del.")))
-                    .children([("Light", true), ("Dark", false)].into_iter().map(|(label, light)| {
-                        Button::new(label).ghost().small().label(label)
-                            .when(crate::appearance::light() == light, |button| button.bg(rgba(0xffffff20)))
-                            .on_click(move |_, _, cx| crate::appearance::set(light, cx))
-                    }))))
+            .when(preferences, |content| content.child(appearance_controls()))
             .when(preferences, |content| {
                 let state = state.clone();
                 content.child(h_flex().w_full().p_4().gap_4().items_center()
