@@ -220,8 +220,8 @@ Direct development launches also set the Dock icon from the embedded ICNS asset.
 The sidebar has **Pinned** (hidden when empty) and the **active Space name** (for example, **Default**). Spaces
 are persistent collections of projects, with independent pinned chats and tab decks.
 Existing projects and pins start in **Default**. The Space switcher at the top of
-the sidebar lists your Spaces and offers **Create Space**, **Create Project** (choose
-its directory), and **Rename Space**, each with an icon. When more than one Space exists, a red **Delete Space** action moves its projects,
+the sidebar lists your Spaces and offers **Create Space** and **Rename Space**,
+each with an icon. Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
 horizontally with two fingers over the left sidebar, or pick one from the Space
 switcher (or the status bar's Space item), to switch Spaces. Swipes slide both lists
@@ -253,15 +253,15 @@ section. Projects are created automatically from session folders. Git subfolders
 and linked worktrees group under the parent repository, while non-Git folders use
 their canonical full paths. Existing histories, pins, titles, and unread state are
 preserved. Project membership is derived from the stored working directory, so no
-provider transcript migration is needed. The **Archived sessions** toggle in the Space switcher menu opens **Archived**,
-showing only archived sessions grouped by project; the menu item is checked while active. The heading
+provider transcript migration is needed. The **Archive** button in the sidebar footer opens **Archived**,
+showing only archived sessions grouped by project; the button is highlighted while active. The heading
 and project-row plus buttons are hidden in this view; the global New Session
 action returns to active Projects. Project identities and collapsed state
 persist in `projects.json`. Hover a project for **+** and its three-dot menu;
 choose Chat or Terminal in the composer. Terminal rows show a terminal icon with
 a small provider badge. Each new-session action creates an independent draft in
 the selected session's directory, or the last directory when no tab is selected.
-Choose **Create Project** from the Spaces menu to open a directory picker. Changing a draft's folder
+Choose **Create Project** from the **+** menu to open a directory picker. Changing a draft's folder
 moves it to that project and expands the destination.
 
 Projects are directory groups, not separate agent containers. Added project directories
@@ -327,12 +327,11 @@ for normal Git review and cleanup.
 The sidebar header has the Space switcher and **Space actions** (+). The plus
 opens Create Space, Create Project, Rename Space, and Delete Space. Search is
 available through ⌘K. Four rounded buttons at the bottom provide **Keep Mac awake**,
-**Archive**, **Memory usage**, and **Settings**. Archive toggles archived sessions;
-the same toggle is available in the Space menu. Empty Spaces show a playful orbit
+**Archive**, **Memory usage**, and **Settings**. Archive toggles archived sessions. Empty Spaces show a playful orbit
 illustration and a hint to create a project from +. Sessions are
 indented 12 px under their project, with provider logos and no mode text labels.
-Project headings show a session count and an amber "N needs you" when sessions
-wait for approval. Each row shows its age and a status glyph for working, waiting
+Project headings show the project name and an amber "N needs you" when sessions
+wait for approval, without a session count. Each row shows its age and a status glyph for working, waiting
 for you, failed, or unread (a filled tick with a bold title, cleared when the chat is read). Read, inactive rows
 have no status marker. Hide timestamps while unread ticks are visible. Keep-awake uses a neutral hover-colored background and animated gold
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.

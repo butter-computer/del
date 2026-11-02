@@ -1179,8 +1179,6 @@ fn space_contents(
                     let cleanup_path = path.clone();
                     let group = SharedString::from(format!("project-{}", path.display()));
                     let project_rows: Vec<&Row> = rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).collect();
-                    let project_count = project_rows.len()
-                        + if show_archived { 0 } else { drafts.iter().filter(|key| s.draft_project(**key).is_some_and(|p| p == path)).count() };
                     let needs = project_rows.iter().filter(|r| r.status == del_agent::SessionStatus::WaitingApproval).count();
                     // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
@@ -1194,11 +1192,9 @@ fn space_contents(
                                 let state = cleanup_state.clone(); let path = cleanup_path.clone();
                                 menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
                             })
-                            // Content-sized so the count sits right after the name.
                             .child(if project_renaming {
                                 div().flex_1().min_w_0().child(Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD))).into_any_element()
                             } else { div().flex_initial().min_w_0().truncate().child(s.project_name(&path)).into_any_element() })
-                            .child(div().flex_none().font_weight(FontWeight::NORMAL).text_color(rgba(FAINT)).child(project_count.to_string()))
                             .child(div().flex_1())
                             .when(needs > 0, |row| row.child(div().flex_none().font_weight(FontWeight::NORMAL).text_size(zpx(TEXT_SM))
                                 .text_color(crate::appearance::ActionTone::Warning.foreground())
@@ -1336,7 +1332,7 @@ pub fn render(
                                 .accessibility_label("Space actions")
                                 .child(feedback.glyph(Glyph::Add))
                                 .dropdown_menu(move |menu, _, cx| {
-                                    space_menu(menu, &space_actions_state, cx)
+                                    space_menu(menu, &space_actions_state, true, cx)
                                 }),
                         )
                     },
@@ -1513,7 +1509,7 @@ mod menu_tests {
     }
 }
 
-/// Spaces to switch to, then the Space and project actions.
+/// Spaces to switch to, followed by Space management actions.
 pub(crate) fn space_switch_menu(
     mut menu: PopupMenu,
     state: &Entity<AppState>,
@@ -1530,22 +1526,15 @@ pub(crate) fn space_switch_menu(
                 .on_click(move |_, _, cx| state.update(cx, |s, cx| s.switch_space(&id, cx))),
         );
     }
-    let archived = state.read(cx).show_archived;
-    let archive_state = state.clone();
-    menu = menu.separator().item(
-        PopupMenuItem::new("Archived sessions")
-            .checked(archived)
-            .on_click(move |_, _, cx| {
-                archive_state.update(cx, |state, cx| {
-                    state.show_archived = !state.show_archived;
-                    cx.notify();
-                });
-            }),
-    );
-    space_menu(menu.separator(), state, cx)
+    space_menu(menu.separator(), state, false, cx)
 }
 
-fn space_menu(menu: PopupMenu, state: &Entity<AppState>, cx: &mut App) -> PopupMenu {
+fn space_menu(
+    menu: PopupMenu,
+    state: &Entity<AppState>,
+    include_project: bool,
+    cx: &mut App,
+) -> PopupMenu {
     let deletable = state.read(cx).spaces.items.len() > 1;
     let motion = crate::hover_motion::HoverMotion::menu(cx);
     let clicks = motion.clone();
@@ -1566,11 +1555,13 @@ fn space_menu(menu: PopupMenu, state: &Entity<AppState>, cx: &mut App) -> PopupM
                     crate::icons::icon(IconName::Copy),
                     &motion,
                 ))
-                .child(session_menu_item(
-                    "Create Project",
-                    crate::icons::icon(IconName::Folder),
-                    &motion,
-                ))
+                .when(include_project, |menu| {
+                    menu.child(session_menu_item(
+                        "Create Project",
+                        crate::icons::icon(IconName::Folder),
+                        &motion,
+                    ))
+                })
                 .child(session_menu_item(
                     "Rename Space",
                     crate::icons::icon(ActionIcon::Pencil),
@@ -1584,6 +1575,7 @@ fn space_menu(menu: PopupMenu, state: &Entity<AppState>, cx: &mut App) -> PopupM
                     ))
                 })
         })
+        .custom_highlight()
         .on_click(move |event, window, cx| {
             let Some(action) = clicks.clicked(event) else {
                 return;

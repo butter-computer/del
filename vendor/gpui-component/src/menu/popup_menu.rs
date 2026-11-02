@@ -48,6 +48,7 @@ pub enum PopupMenuItem {
     },
     /// A menu item with custom element render.
     ElementItem {
+        highlight: bool,
         icon: Option<Icon>,
         disabled: bool,
         checked: bool,
@@ -90,6 +91,7 @@ impl PopupMenuItem {
         E: IntoElement,
     {
         PopupMenuItem::ElementItem {
+            highlight: true,
             icon: None,
             disabled: false,
             checked: false,
@@ -97,6 +99,15 @@ impl PopupMenuItem {
             render: Box::new(move |window, cx| builder(window, cx).into_any_element()),
             handler: None,
         }
+    }
+
+    /// Let a custom element render its own hover and selection highlight.
+    /// Selection, keyboard navigation, and click handling remain enabled.
+    pub fn custom_highlight(mut self) -> Self {
+        if let Self::ElementItem { highlight, .. } = &mut self {
+            *highlight = false;
+        }
+        self
     }
 
     /// Create a new submenu item that opens another popup menu.
@@ -1345,11 +1356,13 @@ impl PopupMenu {
                     .child(div().flex_1().child(label.clone())),
             ),
             PopupMenuItem::ElementItem {
+                highlight,
                 render,
                 icon,
                 disabled,
                 ..
             } => this
+                .highlight(*highlight)
                 .when(!disabled, |this| {
                     this.on_click(cx.listener(move |this, event, window, cx| {
                         this.on_click(ix, event, window, cx)

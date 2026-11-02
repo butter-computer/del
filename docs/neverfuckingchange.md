@@ -41,7 +41,8 @@ This records the final decisions, including corrections to earlier experiments.
 - Archive toggles the archived view and has a selected background while active.
 - Space actions opens Create Space, Create Project, Rename Space and Delete Space.
   New sessions come from project plus buttons, the `+` after the top tabs, and ⌘N.
-  Archived sessions is also a checked toggle in the Space switcher menu.
+  The Space switcher menu contains only Space switching and management actions;
+  Create Project stays in the + menu and Archive stays in the footer.
 - Empty Spaces show a playful orbit illustration, “A little space for your next
   big idea”, and a hint to use + to create a project. An empty archive uses
   “Nothing in this orbit yet” and “Archived sessions will land here.” Only show
@@ -406,15 +407,15 @@ This records the final decisions, including corrections to earlier experiments.
 - Every new-session action creates an independent draft. A project's plus uses
   that project's directory; the general plus inherits the currently selected
   session or draft directory. Use the remembered directory only without a selected
-  tab. The Space switcher menu offers Create Project (a directory picker), and
+  tab. The + menu offers Create Project (a directory picker), and
   project row plus buttons appear only on hover.
 - Terminal sessions use a terminal glyph with a small provider badge at its lower
   right. Chat sessions retain their provider glyph.
 - New worktree is a compact checkbox, not a switch, with 6 px of extra right padding. Keep keyboard activation
   and disabled state, without an extra outer outline.
 - Projects follow the sidebar header directly, grouped without a section heading.
-  Each project row shows its name, session count and, in amber, "N needs you"
-  when sessions wait for approval; the badge gives way to the three-dot menu and
+  Each project row shows its name without a session count. When sessions wait for
+  approval, show an amber "N needs you" badge; it gives way to the three-dot menu and
   plus on hover. Indent session and draft rows 12 px under their project heading. Hide Pinned when empty.
   Project rename changes its display name only. Archive is reversible through the
   archived list. Permanent deletion confirms removal of the project and all its
@@ -445,7 +446,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Project visibility comes only from its sessions (and active drafts), never saved
   project archive/delete flags or empty remembered roots. Changing a draft's
   directory moves it to that directory group and expands the destination without
-  restoring archived sibling sessions. The Archived sessions menu item is checked while viewing archives.
+  restoring archived sibling sessions. The footer Archive button is highlighted while viewing archives.
 
 - Project expand/collapse is instant: no animation, transition, or delay when a
   project group opens or closes. (Section headings keep their reveal.)
@@ -736,7 +737,7 @@ the browser's last viewport instead of sampling a nearly zero-width page.
 
 - The Space switcher in the sidebar header shows only the active Space name with
   a chevron, without a Spaces prefix. Its menu lists the Spaces (the active one
-  checked) and then offers Create Space, Create Project, and Rename Space with
+  checked) and then offers Create Space and Rename Space with
   icons. A red Delete Space action appears only with multiple Spaces and moves
   projects, pins, and tabs to the first remaining Space without deleting chats or
   files. Existing projects and pins belong to Default; new Spaces start empty.
