@@ -72,6 +72,21 @@ async fn replays_plain_turn() {
                 turn_id: turn.clone(),
                 text: "pong".into()
             },
+            AgentEvent::UsageSnapshot {
+                context_tokens: Some(27500),
+                context_window: Some(475000),
+                cost_scope: None,
+                cost_usd: None
+            },
+            AgentEvent::UsageSnapshot {
+                context_tokens: None,
+                context_window: None,
+                cost_scope: Some(del_agent::pricing::cost_scope(
+                    Some("01a16315-ed3f-7d80-a7ff-c4d455713fdf"),
+                    "estimate:codex:01a16315-ed3f-7d80-a7ff-c4d455713fdf".into()
+                )),
+                cost_usd: Some(0.0299904),
+            },
             AgentEvent::TokenUsage {
                 input: 27495,
                 output: 5,

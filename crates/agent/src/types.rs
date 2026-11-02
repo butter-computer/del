@@ -261,6 +261,14 @@ pub enum AgentEvent {
     ApprovalResolved {
         id: String,
     },
+    /// Provider-reported context occupancy and cumulative cost for one stable scope.
+    /// Missing fields mean unreported, never zero. Cost scopes are replaced, not added.
+    UsageSnapshot {
+        context_tokens: Option<u64>,
+        context_window: Option<u64>,
+        cost_scope: Option<String>,
+        cost_usd: Option<f64>,
+    },
     TokenUsage {
         input: u64,
         output: u64,

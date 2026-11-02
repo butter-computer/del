@@ -7,11 +7,10 @@ use crate::state::{AppState, Panel, Selection, Tab};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
 use crate::{AppShell, ResizePreview};
-use del_agent::SessionStatus;
 use del_core::typography::TEXT_SM;
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -79,7 +78,6 @@ fn status_item(id: impl Into<ElementId>) -> Button {
         .rounded(zpx(4.0))
         .text_size(zpx(TEXT_SM))
         .text_color(rgba(0xffffff8c))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 fn status_icon(path: &'static str) -> Icon {
@@ -103,22 +101,102 @@ fn reachable(state: &AppState) -> impl Fn(&Tab) -> bool + '_ {
     }
 }
 
-/// Live, unarchived sessions: (id, terminal, running, waiting).
-fn agent_rows(state: &AppState) -> Vec<(del_agent::SessionId, bool, bool, bool)> {
-    state
-        .unified_rows()
-        .into_iter()
-        .filter(|row| !row.archived)
-        .map(|row| {
-            let terminal = state.terminal_rows.iter().any(|t| t.id == row.id);
-            let running = row.status == SessionStatus::Running || state.session_working(&row.id);
-            let waiting = row.status == SessionStatus::WaitingApproval;
-            (row.id, terminal, running, waiting)
-        })
-        .collect()
-}
-
 impl AppShell {
+    pub(super) fn start_status_ticker(&mut self, cx: &mut Context<Self>) {
+        if cfg!(test) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.state.read(cx).window_active {
+                            this.refresh_status(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        if self.status_refreshing {
+            return;
+        }
+        self.status_refreshing = true;
+        self.state.update(cx, |state, cx| {
+            state.refresh_git(state.effective().2);
+            state.refresh_selected_usage(cx);
+        });
+        let backend = self.state.read(cx).backend();
+        let mut roots: Vec<crate::status_processes::Root> =
+            self.terminals
+                .iter()
+                .map(|(id, host)| crate::status_processes::Root {
+                    pid: host.read(cx).snapshot().pid,
+                    owner: Some(format!("terminal:{}", id.as_str())),
+                })
+                .chain(self.mode_terminals.iter().map(|(id, terminal)| {
+                    crate::status_processes::Root {
+                        pid: terminal.host.read(cx).snapshot().pid,
+                        owner: Some(format!("chat:{}", id.as_str())),
+                    }
+                }))
+                .collect();
+        for (panel, owner) in std::iter::once((&self.right, &self.right_key)).chain(
+            self.right_cache
+                .values()
+                .map(|entry| (&entry.panel, &entry.key)),
+        ) {
+            roots.extend(panel.read(cx).process_roots(cx).into_iter().map(|pid| {
+                crate::status_processes::Root {
+                    pid,
+                    owner: owner.clone(),
+                }
+            }));
+        }
+        let job = backend.runtime.spawn(async move {
+            // Include reconnectable provider servers that may outlive their original parent.
+            for session in backend
+                .manager
+                .list_sessions()
+                .into_iter()
+                .filter(|s| backend.manager.is_live(&s.id))
+            {
+                if let Ok(Some((pid, shared))) = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    backend.manager.session_process(&session.id),
+                )
+                .await
+                {
+                    roots.push(crate::status_processes::Root {
+                        pid,
+                        owner: (!shared).then(|| format!("chat:{}", session.id.as_str())),
+                    });
+                }
+            }
+            crate::status_processes::read(roots).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.status_refreshing = false;
+                if let Ok(snapshot) = result {
+                    this.processes = snapshot;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Record the shown tab in the back/forward history. A newly shown
     /// project also gets its Git state refreshed for the status bar.
     pub(super) fn track_navigation(&mut self, cx: &mut Context<Self>) {
@@ -378,270 +456,385 @@ impl AppShell {
         )
     }
 
-    /// Select the next running (or waiting) session after the current one.
-    fn jump_to(&mut self, waiting: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let (rows, current) = {
-            let state = self.state.read(cx);
-            let current = match &state.selection {
-                Selection::Session(id) | Selection::Terminal(id) => Some(id.clone()),
-                Selection::Draft(_) => None,
-            };
-            (agent_rows(state), current)
-        };
-        let matches: Vec<_> = rows
-            .into_iter()
-            .filter(|(_, _, running, wait)| if waiting { *wait } else { *running })
-            .collect();
-        let start = current
-            .and_then(|id| matches.iter().position(|(row, ..)| row == &id))
-            .map_or(0, |at| at + 1);
-        if let Some((id, terminal, ..)) = matches.get(start % matches.len().max(1)).cloned() {
-            self.state.update(cx, |state, cx| {
-                if terminal {
-                    state.select_terminal(id, cx)
-                } else {
-                    state.select(id, cx)
-                }
-            });
-            self.focus_composer(window, cx);
-        }
-    }
-
-    /// The 22 px status bar on the chrome surface.
+    /// Compact session metrics and the Chat / Terminal switch.
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let (provider, _, cwd) = state.effective();
-        let root = state.project_root(&cwd);
-        let project = state.project_name(&root);
-        let space = state
-            .spaces
-            .items
-            .iter()
-            .find(|space| space.id == state.spaces.active)
-            .map(|space| space.name.clone())
-            .unwrap_or_default();
         let git = state.project_info.get(&cwd).cloned().unwrap_or_default();
-        let rows = agent_rows(state);
-        let running = rows.iter().filter(|(_, _, running, _)| *running).count();
-        let waiting = rows.iter().filter(|(.., waiting)| *waiting).count();
-        let mode = state.mode();
-        let draft = state.is_draft();
-        let caffeine = state.caffeine_enabled;
-        let window_active = state.window_active;
-        let queued = self.open_chat(cx).map_or(0, |chat| {
-            chat.read(cx)
-                .queue
-                .items
+        let account = state.selected_account();
+        let limits = state
+            .account_usage
+            .get(&(provider, account.clone()))
+            .and_then(Option::as_ref)
+            .cloned();
+        let usage = self
+            .open_chat(cx)
+            .map(|chat| chat.read(cx).usage.clone())
+            .or_else(|| match &state.selection {
+                Selection::Session(id) => self.mode_terminals.get(id).map(|t| t.usage.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let cost_breakdown = usage.cost_breakdown();
+        let cost_rows = usage.provider_costs();
+        let total_cost = usage.cost_summary();
+        let terminal = state.mode() == SessionMode::Terminal
+            || matches!(&state.selection, Selection::Session(id) if self.mode_terminals.contains_key(id));
+        let context_label = if terminal {
+            "Context —".into()
+        } else {
+            usage.context_label()
+        };
+        let cost_label = format!(
+            "Cost {}",
+            crate::session_usage::money(usage.provider_cost(provider))
+        );
+        let remaining = limits.as_ref().and_then(|limits| limits.remaining());
+        let limits_label = remaining
+            .map(|n| format!("Limits {n:.0}% left"))
+            .unwrap_or_else(|| "Limits —".into());
+        let process_owner = match &state.selection {
+            Selection::Session(id) => Some(format!("chat:{}", id.as_str())),
+            Selection::Terminal(id) => Some(format!("terminal:{}", id.as_str())),
+            Selection::Draft(_) => None,
+        };
+        let process_rows: Vec<_> = self
+            .processes
+            .rows
+            .iter()
+            .filter(|p| !p.background)
+            .cloned()
+            .collect();
+        let process_count = process_rows
+            .iter()
+            .filter(|p| {
+                process_owner
+                    .as_ref()
+                    .is_none_or(|owner| p.owner.as_ref() == Some(owner))
+            })
+            .count();
+        let process_label = if !self.processes.ready {
+            "Processes …".into()
+        } else if self.processes.error.is_some() {
+            "Processes —".into()
+        } else {
+            format!("{} processes", process_count)
+        };
+        let process_snapshot = self.processes.clone();
+        let branch = if git.current.is_empty() {
+            "No repository".into()
+        } else {
+            let changes = git
+                .changed_files
+                .map(|n| {
+                    if n == 0 {
+                        "clean".into()
+                    } else {
+                        format!("{n} {}", if n == 1 { "file" } else { "files" })
+                    }
+                })
+                .unwrap_or_else(|| "changes unavailable".into());
+            format!(
+                "{} · {changes}{}{}",
+                git.current,
+                if git.ahead > 0 {
+                    format!(" ↑{}", git.ahead)
+                } else {
+                    String::new()
+                },
+                if git.behind > 0 {
+                    format!(" ↓{}", git.behind)
+                } else {
+                    String::new()
+                }
+            )
+        };
+        let branch_tooltip = format!(
+            "{}\n{branch}{}",
+            cwd.display(),
+            git.worktree
+                .as_ref()
+                .map(|name| format!("\nWorktree: {name}"))
+                .unwrap_or_default()
+        );
+        let account_name = match account.as_deref() {
+            Some(id) => state
+                .accounts
                 .iter()
-                .filter(|item| !item.sending)
-                .count()
-        });
-        let model = self.model_picker.read(cx).summary(cx);
-        let state_entity = self.state.clone();
-        let wait_color = ActionTone::Warning.foreground();
+                .find(|a| a.id == id && a.provider == provider)
+                .map(|a| a.identity.clone().unwrap_or_else(|| a.display())),
+            None => state.default_identities.get(&provider).cloned(),
+        }
+        .unwrap_or_else(|| "Account identity unavailable".into());
         h_flex()
             .id("status-bar")
             .flex_none()
             .w_full()
             .h(zpx(STATUS_BAR_HEIGHT))
-            .px(zpx(6.0))
-            .gap(zpx(2.0))
+            .px(zpx(6.))
+            .gap(zpx(2.))
             .items_center()
+            .overflow_hidden()
             .bg(shell_surface())
             .text_size(zpx(TEXT_SM))
             .text_color(rgba(0xffffff8c))
             .child(
-                status_item("status-space")
-                    .tooltip("Switch Space")
+                status_item("status-branch")
+                    .min_w_0()
+                    .max_w(zpx(390.))
+                    .overflow_hidden()
+                    .accessibility_label(format!("Git: {branch}"))
+                    .tooltip(branch_tooltip)
                     .child(
                         h_flex()
+                            .min_w_0()
                             .gap_1()
                             .items_center()
-                            .child(status_icon("icons/layers.svg"))
-                            .child(format!("{space} · {project}")),
-                    )
-                    .dropdown_menu({
-                        let state = state_entity.clone();
-                        move |menu, _, cx| crate::sidebar::space_switch_menu(menu, &state, cx)
-                    }),
-            )
-            .when(!git.current.is_empty(), |bar| {
-                bar.child(
-                    status_item("status-branch")
-                        .tooltip(format!("Branch: {}", git.current))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(status_icon("icons/git-branch.svg"))
-                                .child(format!(
-                                    "{}{}",
-                                    git.current,
-                                    if git.dirty { "*" } else { "" }
-                                ))
-                                .when(git.ahead > 0, |item| item.child(format!("↑{}", git.ahead))),
-                        )
-                        .dropdown_menu(move |menu, _, _| {
-                            let menu = menu.item(
-                                PopupMenuItem::new("View changes")
-                                    .action(Box::new(crate::OpenChanges)),
-                            );
-                            if draft {
-                                menu.item(
-                                    PopupMenuItem::new("Choose starting branch…")
-                                        .action(Box::new(crate::SelectBranch)),
+                            .child(status_icon("icons/git-branch.svg"))
+                            .child(div().min_w_0().truncate().child(branch))
+                            .when_some(git.changed_lines, |row, (added, removed)| {
+                                row.child(
+                                    div()
+                                        .text_color(ActionTone::Success.foreground())
+                                        .child(format!("+{added}")),
                                 )
-                            } else {
-                                menu
-                            }
-                        }),
-                )
-            })
-            .when_some(git.worktree.clone(), |bar, worktree| {
-                bar.child(
-                    status_item("status-worktree")
-                        .tooltip("Show files")
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(crate::icons::icon(IconName::Folder).with_size(zpx(13.0)))
-                                .child(format!("worktree: {worktree}")),
-                        )
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(crate::OpenFiles), cx)
-                        }),
-                )
-            })
-            .when(running > 0, |bar| {
-                bar.child(
-                    status_item("status-running")
-                        .tooltip("Jump to the next running session")
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(status_icon("icons/working-ring.svg"))
-                                .child(format!("{running} running")),
-                        )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.jump_to(false, window, cx)),
-                        ),
-                )
-            })
-            .when(waiting > 0, |bar| {
-                bar.child(
-                    status_item("status-waiting")
-                        .tooltip("Jump to the next session waiting for you")
-                        .text_color(wait_color)
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(status_icon("icons/waiting-ring.svg"))
-                                .child(format!(
-                                    "{waiting} need{} you",
-                                    if waiting == 1 { "s" } else { "" }
-                                )),
-                        )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.jump_to(true, window, cx)),
-                        ),
-                )
-            })
-            .child(div().flex_1().min_w(zpx(8.0)))
-            .child(
-                status_item("status-provider")
-                    .tooltip_with_action("Select provider / account", &crate::SelectProvider, None)
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(crate::composer_ui::provider_logo(provider).size(zpx(13.0)))
-                            .child(crate::providers::display_name(provider)),
+                                .child(
+                                    div()
+                                        .text_color(ActionTone::Danger.foreground())
+                                        .child(format!("−{removed}")),
+                                )
+                            }),
                     )
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::SelectProvider), cx)
+                        window.dispatch_action(Box::new(crate::OpenChanges), cx)
+                    }),
+            )
+            .child(div().flex_1().min_w(zpx(4.)))
+            .child(
+                status_item("status-context")
+                    .accessibility_label(context_label.clone())
+                    .tooltip(
+                        "Conversation context currently used (history, instructions and tools)",
+                    )
+                    .child(context_label)
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                        let menu = menu.label("Context usage");
+                        if terminal {
+                            return menu.label("Not reported in Terminal mode");
+                        }
+                        match (usage.context_tokens, usage.context_window) {
+                            (Some(used), Some(limit)) => menu
+                                .label(format!("{used} / {limit} tokens"))
+                                .label(format!(
+                                    "{:.0}% used · {:.0}% remaining",
+                                    used as f64 / limit as f64 * 100.,
+                                    100. - (used as f64 / limit as f64 * 100.).min(100.)
+                                ))
+                                .label("Includes the conversation carried by the active model")
+                                .label(
+                                    "Older history may be compacted; this is not lifetime tokens",
+                                ),
+                            (Some(used), None) => menu
+                                .label(format!("{used} tokens in the active conversation context"))
+                                .label("This provider has not reported a context capacity"),
+                            _ => menu.label("No context usage reported for this session yet"),
+                        }
                     }),
             )
             .child(
-                status_item("status-model")
-                    .tooltip_with_action("Select model and effort", &crate::SelectModel, None)
-                    .child(model)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::SelectModel), cx)
+                status_item("status-limits")
+                    .accessibility_label(limits_label.clone())
+                    .tooltip(format!(
+                        "{} · {account_name}",
+                        crate::providers::display_name(provider)
+                    ))
+                    .when(remaining.is_some_and(|n| n <= 10.), |b| {
+                        b.text_color(ActionTone::Warning.foreground())
+                    })
+                    .child(limits_label)
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                        let mut menu = menu.label(format!(
+                            "{} · {account_name}",
+                            crate::providers::display_name(provider)
+                        ));
+                        if let Some(limits) = &limits {
+                            for window in &limits.windows {
+                                menu = menu.label(format!(
+                                    "{}: {:.0}% left",
+                                    window.label, window.remaining
+                                ));
+                                if let Some(reset) = &window.resets_at {
+                                    menu = menu.label(format!("Resets {reset}"));
+                                }
+                            }
+                        } else {
+                            menu = menu.label("No allowance reported by this provider/account");
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                status_item("status-cost")
+                    .accessibility_label(cost_label.clone())
+                    .tooltip(cost_breakdown)
+                    .child(cost_label)
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                        let mut menu = menu.label("This conversation · provider costs");
+                        for (provider, cost) in &cost_rows {
+                            let name = match provider.as_str() {
+                                "claude" => "Claude",
+                                "codex" => "OpenAI / Codex",
+                                "opencode" => "OpenCode",
+                                other => other,
+                            };
+                            menu = menu.label(format!(
+                                "{name}  {}",
+                                crate::session_usage::money(Some(*cost))
+                            ));
+                        }
+                        menu.separator()
+                            .label(format!(
+                                "Total  {}",
+                                crate::session_usage::money(total_cost)
+                            ))
+                            .label("Estimates may exclude unreported or Terminal usage")
+                    }),
+            )
+            .child(
+                status_item("status-processes")
+                    .accessibility_label(process_label.clone())
+                    .tooltip(if process_owner.is_some() {
+                        "Commands and servers · this session"
+                    } else {
+                        "Commands and servers · all sessions"
+                    })
+                    .child(process_label)
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                        let mut menu = menu.scrollable(true).max_h(zpx(320.));
+                        if let Some(error) = &process_snapshot.error {
+                            return menu.label(error.clone());
+                        }
+                        let describe = |process: &crate::status_processes::Process| {
+                            let ports = if process.ports.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · :{}", process.ports.join(", :"))
+                            };
+                            format!("{} · PID {}{ports}", process.name, process.pid)
+                        };
+                        if let Some(owner) = &process_owner {
+                            menu = menu.label("This session · commands and servers");
+                            let current = process_rows
+                                .iter()
+                                .filter(|p| p.owner.as_ref() == Some(owner))
+                                .collect::<Vec<_>>();
+                            if current.is_empty() {
+                                menu = menu.label(if process_snapshot.ready {
+                                    "0 running"
+                                } else {
+                                    "Reading processes…"
+                                });
+                            }
+                            for process in current {
+                                menu = menu.label(describe(process));
+                            }
+                            menu = menu.separator();
+                        }
+                        menu = menu.label("All sessions · commands and servers");
+                        if process_rows.is_empty() {
+                            menu = menu.label(if process_snapshot.ready {
+                                "0 running"
+                            } else {
+                                "Reading processes…"
+                            });
+                        }
+                        for process in &process_rows {
+                            menu = menu.label(describe(process));
+                        }
+                        menu
                     }),
             )
             .child(
                 status_item("status-mode")
-                    .tooltip(if mode == SessionMode::Chat {
-                        "Switch to Terminal"
-                    } else {
+                    .accessibility_label(if terminal {
                         "Switch to Chat"
+                    } else {
+                        "Switch to Terminal"
                     })
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(status_icon("icons/queue.svg"))
-                            .child(if mode == SessionMode::Chat {
-                                "Chat"
-                            } else {
-                                "Terminal"
-                            }),
-                    )
+                    .tooltip(if terminal {
+                        "Switch to Chat"
+                    } else {
+                        "Switch to Terminal"
+                    })
+                    .child(if terminal { "Terminal" } else { "Chat" })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let next = if mode == SessionMode::Chat {
-                            SessionMode::Terminal
-                        } else {
-                            SessionMode::Chat
-                        };
-                        this.apply_mode(next, window, cx);
+                        this.apply_mode(
+                            if terminal {
+                                SessionMode::Chat
+                            } else {
+                                SessionMode::Terminal
+                            },
+                            window,
+                            cx,
+                        );
                     })),
             )
-            .child(
-                status_item("status-caffeine")
-                    .tooltip(if caffeine {
-                        "Allow Mac to sleep"
-                    } else {
-                        "Keep Mac awake"
-                    })
-                    .accessibility_label(if caffeine {
-                        "Keep Mac awake: on"
-                    } else {
-                        "Keep Mac awake: off"
-                    })
-                    .child(crate::sidebar::coffee_icon(caffeine, window_active, cx))
-                    .on_click({
-                        let state = state_entity.clone();
-                        move |_, _, cx| state.update(cx, |s, cx| s.toggle_caffeine(cx))
-                    }),
-            )
-            .when(queued > 0, |bar| {
-                bar.child(
-                    status_item("status-queue")
-                        .tooltip("Queued follow-ups")
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use gpui_kit::component::menu::PopupMenuItem;
+    use std::{cell::Cell, rc::Rc};
+    struct Footer {
+        opened: Rc<Cell<bool>>,
+    }
+    impl Render for Footer {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let opened = self.opened.clone();
+            div().size_full().flex().flex_col().justify_end().child(
+                h_flex().h(zpx(STATUS_BAR_HEIGHT)).overflow_hidden().child(
+                    status_item("status-test")
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(status_icon("icons/queue.svg"))
-                                .child(format!("{queued} queued")),
+                            div()
+                                .debug_selector(|| "status-trigger".into())
+                                .child("Context —"),
                         )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.focus_composer(window, cx)),
-                        ),
-                )
-            })
-            .child(
-                status_item("status-version")
-                    .tooltip("Check for updates")
-                    .text_color(rgba(0xffffff70))
-                    .child(concat!("v", env!("CARGO_PKG_VERSION")))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.updater
-                            .update(cx, |updater, cx| updater.check(true, cx))
-                    })),
+                        .dropdown_menu_with_anchor(Anchor::BottomRight, |menu, _, _| {
+                            menu.label("Context usage")
+                                .item(PopupMenuItem::element(|_, _| {
+                                    div()
+                                        .debug_selector(|| "status-menu-detail".into())
+                                        .child("No usage reported yet")
+                                }))
+                        })
+                        .on_open_change(move |open, _, _| opened.set(*open)),
+                ),
             )
+        }
+    }
+    #[::gpui::test]
+    fn status_menu_opens_on_pointer_press(cx: &mut ::gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let opened = Rc::new(Cell::new(false));
+        let (_, cx) = cx.add_window_view(|_, _| Footer {
+            opened: opened.clone(),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("status-trigger").unwrap();
+        cx.simulate_mouse_down(trigger.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        assert!(opened.get(), "footer menu must receive the pointer press");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let detail = cx.debug_bounds("status-menu-detail").unwrap();
+        assert!(
+            detail.bottom() <= trigger.top(),
+            "details should open above the footer"
+        );
     }
 }

@@ -10,10 +10,11 @@ pub struct GitInfo {
     pub root: PathBuf,
     pub current: String,
     pub branches: Vec<String>,
-    /// Uncommitted changes, including untracked files.
-    pub dirty: bool,
     /// Commits ahead of the upstream branch, when one is configured.
     pub ahead: u32,
+    pub behind: u32,
+    pub changed_files: Option<usize>,
+    pub changed_lines: Option<(u64, u64)>,
     /// The checkout's directory name when it is a linked worktree.
     pub worktree: Option<String>,
 }
@@ -127,7 +128,9 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_owned())
 }
 
 pub fn inspect(cwd: &Path) -> GitInfo {
@@ -166,9 +169,20 @@ pub fn inspect(cwd: &Path) -> GitInfo {
     .filter(|s| !s.ends_with("/HEAD"))
     .map(str::to_owned)
     .collect();
-    let dirty = git(cwd, &["status", "--porcelain", "--untracked-files=normal"])
-        .is_ok_and(|status| !status.is_empty());
+    let status = git(
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .ok();
+    let changed_files = status.as_deref().map(changed_file_count);
+    let changed_lines = status
+        .as_deref()
+        .and_then(|status| line_changes(cwd, status));
     let ahead = git(cwd, &["rev-list", "--count", "@{upstream}..HEAD"])
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0);
+    let behind = git(cwd, &["rev-list", "--count", "HEAD..@{upstream}"])
         .ok()
         .and_then(|count| count.parse().ok())
         .unwrap_or(0);
@@ -183,10 +197,90 @@ pub fn inspect(cwd: &Path) -> GitInfo {
         root,
         current,
         branches,
-        dirty,
         ahead,
+        behind,
+        changed_files,
+        changed_lines,
         worktree,
     }
+}
+
+/// Net index + worktree changes against HEAD, plus untracked text files.
+fn line_changes(cwd: &Path, status: &str) -> Option<(u64, u64)> {
+    let base = git(cwd, &["rev-parse", "--verify", "HEAD"])
+        .or_else(|_| git(cwd, &["hash-object", "-t", "tree", "/dev/null"]))
+        .ok()?;
+    let diff = git(
+        cwd,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            &base,
+            "--",
+        ],
+    )
+    .ok()?;
+    let mut counts = (0u64, 0u64);
+    for entry in diff.split('\0').filter(|s| !s.is_empty()) {
+        let mut parts = entry.splitn(3, '\t');
+        let (added, removed) = (parts.next()?, parts.next()?);
+        // Binary changes still contribute to the file count, never fake line counts.
+        if added != "-" {
+            counts.0 = counts.0.saturating_add(added.parse::<u64>().ok()?);
+        }
+        if removed != "-" {
+            counts.1 = counts.1.saturating_add(removed.parse::<u64>().ok()?);
+        }
+    }
+    let mut entries = status.split('\0').filter(|s| !s.is_empty());
+    while let Some(entry) = entries.next() {
+        if let Some(path) = entry.strip_prefix("?? ") {
+            let path = cwd.join(path);
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.is_symlink() {
+                counts.0 += 1;
+                continue;
+            }
+            // Don't scan huge generated files on every footer refresh.
+            if metadata.len() > 8 * 1024 * 1024 {
+                return None;
+            }
+            let bytes = std::fs::read(path).ok()?;
+            if !bytes.iter().take(8192).any(|b| *b == 0) {
+                counts.0 += bytes.iter().filter(|b| **b == b'\n').count() as u64
+                    + u64::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'));
+            }
+        } else if entry
+            .as_bytes()
+            .iter()
+            .take(2)
+            .any(|b| matches!(b, b'R' | b'C'))
+        {
+            entries.next();
+        }
+    }
+    Some(counts)
+}
+
+fn changed_file_count(status: &str) -> usize {
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    let mut count = 0;
+    while let Some(entry) = entries.next() {
+        count += 1;
+        if entry
+            .as_bytes()
+            .iter()
+            .take(2)
+            .any(|b| matches!(b, b'R' | b'C'))
+        {
+            entries.next();
+        }
+    }
+    count
 }
 
 #[derive(Serialize, Deserialize)]
@@ -399,6 +493,33 @@ mod tests {
         .unwrap();
         git(dir.path(), &["branch", "feature"]).unwrap();
         dir
+    }
+    #[test]
+    fn line_totals_include_staged_unstaged_untracked_and_ignore_binary_lines() {
+        let dir = repository();
+        std::fs::write(dir.path().join("tracked"), "old\nkeep\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "seed",
+            ],
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("tracked"), "new\nkeep\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        std::fs::write(dir.path().join("tracked"), "new\nkeep\nextra\n").unwrap();
+        std::fs::write(dir.path().join("new\nfile"), "one\ntwo").unwrap();
+        std::fs::write(dir.path().join("binary"), [0, 1, 2]).unwrap();
+        let info = inspect(dir.path());
+        assert_eq!(info.changed_files, Some(3));
+        assert_eq!(info.changed_lines, Some((4, 1)));
     }
     fn options() -> LaunchOptions {
         LaunchOptions {
@@ -622,5 +743,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    #[test]
+    fn porcelain_counts_files_once_even_with_renames_and_newlines() {
+        assert_eq!(super::changed_file_count(""), 0);
+        assert_eq!(
+            super::changed_file_count(" M file\0?? new\nfile\0R  renamed\0original\0"),
+            3
+        );
+        assert_eq!(super::changed_file_count(" R renamed\0original\0"), 1);
     }
 }

@@ -63,6 +63,8 @@ pub enum RequestAction {
 /// Per-thread translation state.
 #[derive(Debug, Default)]
 pub struct Mapper {
+    pricing_model: Option<String>,
+    pricing_thread: Option<String>,
     turn_id: Option<String>,
     last_completed: Option<String>,
     /// Replaying persisted turns: errors are not re-raised.
@@ -73,6 +75,11 @@ pub struct Mapper {
 }
 
 impl Mapper {
+    pub fn set_pricing(&mut self, thread: &str, model: Option<&str>) {
+        self.pricing_thread = Some(thread.to_owned());
+        self.pricing_model = model.map(str::to_owned);
+    }
+
     /// Rebuild the same events used by the live chat from persisted turn items.
     /// User/reasoning items are snapshot-only here: the live composer already
     /// inserts its user messages and reasoning arrives as deltas.
@@ -240,6 +247,37 @@ impl Mapper {
             }
             "thread/tokenUsage/updated" => {
                 if let Some(u) = decode::<TokenUsageParams>(params) {
+                    if let Some(last) = &u.token_usage.last {
+                        out.push(AgentEvent::UsageSnapshot {
+                            context_tokens: Some(
+                                last.input_tokens.saturating_add(last.output_tokens),
+                            ),
+                            context_window: u.token_usage.model_context_window,
+                            cost_scope: None,
+                            cost_usd: None,
+                        });
+                    }
+                    if let (Some(model), Some(thread)) = (&self.pricing_model, &self.pricing_thread)
+                    {
+                        let total = &u.token_usage.total;
+                        if let Some(cost) = del_agent::pricing::estimate(
+                            model,
+                            total.input_tokens.saturating_sub(total.cached_input_tokens),
+                            total.cached_input_tokens,
+                            0,
+                            total.output_tokens,
+                        ) {
+                            out.push(AgentEvent::UsageSnapshot {
+                                context_tokens: None,
+                                context_window: None,
+                                cost_scope: Some(del_agent::pricing::cost_scope(
+                                    Some(thread),
+                                    format!("estimate:codex:{thread}"),
+                                )),
+                                cost_usd: Some(cost),
+                            });
+                        }
+                    }
                     // Thread-cumulative totals, so the UI can show a running figure.
                     out.push(AgentEvent::TokenUsage {
                         input: u.token_usage.total.input_tokens,

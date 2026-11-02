@@ -316,7 +316,7 @@ fn streaming_usage_errors_and_goals() {
                 "total":{"inputTokens":10,"outputTokens":2,"cachedInputTokens":4,"reasoningOutputTokens":1},
                 "last":{"inputTokens":1,"outputTokens":1,"cachedInputTokens":0}}})
         ),
-        vec![E::TokenUsage {
+        vec![E::UsageSnapshot { context_tokens: Some(2), context_window: None, cost_scope: None, cost_usd: None }, E::TokenUsage {
             input: 10,
             output: 2,
             cached: 4
@@ -480,4 +480,36 @@ fn large_multibyte_output_is_truncated_on_a_character_boundary() {
     };
     assert!(output_summary.ends_with("… [truncated]"));
     assert!(output_summary.len() <= 4096 + "… [truncated]".len());
+}
+
+#[test]
+fn context_uses_last_request_not_cumulative_or_double_counted_cache() {
+    let events = Mapper::default().notification(
+        "thread/tokenUsage/updated",
+        &json!({"tokenUsage": {
+            "total": {"inputTokens": 900000, "outputTokens": 30000},
+            "last": {"inputTokens": 50000, "outputTokens": 1000, "cachedInputTokens": 40000},
+            "modelContextWindow": 200000
+        }}),
+    );
+    assert!(matches!(
+        events[0],
+        E::UsageSnapshot {
+            context_tokens: Some(51000),
+            context_window: Some(200000),
+            cost_usd: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cumulative_cost_estimate_uses_cached_rates_and_stable_thread_scope() {
+    let mut mapper = Mapper::default();
+    mapper.set_pricing("thread-a", Some("gpt-5.3-codex"));
+    let data = json!({"tokenUsage":{"total":{"inputTokens":2000000,"cachedInputTokens":1000000,"outputTokens":1000000}}});
+    for _ in 0..2 {
+        let events = mapper.notification("thread/tokenUsage/updated", &data);
+        assert!(events.iter().any(|e| matches!(e, E::UsageSnapshot {cost_scope:Some(scope), cost_usd:Some(cost), ..} if scope == &del_agent::pricing::cost_scope(Some("thread-a"), "estimate:codex:thread-a".into()) && (*cost - 15.925).abs() < 1e-9)));
+    }
 }

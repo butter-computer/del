@@ -456,6 +456,12 @@ impl CodexBackend {
         drop(opening);
         let mut history = {
             let mut st = session.state.lock().unwrap();
+            st.mapper.set_pricing(
+                id.as_str(),
+                resp.model
+                    .as_deref()
+                    .or_else(|| open_params.get("model").and_then(Value::as_str)),
+            );
             st.open_params = Some(open_params);
             st.detached = false;
             if thread.is_some() {
@@ -874,7 +880,15 @@ impl AgentBackend for CodexBackend {
 
     async fn reconfigure(&self, config: SessionConfig, id: &SessionId) -> Result<SessionHandle> {
         let session = self.session(id)?;
-        session.state.lock().unwrap().turn_config = Some(config);
+        {
+            let mut state = session.state.lock().unwrap();
+            if config.model.is_some() {
+                state
+                    .mapper
+                    .set_pricing(id.as_str(), config.model.as_deref());
+            }
+            state.turn_config = Some(config);
+        }
         Ok(SessionHandle::new(
             id.clone(),
             Provider::Codex,

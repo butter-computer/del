@@ -138,17 +138,6 @@ pub struct ModelPicker {
 }
 
 impl ModelPicker {
-    /// "Model · Effort", as the picker's own pill shows it.
-    pub fn summary(&self, cx: &App) -> String {
-        let state = self.state.read(cx);
-        let info = state.info();
-        let label = model_label(state.model.as_deref(), info.as_ref());
-        match effort_label(state.effort.as_deref(), info.as_ref()) {
-            Some(effort) => format!("{label} · {effort}"),
-            None => label,
-        }
-    }
-
     pub fn close_picker(&mut self, cx: &mut Context<Self>) {
         if self.open {
             self.open = false;

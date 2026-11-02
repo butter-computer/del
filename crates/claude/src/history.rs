@@ -243,7 +243,28 @@ pub fn read(mut reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEven
                 }
             }
         }
-        out.extend(translator.handle_value(record));
+        out.extend(
+            translator
+                .handle_value(record)
+                .into_iter()
+                .map(|mut event| {
+                    // Native history doesn't retain CLI process boundaries. Keep context,
+                    // but don't reinterpret cumulative cost as new spend on every resume.
+                    if let AgentEvent::UsageSnapshot {
+                        cost_scope,
+                        cost_usd,
+                        ..
+                    } = &mut event
+                        && !cost_scope.as_deref().is_some_and(|scope| {
+                            scope.starts_with("estimate:") || scope.contains(":estimate:")
+                        })
+                    {
+                        *cost_scope = None;
+                        *cost_usd = None;
+                    }
+                    event
+                }),
+        );
     }
     if let Some(turn_id) = turn {
         out.push(AgentEvent::TurnCompleted {

@@ -574,7 +574,104 @@ pub fn close_login_terminal(marker: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-pub async fn remaining_usage(provider: Provider, account: Option<&Account>) -> Option<f64> {
+#[derive(Clone, Debug)]
+pub struct UsageWindow {
+    pub label: String,
+    pub remaining: f64,
+    pub resets_at: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct UsageLimits {
+    pub windows: Vec<UsageWindow>,
+}
+impl UsageLimits {
+    pub fn remaining(&self) -> Option<f64> {
+        self.windows.iter().map(|w| w.remaining).reduce(f64::min)
+    }
+}
+fn parse_limits(provider: Provider, value: &serde_json::Value) -> Option<UsageLimits> {
+    let mut windows = vec![];
+    if provider == Provider::Claude && value["rate_limits_available"] == true {
+        let limits = &value["rate_limits"];
+        for (key, label) in [
+            ("five_hour", "5 hours"),
+            ("seven_day", "7 days"),
+            ("seven_day_oauth_apps", "7 days · apps"),
+            ("seven_day_opus", "7 days · Opus"),
+            ("seven_day_sonnet", "7 days · Sonnet"),
+        ] {
+            let window = &limits[key];
+            if let Some(used) = window["utilization"].as_f64().filter(|n| n.is_finite()) {
+                windows.push(UsageWindow {
+                    label: label.into(),
+                    remaining: (100. - used).clamp(0., 100.),
+                    resets_at: window["resets_at"].as_str().and_then(format_reset),
+                });
+            }
+        }
+        for window in limits["model_scoped"].as_array().into_iter().flatten() {
+            if let Some(used) = window["utilization"].as_f64().filter(|n| n.is_finite()) {
+                windows.push(UsageWindow {
+                    label: window["model"].as_str().unwrap_or("Model allowance").into(),
+                    remaining: (100. - used).clamp(0., 100.),
+                    resets_at: window["resets_at"].as_str().and_then(format_reset),
+                });
+            }
+        }
+    } else if provider == Provider::Codex {
+        let buckets: Vec<(String, &serde_json::Value)> = match value["rateLimitsByLimitId"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+        {
+            Some(map) => map
+                .iter()
+                .map(|(key, value)| (key.clone(), value))
+                .collect(),
+            None => vec![("Allowance".into(), &value["rateLimits"])],
+        };
+        for (name, bucket) in buckets {
+            for key in ["primary", "secondary"] {
+                let window = &bucket[key];
+                if let Some(used) = window["usedPercent"].as_f64().filter(|n| n.is_finite()) {
+                    let duration = window["windowDurationMins"]
+                        .as_u64()
+                        .map(|minutes| {
+                            if minutes % 1440 == 0 {
+                                format!("{} days", minutes / 1440)
+                            } else if minutes % 60 == 0 {
+                                format!("{} hours", minutes / 60)
+                            } else {
+                                format!("{minutes} min")
+                            }
+                        })
+                        .unwrap_or_else(|| key.into());
+                    windows.push(UsageWindow {
+                        label: format!("{name} · {duration}"),
+                        remaining: (100. - used).clamp(0., 100.),
+                        resets_at: window["resetsAt"]
+                            .as_i64()
+                            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                            .map(|t| {
+                                t.with_timezone(&chrono::Local)
+                                    .format("%b %-d, %-I:%M %p")
+                                    .to_string()
+                            }),
+                    });
+                }
+            }
+        }
+    }
+    (!windows.is_empty()).then_some(UsageLimits { windows })
+}
+fn format_reset(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value).ok().map(|t| {
+        t.with_timezone(&chrono::Local)
+            .format("%b %-d, %-I:%M %p")
+            .to_string()
+    })
+}
+
+pub async fn usage_limits(provider: Provider, account: Option<&Account>) -> Option<UsageLimits> {
     if provider == Provider::Claude {
         let binary = login_binary(provider).await.ok()?;
         let options = del_claude::ClaudeOptions {
@@ -586,7 +683,7 @@ pub async fn remaining_usage(provider: Provider, account: Option<&Account>) -> O
         let value = del_claude::account_usage(&options, &std::env::temp_dir())
             .await
             .ok()?;
-        return claude_usage_remaining(&value);
+        return parse_limits(provider, &value);
     }
     if provider != Provider::Codex {
         return None;
@@ -614,11 +711,12 @@ pub async fn remaining_usage(provider: Provider, account: Option<&Account>) -> O
     .await;
     let _ = backend.shutdown().await;
     match result {
-        Ok(Ok(value)) => usage_remaining(&value),
+        Ok(Ok(value)) => parse_limits(provider, &value),
         _ => None,
     }
 }
 /// A single bar represents the most constrained reported allowance.
+#[cfg(test)]
 fn usage_remaining(value: &serde_json::Value) -> Option<f64> {
     let buckets: Vec<_> = match value["rateLimitsByLimitId"]
         .as_object()
@@ -636,6 +734,7 @@ fn usage_remaining(value: &serde_json::Value) -> Option<f64> {
 }
 
 /// Plan windows use percentages (not the stream event's 0–1 utilization).
+#[cfg(test)]
 fn claude_usage_remaining(value: &serde_json::Value) -> Option<f64> {
     if value["rate_limits_available"] != true {
         return None;
@@ -749,6 +848,28 @@ pub fn for_record(record: &del_agent::SessionRecord) -> Option<Account> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn footer_limits_keep_windows_resets_and_missing_values_distinct() {
+        let codex = super::parse_limits(del_agent::Provider::Codex, &serde_json::json!({
+            "rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":25,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":80,"windowDurationMins":10080}}},
+            "rateLimits":{"primary":{"usedPercent":99}}
+        })).unwrap();
+        assert_eq!(codex.remaining(), Some(20.));
+        assert_eq!(codex.windows.len(), 2);
+        assert!(codex.windows[0].resets_at.is_some());
+        let claude = super::parse_limits(del_agent::Provider::Claude, &serde_json::json!({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":0,"resets_at":"2026-11-03T10:00:00Z"},"seven_day":{"utilization":null}}})).unwrap();
+        assert_eq!(claude.remaining(), Some(100.));
+        assert_eq!(claude.windows.len(), 1);
+        assert!(claude.windows[0].resets_at.is_some());
+        assert!(
+            super::parse_limits(
+                del_agent::Provider::Claude,
+                &serde_json::json!({"rate_limits_available":false})
+            )
+            .is_none()
+        );
+    }
+
     use super::*;
     #[tokio::test]
     #[ignore = "requires the installed OpenCode CLI; isolated profiles, no inference"]

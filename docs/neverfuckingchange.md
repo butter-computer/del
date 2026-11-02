@@ -824,7 +824,7 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   icons. A red Delete Space action appears only with multiple Spaces and moves
   projects, pins, and tabs to the first remaining Space without deleting chats or
   files. Existing projects and pins belong to Default; new Spaces start empty.
-  The menu stays compact. The status bar's Space item opens the same menu.
+  The menu stays compact; Space dots above the utility buttons also switch Spaces.
 - Create/Rename Space uses a compact dialog with a borderless name input, no blue
   focus outline, and simple Cancel/Create or Save actions. Focus the name on open;
   Enter submits exactly once and Escape dismisses.
@@ -900,3 +900,14 @@ activity bar. It supersedes earlier rules where they conflict.
 - Right-sidebar terminals use the current theme's default foreground, background,
   and cursor with rounded page corners. ANSI colors and program overrides remain
   intact; default color queries report the themed values.
+
+## Workbench status metrics
+
+- The bottom status bar has branch/files/colored line changes, context, allowance, session cost, running commands, and the Chat/Terminal toggle. Keep provider/model in the composer and keep-awake in the sidebar.
+- Context means the active conversation carried by the model, measured by its latest usage snapshot, never cumulative lifetime tokens. Show percent used with a reported capacity or an exact known model specification; clear it on provider switch, and show unavailable in Terminal mode.
+- Missing allowance or price data is unknown, not zero. Account allowances identify the selected profile by full email (including the default CLI account), include reset times when reported, and refresh no more than once per minute, including failed queries.
+- The cost headline shows the active provider; hover/click breaks down the conversation by provider across every switch. Cost updates are cumulative within a stable provider scope and replace earlier values. Persist captured costs across app restarts; don't reconstruct CLI process costs from native history without reliable boundaries. Disclose that captured pricing may exclude older/Terminal activity and may differ from actual billing.
+- Git and process inspection run off the UI thread with deadlines. Count renamed files once. Process lists include only Del-owned trees and attached provider roots; hide background provider connections, shells and helpers. Count this session’s commands and offer both This session and All sessions sections with listening ports. Drafts count all sessions. Empty sections say “0 running”. Shared provider commands with unverifiable ownership belong only in All sessions; never collect command arguments.
+
+- Keep allowance account identity/reset information, but omit provider/account actions and all checked/refresh interval rows from status popovers. Composer overflow fades use the theme surface and actual wrapped text geometry without intercepting editing.
+- Estimated costs use a dated, source-linked model rate table and stable message/thread scopes. Reconcile reported/estimated coverage within each native session (each step for OpenCode), then sum across visits without adding overlapping totals; unknown models remain unpriced. Estimates use standard rates, may differ after model/tier changes, and are never subscription bills.

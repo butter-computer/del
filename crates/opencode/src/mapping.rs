@@ -131,6 +131,51 @@ fn usage(v: &Value) -> AgentEvent {
         cached: v["cache"]["read"].as_u64().unwrap_or(0),
     }
 }
+fn usage_snapshot(value: &Value, event_id: Option<&str>) -> Option<AgentEvent> {
+    let tokens = &value["tokens"];
+    let context = tokens["input"].as_u64().map(|input| {
+        input
+            .saturating_add(tokens["cache"]["read"].as_u64().unwrap_or(0))
+            .saturating_add(tokens["cache"]["write"].as_u64().unwrap_or(0))
+            .saturating_add(tokens["output"].as_u64().unwrap_or(0))
+    });
+    let model = value["modelID"]
+        .as_str()
+        .or_else(|| value["model"].as_str())
+        .or_else(|| value["model"]["modelID"].as_str())
+        .or_else(|| value["model"]["id"].as_str());
+    let reported = event_id
+        .and_then(|_| value["cost"].as_f64())
+        .filter(|n| n.is_finite() && *n >= 0.);
+    let estimate = event_id.and(model).and_then(|model| {
+        del_agent::pricing::estimate(
+            model,
+            tokens["input"].as_u64()?,
+            tokens["cache"]["read"].as_u64().unwrap_or(0),
+            tokens["cache"]["write"].as_u64().unwrap_or(0),
+            tokens["output"].as_u64().unwrap_or(0),
+        )
+    });
+    let cost = reported.or(estimate);
+    (context.is_some() || cost.is_some()).then(|| AgentEvent::UsageSnapshot {
+        context_tokens: context,
+        context_window: value["contextWindow"]
+            .as_u64()
+            .or_else(|| value["model"]["limit"]["context"].as_u64())
+            .or_else(|| model.and_then(del_agent::pricing::context_window)),
+        cost_scope: cost.and(event_id).map(|id| {
+            del_agent::pricing::cost_scope(
+                value["sessionID"].as_str(),
+                if reported.is_some() {
+                    format!("opencode:{id}")
+                } else {
+                    format!("estimate:opencode:{id}")
+                },
+            )
+        }),
+        cost_usd: cost,
+    })
+}
 fn text_id(d: &Value) -> String {
     format!(
         "{}:{}",
@@ -228,7 +273,13 @@ impl Stream {
                 status: ToolStatus::Failed,
                 output_summary: truncate(&error_message(&d["error"])),
             }],
-            Some("session.step.ended") => vec![usage(&d["tokens"])],
+            Some("session.step.ended") => {
+                let mut out = vec![usage(&d["tokens"])];
+                if let Some(snapshot) = usage_snapshot(d, e["id"].as_str()) {
+                    out.push(snapshot);
+                }
+                out
+            }
             Some("permission.asked") => vec![AgentEvent::ApprovalRequested {
                 id: string(d, "id"),
                 kind: ApprovalKind::Other,
@@ -289,6 +340,11 @@ impl Stream {
                 }
                 if m["tokens"].is_object() {
                     out.push(usage(&m["tokens"]));
+                    // Historical assistant totals can overlap live step costs. Only
+                    // restore context here; the captured cost ledger survives reloads.
+                    if let Some(snapshot) = usage_snapshot(m, None) {
+                        out.push(snapshot);
+                    }
                 }
                 out
             }
@@ -451,11 +507,19 @@ mod tests {
                 "session.step.ended",
                 json!({"tokens":{"input":5,"output":2,"cache":{"read":3,"write":1}}})
             )),
-            vec![AgentEvent::TokenUsage {
-                input: 5,
-                output: 2,
-                cached: 3
-            }]
+            vec![
+                AgentEvent::TokenUsage {
+                    input: 5,
+                    output: 2,
+                    cached: 3
+                },
+                AgentEvent::UsageSnapshot {
+                    context_tokens: Some(11),
+                    context_window: None,
+                    cost_scope: None,
+                    cost_usd: None
+                }
+            ]
         );
         assert_eq!(
             s.event(&ev(
@@ -602,6 +666,12 @@ mod tests {
                     output: 2,
                     cached: 0
                 },
+                AgentEvent::UsageSnapshot {
+                    context_tokens: Some(3),
+                    context_window: None,
+                    cost_scope: None,
+                    cost_usd: None
+                },
             ]
         );
         assert!(s.message(&json!({"type":"system"})).is_empty());
@@ -662,5 +732,61 @@ mod tests {
         let unnamed = models(&json!({"data":[{"id":"m","providerID":"p"}]}), &json!({}));
         assert_eq!(unnamed[0].id, "p/m");
         assert!(!unnamed[0].is_default);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn cost_requires_stable_step_identity_and_history_does_not_duplicate_it() {
+        let data =
+            json!({"tokens":{"input":5,"output":2,"cache":{"read":3,"write":1}},"cost":0.02});
+        let event = json!({"type":"session.step.ended","id":"step-1","data":data});
+        let mut stream = Stream::default();
+        let events = stream.event(&event);
+        assert!(
+            matches!(&events[1], AgentEvent::UsageSnapshot {context_tokens:Some(11), cost_scope:Some(scope), cost_usd:Some(cost), ..} if scope == "opencode:step-1" && *cost == 0.02)
+        );
+        assert!(matches!(
+            usage_snapshot(&data, None).unwrap(),
+            AgentEvent::UsageSnapshot { cost_usd: None, .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn repeated_step_ids_in_different_sessions_have_distinct_cost_scopes() {
+        let scope =
+            |session| match usage_snapshot(&json!({"sessionID":session,"cost":0.2}), Some("step"))
+                .unwrap()
+            {
+                AgentEvent::UsageSnapshot {
+                    cost_scope: Some(scope),
+                    ..
+                } => scope,
+                _ => panic!("missing cost"),
+            };
+        assert_ne!(scope("first"), scope("second"));
+        assert_eq!(
+            scope("first"),
+            del_agent::pricing::cost_scope(Some("first"), "opencode:step".into())
+        );
+    }
+    #[test]
+    fn model_metadata_unifies_context_and_estimates_only_missing_cost() {
+        let mut data = json!({"model":{"id":"claude-sonnet-5-5","limit":{"context":1000000}},"tokens":{"input":1000,"output":100,"cache":{"read":2000}}});
+        assert!(
+            matches!(usage_snapshot(&data,Some("step")), Some(AgentEvent::UsageSnapshot{context_window:Some(1000000),cost_scope:Some(scope),cost_usd:Some(cost),..}) if scope == "estimate:opencode:step" && (cost-0.0032).abs()<1e-9)
+        );
+        data["cost"] = json!(0);
+        assert!(
+            matches!(usage_snapshot(&data,Some("step")), Some(AgentEvent::UsageSnapshot{cost_usd:Some(0.),cost_scope:Some(scope),..}) if scope=="opencode:step")
+        );
     }
 }

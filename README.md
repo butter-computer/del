@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.25` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.26` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.25 release notes](docs/releases/0.1.25.md) and
-[validation record](docs/releases/0.1.25-validation.md).
+See the [0.1.26 source update notes](docs/releases/0.1.26.md) and
+[validation record](docs/releases/0.1.26-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -17,7 +17,7 @@ when making future changes.
 
 ## Download and install
 
-The latest release is **0.1.25**; see its [release notes](docs/releases/0.1.25.md)
+The latest downloadable release remains **0.1.25**; see its [release notes](docs/releases/0.1.25.md)
 and [validation record](docs/releases/0.1.25-validation.md).
 Download **Del-0.1.25-arm64.dmg** from the [0.1.25 release](https://github.com/butter-computer/del/releases/tag/v0.1.25),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.25-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.26-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -224,7 +224,7 @@ the sidebar lists your Spaces and offers **Create Space** and **Rename Space**,
 each with an icon. Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
 horizontally with two fingers over the left sidebar, or pick one from the Space
-switcher (or the status bar's Space item), to switch Spaces. Swipes slide both lists
+switcher or the Space dots, to switch Spaces. Swipes slide both lists
 with your fingers; releasing after a quarter of the sidebar width completes the slide,
 while shorter or cancelled swipes settle back. The header and footer stay fixed, and
 Reduce Motion disables the sliding effect. Vertical scrolling still scrolls the session list; switching
@@ -337,10 +337,16 @@ have no status marker. Hide timestamps while unread ticks are visible. Keep-awak
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
 
 The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat
-page's edge, and a 22 px status bar shows the Space and project, branch (with
-dirty and ahead marks), worktree, running and waiting agents, provider, model and
-effort, Chat/Terminal, keep-awake, queued follow-ups, and the version; each item
-opens its picker or menu. ⌘J opens a terminal panel below the page.
+page's edge. The 22 px status bar shows session metrics and the Chat/Terminal toggle:
+
+- **Branch + changes**: current checkout, changed-file count, green added/red removed line totals, and ahead/behind counts; click to open Changes.
+- **Context**: active conversation context (history, instructions, tools and current output), shown as percent used. Capacity comes from provider telemetry or an exact known model specification; unknown capacities stay unavailable. This is not cumulative lifetime token traffic. It resets on provider switches; Terminal mode shows unavailable.
+- **Limits**: the selected provider/account's most constrained allowance, with individual windows and local reset times in the menu. Claude and Codex report these; unsupported accounts show unavailable. Refreshes at most once a minute while active.
+- **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the active provider’s total; hover or click for each provider and the conversation total across repeated switches. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
+- **Processes**: commands and servers for the current session, with PIDs and listening TCP ports. The menu also lists all sessions; empty drafts count all sessions. Empty sections say **0 running**. Background provider connections, shells and helpers are hidden. Commands under shared provider servers without verifiable ownership appear only under all sessions. Refreshes every ten seconds while active; command arguments are never collected.
+- **Chat / Terminal**: switch the active conversation between its chat and native terminal UI.
+
+Unknown values appear as **—**, not zero. Limits identify the selected account by full email where available, including the default CLI account. Provider/model controls remain in the composer; keep-awake stays in the sidebar. ⌘J opens a terminal panel below the page.
 
 Memory usage opens a compact popover above its footer button, clear of the top tabs, with a pointer. It lists loaded chats and terminals by process-tree RAM usage,
 refreshing every three seconds while open. Each row shows a fading session title

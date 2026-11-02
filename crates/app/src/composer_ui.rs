@@ -23,6 +23,52 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::rc::Rc;
 
+// Paint-only overlays preserve selection, scrolling, and pointer input. Read the
+// laid-out textarea during paint so wrapping and auto-grow use the same geometry.
+fn input_edge_fades(input: &Entity<TextareaState>) -> Vec<AnyElement> {
+    [true, false]
+        .into_iter()
+        .map(|top| {
+            let input = input.clone();
+            canvas(
+                |bounds, _, _| bounds,
+                move |_, bounds, window, cx| {
+                    let state = input.read(cx);
+                    let Some(line_height) = state.line_height() else {
+                        return;
+                    };
+                    let offset = state.scroll_offset().y;
+                    let content_height = line_height * state.display_map().wrap_row_count() as f32;
+                    let distance = if top {
+                        -offset
+                    } else {
+                        content_height + offset - state.input_bounds().size.height
+                    };
+                    let alpha = (distance / zpx(16.)).clamp(0., 1.);
+                    if alpha > 0. {
+                        let surface = crate::appearance::composer_surface();
+                        window.paint_quad(fill(
+                            bounds,
+                            linear_gradient(
+                                if top { 180. } else { 0. },
+                                linear_color_stop(surface.opacity(alpha), 0.),
+                                linear_color_stop(surface.opacity(0.), 1.),
+                            ),
+                        ));
+                    }
+                },
+            )
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(zpx(16.))
+            .when(top, |fade| fade.top_0())
+            .when(!top, |fade| fade.bottom_0())
+            .into_any_element()
+        })
+        .collect()
+}
+
 pub(crate) fn account_menu_label(
     name: String,
     remaining: Option<f64>,
@@ -551,24 +597,30 @@ impl RenderOnce for ComposerCard {
             .bg(crate::appearance::composer_surface())
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
-                Textarea::new(&input)
-                    .token(|token, _, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(zpx(TEXT_MD))
-                            .text_color(rgb(0x579fff))
-                            .child(
-                                crate::icons::path("icons/skill.svg")
-                                    .flex_none()
-                                    .text_color(rgb(0x579fff)),
-                            )
-                            .child(token.token().label().clone())
-                    })
-                    .on_paste(move |item, window, cx| on_paste(item, window, cx))
-                    .appearance(false)
-                    .bordered(false)
-                    .text_size(zpx(TEXT_MD)),
+                div()
+                    .relative()
+                    .w_full()
+                    .child(
+                        Textarea::new(&input)
+                            .token(|token, _, _| {
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_size(zpx(TEXT_MD))
+                                    .text_color(rgb(0x579fff))
+                                    .child(
+                                        crate::icons::path("icons/skill.svg")
+                                            .flex_none()
+                                            .text_color(rgb(0x579fff)),
+                                    )
+                                    .child(token.token().label().clone())
+                            })
+                            .on_paste(move |item, window, cx| on_paste(item, window, cx))
+                            .appearance(false)
+                            .bordered(false)
+                            .text_size(zpx(TEXT_MD)),
+                    )
+                    .children(input_edge_fades(&input)),
             )
             .child(
                 h_flex()

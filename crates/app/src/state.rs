@@ -79,7 +79,11 @@ enum Msg {
     /// A draft tab became a session: (draft key, session, first prompt).
     Started(u64, SessionId, String),
     StartFailed(u64, String),
-    AccountUsage(Provider, Option<String>, Option<f64>),
+    AccountUsage(
+        Provider,
+        Option<String>,
+        Option<crate::accounts::UsageLimits>,
+    ),
     AccountUsageFinished,
     AccountSwitched(SessionId, std::result::Result<(), String>),
     AccountIdentity(Provider, Option<String>, String),
@@ -125,8 +129,9 @@ pub struct AppState {
     pub accounts: Vec<crate::accounts::Account>,
     pub account_status: HashMap<String, String>,
     pub default_identities: HashMap<Provider, String>,
-    pub account_usage: HashMap<(Provider, Option<String>), Option<f64>>,
+    pub account_usage: HashMap<(Provider, Option<String>), Option<crate::accounts::UsageLimits>>,
     usage_loading: bool,
+    usage_last_checked: HashMap<(Provider, Option<String>), std::time::Instant>,
     draft_accounts: HashMap<u64, String>,
     rt: Arc<Runtime>,
     manager: SessionManager,
@@ -368,6 +373,7 @@ impl AppState {
             default_identities: HashMap::new(),
             account_usage: HashMap::new(),
             usage_loading: false,
+            usage_last_checked: HashMap::new(),
             draft_accounts: initial_account
                 .map(|id| HashMap::from([(0, id)]))
                 .unwrap_or_default(),
@@ -507,6 +513,8 @@ impl AppState {
                 self.load_models(true, cx);
             }
             Msg::AccountUsage(provider, id, usage) => {
+                self.usage_last_checked
+                    .insert((provider, id.clone()), std::time::Instant::now());
                 self.account_usage.insert((provider, id), usage);
             }
             Msg::AccountUsageFinished => {
@@ -2153,6 +2161,7 @@ impl AppState {
                 if !cfg!(test) {
                     let queue_id = id.clone();
                     let _ = tokio::task::spawn_blocking(move || {
+                        crate::session_usage::remove(&queue_id);
                         crate::followups::Queue::remove_session(&queue_id)
                     })
                     .await;
@@ -2391,8 +2400,8 @@ impl AppState {
     pub fn account_usage_remaining(&self, provider: Provider, id: Option<&str>) -> Option<f64> {
         self.account_usage
             .get(&(provider, id.map(str::to_owned)))
-            .copied()
-            .flatten()
+            .and_then(Option::as_ref)
+            .and_then(|usage| usage.remaining())
     }
 
     pub fn account_is_selected(&self, provider: Provider, candidate: Option<&str>) -> bool {
@@ -2417,6 +2426,42 @@ impl AppState {
         identity(selected.as_deref()).is_some_and(|key| identity(candidate).as_ref() == Some(&key))
     }
 
+    pub fn refresh_selected_usage(&mut self, cx: &mut Context<Self>) {
+        let provider = self.effective().0;
+        let id = self.selected_account();
+        if self.usage_loading
+            || cfg!(test)
+            || !matches!(provider, Provider::Claude | Provider::Codex)
+        {
+            return;
+        }
+        if self
+            .usage_last_checked
+            .get(&(provider, id.clone()))
+            .is_some_and(|checked| checked.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return;
+        }
+        self.usage_loading = true;
+        let account = id
+            .as_ref()
+            .and_then(|id| self.accounts.iter().find(|a| &a.id == id))
+            .cloned();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let usage = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                crate::accounts::usage_limits(provider, account.as_ref()),
+            )
+            .await
+            .ok()
+            .flatten();
+            let _ = tx.send(Msg::AccountUsage(provider, id, usage));
+            let _ = tx.send(Msg::AccountUsageFinished);
+        });
+        cx.notify();
+    }
+
     fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
         if self.usage_loading || cfg!(test) {
             return;
@@ -2437,10 +2482,10 @@ impl AppState {
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             for (provider, accounts) in accounts {
-                let usage = crate::accounts::remaining_usage(provider, None).await;
+                let usage = crate::accounts::usage_limits(provider, None).await;
                 let _ = tx.send(Msg::AccountUsage(provider, None, usage));
                 for account in accounts {
-                    let usage = crate::accounts::remaining_usage(provider, Some(&account)).await;
+                    let usage = crate::accounts::usage_limits(provider, Some(&account)).await;
                     let _ = tx.send(Msg::AccountUsage(provider, Some(account.id), usage));
                 }
             }
@@ -3399,6 +3444,7 @@ pub(crate) mod tests {
             default_identities: HashMap::new(),
             account_usage: HashMap::new(),
             usage_loading: false,
+            usage_last_checked: HashMap::new(),
             draft_accounts: HashMap::new(),
             rt: Arc::new(
                 tokio::runtime::Builder::new_current_thread()

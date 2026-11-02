@@ -20,12 +20,15 @@ pub const TERMINAL_BACKGROUND: u32 = 0x141517;
 pub enum ActionTone {
     Accent,
     Success,
+    Danger,
     Warning,
 }
 impl ActionTone {
     pub fn foreground(self) -> Rgba {
         let value = match (self, light()) {
             (Self::Accent, _) => colors().accent,
+            (Self::Danger, false) => 0xe58b8b,
+            (Self::Danger, true) => 0xb83c3c,
             (Self::Success, false) => 0x86b596,
             (Self::Success, true) => 0x3f7a54,
             (Self::Warning, false) => 0xd3b07a,

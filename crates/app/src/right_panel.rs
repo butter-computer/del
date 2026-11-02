@@ -472,6 +472,18 @@ impl EventEmitter<crate::chat::OpenLink> for RightPanel {}
 impl EventEmitter<crate::chat::OpenPeer> for RightPanel {}
 
 impl RightPanel {
+    pub(crate) fn process_roots(&self, cx: &App) -> Vec<u32> {
+        let mut roots = self
+            .terminals
+            .values()
+            .map(|host| host.read(cx).snapshot().pid)
+            .collect::<Vec<_>>();
+        for tab in &self.hosted {
+            roots.extend(tab.panel.read(cx).process_roots(cx));
+        }
+        roots
+    }
+
     pub(crate) fn set_tab_zone(&mut self, sidebar: bool) {
         self.compact_tools = sidebar;
     }

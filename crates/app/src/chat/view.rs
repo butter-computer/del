@@ -136,6 +136,7 @@ pub struct PeerActivity {
 }
 
 pub struct ChatView {
+    pub usage: crate::session_usage::SessionUsage,
     pub(super) model: ChatModel,
     pub(super) scroller: ListState,
     jump: Option<MessageJump>,
@@ -227,6 +228,7 @@ impl ChatView {
             search_messages: Default::default(),
             tool_groups: Vec::new(),
             replaying: false,
+            usage: Default::default(),
             optimistic_rows: Default::default(),
             backend,
             session: session.clone(),
@@ -390,6 +392,30 @@ impl ChatView {
     }
 
     fn on_event(&mut self, event: &AgentEvent, cx: &mut Context<Self>) {
+        let previous_cost = match event {
+            AgentEvent::UsageSnapshot {
+                cost_scope: Some(scope),
+                ..
+            } => self.usage.costs.get(scope).copied(),
+            _ => None,
+        };
+        self.usage.apply(event);
+        if let AgentEvent::UsageSnapshot {
+            cost_scope: Some(scope),
+            cost_usd: Some(cost),
+            ..
+        } = event
+            && previous_cost != self.usage.costs.get(scope).copied()
+            && let Some(id) = self.session.clone()
+        {
+            let (scope, cost) = (scope.clone(), *cost);
+            self.backend.runtime.spawn_blocking(move || {
+                if let Err(error) = crate::session_usage::save_cost(&id, &scope, cost) {
+                    eprintln!("Could not save session usage: {error}");
+                }
+            });
+        }
+
         if !self.loading && matches!(event, AgentEvent::TurnStarted { .. }) {
             let start = self
                 .model
@@ -995,6 +1021,8 @@ impl ChatView {
         if let Some(Block::User { text, .. }) = &opening {
             self.first_prompt = Some(text.clone());
         }
+        self.usage.context_tokens = None;
+        self.usage.context_window = None;
         self.model = ChatModel::default();
         self.model.blocks.extend(opening);
         self.scroller.reset(self.model.blocks.len());
@@ -1026,18 +1054,20 @@ impl ChatView {
                 .list_sessions()
                 .into_iter()
                 .find(|record| record.id == id);
-            let times = tokio::task::spawn_blocking(move || {
-                record
+            let (times, costs) = tokio::task::spawn_blocking(move || {
+                let costs = crate::session_usage::load_costs(&id);
+                let times = record
                     .as_ref()
                     .map(super::reply_times::load)
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                (times, costs)
             })
             .await
             .unwrap_or_default();
-            Ok::<_, AgentError>((attached, times))
+            Ok::<_, AgentError>((attached, times, costs))
         });
         cx.spawn(async move |this, cx| {
-            let ((history, mut rx), times) = match attached.await {
+            let ((history, mut rx), times, costs) = match attached.await {
                 Ok(Ok(attached)) => attached,
                 Ok(Err(err)) => return report(&this, cx, err.to_string()),
                 Err(err) => return report(&this, cx, err.to_string()),
@@ -1048,6 +1078,14 @@ impl ChatView {
                 if resync {
                     this.loading = true;
                     this.reset_for_resync();
+                }
+                for (scope, cost) in costs {
+                    this.usage.apply(&AgentEvent::UsageSnapshot {
+                        context_tokens: None,
+                        context_window: None,
+                        cost_scope: Some(scope),
+                        cost_usd: Some(cost),
+                    });
                 }
                 // The initial row already includes attachment/goal metadata.
                 // Skip its plain-text history counterpart exactly once.

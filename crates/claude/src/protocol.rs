@@ -30,6 +30,9 @@ pub struct Translator {
     approvals: HashMap<String, Value>,
     interrupting: bool,
     session_id: Option<String>,
+    cost_scope: Option<String>,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
 }
 
 impl Translator {
@@ -127,6 +130,9 @@ impl Translator {
 
     /// Translate one already-parsed stdout record.
     pub fn handle_value(&mut self, v: &Value) -> Vec<AgentEvent> {
+        if let Some(id) = v["session_id"].as_str().or_else(|| v["sessionId"].as_str()) {
+            self.session_id = Some(id.to_owned());
+        }
         if let Some(event) = crate::goals::record(v) {
             return vec![event];
         }
@@ -209,6 +215,38 @@ impl Translator {
 
     fn assistant(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let mut out = vec![];
+        if let Some(input) = msg["usage"]["input_tokens"].as_u64() {
+            let usage = &msg["usage"];
+            let tokens = input
+                .saturating_add(usage["cache_read_input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(usage["cache_creation_input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(usage["output_tokens"].as_u64().unwrap_or(0));
+            self.context_tokens = Some(tokens);
+            self.context_window = msg["model"]
+                .as_str()
+                .and_then(del_agent::pricing::context_window);
+            let estimated = msg["model"].as_str().and_then(|model| {
+                del_agent::pricing::estimate(
+                    model,
+                    input,
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                    usage["output_tokens"].as_u64().unwrap_or(0),
+                )
+            });
+            let scope = msg["id"].as_str().map(|id| {
+                del_agent::pricing::cost_scope(
+                    self.session_id.as_deref(),
+                    format!("estimate:claude:{id}"),
+                )
+            });
+            out.push(AgentEvent::UsageSnapshot {
+                context_tokens: Some(tokens),
+                context_window: self.context_window,
+                cost_scope: scope.clone(),
+                cost_usd: scope.and(estimated),
+            });
+        }
         for block in msg["content"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
                 Some("text") => {
@@ -308,6 +346,43 @@ impl Translator {
 
     fn result(&mut self, v: &Value) -> Vec<AgentEvent> {
         let mut out = vec![];
+        // total_cost_usd is cumulative for this CLI process. Its first result UUID
+        // gives replays the same scope; a restarted process gets a different scope.
+        let cost = v["total_cost_usd"]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.);
+        if cost.is_some() && self.cost_scope.is_none() {
+            self.cost_scope = Some(format!(
+                "claude:{}",
+                v["uuid"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            ));
+        }
+        let windows: Vec<_> = v["modelUsage"]
+            .as_object()
+            .into_iter()
+            .flat_map(|models| models.values())
+            .filter_map(|model| model["contextWindow"].as_u64().filter(|n| *n > 0))
+            .collect();
+        // A multi-model result cannot identify which capacity belongs to the last reply.
+        let window = windows
+            .first()
+            .copied()
+            .filter(|first| windows.iter().all(|n| n == first))
+            .or(self.context_window);
+        if cost.is_some() || self.context_tokens.is_some() || window.is_some() {
+            out.push(AgentEvent::UsageSnapshot {
+                context_tokens: self.context_tokens,
+                context_window: window,
+                cost_scope: self
+                    .cost_scope
+                    .clone()
+                    .map(|scope| del_agent::pricing::cost_scope(self.session_id.as_deref(), scope)),
+                cost_usd: cost,
+            });
+        }
         let u = &v["usage"];
         let n = |k: &str| u[k].as_u64().unwrap_or(0);
         out.push(AgentEvent::TokenUsage {
@@ -504,5 +579,58 @@ mod approval_tests {
 
         ask(&mut t, "d");
         assert_eq!(t.abort()[0], resolved("d"));
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[test]
+    fn native_session_identity_namespaces_live_and_replayed_costs() {
+        let mut translator = Translator::new();
+        let events = translator.handle_value(&json!({"sessionId":"native-a","type":"assistant","message":{"id":"message","model":"claude-sonnet-5-5","usage":{"input_tokens":100},"content":[]}}));
+        let expected =
+            del_agent::pricing::cost_scope(Some("native-a"), "estimate:claude:message".into());
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::UsageSnapshot {cost_scope:Some(scope), ..} if scope == &expected)));
+        let result = translator.handle_value(
+            &json!({"type":"result","session_id":"native-a","uuid":"result","total_cost_usd":0.1}),
+        );
+        let expected = del_agent::pricing::cost_scope(Some("native-a"), "claude:result".into());
+        assert!(result.iter().any(|event| matches!(event, AgentEvent::UsageSnapshot {cost_scope:Some(scope), ..} if scope == &expected)));
+    }
+    #[test]
+    fn assistant_usage_restores_known_capacity_and_estimate_by_message_id() {
+        let mut translator = Translator::new();
+        let message = json!({"type":"assistant","message":{"id":"message-1","model":"claude-haiku-5-5","usage":{"input_tokens":1000,"cache_read_input_tokens":2000,"output_tokens":100},"content":[]}});
+        let events = translator.handle_value(&message);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::UsageSnapshot {context_tokens:Some(3100),context_window:Some(1000000),cost_scope:Some(scope),cost_usd:Some(cost)} if scope == "estimate:claude:message-1" && (*cost - 0.00017).abs() < 1e-9)));
+    }
+    #[test]
+    fn latest_context_and_cumulative_cost_have_independent_scopes() {
+        let mut translator = Translator::new();
+        let assistant = json!({"type":"assistant", "message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":5},"content":[]}});
+        assert!(matches!(
+            translator
+                .handle_value(&assistant)
+                .iter()
+                .find(|event| matches!(event, AgentEvent::UsageSnapshot { .. }))
+                .unwrap(),
+            AgentEvent::UsageSnapshot {
+                context_tokens: Some(135),
+                ..
+            }
+        ));
+        let result = |uuid, cost| json!({"type":"result","uuid":uuid,"total_cost_usd":cost,"usage":{"input_tokens":99999},"modelUsage":{"model":{"contextWindow":200000}}});
+        let first = translator.handle_value(&result("first", 0.2));
+        let next = translator.handle_value(&result("second", 0.4));
+        for events in [&first, &next] {
+            assert!(
+                matches!(&events[0], AgentEvent::UsageSnapshot {context_tokens:Some(135), context_window:Some(200000), cost_scope:Some(scope), ..} if scope == "claude:first")
+            );
+        }
+        let restarted = Translator::new().handle_value(&result("restart", 0.1));
+        assert!(
+            matches!(&restarted[0], AgentEvent::UsageSnapshot {cost_scope:Some(scope), context_tokens:None, ..} if scope == "claude:restart")
+        );
     }
 }

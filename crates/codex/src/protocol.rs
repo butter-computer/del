@@ -19,6 +19,8 @@ pub struct ThreadRef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ThreadResponse {
     pub thread: ThreadRef,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,8 +230,13 @@ pub struct TokenUsageParams {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadTokenUsage {
     pub total: TokenBreakdown,
+    #[serde(default)]
+    pub last: Option<TokenBreakdown>,
+    #[serde(default)]
+    pub model_context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

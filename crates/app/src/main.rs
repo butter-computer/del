@@ -54,11 +54,13 @@ mod readiness;
 mod right_panel;
 mod search_ui;
 mod session_modes;
+mod session_usage;
 mod sessions;
 mod side_chat;
 mod sidebar;
 mod signin;
 mod state;
+mod status_processes;
 mod tab_motion;
 mod tab_transfer;
 mod tab_zone;
@@ -506,6 +508,8 @@ struct AppShell {
     nav: nav_history::NavHistory,
     /// The directory whose Git state was last refreshed for the status bar.
     git_refreshed: Option<std::path::PathBuf>,
+    processes: status_processes::Snapshot,
+    status_refreshing: bool,
     bottom: workbench::BottomPanel,
 }
 
@@ -971,12 +975,15 @@ impl AppShell {
             previous_drag_target: None,
             nav: Default::default(),
             git_refreshed: None,
+            processes: Default::default(),
+            status_refreshing: false,
             bottom: Default::default(),
         };
         shell.sidebar_motion.settle(true);
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
+        shell.start_status_ticker(cx);
         shell.state.update(cx, |state, cx| {
             state.window_activation_changed(window.is_window_active(), cx)
         });

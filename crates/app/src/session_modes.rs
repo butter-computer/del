@@ -28,6 +28,7 @@ impl Drop for HandoffLease {
 }
 
 pub(super) struct ModeTerminal {
+    pub usage: crate::session_usage::SessionUsage,
     pub host: Entity<TerminalHost>,
     session: Option<del_terminal::TerminalShutdown>,
     lease: Option<HandoffLease>,
@@ -295,6 +296,11 @@ impl AppShell {
                     this.mode_terminals.insert(
                         id.clone(),
                         ModeTerminal {
+                            usage: this
+                                .chats
+                                .get(&id)
+                                .map(|chat| chat.read(cx).usage.clone())
+                                .unwrap_or_default(),
                             host: host.clone(),
                             session: Some(session),
                             lease: Some(lease),

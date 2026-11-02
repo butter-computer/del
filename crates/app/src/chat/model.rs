@@ -487,7 +487,7 @@ impl ChatModel {
                 }
                 Some(Change::Updated(ix))
             }
-            AgentEvent::TokenUsage { .. } => None,
+            AgentEvent::TokenUsage { .. } | AgentEvent::UsageSnapshot { .. } => None,
             AgentEvent::TurnCompleted { turn_id, status } => {
                 self.seal();
                 self.phase = Phase::Idle;
