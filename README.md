@@ -1011,12 +1011,28 @@ with icons aligned to the left of their labels. Appearance includes persisted
 Light/Dark color modes and a Theme dropdown with color swatches. Choose Graphite
 (the original), Dune, Grove, Tide, Rosewood, Ember, Midnight, Aubergine, Olive,
 Porcelain, Cocoa, Iris, Onyx, Obsidian, Soot, Pine, Oxblood, Eclipse, or Vercel.
-Vercel offers a pitch-black, monochrome workspace inspired by Vercel, with the animated backdrop hidden.
+Vercel offers a pitch-black, monochrome workspace inspired by Vercel, with the animated backdrop hidden by default.
 Onyx offers softer monochrome black; the other near-black options add subtle
 undertones. Each has coordinated light and dark palettes for the
 workspace, chrome, composer, menus, text, and controls. Changes apply immediately
 and persist across launches. Provider logos and semantic status colors retain
 their meaning; terminals retain their dark background and ANSI colors.
+**Background animation** is a separate saved dropdown: Theme default, Off, Life,
+Liquid, Contours, Drift, or Fluted Glass. Theme default keeps Vercel still and uses Life
+elsewhere; an explicit choice stays selected when switching themes. All five
+animations use the current theme accent (including monochrome for Vercel/Onyx),
+with subdued opacity in light and dark modes. Liquid uses flowing folds and soft
+specular highlights; Fluted Glass refracts a moving light field through fixed
+vertical ribs. Old Waves/Orbit preferences migrate to Liquid/Fluted Glass. Animations pause while the window
+is inactive or hidden, and Reduce Motion hides the animated layer entirely.
+Light-mode backgrounds have extra opacity so their details remain visible.
+The saved **Mouse reactive** switch enables a smooth, localized cursor response
+for every style; it starts off and is unavailable when the background is Off.
+It highlights Life cells, stirs Liquid with spreading ripples and a settling wake,
+gently distorts Contours/Drift, and refracts the
+light behind Fluted Glass without moving its ribs.
+Rendering stays on the GPU, with a shared fade toward the bottom and soft blur
+behind the composer. Only Life runs the cellular simulation.
 Providers shows sign-in status and account controls. **Keybinds** lists app shortcuts
 and contextual controls, grouped by area; it is read-only.
 Settings uses the same fade-and-slide entrance as search, with a strongly blurred
@@ -1082,7 +1098,7 @@ Provider credentials and provider-owned transcripts remain managed by their CLIs
 | `right-panels.json` | Per-session file/terminal/browser state, profile IDs, and tabs |
 | `browser-profile-deletions.json` | Pending WebKit profile cleanup |
 | `sidebar-widths.json` | Sidebar sizes |
-| `appearance.json` | Color mode and theme preset |
+| `appearance.json` | Color mode, theme preset, and background animation |
 | `zoom.json` | Interface zoom percentage |
 | `acp-agents.json` | ACP registry overrides |
 

@@ -366,6 +366,91 @@ fn appearance_controls() -> impl IntoElement {
                         }),
                 ),
         )
+        .child(div().h(zpx(1.)).bg(appearance::separator()))
+        .child(
+            h_flex()
+                .w_full()
+                .gap_4()
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().child("Background animation"))
+                        .child(
+                            div()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(appearance::secondary_text())
+                                .child(appearance::background().description()),
+                        ),
+                )
+                .child(
+                    Button::new("appearance-background")
+                        .ghost()
+                        .small()
+                        .accessibility_label(format!(
+                            "Background animation: {}",
+                            appearance::background().name()
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(appearance::background().name())
+                                .child(crate::icons::icon(IconName::ChevronDown)),
+                        )
+                        .dropdown_menu(|menu, _, _| {
+                            appearance::BackgroundAnimation::ALL.into_iter().fold(
+                                menu,
+                                |menu, choice| {
+                                    menu.item(
+                                        PopupMenuItem::new(choice.name())
+                                            .checked(choice == appearance::background())
+                                            .on_click(move |_, _, cx| {
+                                                appearance::set_background(choice, cx)
+                                            }),
+                                    )
+                                },
+                            )
+                        }),
+                ),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .gap_4()
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().child("Mouse reactive"))
+                        .child(
+                            div()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(appearance::secondary_text())
+                                .child("Let the background respond gently to your cursor."),
+                        ),
+                )
+                .child(
+                    gpui_kit::component::switch::Switch::new("background-mouse-reactive")
+                        .checked(appearance::mouse_reactive())
+                        .disabled(
+                            appearance::effective_background()
+                                == appearance::BackgroundAnimation::Off,
+                        )
+                        .accessibility_label("Mouse reactive background")
+                        .on_click(|enabled, _, cx| appearance::set_mouse_reactive(*enabled, cx)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(zpx(TEXT_SM))
+                .text_color(appearance::secondary_text())
+                .child("Matches your theme. Pauses when inactive; hidden with Reduce Motion."),
+        )
 }
 
 pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {

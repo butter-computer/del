@@ -1,4 +1,4 @@
-//! Display-synchronized native Metal Conway Life, composited as one GPUI alpha surface.
+//! Display-synchronized native Metal backgrounds, composited as one GPUI alpha surface.
 //! CPU work is O(1) pointer/uniform updates; simulation and pixel shading are GPU-only.
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -30,6 +30,12 @@ mod native {
             origin_x: f64,
             origin_y: f64,
             light: bool,
+            style: u32,
+            red: f32,
+            green: f32,
+            blue: f32,
+            strength: f32,
+            mouse_reactive: bool,
         ) -> *mut c_void;
         fn del_fluid_region(
             renderer: *mut c_void,
@@ -80,6 +86,7 @@ mod native {
             window: &Window,
         ) -> Option<CFRetained<CVPixelBuffer>> {
             let mouse = window.mouse_position() - bounds.origin;
+            let tint = crate::appearance::background_tint();
             let pointer = unsafe {
                 del_fluid_frame(
                     self.0,
@@ -93,6 +100,12 @@ mod native {
                     bounds.origin.x.as_f32() as f64,
                     bounds.origin.y.as_f32() as f64,
                     crate::appearance::light(),
+                    crate::appearance::effective_background() as u32,
+                    tint.r,
+                    tint.g,
+                    tint.b,
+                    tint.a,
+                    crate::appearance::mouse_reactive(),
                 )
             };
             NonNull::new(pointer.cast::<CVPixelBuffer>())
@@ -149,7 +162,8 @@ impl LifeBackground {
     }
     fn animates(&self, window: &Window, cx: &App) -> bool {
         self.visible
-            && crate::appearance::preset() != crate::appearance::ThemePreset::Vercel
+            && crate::appearance::effective_background()
+                != crate::appearance::BackgroundAnimation::Off
             && window.is_visible()
             && window.is_window_active()
             && !cx.reduce_motion()
@@ -166,8 +180,10 @@ impl LifeBackground {
 impl Render for LifeBackground {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
-        // The focused monochrome preset keeps the workspace completely still.
-        if crate::appearance::preset() == crate::appearance::ThemePreset::Vercel {
+        // Off and reduced motion omit the surface entirely, including pointer effects.
+        if crate::appearance::effective_background() == crate::appearance::BackgroundAnimation::Off
+            || cx.reduce_motion()
+        {
             return div().absolute().inset_0().into_any_element();
         }
         #[cfg(target_os = "macos")]

@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; };
+struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; float4 tint; float4 animation; float4 stroke; };
 // Stable integer hashes are used only for initial soup / rare localized reseeds.
 // The visible state between those events is determined exclusively by Conway.
 float randomCell(uint2 p,uint seed) {
@@ -71,39 +71,151 @@ kernel void cellular_life(texture2d<float,access::read> input [[texture(0)]],
     heat=mix(heat,colorTarget,1.0f-exp(-u.impulse.w*(colorTarget>heat?20.0f:3.8f)));
     nextHighlight.write(float4(heat),id);
 }
+// Damped wave equation: RG stores surface height and vertical velocity.
+// Pointer strokes inject a depression behind the cursor and a crest ahead;
+// propagation continues without pointer input and naturally settles.
+kernel void liquid_step(texture2d<float,access::read> input [[texture(0)]],
+ texture2d<float,access::write> output [[texture(1)]],constant Params &u [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+    if(any(float2(id)>=u.clock.zw))return;
+    if(u.impulse.z>0.5f) {output.write(float4(0),id);return;}
+    int2 size=int2(u.clock.zw),p=int2(id);
+    float2 state=input.read(id).xy;
+    float left=input.read(uint2(max(p-int2(1,0),int2(0)))).x;
+    float right=input.read(uint2(min(p+int2(1,0),size-1))).x;
+    float up=input.read(uint2(max(p-int2(0,1),int2(0)))).x;
+    float down=input.read(uint2(min(p+int2(0,1),size-1))).x;
+    float2 extent=u.geometry.xy/max(u.geometry.z,0.1f);
+    float2 spacing=extent/u.clock.zw;
+    float laplacian=(left+right-2.0f*state.x)/(spacing.x*spacing.x)
+        +(up+down-2.0f*state.x)/(spacing.y*spacing.y);
+    float dt=u.impulse.w;
+    float velocity=(state.y+140.0f*140.0f*laplacian*dt)*exp(-3.2f*dt);
+    float height=state.x+velocity*dt;
+    if(u.impulse.x>0) {
+        float2 position=(float2(id)+0.5f)/u.clock.zw*extent;
+        float2 start=u.stroke.xy*extent,end=u.stroke.zw*extent;
+        float2 path=end-start;
+        float along=clamp(dot(position-start,path)/max(dot(path,path),0.001f),0.0f,1.0f);
+        float2 delta=position-mix(start,end,along);
+        float2 direction=normalize(path);
+        float front=dot(position-end,direction)/24.0f;
+        float wake=exp(-dot(delta,delta)/(2.0f*24.0f*24.0f));
+        height+=0.09f*(u.impulse.x/24.0f)*wake*clamp(front,-1.0f,1.0f);
+    }
+    // Absorb waves at the edges instead of reflecting them back into the panel.
+    float border=min(min(float(id.x),float(id.y)),min(float(size.x-1-p.x),float(size.y-1-p.y)));
+    float damping=exp(-dt*12.0f*(1.0f-smoothstep(0.0f,5.0f,border)));
+    output.write(float4(clamp(height*damping,-0.45f,0.45f),velocity*damping,0,0),id);
+}
 struct Vertex { float4 position [[position]]; float2 uv; };
 vertex Vertex fluid_vertex(uint id [[vertex_id]]) {
     float2 p=float2((id<<1)&2,id&2);
     return {float4(p*2.0f-1.0f,0,1),float2(p.x,1.0f-p.y)};
 }
-fragment float4 fluid_fragment(Vertex in [[stage_in]],texture2d<float,access::read> cells [[texture(0)]],texture2d<float,access::read> highlight [[texture(1)]],constant Params &u [[buffer(0)]]) {
+// Smooth value noise: stable spatial detail, no per-frame reseeding or flicker.
+float ambientNoise(float2 p) {
+    float2 cell=floor(p),f=fract(p);
+    f=f*f*(3.0f-2.0f*f);
+    uint2 id=uint2(cell+8192.0f);
+    float a=randomCell(id,71u),b=randomCell(id+uint2(1,0),71u);
+    float c=randomCell(id+uint2(0,1),71u),d=randomCell(id+uint2(1,1),71u);
+    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+float liquidHeight(float2 p,float time) {
+    float2 q=p/170.0f;
+    float2 flow=float2(time*0.035f,-time*0.024f);
+    float2 warp=float2(ambientNoise(q*0.65f+flow),ambientNoise(q*0.65f-flow+17.0f));
+    q+=1.5f*(warp-0.5f);
+    return 0.72f*ambientNoise(q+flow)
+        +0.20f*ambientNoise(q*2.0f-flow*0.7f)
+        +0.08f*ambientNoise(q*4.0f+flow*0.3f);
+}
+// Analytic backgrounds share the same clock, theme tint, clipping and blur pass.
+// Coordinates are logical pixels, so pattern sizes remain stable under zoom.
+float backgroundField(float2 p,float time,uint style,float2 distortion,float disturbance) {
+    if(style==3u) { // Liquid: domain-warped surface with moving folds and specular sheen.
+        float height=liquidHeight(p,time)+disturbance;
+        float2 gradient=float2(dfdx(height),dfdy(height))/max(fwidth(p),float2(0.001f))*150.0f;
+        float3 normal=normalize(float3(-gradient,0.75f));
+        float3 light=normalize(float3(-0.55f,-0.65f,0.65f));
+        float diffuse=max(dot(normal,light),0.0f);
+        float sheen=pow(max(dot(normal,normalize(light+float3(0,0,1))),0.0f),22.0f);
+        float body=smoothstep(0.28f,0.72f,height);
+        float fold=exp(-pow((height-0.52f)/0.045f,2.0f));
+        return clamp(0.08f+body*diffuse*0.45f+sheen*0.70f+fold*0.18f,0.0f,1.0f);
+    }
+    if(style==4u) { // Contours: continuous, antialiased topographic lines.
+        float2 q=(p-distortion)/150.0f;
+        float height=sin(q.x+time*0.055f)+cos(q.y*0.85f-time*0.04f)
+            +0.45f*sin(q.x*0.7f+q.y*1.2f+time*0.035f);
+        float phase=height*2.2f;
+        float distance=abs(fract(phase)-0.5f);
+        return (1.0f-smoothstep(0.012f,0.012f+max(fwidth(phase),0.008f),distance))*0.75f;
+    }
+    if(style==5u) { // Drift: two sparse layers moving upward without blinking.
+        float field=0;
+        for(uint layer=0;layer<2;layer++) {
+            float pitch=layer==0?78.0f:115.0f;
+            float2 q=(p-distortion)/pitch+float2(0.025f*sin(time*0.07f),time*(layer==0?0.035f:0.021f));
+            uint2 cell=uint2(floor(q)+4096.0f);
+            float seed=randomCell(cell,layer+217u);
+            float2 center=float2(0.2f+0.6f*seed,0.2f+0.6f*randomCell(cell,layer+573u));
+            float distance=length(fract(q)-center)*pitch;
+            float radius=layer==0?1.6f:1.0f;
+            field+=(1.0f-smoothstep(radius,radius+1.0f,distance))*step(0.55f,seed)*(layer==0?1.0f:0.5f);
+        }
+        return min(field,1.0f);
+    }
+    if(style==6u) { // Fluted glass: fixed cylindrical ribs refract a slow moving light field.
+        const float pitch=24.0f;
+        float rib=fract(p.x/pitch);
+        float angle=(rib-0.5f)*2.7f;
+        float curve=cos(angle),slope=sin(angle);
+        // Compress and displace the scene behind each rib; glass geometry stays still.
+        float2 refracted=float2(p.x+slope*32.0f,p.y+curve*7.0f)-distortion*1.5f;
+        float lightField=liquidHeight(refracted*0.72f+float2(time*2.0f,0),time*0.7f);
+        float illumination=smoothstep(0.24f,0.75f,lightField);
+        float edgeDistance=min(rib,1.0f-rib);
+        float seam=1.0f-smoothstep(0.015f,0.06f,edgeDistance);
+        float highlight=exp(-pow((rib-0.19f)/0.065f,2.0f));
+        float transmitted=illumination*(0.2f+0.5f*curve);
+        return clamp(transmitted*(1.0f-seam*0.8f)+highlight*(0.12f+illumination*0.35f),0.0f,1.0f);
+    }
+    return 0;
+}
+fragment float4 fluid_fragment(Vertex in [[stage_in]],texture2d<float,access::read> cells [[texture(0)]],texture2d<float,access::read> highlight [[texture(1)]],texture2d<float> liquid [[texture(2)]],constant Params &u [[buffer(0)]]) {
     float2 logical=in.uv*u.geometry.xy;
-    float2 lattice=in.uv*u.clock.zw;
-    uint2 cell=min(uint2(lattice),uint2(u.clock.zw)-1);
-    float4 state=cells.read(cell);
-    float2 q=abs(fract(lattice)-0.5f);
-    float aa=max(fwidth(q.x),fwidth(q.y))*0.5f;
-    // Fixed ~7px squares retain their centers and gap, with a roughly one
-    // logical-pixel soft rim. End the rim inside the cell to avoid offset seams.
-    float pixels=1.0f-smoothstep(0.31f-aa,min(0.49f,0.46f+aa),max(q.x,q.y));
+    uint style=uint(u.animation.x);
+    float field=0;
+    if(style==2u) { // Conway Life retains exact B3/S23 topology.
+        float2 lattice=in.uv*u.clock.zw;
+        uint2 cell=min(uint2(lattice),uint2(u.clock.zw)-1);
+        float4 state=cells.read(cell);
+        float2 q=abs(fract(lattice)-0.5f);
+        float aa=max(fwidth(q.x),fwidth(q.y))*0.5f;
+        float pixels=1.0f-smoothstep(0.31f-aa,min(0.49f,0.46f+aa),max(q.x,q.y));
+        float heat=u.animation.y>0.5f?clamp(highlight.read(cell).x,0.0f,1.0f):0.0f;
+        field=state.z*mix(0.65f,1.0f,heat)*pixels;
+    } else {
+        float zoom=max(u.geometry.z,0.1f);
+        float2 p=logical/zoom;
+        float2 delta=p-u.pointer.zw*u.geometry.xy/zoom;
+        float influence=exp(-dot(delta,delta)/(2.0f*110.0f*110.0f))*u.animation.z;
+        float2 distortion=delta*(0.18f*influence);
+        constexpr sampler waterSampler(coord::normalized,address::clamp_to_edge,filter::linear);
+        float disturbance=style==3u&&u.animation.y>0.5f?liquid.sample(waterSampler,in.uv).x:0.0f;
+        field=backgroundField(p,u.clock.x,style,distortion,disturbance);
+        if(style!=3u)field=min(field*(1.0f+0.25f*influence),1.0f);
+    }
     float edge=smoothstep(0.0f,0.035f,min(min(in.uv.x,1-in.uv.x),min(in.uv.y,1-in.uv.y)));
-    float heat=clamp(highlight.read(cell).x,0.0f,1.0f);
-    // One constant orange hue. No spatial/time color field, multistop hue
-    // blending or moving brightness bands; hover only raises the same alpha.
-    float3 color=float3(0.86f,0.37f,0.10f);
-    if(u.clock.y>0.5f)color*=0.70f;
-    // Straight RGB; GPUI applies surface alpha once. Preserve only the cell's
-    // birth/death transition, soft rim and page-edge masks.
-    // Linear opacity only: full animation strength at pane top, zero at
-    // bottom. Applied before offscreen Gaussian so sharp/blurred cells agree.
     float verticalFade=1.0f-clamp(in.uv.y,0.0f,1.0f);
-    float alpha=state.z*mix(0.10f,0.19f,heat)*pixels*edge*verticalFade;
+    float alpha=field*u.tint.a*edge*verticalFade;
     float2 halfSize=u.geometry.xy*0.5f;
     float radius=u.geometry.w;
     float2 rounded=abs(logical-halfSize)-halfSize+radius;
     float sdf=length(max(rounded,0.0f))+min(max(rounded.x,rounded.y),0.0f)-radius;
     alpha*=1.0f-smoothstep(-0.5f,0.5f,sdf);
-    return float4(color,clamp(alpha,0.0f,0.85f));
+    return float4(u.tint.rgb,clamp(alpha,0.0f,0.20f));
 }
 
 constexpr sampler sceneSampler(coord::normalized,address::clamp_to_edge,filter::linear);

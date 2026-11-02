@@ -3,7 +3,11 @@ use crate::zoom::px as zpx;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Rgba};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+mod background;
 mod themes;
+pub use background::BackgroundAnimation;
+static BACKGROUND: AtomicU8 = AtomicU8::new(0);
+static MOUSE_REACTIVE: AtomicBool = AtomicBool::new(false);
 pub use themes::ThemePreset;
 static PRESET: AtomicU8 = AtomicU8::new(0);
 static LIGHT: AtomicBool = AtomicBool::new(false);
@@ -57,6 +61,8 @@ pub fn separator() -> Rgba {
 struct Preferences {
     light: bool,
     theme: ThemePreset,
+    background: BackgroundAnimation,
+    mouse_reactive: bool,
 }
 
 pub fn light() -> bool {
@@ -69,6 +75,37 @@ pub fn preset() -> ThemePreset {
         .copied()
         .unwrap_or_default()
 }
+pub fn background() -> BackgroundAnimation {
+    BackgroundAnimation::ALL
+        .get(BACKGROUND.load(Ordering::Relaxed) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+pub fn effective_background() -> BackgroundAnimation {
+    background().resolve(preset())
+}
+pub fn set_background(animation: BackgroundAnimation, cx: &mut App) {
+    BACKGROUND.store(animation as u8, Ordering::Relaxed);
+    save();
+    cx.refresh_windows();
+}
+pub fn mouse_reactive() -> bool {
+    MOUSE_REACTIVE.load(Ordering::Relaxed)
+}
+pub fn set_mouse_reactive(enabled: bool, cx: &mut App) {
+    MOUSE_REACTIVE.store(enabled, Ordering::Relaxed);
+    save();
+    cx.refresh_windows();
+}
+
+/// Theme accent in dark mode, darker ink-like accent in light mode. Alpha stays
+/// deliberately low: the animated layer never competes with chat content.
+pub fn background_tint() -> Rgba {
+    let mut color = ActionTone::Accent.foreground();
+    color.a = if light() { 0.16 } else { 0.14 };
+    color
+}
+
 fn colors() -> themes::Palette {
     preset().palette(light())
 }
@@ -113,12 +150,16 @@ pub fn load(cx: &mut App) {
     let preferences = std::fs::read(path())
         .map(|bytes| parse(&bytes))
         .unwrap_or_default();
+    BACKGROUND.store(preferences.background as u8, Ordering::Relaxed);
+    MOUSE_REACTIVE.store(preferences.mouse_reactive, Ordering::Relaxed);
     apply(preferences.light, preferences.theme, cx);
 }
 fn save() {
     if let Ok(bytes) = serde_json::to_vec(&Preferences {
         light: light(),
         theme: preset(),
+        background: background(),
+        mouse_reactive: mouse_reactive(),
     }) {
         let _ = crate::sessions::write_atomic(&path(), &bytes, 0o644);
     }
@@ -321,7 +362,12 @@ mod tests {
     fn every_preset_round_trips_and_unknown_names_preserve_color_mode() {
         for theme in ThemePreset::ALL {
             for light in [false, true] {
-                let bytes = serde_json::to_vec(&Preferences { light, theme }).unwrap();
+                let bytes = serde_json::to_vec(&Preferences {
+                    light,
+                    theme,
+                    ..Preferences::default()
+                })
+                .unwrap();
                 let restored = parse(&bytes);
                 assert_eq!(restored.theme, theme);
                 assert_eq!(restored.light, light);
@@ -394,6 +440,47 @@ mod tests {
                 let provider = gpui_kit::rgb(0xd97757);
                 assert_eq!(map_neutral(provider, p), provider);
             }
+        }
+    }
+    #[test]
+    fn background_preferences_migrate_and_round_trip_independently() {
+        let legacy = parse(br#"{"light":false,"theme":"vercel"}"#);
+        assert_eq!(
+            legacy.background.resolve(legacy.theme),
+            BackgroundAnimation::Off
+        );
+        for background in BackgroundAnimation::ALL {
+            let bytes = serde_json::to_vec(&Preferences {
+                light: true,
+                theme: ThemePreset::Tide,
+                background,
+                ..Preferences::default()
+            })
+            .unwrap();
+            let restored = parse(&bytes);
+            assert_eq!(restored.background, background);
+            assert_eq!(restored.theme, ThemePreset::Tide);
+            assert!(restored.light);
+        }
+        let future = parse(br#"{"light":true,"theme":"tide","background":"future"}"#);
+        assert_eq!(future.background, BackgroundAnimation::ThemeDefault);
+        assert_eq!(future.theme, ThemePreset::Tide);
+        assert!(future.light);
+    }
+    #[test]
+    fn mouse_reactivity_migrates_and_persists_with_other_preferences() {
+        let legacy = parse(br#"{"light":true,"theme":"tide","background":"liquid"}"#);
+        assert!(!legacy.mouse_reactive);
+        for mouse_reactive in [false, true] {
+            let preferences = Preferences {
+                mouse_reactive,
+                ..legacy
+            };
+            let restored = parse(&serde_json::to_vec(&preferences).unwrap());
+            assert_eq!(restored.mouse_reactive, mouse_reactive);
+            assert!(restored.light);
+            assert_eq!(restored.theme, ThemePreset::Tide);
+            assert_eq!(restored.background, BackgroundAnimation::Liquid);
         }
     }
 }

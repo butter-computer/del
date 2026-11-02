@@ -4,7 +4,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <simd/simd.h>
 
-struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, composer, footer, blur; };
+struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, composer, footer, blur, tint, animation, stroke; };
 @class DelFluidRenderer;
 @interface DelFluidOwner : NSObject
 @property(nonatomic,weak) DelFluidRenderer *renderer;
@@ -16,24 +16,27 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     CVPixelBufferRef _buffer;
     CVMetalTextureCacheRef _cache;
     CVMetalTextureRef _surface;
-    id<MTLTexture> _cells[2], _highlight[2], _scene, _blurA, _blurB;
+    id<MTLTexture> _cells[2], _highlight[2], _scene, _blurA, _blurB, _liquid[2];
     simd_float4 _regions[2];
     simd_float2 _radii;
     NSUInteger _dyeIndex, _simWidth, _simHeight, _generation, _universeSeed;
     struct DelFluidParams _params;
     CFTimeInterval _lastFrame;
-    float _time, _generationTime;
+    float _time, _generationTime, _reaction;
+    BOOL _pointerInitialized, _liquidPointerValid, _clearLiquid;
+    simd_float2 _liquidPointer;
+    NSUInteger _liquidIndex;
     BOOL _running, _clear;
 }
 @property(nonatomic,strong) NSData *libraryData;
 @property(nonatomic,strong) NSString *librarySource;
 @property(nonatomic,strong) id<MTLDevice> device;
-@property(nonatomic,strong) id<MTLComputePipelineState> clearState, lifeState, blurHorizontalState, blurVerticalState;
+@property(nonatomic,strong) id<MTLComputePipelineState> clearState, lifeState, liquidState, blurHorizontalState, blurVerticalState;
 @property(nonatomic,strong) id<MTLRenderPipelineState> displayState, compositeState;
 @property(nonatomic) simd_float2 origin;
 @property(nonatomic,strong) MTLRenderPassDescriptor *displayPass;
 - (CVPixelBufferRef)frameWidth:(double)width height:(double)height scale:(double)scale zoom:(double)zoom radius:(double)radius
-    mouseX:(double)x mouseY:(double)y light:(BOOL)light;
+    mouseX:(double)x mouseY:(double)y light:(BOOL)light style:(unsigned int)style tint:(simd_float4)tint reactive:(BOOL)reactive;
 - (void)setRunning:(BOOL)running;
 - (void)region:(NSUInteger)slot x:(double)x y:(double)y width:(double)width height:(double)height radius:(double)radius;
 - (void)encode:(id<MTLCommandBuffer>)command buffer:(CVPixelBufferRef)buffer;
@@ -53,14 +56,14 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
 - (instancetype)init { if((self=[super init])) { _clear=YES;_universeSeed=arc4random_uniform(65536); } return self; }
 - (void)dealloc { if(_surface)CFRelease(_surface);if(_cache)CFRelease(_cache);if(_buffer)CFRelease(_buffer); }
 - (void)setRunning:(BOOL)running {
-    if(_running!=running) { _running=running;_lastFrame=0; }
+    if(_running!=running) { _running=running;_lastFrame=0;_liquidPointerValid=NO; }
 }
 - (void)region:(NSUInteger)slot x:(double)x y:(double)y width:(double)width height:(double)height radius:(double)radius {
     if(slot>1)return;
     _regions[slot]=(simd_float4){x,y,width,height};_radii[slot]=radius;
 }
 - (CVPixelBufferRef)frameWidth:(double)width height:(double)height scale:(double)scale zoom:(double)zoom radius:(double)radius
-    mouseX:(double)x mouseY:(double)y light:(BOOL)light {
+    mouseX:(double)x mouseY:(double)y light:(BOOL)light style:(unsigned int)style tint:(simd_float4)tint reactive:(BOOL)reactive {
     if(width<=0||height<=0)return NULL;
     size_t pixelsWide=(size_t)ceil(width*scale),pixelsHigh=(size_t)ceil(height*scale);
     if(!_buffer||CVPixelBufferGetWidth(_buffer)!=pixelsWide||CVPixelBufferGetHeight(_buffer)!=pixelsHigh) {
@@ -78,13 +81,17 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     simd_float2 point={(float)(x/width),(float)(y/height)};
     BOOL inside=x>=0&&y>=0&&x<width&&y<height;
     _params.geometry=(simd_float4){width,height,zoom,radius};
-    _params.pointer=(simd_float4){point.x,point.y,point.x,point.y};
+    _params.pointer.x=point.x;_params.pointer.y=point.y;
+    if(!_pointerInitialized&&inside) {
+        _params.pointer.z=point.x;_params.pointer.w=point.y;_pointerInitialized=YES;
+    }
     _params.composer=_regions[0];_params.footer=_regions[1];
     _params.composer.x-=self.origin.x;_params.composer.y-=self.origin.y;
     _params.footer.x-=self.origin.x;_params.footer.y-=self.origin.y;
     _params.blur=(simd_float4){_radii.x,_radii.y,scale,0};
     _params.clock.y=light?1:0;
-    _params.life.z=(_running&&inside)?1:0;
+    _params.tint=tint;_params.animation.x=style;_params.animation.y=reactive?1:0;
+    _params.life.z=(_running&&inside&&reactive)?1:0;
     // Simulation time is consumed in encode, never in GPUI paint preparation.
     return _buffer;
 }
@@ -95,7 +102,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     id<MTLLibrary> library=del_metal_library(device,self.libraryData,self.librarySource,&error);
     if(!library){NSLog(@"Del Metal library: %@",error);return NO;}
 #define PIPE(property,name) self.property=[device newComputePipelineStateWithFunction:[library newFunctionWithName:@name] error:&error]; if(!self.property){NSLog(@"Del Metal pipeline: %@",error);return NO;}
-    PIPE(clearState,"fluid_clear") PIPE(lifeState,"cellular_life")
+    PIPE(clearState,"fluid_clear") PIPE(lifeState,"cellular_life") PIPE(liquidState,"liquid_step")
     PIPE(blurHorizontalState,"cell_blur_horizontal") PIPE(blurVerticalState,"cell_blur_vertical")
 #undef PIPE
     MTLRenderPipelineDescriptor *display=[MTLRenderPipelineDescriptor new];
@@ -115,7 +122,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     self.displayPass=[MTLRenderPassDescriptor renderPassDescriptor];
     self.displayPass.colorAttachments[0].loadAction=MTLLoadActionDontCare;
     self.displayPass.colorAttachments[0].storeAction=MTLStoreActionStore;
-    _simWidth=0;_clear=YES;return YES;
+    _simWidth=0;_clear=YES;_liquid[0]=nil;_liquid[1]=nil;return YES;
 }
 - (id<MTLTexture>)texture:(MTLPixelFormat)format width:(NSUInteger)width height:(NSUInteger)height {
     MTLTextureDescriptor *descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
@@ -134,6 +141,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     NSUInteger width=MAX(1,(NSUInteger)ceilf(_params.geometry.x/pitch));
     NSUInteger height=MAX(1,(NSUInteger)ceilf(_params.geometry.y/pitch));
     if(width!=_simWidth||height!=_simHeight) {
+        _liquid[0]=nil;_liquid[1]=nil;_liquidPointerValid=NO;
         _simWidth=width;_simHeight=height;_clear=YES;_dyeIndex=0;_generation=0;_generationTime=0;_lastFrame=0;
         for(int i=0;i<2;i++){
             _cells[i]=[self texture:MTLPixelFormatRGBA16Float width:width height:height];
@@ -148,8 +156,20 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     CFTimeInterval now=CACurrentMediaTime();
     float dt=_running?(_lastFrame>0?fminf(fmaxf(now-_lastFrame,0),0.05f):1.0f/60.0f):0;
     _lastFrame=now;
-    _time+=dt;_generationTime+=dt;
-    BOOL generation=_running&&_generationTime>=0.09f;
+    _time+=dt;
+    // Smooth only while the frame clock runs; inactive windows stay completely still.
+    float follow=1.0f-expf(-dt*9.0f);
+    if(_params.life.z>0) {
+        _params.pointer.z+=(_params.pointer.x-_params.pointer.z)*follow;
+        _params.pointer.w+=(_params.pointer.y-_params.pointer.w)*follow;
+    }
+    if(_params.animation.y<0.5f)_reaction=0;
+    else _reaction+=(_params.life.z-_reaction)*(1.0f-expf(-dt*7.0f));
+    _params.animation.z=_reaction;
+    _params.life.z=_reaction;
+    BOOL simulatesLife=(unsigned int)_params.animation.x==2;
+    if(simulatesLife)_generationTime+=dt;
+    BOOL generation=_running&&simulatesLife&&_generationTime>=0.09f;
     if(generation){_generationTime=fmodf(_generationTime,0.09f);_generation++;}
     _params.impulse=(simd_float4){0,0,0,dt};
     _params.clock.x=_time;_params.clock.z=_simWidth;_params.clock.w=_simHeight;
@@ -161,11 +181,47 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
         [encoder setTexture:_highlight[0] atIndex:2];[encoder setTexture:_highlight[1] atIndex:3];
         [self dispatch:encoder pipeline:self.clearState];_clear=NO;
     }
-    if(_running) {
+    if(_running&&simulatesLife) {
         [encoder setBytes:&_params length:sizeof(_params) atIndex:0];
         [encoder setTexture:_cells[_dyeIndex] atIndex:0];[encoder setTexture:_cells[1-_dyeIndex] atIndex:1];
         [encoder setTexture:_highlight[_dyeIndex] atIndex:2];[encoder setTexture:_highlight[1-_dyeIndex] atIndex:3];
         [self dispatch:encoder pipeline:self.lifeState];_dyeIndex=1-_dyeIndex;
+    }
+    // A separate height/velocity field carries the liquid wake between frames.
+    // Substeps bound the wave solver independently of display refresh rate.
+    BOOL liquid=(unsigned int)_params.animation.x==3;
+    BOOL reactive=_params.animation.y>0.5f;
+    if(!liquid||!reactive) {_clearLiquid=YES;_liquidPointerValid=NO;}
+    if(liquid) {
+        if(!_liquid[0]) {
+            for(int i=0;i<2;i++)_liquid[i]=[self texture:MTLPixelFormatRG32Float width:width height:height];
+            _liquidIndex=0;_clearLiquid=YES;
+        }
+        struct DelFluidParams water=_params;
+        simd_float2 point={_params.pointer.x,_params.pointer.y};
+        BOOL inside=point.x>=0&&point.y>=0&&point.x<1&&point.y<1;
+        simd_float2 previous=_liquidPointerValid?_liquidPointer:point;
+        simd_float2 travel=(point-previous)*(simd_float2){_params.geometry.x,_params.geometry.y}/fmaxf(_params.geometry.z,0.1f);
+        float distance=simd_length(travel);
+        // Entering/resuming starts a fresh stroke; never draw a wake across the window.
+        BOOL stirring=reactive&&inside&&_liquidPointerValid&&distance>0.01f;
+        water.stroke=(simd_float4){previous.x,previous.y,point.x,point.y};
+        if(_clearLiquid) {
+            water.impulse=(simd_float4){0,0,1,0};
+            [encoder setBytes:&water length:sizeof(water) atIndex:0];
+            [encoder setTexture:_liquid[_liquidIndex] atIndex:0];[encoder setTexture:_liquid[1-_liquidIndex] atIndex:1];
+            [self dispatch:encoder pipeline:self.liquidState];_liquidIndex=1-_liquidIndex;_clearLiquid=NO;
+        }
+        if(_running&&reactive) {
+            NSUInteger steps=MAX(1,(NSUInteger)ceilf(dt*120.0f));
+            for(NSUInteger step=0;step<steps;step++) {
+                water.impulse=(simd_float4){stirring?fminf(distance,80.0f)/(float)steps:0,0,0,dt/(float)steps};
+                [encoder setBytes:&water length:sizeof(water) atIndex:0];
+                [encoder setTexture:_liquid[_liquidIndex] atIndex:0];[encoder setTexture:_liquid[1-_liquidIndex] atIndex:1];
+                [self dispatch:encoder pipeline:self.liquidState];_liquidIndex=1-_liquidIndex;
+            }
+            _liquidPointer=point;_liquidPointerValid=inside;
+        }
     }
     [encoder endEncoding];
     // Reusable offscreen scene + two half-resolution Gaussian intermediates.
@@ -185,6 +241,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     id<MTLRenderCommandEncoder> render=[command renderCommandEncoderWithDescriptor:pass];
     [render setRenderPipelineState:self.displayState];[render setFragmentTexture:_cells[_dyeIndex] atIndex:0];
     [render setFragmentTexture:_highlight[_dyeIndex] atIndex:1];
+    [render setFragmentTexture:liquid?_liquid[_liquidIndex]:_cells[_dyeIndex] atIndex:2];
     [render setFragmentBytes:&_params length:sizeof(_params) atIndex:0];
     [render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[render endEncoding];
     encoder=[command computeCommandEncoder];
@@ -214,10 +271,10 @@ void *del_fluid_create(const unsigned char *bytes,size_t length,const char *sour
 }
 void del_fluid_release(void *pointer) { if(pointer) { DelFluidRenderer *renderer=(__bridge_transfer DelFluidRenderer *)pointer;(void)renderer; } }
 void del_fluid_running(void *pointer,bool running) { if(pointer)[(__bridge DelFluidRenderer *)pointer setRunning:running]; }
-void *del_fluid_frame(void *pointer,double width,double height,double scale,double zoom,double radius,double x,double y,double originX,double originY,bool light) {
+void *del_fluid_frame(void *pointer,double width,double height,double scale,double zoom,double radius,double x,double y,double originX,double originY,bool light,unsigned int style,float red,float green,float blue,float strength,bool reactive) {
     if(!pointer)return NULL;
     DelFluidRenderer *renderer=(__bridge DelFluidRenderer *)pointer;renderer.origin=(simd_float2){originX,originY};
-    CVPixelBufferRef buffer=[renderer frameWidth:width height:height scale:scale zoom:zoom radius:radius mouseX:x mouseY:y light:light];
+    CVPixelBufferRef buffer=[renderer frameWidth:width height:height scale:scale zoom:zoom radius:radius mouseX:x mouseY:y light:light style:style tint:(simd_float4){red,green,blue,strength} reactive:reactive];
     return buffer?(void *)CFRetain(buffer):NULL;
 }
 void del_fluid_region(void *pointer,unsigned int slot,double x,double y,double width,double height,double radius) {

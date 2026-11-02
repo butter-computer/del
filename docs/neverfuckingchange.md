@@ -17,12 +17,32 @@ This records the final decisions, including corrections to earlier experiments.
 - Appearance has a Theme dropdown with swatches: Graphite, Dune, Grove, Tide,
   Rosewood, Ember, Midnight, Aubergine, Olive, Porcelain, Cocoa, Iris, Onyx,
   Obsidian, Soot, Pine, Oxblood, Eclipse, and Vercel. Vercel uses pitch-black
-  chrome and workspace with crisp monochrome controls and no animated backdrop. Onyx uses monochrome near-black;
+  chrome and workspace with crisp monochrome controls and no animated backdrop by default. Onyx uses monochrome near-black;
   Obsidian, Soot, Pine, Oxblood, and Eclipse add subtle tints to near-black.
   Each has a light and dark variant; color mode and preset persist independently.
   Selecting either updates the whole app immediately. Existing boolean appearance
   preferences migrate to Graphite; unknown preset names fall back to Graphite.
   Preserve provider hues, semantic status meanings, and terminal ANSI colors.
+- Appearance includes an independent Background animation dropdown: Theme default,
+  Off, Life, Liquid, Contours, Drift, Fluted Glass. Persist the choice across restarts and
+  theme changes. Theme default resolves to Off for Vercel, Life otherwise; users
+  can explicitly enable any animation on Vercel. Older appearance files keep
+  these defaults. Unknown animation names fall back to Theme default. Waves and
+  Orbit are removed from the picker; saved values migrate to Liquid and Fluted Glass.
+  Liquid uses flowing folds and highlights; Fluted Glass keeps vertical ribs fixed
+  while the refracted light field moves behind them.
+- Backgrounds use the current theme accent, never a fixed orange hue. Light mode
+  uses the darker accent at 16% opacity (dark stays at 14%); monochrome palettes remain neutral.
+  Preserve the rounded clipping, downward opacity fade, and composer-region blur.
+  Off/Reduce Motion omit the animation surface. Pause GPU motion while inactive
+  or hidden; only Life executes the cellular simulation.
+- The saved Mouse reactive switch under Background animation starts off, is
+  disabled when the effective background is Off, and applies to every style.
+  Smooth the cursor response and fade it away on exit. Life changes highlights,
+  never topology; Liquid uses a separate damped height/velocity simulation driven
+  by cursor strokes, with no lens scaling; Contours/Drift use local displacement; Fluted Glass
+  refracts the light field while its ribs stay fixed. Toggling off removes
+  cursor influence immediately. Inactive/reduced-motion behavior still wins.
 - The sidebar uses the same chrome surface as the title bar: no seam between them.
 - Keep the light-mode composer darker than the main workspace. Do not brighten
   the composer past the workspace or reverse the surface hierarchy.
