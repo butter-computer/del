@@ -1,3 +1,5 @@
+use crate::animated_icons::Glyph;
+use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 use crate::{
     AppShell,
@@ -6,7 +8,6 @@ use crate::{
     state::{Selection, Tab},
 };
 use del_agent::{Attachment, UserInput};
-use gpui_kit::assets::IconName as ActionIcon;
 use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     *,
@@ -48,14 +49,13 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
             el.child(crate::icons::icon(IconName::File).text_color(rgba(0xffffff99)))
         })
 }
-fn action(id: SharedString, icon: ActionIcon, label: &'static str) -> Button {
+fn action(id: SharedString, label: &'static str) -> Button {
     Button::new(id.clone())
         .debug_selector(move || id.to_string())
         .size(crate::icons::button_size())
         .flex_none()
         .p_0()
         .ghost()
-        .child(crate::icons::icon(icon))
         .tooltip(label)
         .accessibility_label(label)
 }
@@ -330,9 +330,6 @@ impl AppShell {
                                         .hover(rgb(0xffffff).into())
                                         .active(rgb(0xe5e5e5).into()),
                                 )
-                                .child(
-                                    crate::icons::icon(ActionIcon::Close).text_color(rgb(0x202020)),
-                                )
                                 .accessibility_label("Remove attachment")
                                 .tooltip("Remove attachment")
                                 .absolute()
@@ -344,18 +341,21 @@ impl AppShell {
                                 .opacity(0.0)
                                 .group_hover(group, |button| button.opacity(1.0))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(files) =
-                                            this.composer_attachments.get_mut(&owner)
-                                            && index < files.len()
-                                        {
-                                            files.remove(index);
-                                        }
-                                        cx.notify();
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(files) = this.composer_attachments.get_mut(&owner)
+                                        && index < files.len()
+                                    {
+                                        files.remove(index);
+                                    }
+                                    cx.notify();
+                                }))
+                                .motion_child(
+                                    true,
+                                    move |feedback| {
+                                        feedback.glyph(Glyph::Close).text_color(rgb(0x202020))
                                     },
-                                )),
+                                ),
                             )
                     }),
             );
@@ -530,38 +530,35 @@ pub(crate) fn render_queue(
                                 .compact()
                                 .flex_none()
                                 .accessibility_label("Steer queued message")
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(crate::icons::path("icons/steer.svg"))
-                                        .child("Steer"),
-                                )
                                 .on_click(move |_, _, cx| {
                                     send_chat.update(cx, |chat, cx| {
                                         chat.deliver_queued(send.clone(), chat.is_running(), cx)
                                     })
+                                })
+                                .motion_child(true, move |feedback| {
+                                    h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(feedback.glyph(Glyph::Steer))
+                                        .child("Steer")
                                 }),
                         )
                         .child(
                             action(
                                 format!("delete-{}", item.id).into(),
-                                ActionIcon::Trash,
                                 "Delete queued message",
                             )
                             .on_click(move |_, _, cx| {
                                 delete_chat.update(cx, |chat, cx| {
                                     chat.take_queued(&delete, cx);
                                 });
-                            }),
+                            })
+                            .motion_child(true, move |feedback| feedback.glyph(Glyph::Trash)),
                         )
                         .child(
-                            action(
-                                format!("edit-{}", item.id).into(),
-                                ActionIcon::Pencil,
-                                "Edit queued message",
-                            )
-                            .on_click(move |_, window, cx| on_edit(&edit, window, cx)),
+                            action(format!("edit-{}", item.id).into(), "Edit queued message")
+                                .on_click(move |_, window, cx| on_edit(&edit, window, cx))
+                                .motion_child(true, move |feedback| feedback.glyph(Glyph::Pencil)),
                         )
                 })),
         )

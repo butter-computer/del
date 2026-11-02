@@ -755,6 +755,13 @@ See [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
 
 ## Files, terminals, and browser
 
+Native animated icons give controls action-specific feedback: folder fronts open,
+archive/trash lids lift, pencils draw, and arrows retrace their strokes. Copy/check,
+Send/Stop, and goal Play/Pause icons morph between actual vector shapes. Tabs,
+sidebar actions, tool launchers, queued messages, and main/Side chat share the same
+motion system. Click targets stay fixed, rapid reversals remain smooth, and macOS
+Reduce Motion applies final states immediately. See the [complete interaction list](docs/micro-interactions.md).
+
 The main area shows only the selected agent conversation or terminal session,
 without an inner tab bar. All tools live in the right sidebar; their tabs and plus
 button sit in the top title bar directly above that panel, alongside the session

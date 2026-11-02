@@ -999,19 +999,15 @@ fn assistant_message(
                             .role(Role::Button)
                             .aria_label(if copied { "Copied" } else { "Copy response" })
                             .hover(|button| button.bg(rgba(CARD_HOVER)))
-                            .child(if copied {
-                                crate::icons::icon(IconName::Check)
-                                    .with_size(zpx(13.))
-                                    .text_color(rgba(MUTED))
-                                    .into_any_element()
-                            } else {
-                                svg()
-                                    .path("icons/copy-response.svg")
-                                    .size(zpx(13.))
-                                    .flex_none()
-                                    .text_color(rgba(MUTED))
-                                    .into_any_element()
-                            })
+                            .child(
+                                crate::micro_motion::MorphIcon::new(
+                                    ("copy-confirmation", ix),
+                                    crate::animated_icons::Morph::CopyCheck,
+                                    copied,
+                                )
+                                .with_size(zpx(13.))
+                                .text_color(rgba(MUTED)),
+                            )
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 let _ = copy_chat.update(cx, |chat, cx| chat.copy_response(ix, cx));

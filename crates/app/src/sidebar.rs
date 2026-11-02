@@ -2,7 +2,9 @@
 //! grouped by project with live status, and the keep-awake / memory /
 //! settings footer. Borderless; rows are told apart by fill alone.
 
+use crate::animated_icons::Glyph;
 use crate::appearance::{rgb, rgba};
+use crate::micro_motion::MotionIconExt as _;
 use crate::sessions::Row;
 use crate::state::{AppState, Panel, Selection};
 use crate::zoom::px as zpx;
@@ -366,11 +368,6 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
         .tooltip(if pinned { "Unpin" } else { "Pin" })
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
         .text_color(if pinned { rgb(0xf5f5f5) } else { rgba(MUTED) })
-        .child(if pinned {
-            crate::icons::path("icons/pin-filled.svg")
-        } else {
-            crate::icons::icon(ActionIcon::Pin)
-        })
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
@@ -381,7 +378,6 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .tooltip("Archive")
         .accessibility_label("Archive")
         .text_color(rgba(MUTED))
-        .child(crate::icons::icon(ActionIcon::Archive))
 }
 
 fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div {
@@ -400,12 +396,12 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .tooltip("Restore")
                 .accessibility_label("Restore")
                 .text_color(rgba(MUTED))
-                .child(crate::icons::path("icons/restore.svg"))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     restore_state.update(cx, |s, cx| s.restore(restore_id.clone(), cx));
-                }),
+                })
+                .motion_child(true, move |feedback| feedback.glyph(Glyph::Restore)),
         )
         .child(
             Button::new(SharedString::from(format!("delete-{}", id.0)))
@@ -414,11 +410,13 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .p_0()
                 .tooltip("Permanently delete")
                 .accessibility_label("Permanently delete")
-                .child(crate::icons::icon(ActionIcon::Trash).text_color(rgb(0xff646b)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     delete_state.update(cx, |s, cx| s.permanently_delete(delete_id.clone(), cx));
+                })
+                .motion_child(true, move |feedback| {
+                    feedback.glyph(Glyph::Trash).text_color(rgb(0xff646b))
                 }),
         )
 }
@@ -497,11 +495,15 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> AnyElement {
             _ if row.updated_secs == 0 => ("Idle", div().size(size).into_any_element()),
             _ if aged => (
                 "Idle",
-                glyph("icons/moon.svg").text_color(rgba(FAINT)).into_any_element(),
+                glyph("icons/moon.svg")
+                    .text_color(rgba(FAINT))
+                    .into_any_element(),
             ),
             _ => (
                 "Done",
-                glyph("icons/check.svg").text_color(rgba(MUTED)).into_any_element(),
+                glyph("icons/check.svg")
+                    .text_color(rgba(MUTED))
+                    .into_any_element(),
             ),
         }
     };
@@ -671,46 +673,47 @@ fn row_item(
                 .child(status_glyph(row, working, unread))
                 .into_any_element()
         });
-        item = item
-            .child(
-                // Always laid out and painted, only faded in on hover: toggling
-                // `display` under the pointer made GPUI paint children it had
-                // not prepainted, which aborted the app.
-                h_flex()
-                    .absolute()
-                    .right(zpx(action_right))
-                    .top(zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0))
-                    .h(crate::icons::button_size())
-                    .items_center()
-                    .gap(zpx(4.0))
-                    .w(zpx(ROW_ACTIONS_WIDTH))
-                    .rounded_sm()
-                    .opacity(0.0)
-                    .group_hover(hover_group, |a| a.opacity(1.0))
-                    .when(!archived, |a| {
-                        a.child(
-                            archive_button(SharedString::from(format!("ar-{}", id.0)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let id = archive_id.clone();
-                                    archive_state.update(cx, |s, cx| s.archive(id, cx));
-                                }),
-                        )
-                        .child(
-                            pin_button(
-                                SharedString::from(format!("pin-session-{}", id.0)),
-                                row.pinned,
-                            )
+        item = item.child(
+            // Always laid out and painted, only faded in on hover: toggling
+            // `display` under the pointer made GPUI paint children it had
+            // not prepainted, which aborted the app.
+            h_flex()
+                .absolute()
+                .right(zpx(action_right))
+                .top(zpx((ROW_HEIGHT - crate::icons::BUTTON_SIZE) / 2.0))
+                .h(crate::icons::button_size())
+                .items_center()
+                .gap(zpx(4.0))
+                .w(zpx(ROW_ACTIONS_WIDTH))
+                .rounded_sm()
+                .opacity(0.0)
+                .group_hover(hover_group, |a| a.opacity(1.0))
+                .when(!archived, |a| {
+                    a.child(
+                        archive_button(SharedString::from(format!("ar-{}", id.0)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                pin_state.update(cx, |s, cx| s.toggle_session_pin(&pin_id, cx));
-                            }),
+                                let id = archive_id.clone();
+                                archive_state.update(cx, |s, cx| s.archive(id, cx));
+                            })
+                            .motion_child(true, move |feedback| feedback.glyph(Glyph::Archive)),
+                    )
+                    .child(
+                        pin_button(
+                            SharedString::from(format!("pin-session-{}", id.0)),
+                            row.pinned,
                         )
-                    })
-                    .when(archived, |a| a.child(archived_actions(&id, state))),
-            );
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            pin_state.update(cx, |s, cx| s.toggle_session_pin(&pin_id, cx));
+                        })
+                        .motion_child(true, move |feedback| feedback.glyph(Glyph::Pin)),
+                    )
+                })
+                .when(archived, |a| a.child(archived_actions(&id, state))),
+        );
 
         if !archived {
             let state = state.clone();
@@ -1113,11 +1116,11 @@ fn space_contents(
                                 .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
                                     .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
                                     .dropdown_menu(move |menu, window, cx| project_menu(menu, &menu_state, &menu_path, window, cx)))
-                                .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact().icon(IconName::Plus)
+                                .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact()
                                     .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
                                     .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                    .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); })))))
+                                    .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }).motion_child(true, move |feedback| feedback.glyph(Glyph::Add))))))
                         .content(v_flex().w_full().debug_selector(|| "project-session-content".into()).gap_0p5()
                             .children(drafts.iter().copied().filter(|key| s.draft_project(*key).is_some_and(|p| p == path)).collect::<Vec<_>>().into_iter().filter(|_| !show_archived).map(|key| {
                                 let state = state.clone();
@@ -1135,12 +1138,12 @@ fn space_contents(
                                         .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
                                         .opacity(0.).group_hover(group, |button| button.opacity(1.))
                                         .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
-                                        .child(crate::icons::icon(IconName::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)))
+
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(move |_, _, cx| {
                                             cx.stop_propagation();
                                             close_state.update(cx, |s, cx| s.close_tab(&crate::state::Tab::Draft(key), cx));
-                                        }))
+                                        }).motion_child(true, |feedback| feedback.glyph(Glyph::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))))
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
                             .children(project_rows.iter().map(|row|
@@ -1224,17 +1227,19 @@ pub fn render(
                                         .text_color(rgba(MUTED)),
                                 ),
                         )
-                        .dropdown_menu(move |menu, _, cx| space_switch_menu(menu, &switcher_state, cx)),
+                        .dropdown_menu(move |menu, _, cx| {
+                            space_switch_menu(menu, &switcher_state, cx)
+                        }),
                 )
                 .child(div().flex_1())
                 .child(
                     icon_button("search-conversations")
                         .tooltip("Search (⌘K)")
                         .accessibility_label("Search conversations")
-                        .child(crate::icons::icon(IconName::Search))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::SearchConversations), cx)
-                        }),
+                        })
+                        .motion_child(true, |feedback| feedback.glyph(Glyph::Search)),
                 )
                 .child(
                     icon_button("show-archived")
@@ -1248,13 +1253,13 @@ pub fn render(
                             "Show archived sessions and projects"
                         })
                         .accessibility_label("Toggle archived sessions")
-                        .child(crate::icons::icon(ActionIcon::Archive))
                         .on_click(move |_, _, cx| {
                             arch_state.update(cx, |s, cx| {
                                 s.show_archived = !s.show_archived;
                                 cx.notify();
                             })
-                        }),
+                        })
+                        .motion_child(true, |feedback| feedback.glyph(Glyph::Archive)),
                 ),
         )
         .child(space_pages(state, rename, cx))
@@ -1299,7 +1304,11 @@ pub fn render(
                             icon_button("session-usage-trigger")
                                 .tooltip("Memory usage")
                                 .accessibility_label("Memory usage")
-                                .child(crate::icons::icon(ActionIcon::Activity)),
+                                .child(crate::micro_motion::MorphIcon::new(
+                                    "memory-waveform",
+                                    crate::animated_icons::Morph::Activity,
+                                    usage.read(cx).open,
+                                )),
                         )
                         .content({
                             let usage = usage.clone();
@@ -1314,10 +1323,10 @@ pub fn render(
                         })
                         .tooltip("Settings (⌘,)")
                         .accessibility_label("Settings")
-                        .child(crate::icons::icon(IconName::Settings))
                         .on_click(move |_, _, cx| {
                             prov_state.update(cx, |s, cx| s.toggle_providers(cx))
-                        }),
+                        })
+                        .motion_child(true, |feedback| feedback.glyph(Glyph::Settings)),
                 ),
         )
         .into_any_element()

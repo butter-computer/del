@@ -7,7 +7,9 @@
 //! then steers the turn), and the agent / model / folder are locked once the
 //! session exists.
 
+use crate::animated_icons::Glyph;
 use crate::appearance::{rgb, rgba};
+use crate::micro_motion::MotionIconExt as _;
 use crate::providers;
 use crate::zoom::px as zpx;
 use del_agent::Provider;
@@ -473,26 +475,35 @@ impl RenderOnce for ComposerCard {
             .rounded_full();
         let action = if starting {
             action.child(crate::icons::spinner())
-        } else if running {
-            action
-                .bg(rgb(0xffffff))
-                .cursor_pointer()
-                .role(Role::Button)
-                .aria_label("Stop response")
-                .on_click(move |_, w, cx| on_stop(w, cx))
-                .child(crate::icons::icon(IconName::Square).text_color(rgb(0x111113)))
         } else {
             action
-                .bg(if can_send {
+                .role(Role::Button)
+                .aria_label(if running {
+                    "Stop response"
+                } else {
+                    "Send message"
+                })
+                .bg(if running || can_send {
                     rgb(0xffffff)
                 } else {
                     rgb(0x4a4a4e)
                 })
-                .when(can_send, |a| {
-                    a.cursor_pointer().on_click(move |_, w, cx| on_send(w, cx))
+                .when(running || can_send, |a| {
+                    a.cursor_pointer().on_click(move |_, w, cx| {
+                        if running {
+                            on_stop(w, cx);
+                        } else {
+                            on_send(w, cx);
+                        }
+                    })
                 })
                 .child(
-                    crate::icons::icon(IconName::ArrowUp).text_color(if can_send {
+                    crate::micro_motion::MorphIcon::new(
+                        "send-stop-icon",
+                        crate::animated_icons::Morph::SendStop,
+                        running,
+                    )
+                    .text_color(if running || can_send {
                         rgb(0x111113)
                     } else {
                         rgb(0x8a8a8e)
@@ -514,16 +525,20 @@ impl RenderOnce for ComposerCard {
             .when(dictation == crate::dictation::Phase::Listening, |button| {
                 button.bg(rgba(0xff505024))
             })
-            .child(match dictation {
-                crate::dictation::Phase::Idle => crate::icons::path("icons/microphone.svg")
-                    .text_color(muted)
-                    .into_any_element(),
-                crate::dictation::Phase::Listening => crate::icons::icon(IconName::Square)
-                    .text_color(rgb(0xff6666))
-                    .into_any_element(),
-                _ => crate::icons::spinner().into_any_element(),
-            })
-            .on_click(move |_, window, cx| on_voice(window, cx));
+            .on_click(move |_, window, cx| on_voice(window, cx))
+            .motion_child(
+                !starting || dictation != crate::dictation::Phase::Idle,
+                move |feedback| match dictation {
+                    crate::dictation::Phase::Idle => feedback
+                        .glyph(Glyph::Microphone)
+                        .text_color(muted)
+                        .into_any_element(),
+                    crate::dictation::Phase::Listening => crate::icons::icon(IconName::Square)
+                        .text_color(rgb(0xff6666))
+                        .into_any_element(),
+                    _ => crate::icons::spinner().into_any_element(),
+                },
+            );
 
         let custom_settings = settings.is_some();
         // The wrapper owns the tint; the textarea adds no second background.
@@ -564,15 +579,19 @@ impl RenderOnce for ComposerCard {
                             .items_center()
                             .gap_0p5()
                             .when(custom_settings, |row| row.flex_1().min_w_0())
-                            .child(
-                                chip("attach-files")
-                                    .size(crate::icons::button_size())
-                                    .p_0()
-                                    .child(crate::icons::icon(IconName::Plus))
-                                    .tooltip("Attach files")
-                                    .accessibility_label("Attach files")
-                                    .on_click(move |_, window, cx| on_attach(window, cx)),
-                            )
+                            .child(crate::micro_motion::control(
+                                "attach-motion",
+                                true,
+                                move |motion| {
+                                    chip("attach-files")
+                                        .size(crate::icons::button_size())
+                                        .p_0()
+                                        .child(motion.glyph(Glyph::Add))
+                                        .tooltip("Attach files")
+                                        .accessibility_label("Attach files")
+                                        .on_click(move |_, window, cx| on_attach(window, cx))
+                                },
+                            ))
                             .child(settings.unwrap_or_else(|| {
                                 h_flex()
                                     .items_center()
@@ -620,38 +639,47 @@ mod tests {
     struct StopFixture {
         input: Entity<TextareaState>,
         picker: Entity<crate::model_picker::ModelPicker>,
+        provider: Provider,
+        running: bool,
+        sent: std::rc::Rc<std::cell::Cell<usize>>,
         stopped: std::rc::Rc<std::cell::Cell<usize>>,
     }
     impl Render for StopFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let stopped = self.stopped.clone();
+            let sent = self.sent.clone();
             div().w(px(600.)).child(
                 ComposerCard::new(
                     &self.input,
                     600.,
-                    Provider::Claude,
+                    self.provider,
                     true,
                     self.picker.clone(),
                     "project".into(),
                     true,
-                    true,
+                    self.running,
                 )
+                .on_send(move |_, _| sent.set(sent.get() + 1))
                 .on_stop(move |_, _| stopped.set(stopped.get() + 1)),
             )
         }
     }
     #[gpui::test]
-    fn stop_button_click_reaches_handler_with_focused_input(cx: &mut gpui::TestAppContext) {
+    fn send_and_stop_remain_immediate_during_icon_changes(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         let state = crate::state::tests::draft(cx);
         let stopped = std::rc::Rc::new(std::cell::Cell::new(0));
-        let (_, cx) = cx.add_window_view(|window, cx| {
+        let sent = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (root, cx) = cx.add_window_view(|window, cx| {
             let input = cx.new(|cx| TextareaState::new(window, cx));
             input.update(cx, |input, cx| input.focus(window, cx));
             let picker = cx.new(|cx| crate::model_picker::ModelPicker::new(state, window, cx));
             StopFixture {
                 input,
                 picker,
+                provider: Provider::Claude,
+                running: true,
+                sent: sent.clone(),
                 stopped: stopped.clone(),
             }
         });
@@ -661,5 +689,28 @@ mod tests {
         cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
         assert_eq!(stopped.get(), 1);
+        for (index, provider) in [Provider::Claude, Provider::Codex, Provider::OpenCode]
+            .into_iter()
+            .enumerate()
+        {
+            for running in [false, true] {
+                cx.update(|window, cx| {
+                    root.update(cx, |view, cx| {
+                        view.provider = provider;
+                        view.running = running;
+                        view.input
+                            .update(cx, |input, cx| input.set_value("test", window, cx));
+                        cx.notify();
+                    });
+                    window.draw(cx).clear(cx);
+                });
+                assert_eq!(cx.debug_bounds("composer-action").unwrap().center(), target);
+                // Click on the first frame, before the glyph finishes morphing.
+                cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+                cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+                assert_eq!(sent.get(), index + 1);
+                assert_eq!(stopped.get(), index + 1 + usize::from(running));
+            }
+        }
     }
 }

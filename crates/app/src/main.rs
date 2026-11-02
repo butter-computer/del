@@ -5,6 +5,8 @@
 //! Layout metrics and the shell colours live in `del_core`; this crate renders
 //! them.
 
+use crate::animated_icons::Glyph;
+use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 // The wallpaper background is switched off for now; the loader stays so it can
 // be wired back in without redoing the preload and decode work.
@@ -13,6 +15,7 @@ mod wallpaper;
 
 mod accounts;
 mod ambient;
+mod animated_icons;
 mod app_updates;
 mod appearance;
 mod assets;
@@ -38,6 +41,7 @@ mod icons;
 mod keybinds;
 #[allow(dead_code)]
 mod mcp_bridge;
+mod micro_motion;
 mod mode_ui;
 mod model_picker;
 mod nav_history;
@@ -64,8 +68,8 @@ mod terminal_host;
 mod terminal_store;
 mod usage;
 mod voice_ui;
-mod workspace_files;
 mod workbench;
+mod workspace_files;
 mod workspace_tabs;
 mod zoom;
 
@@ -128,32 +132,29 @@ impl Render for DraggedTab {
         let left = natural_left.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
         // GPUI places drag previews at the pointer. Cancel its vertical movement
         // inside a fixed-size wrapper, keeping the original grab offset intact.
-        div()
-            .w(zpx(TAB_WIDTH))
-            .h(zpx(TAB_HEIGHT))
-            .child(
-                h_flex()
-                    .relative()
-                    .top(self.start_pointer_y - window.mouse_position().y)
-                    .left(left - natural_left)
-                    .w(width)
-                    .overflow_hidden()
-                    .h(zpx(TAB_HEIGHT))
-                    .px_2()
-                    .gap_2()
-                    .items_center()
-                    .rounded(zpx(8.0))
-                    .bg(appearance::dragged_tab_surface())
-                    .text_color(rgb(0xf5f5f5))
-                    .text_size(zpx(TEXT_MD))
-                    .shadow_md()
-                    .child(if self.terminal {
-                        mode_ui::terminal_mark(self.provider)
-                    } else {
-                        mode_ui::tab_mark(self.provider)
-                    })
-                    .child(tab_title(self.title.clone())),
-            )
+        div().w(zpx(TAB_WIDTH)).h(zpx(TAB_HEIGHT)).child(
+            h_flex()
+                .relative()
+                .top(self.start_pointer_y - window.mouse_position().y)
+                .left(left - natural_left)
+                .w(width)
+                .overflow_hidden()
+                .h(zpx(TAB_HEIGHT))
+                .px_2()
+                .gap_2()
+                .items_center()
+                .rounded(zpx(8.0))
+                .bg(appearance::dragged_tab_surface())
+                .text_color(rgb(0xf5f5f5))
+                .text_size(zpx(TEXT_MD))
+                .shadow_md()
+                .child(if self.terminal {
+                    mode_ui::terminal_mark(self.provider)
+                } else {
+                    mode_ui::tab_mark(self.provider)
+                })
+                .child(tab_title(self.title.clone())),
+        )
     }
 }
 
@@ -175,8 +176,10 @@ fn tab_action_content(
     shortcut: Option<usize>,
     color: Hsla,
     working: bool,
-) -> Div {
+) -> impl IntoElement {
+    let glyph_group = group.clone();
     div()
+        .id((ElementId::from(group.clone()), "close-motion"))
         .relative()
         .w(if shortcut.is_some() {
             crate::icons::button_size()
@@ -191,17 +194,6 @@ fn tab_action_content(
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .flex()
-                .opacity(0.0)
-                .group_hover(group.clone(), |glyph| glyph.opacity(1.0))
-                .child(
-                    crate::icons::icon(IconName::Close)
-                        .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))
-                        .text_color(color),
-                ),
-        )
         .when(working, |slot| {
             slot.child(
                 div()
@@ -233,12 +225,22 @@ fn tab_action_content(
                     ),
             )
         })
+        .motion_child(true, move |feedback| {
+            div()
+                .flex()
+                .opacity(0.0)
+                .group_hover(glyph_group, |glyph| glyph.opacity(1.0))
+                .child(
+                    feedback
+                        .glyph(Glyph::Close)
+                        .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))
+                        .text_color(color),
+                )
+        })
 }
 
 /// Shared timing for the left and right sidebar width transitions.
 const PANEL_ANIM: Duration = Duration::from_millis(220);
-
-/// The prompt above the composer.
 
 /// Widest the composer grows on a large window, in logical pixels.
 const COMPOSER_MAX_WIDTH: f32 = chat::COLUMN_MAX_WIDTH;
@@ -2359,11 +2361,7 @@ impl AppShell {
                                         this.state.update(cx, |s, cx| s.new_session(cx));
                                         this.focus_composer(window, cx);
                                     }))
-                                    .child(
-                                        crate::icons::icon(IconName::Plus)
-                                            .with_size(zpx(13.0))
-                                            .text_color(muted),
-                                    ),
+                                    .motion_child(dragging_tab.is_none(), move |feedback| feedback.glyph(Glyph::Add).with_size(zpx(13.0)).text_color(muted)),
                             ),
                     )
                     .child(
@@ -2434,14 +2432,8 @@ impl AppShell {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.state.read(cx).panel == Panel::Chat { this.set_right(!this.right_open, cx); }
                             }))
-                            .child(
-                                crate::icons::icon(if self.right_open {
-                                    IconName::PanelRightClose
-                                } else {
-                                    IconName::PanelRightOpen
-                                })
-                                .text_color(muted),
-                            ),
+                            .motion_child(true, move |feedback| feedback.glyph(Glyph::PanelRight)
+                                .text_color(muted)),
                         ),
                     ),
             )
@@ -2559,7 +2551,9 @@ impl AppShell {
                                     .max_w(zpx(COMPOSER_MAX_WIDTH))
                                     .items_start()
                                     .gap_2()
-                                    .child(div().relative().w_full().child(self.render_composer(cx)))
+                                    .child(
+                                        div().relative().w_full().child(self.render_composer(cx)),
+                                    )
                                     // Project, branch and New worktree on the left and
                                     // Chat/Terminal on the right, each in its own container
                                     // flush with the composer's edges; the middle stays empty.
@@ -2575,10 +2569,10 @@ impl AppShell {
                                                     .min_w_0()
                                                     .child(self.render_new_session_options(cx)),
                                             )
-                                            .child(new_tab_group().child(self.render_mode_picker(cx)))
                                             .child(
-                                                self.ambient.read(cx).region_probe(1, zpx(8.0)),
-                                            ),
+                                                new_tab_group().child(self.render_mode_picker(cx)),
+                                            )
+                                            .child(self.ambient.read(cx).region_probe(1, zpx(8.0))),
                                     ),
                             ),
                     )
@@ -2835,7 +2829,11 @@ impl Render for AppShell {
             0.0
         };
         let nav_width = (zpx(left_extent)
-            - gpui::px(if cfg!(target_os = "macos") { 80.0 } else { 12.0 }))
+            - gpui::px(if cfg!(target_os = "macos") {
+                80.0
+            } else {
+                12.0
+            }))
         .max(zpx(workbench::NAV_MIN_WIDTH));
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
@@ -3182,7 +3180,10 @@ impl Render for AppShell {
                                         }
                                     })
                                     .on_drag_move(cx.listener(
-                                        |this, event: &DragMoveEvent<workbench::PanelResize>, window, cx| {
+                                        |this,
+                                         event: &DragMoveEvent<workbench::PanelResize>,
+                                         window,
+                                         cx| {
                                             let drag = event.drag(cx).clone();
                                             this.resize_bottom_panel(&drag, window, cx);
                                         },
@@ -3192,12 +3193,14 @@ impl Render for AppShell {
                                             .w_full()
                                             .min_h_0()
                                             .overflow_hidden()
-                                            .when(self.bottom.open && self.bottom.maximized, |page| {
-                                                page.h(zpx(0.0)).flex_none()
-                                            })
-                                            .when(!(self.bottom.open && self.bottom.maximized), |page| {
-                                                page.flex_1()
-                                            })
+                                            .when(
+                                                self.bottom.open && self.bottom.maximized,
+                                                |page| page.h(zpx(0.0)).flex_none(),
+                                            )
+                                            .when(
+                                                !(self.bottom.open && self.bottom.maximized),
+                                                |page| page.flex_1(),
+                                            )
                                             .child(self.render_page(window, cx)),
                                     )
                                     .children(self.render_bottom_panel(cx)),

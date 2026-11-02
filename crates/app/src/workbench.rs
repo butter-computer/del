@@ -1,6 +1,8 @@
 //! Harp workbench chrome around Del's page: back/forward navigation in the
 //! title bar, the bottom terminal panel (⌘J) and the status bar.
+use crate::animated_icons::Glyph;
 use crate::appearance::{ActionTone, rgb, rgba, shell_surface};
+use crate::micro_motion::MotionIconExt as _;
 use crate::state::{AppState, Panel, Selection, Tab};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
@@ -45,7 +47,11 @@ pub struct PanelResize {
 
 /// A 28 px icon button in the title bar. It stops mouse-down so the bar's
 /// window-drag area does not start a window move.
-pub fn chrome_button(id: impl Into<ElementId>, label: &'static str, enabled: bool) -> Stateful<Div> {
+pub fn chrome_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    enabled: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .role(gpui::Role::Button)
@@ -57,7 +63,9 @@ pub fn chrome_button(id: impl Into<ElementId>, label: &'static str, enabled: boo
         .justify_center()
         .rounded(zpx(6.0))
         .text_color(rgba(0xffffff8c))
-        .when(enabled, |b| b.cursor_pointer().hover(|b| b.bg(rgba(0xffffff0a))))
+        .when(enabled, |b| {
+            b.cursor_pointer().hover(|b| b.bg(rgba(0xffffff0a)))
+        })
         .when(!enabled, |b| b.opacity(0.35))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
@@ -159,12 +167,10 @@ impl AppShell {
             .child(
                 chrome_button("toggle-sidebar", "Toggle left sidebar", true)
                     .when(settings, |button| button.invisible())
-                    .on_click(cx.listener(|this, _, _, cx| this.set_sidebar(!this.sidebar_open, cx)))
-                    .child(crate::icons::icon(if self.sidebar_open {
-                        IconName::PanelLeftClose
-                    } else {
-                        IconName::PanelLeftOpen
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_sidebar(!this.sidebar_open, cx)),
+                    )
+                    .motion_child(true, |feedback| feedback.glyph(Glyph::PanelLeft)),
             )
             .child(div().flex_1().min_w(zpx(12.0)))
             .child(
@@ -214,7 +220,9 @@ impl AppShell {
             )
             .child(
                 chrome_button("nav-back", "Back", back)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Back (⌘[)").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Back (⌘[)").build(window, cx)
+                    })
                     .when(back, |b| {
                         b.on_click(cx.listener(|this, _, window, cx| this.navigate(-1, window, cx)))
                     })
@@ -222,7 +230,9 @@ impl AppShell {
             )
             .child(
                 chrome_button("nav-forward", "Forward", forward)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Forward (⌘])").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Forward (⌘])").build(window, cx)
+                    })
                     .when(forward, |b| {
                         b.on_click(cx.listener(|this, _, window, cx| this.navigate(1, window, cx)))
                     })
@@ -273,7 +283,12 @@ impl AppShell {
         }
     }
 
-    pub(super) fn resize_bottom_panel(&mut self, drag: &PanelResize, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn resize_bottom_panel(
+        &mut self,
+        drag: &PanelResize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let delta =
             del_core::zoom::unscaled(drag.start_y.get() - window.mouse_position().y.as_f32());
         let viewport = del_core::zoom::unscaled(window.viewport_size().height.as_f32());
@@ -306,7 +321,9 @@ impl AppShell {
                 .w_full()
                 .min_h_0()
                 .when(maximized, |panel| panel.flex_1())
-                .when(!maximized, |panel| panel.flex_none().h(zpx(height + PANEL_HEADER_HEIGHT)))
+                .when(!maximized, |panel| {
+                    panel.flex_none().h(zpx(height + PANEL_HEADER_HEIGHT))
+                })
                 .child(
                     div()
                         .id("resize-bottom-panel")
@@ -361,7 +378,11 @@ impl AppShell {
                         .child(
                             chrome_button(
                                 "bottom-maximize",
-                                if maximized { "Restore panel size" } else { "Maximize panel" },
+                                if maximized {
+                                    "Restore panel size"
+                                } else {
+                                    "Maximize panel"
+                                },
                                 true,
                             )
                             .size(zpx(24.0))
@@ -394,9 +415,10 @@ impl AppShell {
                         .when_some(self.bottom.error.clone(), |body, error| {
                             body.child(div().p_2().text_size(zpx(TEXT_SM)).child(error))
                         })
-                        .when_some(self.bottom.terminals.get(&root).cloned(), |body, terminal| {
-                            body.child(terminal)
-                        }),
+                        .when_some(
+                            self.bottom.terminals.get(&root).cloned(),
+                            |body, terminal| body.child(terminal),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -452,9 +474,14 @@ impl AppShell {
         let draft = state.is_draft();
         let caffeine = state.caffeine_enabled;
         let window_active = state.window_active;
-        let queued = self
-            .open_chat(cx)
-            .map_or(0, |chat| chat.read(cx).queue.items.iter().filter(|item| !item.sending).count());
+        let queued = self.open_chat(cx).map_or(0, |chat| {
+            chat.read(cx)
+                .queue
+                .items
+                .iter()
+                .filter(|item| !item.sending)
+                .count()
+        });
         let model = self.model_picker.read(cx).summary(cx);
         let state_entity = self.state.clone();
         let wait_color = ActionTone::Warning.foreground();
@@ -527,7 +554,9 @@ impl AppShell {
                                 .child(crate::icons::icon(IconName::Folder).with_size(zpx(13.0)))
                                 .child(format!("worktree: {worktree}")),
                         )
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenFiles), cx)),
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::OpenFiles), cx)
+                        }),
                 )
             })
             .when(running > 0, |bar| {
@@ -541,7 +570,9 @@ impl AppShell {
                                 .child(status_icon("icons/working-ring.svg"))
                                 .child(format!("{running} running")),
                         )
-                        .on_click(cx.listener(|this, _, window, cx| this.jump_to(false, window, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.jump_to(false, window, cx)),
+                        ),
                 )
             })
             .when(waiting > 0, |bar| {
@@ -559,7 +590,9 @@ impl AppShell {
                                     if waiting == 1 { "s" } else { "" }
                                 )),
                         )
-                        .on_click(cx.listener(|this, _, window, cx| this.jump_to(true, window, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.jump_to(true, window, cx)),
+                        ),
                 )
             })
             .child(div().flex_1().min_w(zpx(8.0)))
@@ -581,7 +614,9 @@ impl AppShell {
                 status_item("status-model")
                     .tooltip_with_action("Select model and effort", &crate::SelectModel, None)
                     .child(model)
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::SelectModel), cx)),
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::SelectModel), cx)
+                    }),
             )
             .child(
                 status_item("status-mode")
@@ -595,7 +630,11 @@ impl AppShell {
                             .gap_1()
                             .items_center()
                             .child(status_icon("icons/queue.svg"))
-                            .child(if mode == SessionMode::Chat { "Chat" } else { "Terminal" }),
+                            .child(if mode == SessionMode::Chat {
+                                "Chat"
+                            } else {
+                                "Terminal"
+                            }),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let next = if mode == SessionMode::Chat {
@@ -608,7 +647,11 @@ impl AppShell {
             )
             .child(
                 status_item("status-caffeine")
-                    .tooltip(if caffeine { "Allow Mac to sleep" } else { "Keep Mac awake" })
+                    .tooltip(if caffeine {
+                        "Allow Mac to sleep"
+                    } else {
+                        "Keep Mac awake"
+                    })
                     .accessibility_label(if caffeine {
                         "Keep Mac awake: on"
                     } else {
@@ -631,7 +674,9 @@ impl AppShell {
                                 .child(status_icon("icons/queue.svg"))
                                 .child(format!("{queued} queued")),
                         )
-                        .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.focus_composer(window, cx)),
+                        ),
                 )
             })
             .child(
@@ -640,7 +685,8 @@ impl AppShell {
                     .text_color(rgba(0xffffff70))
                     .child(concat!("v", env!("CARGO_PKG_VERSION")))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.updater.update(cx, |updater, cx| updater.check(true, cx))
+                        this.updater
+                            .update(cx, |updater, cx| updater.check(true, cx))
                     })),
             )
     }

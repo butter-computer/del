@@ -1,4 +1,6 @@
 //! Goal controls share a provider-neutral contract; continuation stays in the harness.
+use crate::animated_icons::Glyph;
+use crate::micro_motion::MotionIconExt as _;
 use crate::{AppShell, appearance::rgba, state::Selection, zoom::px as zpx};
 use del_agent::{ComposerCommand, GoalAction, GoalStatus};
 use gpui_kit::assets::IconName as GoalIcon;
@@ -126,12 +128,14 @@ impl AppShell {
                             .p_0()
                             .ghost()
                             .disabled(pending)
-                            .child(crate::icons::icon(GoalIcon::Trash))
                             .tooltip("Clear goal")
                             .accessibility_label("Clear goal")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.goal_action(GoalAction::Clear, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.goal_action(GoalAction::Clear, cx)
+                                }),
+                            )
+                            .motion_child(!pending, move |feedback| feedback.glyph(Glyph::Trash)),
                     )
                     .when(
                         goal.can_pause && goal.status != GoalStatus::Complete,
@@ -142,11 +146,6 @@ impl AppShell {
                                     .p_0()
                                     .ghost()
                                     .disabled(pending)
-                                    .child(crate::icons::icon(if paused {
-                                        GoalIcon::Play
-                                    } else {
-                                        GoalIcon::Pause
-                                    }))
                                     .tooltip(if paused { "Resume goal" } else { "Pause goal" })
                                     .accessibility_label(if paused {
                                         "Resume goal"
@@ -162,7 +161,12 @@ impl AppShell {
                                             },
                                             cx,
                                         )
-                                    })),
+                                    }))
+                                    .child(crate::micro_motion::MorphIcon::new(
+                                        "goal-play-pause",
+                                        crate::animated_icons::Morph::PlayPause,
+                                        !paused,
+                                    )),
                             )
                         },
                     )
@@ -171,11 +175,6 @@ impl AppShell {
                             .size(crate::icons::button_size())
                             .p_0()
                             .ghost()
-                            .child(crate::icons::icon(if expanded {
-                                GoalIcon::ChevronUp
-                            } else {
-                                GoalIcon::ChevronDown
-                            }))
                             .tooltip("Goal details")
                             .accessibility_label("Goal details")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -183,7 +182,12 @@ impl AppShell {
                                     this.goal_expanded.insert(owner);
                                 }
                                 cx.notify();
-                            })),
+                            }))
+                            .child(crate::micro_motion::MorphIcon::new(
+                                "goal-disclosure",
+                                crate::animated_icons::Morph::Disclosure,
+                                expanded,
+                            )),
                     ),
             )
             .when(expanded, |column| {

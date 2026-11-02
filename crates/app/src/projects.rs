@@ -174,7 +174,10 @@ pub fn inspect(cwd: &Path) -> GitInfo {
         .unwrap_or(0);
     let top = PathBuf::from(&top);
     let worktree = (top != root)
-        .then(|| top.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .then(|| {
+            top.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .flatten();
     GitInfo {
         root,

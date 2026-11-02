@@ -43,8 +43,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Keep-awake uses a neutral hover-style background, never a yellow filled background.
 - When off, the keep-awake cup uses the same color as the other toolbar icons; never dim it.
 - While enabled, use the gold cup with subtle rising steam above it. Respect Reduce Motion.
-- Archive and pin controls use the shared SF Symbols (`archivebox`, `pin`, and
-  `pin.fill`) like the search and activity icons, with SVG only as a platform fallback.
+- Static archive and pin marks use the shared SF Symbols (`archivebox`, `pin`, and
+  `pin.fill`), with SVG as a platform fallback. Interactive controls use matching
+  native vector silhouettes so individual parts can animate.
 - Tooltips must remain visible and clear of the title bar; toolbar hints open below.
 
 ## Memory usage
@@ -265,6 +266,12 @@ This records the final decisions, including corrections to earlier experiments.
 - Terminal titles continue to follow provider metadata.
 
 ## Delivery and regression checks
+
+- Interactive icons animate their parts and vector paths, rather than applying
+  generic whole-icon rotation or scaling. Keep hover/press and state morphs short
+  and reversible inside stable hit targets. Respect Reduce Motion, disabled
+  actions, and cancelled presses. Do not delay an action until its animation
+  completes. Main and Side chat share this behavior; preserve provider identities.
 
 - Keep the README accurate when changing these behaviors.
 - Check the affected light and dark surfaces; avoid broad palette rewrites for a local tweak.

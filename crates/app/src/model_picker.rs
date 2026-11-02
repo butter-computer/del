@@ -1,4 +1,5 @@
 //! Model and reasoning controls backed by the selected provider's catalog.
+use crate::animated_icons::Glyph;
 use crate::appearance::{rgb, rgba};
 use crate::state::{AppState, Selection};
 use crate::zoom::px as zpx;
@@ -630,20 +631,26 @@ impl Render for ModelPanel {
                                     .prefix(crate::icons::icon(IconName::Search).text_color(muted)),
                             ),
                         )
-                        .child(
-                            Button::new("refresh-models")
+                        .child({
+                            let button = Button::new("refresh-models")
                                 .ghost()
                                 .size(crate::icons::button_size())
                                 .flex_none()
                                 .p_0()
                                 .accessibility_label("Refresh models")
                                 .tooltip("Refresh models")
-                                .child(crate::icons::icon(IconName::RefreshCw).text_color(muted))
                                 .disabled(catalog.loading)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.state.apply(ModelChange::Refresh(true), cx)
-                                })),
-                        ),
+                                }));
+                            crate::micro_motion::control(
+                                "refresh-models-motion",
+                                !catalog.loading,
+                                move |motion| {
+                                    button.child(motion.glyph(Glyph::Refresh).text_color(muted))
+                                },
+                            )
+                        }),
                 )
                 .when(catalog.loading, |col| {
                     col.child(div().text_color(muted).child("Loading available models…"))
@@ -772,8 +779,8 @@ impl Render for ModelPanel {
                             cx.notify();
                         })),
                 )
-                .child(
-                    Button::new("reset-effort")
+                .child({
+                    let button = Button::new("reset-effort")
                         .ghost()
                         .size(crate::icons::button_size())
                         .flex_none()
@@ -782,11 +789,17 @@ impl Render for ModelPanel {
                         .tooltip("Reset model settings and refresh")
                         .text_color(rgba(0xffffff70))
                         .disabled(locked || catalog.loading)
-                        .child(crate::icons::icon(IconName::RefreshCw).text_color(rgba(0xffffff70)))
                         .on_click(
                             cx.listener(|this, _, _, cx| this.state.apply(ModelChange::Reset, cx)),
-                        ),
-                ),
+                        );
+                    crate::micro_motion::control(
+                        "reset-effort-motion",
+                        !locked && !catalog.loading,
+                        move |motion| {
+                            button.child(motion.glyph(Glyph::Refresh).text_color(rgba(0xffffff70)))
+                        },
+                    )
+                }),
         )
         .when(!self.levels.is_empty(), |col| {
             const TRACK_WIDTH: f32 = 254.0;

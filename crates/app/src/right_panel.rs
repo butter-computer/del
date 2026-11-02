@@ -1,6 +1,8 @@
 //! The right sidebar: files, a workspace PTY, and an embedded browser.
 
+use crate::animated_icons::Glyph;
 use crate::appearance::{ActionTone, rgb, rgba};
+use crate::micro_motion::MotionIconExt as _;
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
@@ -2452,10 +2454,11 @@ impl RightPanel {
                             this.close_tool(pane, window, cx);
                         }
                     }))
-                    .child(
-                        crate::icons::icon(IconName::Close)
-                            .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH)),
-                    ),
+                    .motion_child(true, move |feedback| {
+                        feedback
+                            .glyph(Glyph::Close)
+                            .with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))
+                    }),
             )
     }
 
@@ -2731,7 +2734,9 @@ impl RightPanel {
                                     this.viewer = Viewer::None;
                                     cx.notify();
                                 }))
-                                .child(crate::icons::icon(IconName::Close).text_color(muted)),
+                                .motion_child(true, move |feedback| {
+                                    feedback.glyph(Glyph::Close).text_color(muted)
+                                }),
                         ),
                 )
             })
@@ -3567,7 +3572,7 @@ impl RightPanel {
                     .cursor_pointer()
                     .hover(|button| button.bg(rgba(0xffffff14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
-                    .child(crate::icons::icon(IconName::Plus)),
+                    .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),
             )
             .when(
                 self.pane == Pane::Files && self.active_hosted.is_none(),

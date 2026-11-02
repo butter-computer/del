@@ -1,4 +1,5 @@
 //! Shared new-tab content for session tabs and the right sidebar.
+use crate::animated_icons::Glyph;
 use crate::appearance::rgba;
 use crate::right_panel::Pane;
 use crate::zoom::px as zpx;
@@ -49,7 +50,7 @@ pub fn tools<T: 'static>(
     cx: &mut Context<T>,
 ) -> AnyElement {
     let tool = |pane: Pane, label: &'static str, cx: &mut Context<T>| {
-        h_flex()
+        let row = h_flex()
             .id(label)
             .debug_selector(move || label.into())
             .role(gpui::Role::Button)
@@ -64,8 +65,18 @@ pub fn tools<T: 'static>(
             .bg(rgba(0xffffff10))
             .hover(|b| b.bg(rgba(0xffffff18)))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| choose(this, pane, window, cx)))
-            .child(crate::icons::icon(pane.icon()).text_color(rgba(0xffffffb3)))
+            .on_click(cx.listener(move |this, _, window, cx| choose(this, pane, window, cx)));
+        crate::micro_motion::control((ElementId::from(label), "motion"), true, move |motion| {
+            row.child(
+                motion
+                    .glyph(match pane {
+                        Pane::Files => Glyph::Folder,
+                        Pane::Terminal => Glyph::Terminal,
+                        Pane::SideChat => Glyph::SideChat,
+                        _ => Glyph::Changes,
+                    })
+                    .text_color(rgba(0xffffffb3)),
+            )
             .child(div().flex_1().min_w_0().truncate().child(label))
             .child(
                 div()
@@ -83,6 +94,7 @@ pub fn tools<T: 'static>(
                         _ => "",
                     }),
             )
+        })
     };
     let changes = tool(Pane::Changes, "Changes", cx);
     let terminal = tool(Pane::Terminal, "Terminal", cx);

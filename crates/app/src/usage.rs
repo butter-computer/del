@@ -1,4 +1,6 @@
 //! On-demand process-tree RSS for loaded sessions.
+use crate::animated_icons::Glyph;
+use crate::micro_motion::MotionIconExt as _;
 use crate::{
     state::{AppState, Tab},
     zoom::px as zpx,
@@ -291,12 +293,6 @@ impl Render for Usage {
                                                 .rounded(zpx(6.))
                                                 .tooltip("Permanently delete")
                                                 .accessibility_label("Permanently delete session")
-                                                .child(
-                                                    crate::icons::icon(
-                                                        gpui_kit::assets::IconName::Trash,
-                                                    )
-                                                    .text_color(crate::appearance::rgb(0xff646b)),
-                                                )
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.state.update(cx, |s, cx| {
                                                         s.permanently_delete(delete_id.clone(), cx)
@@ -305,7 +301,12 @@ impl Render for Usage {
                                                     this.entries
                                                         .retain(|entry| entry.id != delete_id);
                                                     cx.notify();
-                                                })),
+                                                }))
+                                                .motion_child(true, move |feedback| {
+                                                    feedback.glyph(Glyph::Trash).text_color(
+                                                        crate::appearance::rgb(0xff646b),
+                                                    )
+                                                }),
                                             )
                                             .child(
                                                 Button::new(SharedString::from(format!(
@@ -319,9 +320,6 @@ impl Render for Usage {
                                                 .rounded(zpx(6.))
                                                 .tooltip("Unload session; keep history")
                                                 .accessibility_label("Unload session")
-                                                .child(crate::icons::icon(
-                                                    gpui_kit::assets::IconName::Close,
-                                                ))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.state.update(cx, |s, cx| {
                                                         s.unload(unload_id.clone(), cx)
@@ -330,7 +328,10 @@ impl Render for Usage {
                                                     this.entries
                                                         .retain(|entry| entry.id != unload_id);
                                                     cx.notify();
-                                                })),
+                                                }))
+                                                .motion_child(true, move |feedback| {
+                                                    feedback.glyph(Glyph::Close)
+                                                }),
                                             ),
                                     )
                             })),

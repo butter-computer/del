@@ -612,7 +612,12 @@ impl AppState {
                 }
                 self.reply_finished(&id, cx);
                 self.set_records(self.manager.list_sessions());
-                if let Some(cwd) = self.records.iter().find(|r| r.id == id).map(|r| r.cwd.clone()) {
+                if let Some(cwd) = self
+                    .records
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.cwd.clone())
+                {
                     self.refresh_git(cwd);
                 }
             }
