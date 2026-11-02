@@ -173,8 +173,12 @@ impl SideChat {
             input
         });
         cx.subscribe_in(&input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                this.submit(window, cx);
+            if let InputEvent::PressEnter {
+                secondary,
+                shift: false,
+            } = event
+            {
+                this.submit_with_mode(*secondary || window.modifiers().platform, window, cx);
             }
             this.save_soon(cx);
         })
@@ -235,7 +239,11 @@ impl SideChat {
             }
         }
         view.input.update(cx, |input, cx| {
-            input.set_value(view.saved.draft.text.clone(), window, cx)
+            input.set_value(
+                crate::command_menu::restore_skill_tokens(&view.saved.draft),
+                window,
+                cx,
+            )
         });
         view.attachments = view.saved.draft.attachments.clone();
         for item in &mut view.saved.queue {
@@ -283,6 +291,8 @@ impl SideChat {
         }
         self.saved.draft = UserInput::text(self.input.read(cx).value().to_string());
         self.saved.draft.attachments = self.attachments.clone();
+        self.saved.draft.skills =
+            crate::command_menu::selected_skills(&self.input.read(cx).content());
         if let Some(chat) = &self.chat {
             self.saved.queue = chat.read(cx).queue.items.clone();
         }
@@ -360,6 +370,10 @@ impl SideChat {
                             this.report_activity(false, cx);
                             this.save_soon(cx);
                             cx.notify();
+                        })
+                        .detach();
+                        cx.subscribe(&chat, |this, _, _: &crate::chat::PromptSubmitted, cx| {
+                            this.report_activity(true, cx);
                         })
                         .detach();
                         cx.subscribe(&chat, |this, _, event: &crate::chat::PeerActivity, cx| {
@@ -517,9 +531,12 @@ impl SideChat {
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let text = self.input.read(cx).value().to_string();
-        if (text.trim().is_empty() && self.attachments.is_empty()) || self.loading || self.importing
-        {
+        self.submit_with_mode(false, window, cx);
+    }
+
+    fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let text = self.input.read(cx).value().trim().to_string();
+        if self.loading || self.importing {
             return;
         }
         let Some(chat) = &self.chat else {
@@ -528,15 +545,61 @@ impl SideChat {
         if chat.read(cx).is_loading() {
             return;
         }
+        if text.is_empty() && self.attachments.is_empty() {
+            if steer {
+                let first = chat
+                    .read(cx)
+                    .queue
+                    .items
+                    .first()
+                    .map(|item| item.id.clone());
+                if let Some(id) = first {
+                    chat.update(cx, |chat, cx| {
+                        chat.deliver_queued(id, chat.is_running(), cx)
+                    });
+                }
+            }
+            return;
+        }
         self.error = None;
         let mut input = UserInput::text(text);
+        input.skills = crate::command_menu::selected_skills(&self.input.read(cx).content());
         input.attachments = std::mem::take(&mut self.attachments);
         chat.update(cx, |chat, cx| {
-            chat.submit_input(input, false, cx);
+            chat.submit_input(input, steer, cx);
         });
         self.report_activity(true, cx);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.save(cx);
+        cx.notify();
+    }
+
+    fn edit_queued(&mut self, id: &str, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let Some(chat) = &self.chat else {
+            return;
+        };
+        let Some(input) = chat.update(cx, |chat, cx| chat.take_queued(id, cx)) else {
+            return;
+        };
+        let current = UserInput {
+            text: self.input.read(cx).value().to_string(),
+            attachments: std::mem::take(&mut self.attachments),
+            skills: crate::command_menu::selected_skills(&self.input.read(cx).content()),
+            command: None,
+        };
+        if !current.text.trim().is_empty() || !current.attachments.is_empty() {
+            chat.update(cx, |chat, cx| {
+                chat.enqueue(current, cx);
+            });
+        }
+        let content = crate::command_menu::restore_skill_tokens(&input);
+        self.attachments = input.attachments;
+        self.input.update(cx, |state, cx| {
+            state.set_value(content, window, cx);
+            state.focus(window, cx);
+        });
+        self.error = None;
         self.save(cx);
         cx.notify();
     }
@@ -936,23 +999,12 @@ impl Render for SideChat {
             .chat
             .as_ref()
             .is_none_or(|c| c.read(cx).search_messages().is_empty());
-        let queued = self
-            .chat
-            .as_ref()
-            .map_or(0, |c| c.read(cx).queue.items.len());
-        let failed: Vec<_> = self
-            .chat
-            .as_ref()
-            .map(|chat| {
-                chat.read(cx)
-                    .queue
-                    .items
-                    .iter()
-                    .filter(|item| item.error.is_some() && !item.sending)
-                    .map(|item| (item.id.clone(), item.input.text.clone()))
-                    .collect()
+        let side = cx.entity().downgrade();
+        let queue = self.chat.as_ref().map(|chat| {
+            crate::followup_ui::render_queue(chat, cx, move |id, window, cx| {
+                let _ = side.update(cx, |side, cx| side.edit_queued(id, window, cx));
             })
-            .unwrap_or_default();
+        });
         let send = cx.entity();
         let stop = send.clone();
         let attach = send.clone();
@@ -1076,46 +1128,21 @@ impl Render for SideChat {
                     .when_some(self.chat.clone(), |v, chat| v.child(chat))
                     .into_any_element()
             })
-            .children(failed.into_iter().map(|(id, text)| {
-                Button::new(SharedString::from(format!("retry-{id}")))
-                    .ghost()
-                    .small()
-                    .label(format!(
-                        "Edit unsent: {}",
-                        text.chars().take(32).collect::<String>()
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(chat) = &this.chat
-                            && let Some(input) =
-                                chat.update(cx, |chat, cx| chat.take_queued(&id, cx))
-                        {
-                            this.input.update(cx, |state, cx| {
-                                state.set_value(input.text, window, cx);
-                                state.focus(window, cx);
-                            });
-                            this.attachments = input.attachments;
-                            this.error = None;
-                            this.save(cx);
-                        }
-                    }))
-            }))
-            .when(queued > 0, |v| {
-                v.child(
-                    div()
-                        .px_3()
-                        .text_size(zpx(11.))
-                        .text_color(rgba(0xffffff80))
-                        .child(format!("{queued} queued")),
-                )
-            })
             .child(
-                h_flex()
+                v_flex()
                     .flex_none()
                     .w_full()
                     .min_w_0()
                     .p_3()
-                    .justify_center()
-                    .child(composer),
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(zpx(640.))
+                            .min_w_0()
+                            .children(queue)
+                            .child(composer),
+                    ),
             )
     }
 }
@@ -1125,6 +1152,361 @@ mod tests {
     use super::*;
     use ::core::prelude::v1::test;
     use std::{sync::Arc, time::Duration};
+
+    async fn idle(manager: &del_agent::SessionManager, id: &SessionId) {
+        for _ in 0..500 {
+            if manager.status(id) == Some(del_agent::SessionStatus::Idle) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("session never finished its turn");
+    }
+
+    /// docs/chat-terminal.md: temporary Side chats cannot become main terminals,
+    /// and a saved fork keeps its undelivered context in Chat. Neither rejection
+    /// may take terminal ownership or disturb the parent conversation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn side_chats_only_become_terminals_after_their_context_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent: Arc<dyn del_agent::AgentBackend> = Arc::new(
+            del_agent::MockBackend::new(Provider::Codex).with_delay(Duration::from_millis(1)),
+        );
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), [agent]).unwrap();
+        let parent = manager
+            .start_session(SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Plan,
+            })
+            .await
+            .unwrap();
+        manager
+            .send_prompt(&parent.id, UserInput::text("parent context"))
+            .await
+            .unwrap();
+        idle(&manager, &parent.id).await;
+
+        let temporary = manager
+            .fork(
+                ForkSource::Session(parent.id.clone()),
+                ForkLifetime::Temporary,
+            )
+            .await
+            .unwrap()
+            .handle
+            .id;
+        let error = manager
+            .handoff_to_terminal(&temporary)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Temporary side chats"), "{error}");
+        assert!(!manager.is_terminal_owned(&temporary));
+        // The rejected fork keeps working as a chat.
+        manager
+            .send_prompt(&temporary, UserInput::text("still a chat"))
+            .await
+            .unwrap();
+        idle(&manager, &temporary).await;
+
+        let saved = manager
+            .fork(ForkSource::Session(parent.id.clone()), ForkLifetime::Saved)
+            .await
+            .unwrap()
+            .handle
+            .id;
+        let error = manager
+            .handoff_to_terminal(&saved)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Send the next message in Chat"), "{error}");
+        assert!(!manager.is_terminal_owned(&saved));
+        assert!(!manager.is_terminal_owned(&parent.id));
+        // Sending in Chat delivers the context; the fork can then switch.
+        manager
+            .send_prompt(&saved, UserInput::text("deliver context"))
+            .await
+            .unwrap();
+        idle(&manager, &saved).await;
+        manager.handoff_to_terminal(&saved).await.unwrap();
+        assert!(manager.is_terminal_owned(&saved));
+        assert!(!manager.is_terminal_owned(&parent.id));
+        manager.release_terminal(&saved);
+        assert!(!manager.is_terminal_owned(&saved));
+        manager.resume(&saved).await.unwrap();
+        manager.shutdown().await;
+    }
+
+    #[::gpui::test]
+    fn codex_side_queue_matches_main_chat(cx: &mut gpui::TestAppContext) {
+        side_queue_scenario(cx, Provider::Codex);
+    }
+
+    #[::gpui::test]
+    fn claude_side_queue_matches_main_chat(cx: &mut gpui::TestAppContext) {
+        side_queue_scenario(cx, Provider::Claude);
+    }
+
+    #[::gpui::test]
+    fn opencode_side_queue_matches_main_chat(cx: &mut gpui::TestAppContext) {
+        side_queue_scenario(cx, Provider::OpenCode);
+    }
+
+    fn side_queue_scenario(cx: &mut gpui::TestAppContext, provider: Provider) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let agent: Arc<dyn del_agent::AgentBackend> =
+            Arc::new(del_agent::MockBackend::new(provider).with_delay(Duration::from_millis(2)));
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), [agent]).unwrap();
+        let parent = runtime
+            .block_on(manager.start_session(SessionConfig {
+                cwd: dir.path().into(),
+                provider,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Plan,
+            }))
+            .unwrap();
+        let context = Context {
+            activity_owner: None,
+            backend: Backend {
+                runtime: runtime.handle().clone(),
+                manager: manager.clone(),
+            },
+            source: ForkSource::Session(parent.id.clone()),
+            accounts: vec![],
+        };
+        let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if side.read_with(cx, |side, cx| {
+                side.chat
+                    .as_ref()
+                    .is_some_and(|chat| !chat.read(cx).is_loading())
+            }) {
+                break;
+            }
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+        }
+        let chat = side.read_with(cx, |side, _| side.chat.clone().unwrap());
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "queue attachment").unwrap();
+        let attachment = del_agent::Attachment {
+            path: file,
+            mime: Some("text/plain".into()),
+        };
+        let mut original = UserInput::text("queued with attachment");
+        original.attachments.push(attachment.clone());
+        let ids = chat.update(cx, |chat, cx| {
+            chat.enqueue(original.clone(), cx);
+            let first = "side-queue-first".to_string();
+            chat.queue.items[0].id = first.clone();
+            // Restored/failed messages expose the same edit/delete/Steer controls.
+            chat.queue
+                .finish(&first, Some("Review before retrying".into()));
+            let mut ids = vec![first];
+            for n in 1..6 {
+                let id = chat.enqueue(UserInput::text(format!("queued {n}")), cx);
+                if n == 1 {
+                    chat.queue.items[n].id = "side-queue-second".into();
+                    ids.push("side-queue-second".into());
+                } else {
+                    ids.push(id);
+                }
+            }
+            ids
+        });
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input.update(cx, |input, cx| {
+                    input.set_value("unfinished draft", window, cx)
+                });
+                side.attachments = vec![attachment.clone()];
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("followup-queue").unwrap().size.height,
+            zpx(136.)
+        );
+        cx.simulate_resize(gpui::size(gpui::px(220.), gpui::px(800.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let edit = cx.debug_bounds("edit-side-queue-first").unwrap();
+        let delete = cx.debug_bounds("delete-side-queue-first").unwrap();
+        let steer = cx.debug_bounds("steer-side-queue-first").unwrap();
+        assert!(
+            edit.right() <= gpui::px(220.),
+            "Edit must fit the narrowest sidebar"
+        );
+        assert!(delete.right() <= edit.left());
+        assert!(steer.right() <= delete.left());
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(800.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("edit-side-queue-first").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        side.read_with(cx, |side, cx| {
+            assert_eq!(side.input.read(cx).value().as_ref(), original.text);
+            assert_eq!(side.attachments, original.attachments);
+            let queue = &chat.read(cx).queue.items;
+            assert_eq!(queue.len(), 6);
+            assert_eq!(queue.last().unwrap().input.text, "unfinished draft");
+            assert_eq!(queue.last().unwrap().input.attachments, vec![attachment]);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx
+            .debug_bounds("delete-side-queue-second")
+            .unwrap()
+            .center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        assert!(chat.read_with(cx, |chat, _| {
+            !chat.queue.items.iter().any(|item| item.id == ids[1])
+        }));
+        // A blank Cmd-Return sends the first queued input. Later items drain in order.
+        chat.update(cx, |chat, cx| {
+            let ids: Vec<_> = chat
+                .queue
+                .items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect();
+            for id in ids {
+                chat.take_queued(&id, cx);
+            }
+            chat.enqueue(UserInput::text("first queued"), cx);
+            chat.enqueue(UserInput::text("second queued"), cx);
+        });
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.attachments.clear();
+                side.input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+            })
+        });
+        cx.simulate_keystrokes("cmd-enter");
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.queue.items[0].sending);
+            assert!(!chat.queue.items[1].sending);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            cx.debug_bounds("followup-queue").unwrap().size.height,
+            zpx(40.)
+        );
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| {
+                chat.queue.items.is_empty() && !chat.is_running()
+            }) {
+                break;
+            }
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+        }
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.queue.items.is_empty());
+            assert!(!chat.is_running());
+            let messages: Vec<_> = chat
+                .search_messages()
+                .iter()
+                .filter(|m| m.role == "You")
+                .map(|m| m.text.clone())
+                .collect();
+            assert_eq!(messages, vec!["first queued", "second queued"]);
+        });
+        // Enter queues behind a live turn; Cmd-Return steers a draft immediately.
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input
+                    .update(cx, |input, cx| input.set_value("active turn", window, cx));
+            })
+        });
+        cx.simulate_keystrokes("enter");
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| {
+                chat.is_running() && chat.queue.items.is_empty()
+            }) {
+                break;
+            }
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+        }
+        assert!(chat.read_with(cx, |chat, _| chat.is_running()));
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input.update(cx, |input, cx| {
+                    input.set_value("after active turn", window, cx)
+                });
+            })
+        });
+        cx.simulate_keystrokes("enter");
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.queue.items.len(), 1);
+            assert!(!chat.queue.items[0].sending);
+        });
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input.update(cx, |input, cx| {
+                    input.set_value("steer active turn", window, cx)
+                });
+            })
+        });
+        cx.simulate_keystrokes("cmd-enter");
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.queue.items.len(), 2);
+            assert!(!chat.queue.items[0].sending);
+            assert!(chat.queue.items[1].sending);
+        });
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| {
+                chat.queue.items.is_empty() && !chat.is_running()
+            }) {
+                break;
+            }
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+        }
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.queue.items.is_empty());
+            assert!(!chat.is_running());
+            let messages: Vec<_> = chat
+                .search_messages()
+                .iter()
+                .filter(|m| m.role == "You")
+                .map(|m| m.text.clone())
+                .collect();
+            assert_eq!(
+                messages,
+                vec![
+                    "first queued",
+                    "second queued",
+                    "active turn",
+                    "steer active turn",
+                    "after active turn"
+                ]
+            );
+        });
+        assert_eq!(
+            manager.subscribe_with_history(&parent.id).unwrap().0.len(),
+            1,
+            "Side queue actions must never deliver to the parent"
+        );
+        side.update(cx, |side, cx| side.forget(cx));
+    }
 
     #[::gpui::test]
     fn side_chat_uses_its_own_transcript_and_queue(cx: &mut gpui::TestAppContext) {

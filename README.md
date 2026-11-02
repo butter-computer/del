@@ -6,8 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.23` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.24` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
+See the [0.1.24 source release notes](docs/releases/0.1.24.md) and
+[validation record](docs/releases/0.1.24-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -37,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.23-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.24-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -69,11 +71,18 @@ a small ring without a number. Claude usage comes from its native `get_usage`
 control request, without sending a prompt or reading credentials. Unavailable quota
 (including older Claude CLIs without this query) stays hidden.
 
-In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection.
+In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection. An empty model catalog is reported explicitly with a Refresh action. Default keeps the provider’s configured choice.
 A new chat remembers its account across restarts. Choosing a different account of the same provider
 resumes the existing chat with its native history under that account. Switching
 is blocked during a running response; a failed transfer reconnects the original
-account. Changing providers still opens a new draft. New chats use the provider’s chosen default
+account. Choosing Codex, Claude, or OpenCode in an existing chat switches providers
+in place, with a compact switch row. Every switch creates a fresh native session,
+including when switching back. Earlier messages, reasoning, tools, and attachment
+references remain in the chat. Public history is attached separately during setup;
+your next message stays unchanged. The initial attachment is bounded, and the agent
+can page through the full saved public history with `read_session`, including retired
+provider segments after a restart. Finish or stop the response and clear any unfinished
+native goal before switching. New chats use the provider’s chosen default
 account. Saved accounts work in Chat and Terminal modes. Terminal launches retain their
 selected account when reopened. OpenCode’s built-in account is labeled **System**.
 
@@ -400,7 +409,11 @@ conversation. Unloading a running session also stops its current work.
   commands run locally, without sending a model prompt. The handoff retains the
   native conversation ID, account, folder, and saved model/permission settings.
   Finish or stop a chat response before switching. Returning closes the terminal
-  process before Chat reloads its native history. In a new draft, these commands
+  process before Chat reloads its native history. After a provider switch, Terminal
+  opens the current native segment with its attached context; returning appends
+  terminal turns below the existing chat without losing earlier provider segments.
+  Side chats and `read_session` can read both the saved conversation and new terminal
+  turns. Return to Chat before changing provider or account again. In a new draft, these commands
   choose the mode for the first message. Ordinary sidebar shells are unaffected.
   Restored terminal history removes ANSI formatting controls. Recognized native
   commands and background notifications appear as expandable activity, rather
@@ -416,7 +429,8 @@ conversation. Unloading a running session also stops its current work.
   jump-to-prompt navigation. Hover magnifies nearby ticks, but only the hovered
   tick is white; neighbors stay gray. Away from the rail, only the current-message
   tick is highlighted. Moving onto a different tick emits native haptic feedback
-  on supported macOS hardware.
+  on supported macOS hardware. Ticks use compact 10 px spacing, with 6 px idle
+  bars that grow to at most 18 px on hover.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
@@ -543,7 +557,8 @@ same level stays silent; devices without haptic support receive no feedback.
 Model, effort, and service-tier selections are stored with the conversation.
 Existing chat settings apply on subsequent prompts through the backend's
 reconfiguration path; they do not rewrite a turn already in flight. Changing a
-model clears incompatible effort/tier choices. Provider changes use a new draft.
+model clears incompatible effort/tier choices. Provider changes in existing chats
+keep the same tab and working directory and reset model/effort/tier to the target's defaults.
 Catalog discovery submits no prompt, but can start a CLI process. ACP is no longer
 offered in the provider picker or Settings; its backend remains for legacy records.
 
@@ -602,6 +617,10 @@ currently use that default rather than advertising commands they cannot execute.
 
 ## Follow-up queue and attachments
 
+Main chat and Side chat share the same queue rows and delivery behavior. Actions
+apply only to the chat containing that queue; Side chat works independently while
+the main conversation is in Terminal.
+
 While a reply runs, **Enter** queues the current draft. **⌘ + Enter** submits
 it as steering input; with an empty composer, it submits the top queued item.
 Completed turns advance remaining follow-ups in order. A busy provider leaves
@@ -613,7 +632,8 @@ queue and its order.
 
 Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
 attachments to the composer; an existing draft is preserved as another queued item.
-Drag from the left edge to reorder, without an extra hover icon. Rows have subtle
+Drag the queue icon to reorder, without an extra hover icon. Controls remain
+visible at the sidebar’s minimum width. Rows have subtle
 separators and a surface just darker than the composer. Around four rows fit
 before the list scrolls, with a bottom fade and no scrollbar.
 

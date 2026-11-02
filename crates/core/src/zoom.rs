@@ -46,4 +46,22 @@ mod tests {
         }
         assert_eq!(value, super::MIN);
     }
+
+    #[test]
+    fn set_clamps_and_scaling_round_trips() {
+        // Thread-local: other tests on other threads are unaffected.
+        assert_eq!(super::percent(), super::DEFAULT);
+        assert_eq!(super::factor(), 1.0);
+        super::set(i16::MAX);
+        assert_eq!(super::percent(), super::MAX);
+        assert_eq!(super::scaled(13.), 26.);
+        assert_eq!(super::unscaled(26.), 13.);
+        super::set(i16::MIN);
+        assert_eq!(super::percent(), super::MIN);
+        assert!((super::unscaled(super::scaled(19.)) - 19.).abs() < 1e-4);
+        super::set(155);
+        assert_eq!(super::percent(), 155);
+        super::set(super::DEFAULT as i16);
+        assert_eq!(super::scaled(8.), 8.);
+    }
 }

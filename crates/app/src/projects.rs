@@ -475,6 +475,114 @@ mod tests {
         assert!(git(repo.path(), &["rev-parse", "--verify", &branch]).is_ok());
     }
     #[test]
+    fn plain_launch_and_current_branch_never_touch_the_checkout() {
+        // No branch or worktree requested: no Git command runs, even outside a repository.
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            prepare(plain.path(), &LaunchOptions::default(), plain.path()).unwrap(),
+            plain.path()
+        );
+        let repo = repository();
+        let storage = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("dirty"), "keep").unwrap();
+        let current = LaunchOptions {
+            branch: Some("main".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            prepare(repo.path(), &current, storage.path()).unwrap(),
+            repo.path()
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("dirty")).unwrap(),
+            "keep"
+        );
+        // Refusing a dirty switch leaves the current branch and files alone.
+        let other = LaunchOptions {
+            branch: Some("feature".into()),
+            ..Default::default()
+        };
+        assert!(prepare(repo.path(), &other, storage.path()).is_err());
+        assert_eq!(inspect(repo.path()).current, "main");
+        assert!(repo.path().join("dirty").exists());
+    }
+
+    #[test]
+    fn cleanup_ignores_foreign_manifests_and_preserves_switched_or_ignored_checkouts() {
+        let repo = repository();
+        let storage = tempfile::tempdir().unwrap();
+        let root = inspect(repo.path()).root;
+        assert_eq!(cleanup(&root, &[], storage.path()).unwrap(), 0);
+        // A manifest naming the user's own checkout (or anything outside its
+        // owned entry) is never acted on.
+        let foreign = storage.path().join("worktrees/foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        let manifest = OwnedWorktree {
+            source: root.clone(),
+            path: repo.path().to_path_buf(),
+            branch: "main".into(),
+            base: "main".into(),
+            base_commit: git(repo.path(), &["rev-parse", "HEAD"]).unwrap(),
+        };
+        std::fs::write(
+            foreign.join("worktree.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let corrupt = storage.path().join("worktrees/corrupt");
+        std::fs::create_dir_all(&corrupt).unwrap();
+        std::fs::write(corrupt.join("worktree.json"), "{not json").unwrap();
+        // Checked-out another branch, or holding only ignored files: both are kept.
+        let switched = prepare(repo.path(), &options(), storage.path()).unwrap();
+        git(&switched, &["switch", "-c", "user-branch"]).unwrap();
+        let ignored = prepare(repo.path(), &options(), storage.path()).unwrap();
+        // Linked worktrees share the repository's info/exclude.
+        std::fs::create_dir_all(repo.path().join(".git/info")).unwrap();
+        std::fs::write(repo.path().join(".git/info/exclude"), "*.log\n").unwrap();
+        std::fs::write(ignored.join("build.log"), "x").unwrap();
+        // Records whose directory is inside an owned checkout keep it.
+        let nested = prepare(repo.path(), &options(), storage.path()).unwrap();
+        std::fs::create_dir_all(nested.join("sub")).unwrap();
+        let unused = prepare(repo.path(), &options(), storage.path()).unwrap();
+        assert_eq!(
+            cleanup(&root, &[nested.join("sub")], storage.path()).unwrap(),
+            1
+        );
+        assert!(repo.path().join(".git").exists());
+        assert_eq!(inspect(repo.path()).current, "main");
+        assert!(foreign.join("worktree.json").exists() && corrupt.exists());
+        assert!(switched.exists() && ignored.join("build.log").exists() && nested.exists());
+        assert!(!unused.exists());
+        // Another project's cleanup never removes this project's checkouts.
+        let elsewhere = repository();
+        let kept = prepare(repo.path(), &options(), storage.path()).unwrap();
+        assert_eq!(
+            cleanup(&inspect(elsewhere.path()).root, &[], storage.path()).unwrap(),
+            0
+        );
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn preferences_round_trip_and_ignore_unknown_fields() {
+        let saved: ProjectPreferences = serde_json::from_str(
+            r#"{"names":{"/repo":"Repo"},"collapsed":["/repo"],"collapsed_sections":["Pinned"],
+                "directories":{"/repo/sub":"/repo"},"future_setting":{"x":1}}"#,
+        )
+        .unwrap();
+        let again: ProjectPreferences =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(again.names.get(Path::new("/repo")).unwrap(), "Repo");
+        assert!(again.collapsed.contains(Path::new("/repo")));
+        assert!(again.collapsed_sections.contains("Pinned"));
+        assert_eq!(
+            again.directories.get(Path::new("/repo/sub")).unwrap(),
+            Path::new("/repo")
+        );
+        assert!(again.archived.is_empty() && again.last_directory.is_none());
+    }
+
+    #[test]
     fn folders_without_git_remain_distinct_and_unborn_repos_fail_clearly() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();

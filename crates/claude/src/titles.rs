@@ -26,15 +26,19 @@ impl Titles {
         }
         file.seek(SeekFrom::Start(state.offset))?;
         let mut reader = BufReader::new(file);
-        let mut line = String::new();
+        let mut line = Vec::new();
         loop {
             line.clear();
-            let count = reader.read_line(&mut line)?;
-            if count == 0 || !line.ends_with('\n') {
+            // Bytes, not `read_line`: one invalid UTF-8 record must not stop
+            // every later title from being read.
+            let count = reader.read_until(b'\n', &mut line)?;
+            if count == 0 || line.last() != Some(&b'\n') {
                 break;
             }
             state.offset += count as u64;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            let Ok(value) =
+                serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&line))
+            else {
                 continue;
             };
             if value["sessionId"]
@@ -144,6 +148,33 @@ mod tests {
                 .read(&root, Path::new("/tmp/project"), "../wrong")
                 .unwrap(),
             None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_utf8_record_does_not_block_later_titles() {
+        let root = std::env::temp_dir().join(format!("del-claude-titles-{}", uuid::Uuid::new_v4()));
+        let project = root.join("projects/-tmp-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut file = std::fs::File::create(project.join(format!("{id}.jsonl"))).unwrap();
+        file.write_all(b"{\"type\":\"user\",\"message\":\"\xff\"}\n")
+            .unwrap();
+        writeln!(file, r#"{{"type":"ai-title","aiTitle":"After bad bytes"}}"#).unwrap();
+        let mut titles = Titles::default();
+        let cwd = Path::new("/tmp/project");
+        assert_eq!(
+            titles.read(&root, cwd, &id).unwrap().as_deref(),
+            Some("After bad bytes")
+        );
+        // A symlinked or differently encoded workspace is still found by id.
+        assert_eq!(
+            titles
+                .read(&root, Path::new("/elsewhere"), &id)
+                .unwrap()
+                .as_deref(),
+            Some("After bad bytes")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

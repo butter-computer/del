@@ -498,7 +498,7 @@ impl AppState {
                 self.switching_accounts.remove(&id);
                 self.set_records(self.manager.list_sessions());
                 if let Err(error) = result {
-                    self.error = Some(format!("Could not switch account: {error}"));
+                    self.error = Some(format!("Could not switch provider or account: {error}"));
                 }
                 self.load_models(true, cx);
             }
@@ -513,7 +513,9 @@ impl AppState {
                     if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
                         account.identity = Some(identity);
                     }
-                    if let Err(e) = crate::accounts::save(&self.accounts) {
+                    if !cfg!(test)
+                        && let Err(e) = crate::accounts::save(&self.accounts)
+                    {
                         self.error = Some(format!("Could not save account: {e}"));
                     }
                 } else {
@@ -533,7 +535,9 @@ impl AppState {
                             .retain(|(_, account, _), _| account.as_ref() != Some(&id));
                         self.account_status.insert(id, "Connected".into());
                         self.refresh_account_usage(cx);
-                        if let Err(e) = crate::accounts::save(&self.accounts) {
+                        if !cfg!(test)
+                            && let Err(e) = crate::accounts::save(&self.accounts)
+                        {
                             self.error = Some(format!("Could not save account: {e}"));
                         }
                     }
@@ -2302,15 +2306,14 @@ impl AppState {
         if self.effective().0 == provider && self.selected_account() == account {
             return;
         }
-        if let Selection::Session(id) = self.selection.clone()
-            && self.effective().0 == provider
-        {
+        if let Selection::Session(id) = self.selection.clone() {
             if matches!(
                 self.manager.status(&id),
                 Some(SessionStatus::Running | SessionStatus::WaitingApproval)
             ) {
-                self.error =
-                    Some("Wait for the response to finish before switching accounts.".into());
+                self.error = Some(
+                    "Finish or stop the response before switching providers or accounts.".into(),
+                );
                 cx.notify();
                 return;
             }
@@ -2319,13 +2322,18 @@ impl AppState {
                 .and_then(|id| self.accounts.iter().find(|a| &a.id == id))
                 .cloned();
             self.switching_accounts.insert(id.clone());
+            let same_provider = self.effective().0 == provider;
             let (manager, tx) = (self.manager.clone(), self.tx.clone());
             self.rt.spawn(async move {
-                let result = manager
-                    .switch_account(&id, account, |record| {
-                        crate::accounts::transfer_conversation(record, target)
-                    })
-                    .await;
+                let result = if same_provider {
+                    manager
+                        .switch_account(&id, account, |record| {
+                            crate::accounts::transfer_conversation(record, target)
+                        })
+                        .await
+                } else {
+                    manager.switch_provider(&id, provider, account).await
+                };
                 let _ = tx.send(Msg::AccountSwitched(id, result.map_err(|e| e.to_string())));
             });
             cx.notify();
@@ -2999,19 +3007,26 @@ impl AppState {
         self.save_projects(cx);
     }
 
-    pub fn cleanup_project_worktrees(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        let mut used: Vec<_> = self
-            .records
+    /// Checkouts that worktree cleanup must keep: every saved chat or terminal
+    /// directory, every open draft directory (a draft may inherit a worktree
+    /// session's folder), and each draft's own pending worktree.
+    fn worktrees_in_use(&self, storage: &std::path::Path) -> Vec<PathBuf> {
+        self.records
             .iter()
             .map(|r| r.cwd.clone())
             .chain(self.terminal_rows.iter().map(|r| r.cwd.clone()))
-            .collect();
+            .chain(self.drafts.values().map(|d| d.cwd.clone()))
+            .chain(
+                self.launch_options
+                    .values()
+                    .map(|o| storage.join("worktrees").join(&o.token).join("checkout")),
+            )
+            .collect()
+    }
+
+    pub fn cleanup_project_worktrees(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let storage = del_agent::data_dir().unwrap_or_else(std::env::temp_dir);
-        used.extend(
-            self.launch_options
-                .values()
-                .map(|o| storage.join("worktrees").join(&o.token).join("checkout")),
-        );
+        let used = self.worktrees_in_use(&storage);
         let tx = self.tx.clone();
         self.rt.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -4614,6 +4629,7 @@ pub(crate) mod tests {
             let chat = SessionId::new("chat");
             s.invalidate_rows();
             s.records.push(SessionRecord {
+                segments: Vec::new(),
                 fork: None,
                 id: chat.clone(),
                 provider: Provider::Codex,
@@ -4770,6 +4786,279 @@ pub(crate) mod tests {
                 cx.notify();
             });
             window.draw(cx).clear(cx);
+        });
+    }
+
+    fn chat_record(id: &str, cwd: &str, account: Option<String>) -> del_agent::SessionRecord {
+        del_agent::SessionRecord {
+            segments: Vec::new(),
+            fork: None,
+            id: del_agent::SessionId::new(id),
+            provider: Provider::Claude,
+            account_id: account,
+            cwd: cwd.into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: Default::default(),
+            title: Some(id.into()),
+            title_turns: 0,
+            created_at_ms: 1,
+            updated_at_ms: 1_000,
+            status: del_agent::SessionStatus::Idle,
+        }
+    }
+
+    fn terminal_row(id: &str, cwd: &str, account: Option<String>) -> crate::sessions::TerminalRow {
+        crate::sessions::TerminalRow {
+            account_id: account,
+            id: del_agent::SessionId::new(id),
+            title: id.into(),
+            cwd: cwd.into(),
+            provider: Some(Provider::Claude),
+            active: false,
+            summary: String::new(),
+            pinned: false,
+        }
+    }
+
+    fn profile(provider: Provider, number: usize) -> crate::accounts::Account {
+        crate::accounts::Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            provider,
+            number,
+            identity: None,
+            is_default: false,
+            requires_login: false,
+        }
+    }
+
+    #[gpui::test]
+    fn accounts_used_by_chats_or_terminals_cannot_be_deleted(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let chat = profile(Provider::Claude, 2);
+            let terminal = profile(Provider::Claude, 3);
+            let free = profile(Provider::Codex, 2);
+            s.accounts = vec![chat.clone(), terminal.clone(), free.clone()];
+            let dir = tempfile::tempdir().unwrap();
+            let index = dir.path().join("sessions.jsonl");
+            let saved = chat_record("uses-profile", "/tmp", Some(chat.id.clone()));
+            std::fs::write(&index, serde_json::to_string(&saved).unwrap() + "\n").unwrap();
+            s.manager = SessionManager::new(&index, []).unwrap();
+            // Archived chats are still saved chats; archiving does not release the profile.
+            s.overrides_mut().set_archived(&saved.id, true);
+            s.terminal_rows.push(terminal_row(
+                "terminal-profile",
+                "/tmp",
+                Some(terminal.id.clone()),
+            ));
+            s.delete_account(&chat.id, cx);
+            assert!(s.error.take().unwrap().contains("used by existing chats"));
+            s.delete_account(&terminal.id, cx);
+            assert!(s.error.take().unwrap().contains("used by existing chats"));
+            assert_eq!(s.accounts.len(), 3);
+            // Nothing is deleted while an account switch or a startup using it is in flight.
+            s.switching_accounts
+                .insert(del_agent::SessionId::new("switching"));
+            s.delete_account(&free.id, cx);
+            assert!(s.error.take().is_some());
+            s.switching_accounts.clear();
+            s.draft_accounts.insert(0, free.id.clone());
+            s.starting.insert(0);
+            s.delete_account(&free.id, cx);
+            assert!(s.error.take().is_some());
+            s.starting.clear();
+            // Or while that provider's sign-in is running.
+            s.signin = Some(Provider::Codex);
+            s.delete_account(&free.id, cx);
+            assert_eq!(s.accounts.len(), 3);
+            s.signin = None;
+            s.delete_account(&free.id, cx);
+            assert_eq!(
+                s.accounts.iter().map(|a| &a.id).collect::<Vec<_>>(),
+                vec![&chat.id, &terminal.id]
+            );
+            assert!(!s.draft_accounts.values().any(|id| id == &free.id));
+            assert!(s.error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn default_accounts_are_per_provider_and_require_a_usable_login(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let first = profile(Provider::Claude, 2);
+            let second = profile(Provider::Claude, 3);
+            let codex = profile(Provider::Codex, 2);
+            let mut expired = profile(Provider::Claude, 4);
+            expired.requires_login = true;
+            s.accounts = vec![
+                first.clone(),
+                second.clone(),
+                codex.clone(),
+                expired.clone(),
+            ];
+            let defaults = |s: &AppState| {
+                (
+                    s.default_account(Provider::Claude).map(str::to_owned),
+                    s.default_account(Provider::Codex).map(str::to_owned),
+                )
+            };
+            s.make_default_account(Provider::Claude, Some(first.id.clone()), cx);
+            s.make_default_account(Provider::Codex, Some(codex.id.clone()), cx);
+            assert_eq!(
+                defaults(s),
+                (Some(first.id.clone()), Some(codex.id.clone()))
+            );
+            s.make_default_account(Provider::Claude, Some(second.id.clone()), cx);
+            assert_eq!(
+                defaults(s),
+                (Some(second.id.clone()), Some(codex.id.clone()))
+            );
+            assert_eq!(s.accounts.iter().filter(|a| a.is_default).count(), 2);
+            // Wrong provider, unknown, or signed-out profiles never become the default.
+            s.make_default_account(Provider::Claude, Some(codex.id.clone()), cx);
+            s.make_default_account(Provider::Claude, Some("missing".into()), cx);
+            s.make_default_account(Provider::Claude, Some(expired.id.clone()), cx);
+            assert_eq!(
+                defaults(s),
+                (Some(second.id.clone()), Some(codex.id.clone()))
+            );
+            // An existing draft keeps its chosen account; only new drafts follow the default.
+            s.select_account(Provider::Claude, Some(first.id.clone()), cx);
+            let Selection::Draft(existing) = s.selection else {
+                panic!("expected draft")
+            };
+            s.make_default_account(Provider::Claude, None, cx);
+            assert_eq!(defaults(s), (None, Some(codex.id.clone())));
+            assert_eq!(s.draft_accounts.get(&existing), Some(&first.id));
+            s.new_session(cx);
+            assert_eq!(s.selected_account(), None);
+        });
+    }
+
+    #[gpui::test]
+    fn sign_in_checks_only_change_login_state_when_conclusive(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let account = profile(Provider::Codex, 2);
+            let id = account.id.clone();
+            s.accounts.push(account);
+            let checked = |s: &mut AppState, result, cx: &mut gpui::Context<AppState>| {
+                s.apply(super::Msg::AccountChecked(id.clone(), result), cx)
+            };
+            checked(s, Err(crate::accounts::IDENTITY_TIMED_OUT.into()), cx);
+            assert!(!s.account_needs_login(&id));
+            checked(s, Err("Sign in to connect this account".into()), cx);
+            assert!(s.account_needs_login(&id) && s.accounts[0].requires_login);
+            checked(s, Ok(Some("person@example.com".into())), cx);
+            assert!(!s.account_needs_login(&id) && !s.accounts[0].requires_login);
+            // A check that cannot read the identity keeps the known one.
+            checked(s, Ok(None), cx);
+            assert_eq!(
+                s.accounts[0].identity.as_deref(),
+                Some("person@example.com")
+            );
+            assert_eq!(s.accounts[0].display(), "person");
+        });
+    }
+
+    #[gpui::test]
+    fn worktree_cleanup_keeps_every_referenced_directory(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let storage = std::path::Path::new("/del-data");
+            s.invalidate_rows();
+            s.records.push(chat_record("chat", "/checkouts/chat", None));
+            s.terminal_rows
+                .push(terminal_row("terminal", "/checkouts/terminal", None));
+            // A new draft can inherit a worktree session's directory.
+            s.new_project_session("/checkouts/draft".into(), cx);
+            s.new_session(cx);
+            s.set_launch_options(None, true, cx);
+            let token = s.draft_launch_options().token;
+            let used = s.worktrees_in_use(storage);
+            for path in [
+                std::path::PathBuf::from("/checkouts/chat"),
+                "/checkouts/terminal".into(),
+                "/checkouts/draft".into(),
+                storage.join("worktrees").join(token).join("checkout"),
+            ] {
+                assert!(used.contains(&path), "{path:?} missing from {used:?}");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn chat_and_terminal_pins_share_one_append_only_order(cx: &mut gpui::TestAppContext) {
+        use del_agent::SessionId;
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            s.invalidate_rows();
+            s.records.push(chat_record("chat-a", "/project", None));
+            s.records.push(chat_record("chat-b", "/project", None));
+            s.terminal_rows
+                .push(terminal_row("shell", "/project", None));
+            let [a, b, shell] = ["chat-a", "chat-b", "shell"].map(SessionId::new);
+            let pins = |s: &AppState| {
+                s.unified_rows()
+                    .into_iter()
+                    .filter(|r| r.pinned)
+                    .map(|r| r.id.0)
+                    .collect::<Vec<_>>()
+            };
+            s.select(b.clone(), cx);
+            let selection = s.selection.clone();
+            s.toggle_session_pin(&a, cx);
+            s.toggle_session_pin(&shell, cx);
+            s.toggle_session_pin(&b, cx);
+            assert_eq!(pins(s), ["chat-a", "shell", "chat-b"]);
+            assert_eq!(s.selection, selection, "pinning never changes selection");
+            // New activity on a pinned chat does not move it.
+            s.invalidate_rows();
+            s.records[1].updated_at_ms = 99_000_000;
+            assert_eq!(pins(s), ["chat-a", "shell", "chat-b"]);
+            // Unpinning and pinning again appends it.
+            s.toggle_session_pin(&a, cx);
+            assert_eq!(pins(s), ["shell", "chat-b"]);
+            s.toggle_session_pin(&a, cx);
+            assert_eq!(pins(s), ["shell", "chat-b", "chat-a"]);
+            // The order survives a save/load round trip.
+            let saved = serde_json::to_string(&s.overrides).unwrap();
+            s.overrides = serde_json::from_str(&saved).unwrap();
+            s.invalidate_rows();
+            assert_eq!(pins(s), ["shell", "chat-b", "chat-a"]);
+        });
+    }
+
+    #[gpui::test]
+    fn opening_or_focusing_one_chat_never_clears_other_unread_chats(cx: &mut gpui::TestAppContext) {
+        use del_agent::SessionId;
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let [a, b] = ["unread-a", "unread-b"].map(SessionId::new);
+            s.apply(super::Msg::ReplyFinished(a.clone()), cx);
+            s.apply(super::Msg::ReplyFinished(b.clone()), cx);
+            assert!(s.terminal_unread(&a) && s.terminal_unread(&b));
+            s.select(a.clone(), cx);
+            assert!(!s.terminal_unread(&a) && s.terminal_unread(&b));
+            // Settings covers the chat: a reply there stays unread until it is seen.
+            s.panel = Panel::Providers;
+            s.apply(super::Msg::ReplyFinished(a.clone()), cx);
+            s.window_activation_changed(true, cx);
+            assert!(s.terminal_unread(&a));
+            s.panel = Panel::Chat;
+            s.window_activation_changed(true, cx);
+            assert!(!s.terminal_unread(&a) && s.terminal_unread(&b));
+            // Explicitly marking unread is respected until the chat is reopened.
+            s.mark_session_unread(&a, cx);
+            assert!(s.terminal_unread(&a));
+            s.select(b.clone(), cx);
+            assert!(s.terminal_unread(&a) && !s.terminal_unread(&b));
+            // Deleting a chat drops its unread state with it.
+            s.permanently_delete(a.clone(), cx);
+            assert!(!s.terminal_unread(&a));
         });
     }
 

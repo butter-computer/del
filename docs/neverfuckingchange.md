@@ -101,6 +101,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Model and effort controls
 
+- An empty model catalog must show an explicit empty state with Refresh. Keep
+  Default distinct from an explicit model; catalog recommendations can differ
+  from the provider’s configured default.
+
 - Effort slider changes emit one native haptic tick per level transition on supported
   macOS hardware, for dragging, clicking stops, and arrow keys.
 - Repeated pointer movement within the same level stays silent. Opening the picker
@@ -201,6 +205,7 @@ This records the final decisions, including corrections to earlier experiments.
 - Message navigation highlights exactly one tick: the hovered tick while pointing,
   otherwise the current message. Nearby ticks may lengthen but stay gray. Emit a
   native haptic tick on entering a different marker, not on every pointer move.
+  Keep markers compact: 10 px spacing, 6 px idle width, and at most 18 px on hover.
 - Show the live elapsed-work label directly beneath the latest user message,
   scrolling with that message; never fix it at the top of the transcript. Do not invent historical timing.
 - Shimmer the inline “Working for…” text (static with Reduce Motion). Do not show
@@ -282,7 +287,10 @@ This records the final decisions, including corrections to earlier experiments.
 - Persist the account on each chat. Switching accounts within the same provider
   keeps the same chat, native history, and workspace, including across restarts.
   Block switching during running turns and restore the original account on failure.
-  Changing providers still creates a new draft.
+  Changing between Codex, Claude, and OpenCode continues the same chat with a compact
+  switch row and a fresh native session on every switch. Preserve displayed history,
+  queue, browser, project, and tab identity. Attach public context separately from
+  user input; retain readable saved history across all provider segments.
 - Deduplicate full account identities while showing only the username. Close only
   the successful login attempt's own idle Terminal window. Show per-account Codex and Claude
   remaining usage as a slim bar and percentage only: no window labels, reset
@@ -529,6 +537,11 @@ This records the final decisions, including corrections to earlier experiments.
 - Side chat uses the shared main-chat provider chip and searchable model/effort
   picker, including Fast mode and reset. Keep account names in the provider
   submenu; all changes stay scoped to the side-chat fork.
+- Side chat uses the same queued-message rows and actions as main chat: Steer,
+  Edit, Delete, drag reordering, attachment previews, and scrolling after four
+  rows. Enter queues during a turn; Cmd-Return steers the draft or sends the first
+  queued message when empty. Editing preserves the existing draft and attachments
+  in the queue. All actions stay scoped to that chat and share delivery/Stop rules.
 - Side chat remains available while the main conversation is open in Terminal.
   Opening or refreshing it reads the provider's latest saved context without
   resuming, stopping, or taking ownership of the terminal conversation. Replies
@@ -714,3 +727,12 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   chats, and browser ownership. Async startup updates the original Space's tab
   without selecting it in another Space. Persist collections and selections across
   app restarts; never delete or relocate project files when switching or renaming.
+
+### Provider switching with Chat/Terminal
+
+- `/terminal` resumes the active provider segment, preserving its account and
+  separately attached context. `/chat` imports new terminal turns into the same
+  displayed conversation without replacing earlier provider segments or details.
+- Side chats and historical reads include previous segments and new persisted
+  terminal turns. Keep exclusive ownership: return to Chat before switching
+  provider or account again. Preserve recovery across restarts and failed returns.

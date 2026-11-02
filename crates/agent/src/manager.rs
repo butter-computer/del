@@ -13,6 +13,8 @@ use tokio::task::JoinHandle;
 
 mod forks;
 mod peers;
+mod routed;
+pub(crate) mod switching;
 mod terminal;
 pub use forks::{ForkContext, ForkLifetime, ForkRecord, ForkResult, ForkSnapshot, ForkSource};
 pub use peers::{ContextChunk, ContextCursor, SessionContext};
@@ -38,36 +40,9 @@ pub enum ManagerEvent {
     },
 }
 
-/// Most events kept per session for late subscribers.
-const HISTORY_LIMIT: usize = 50_000;
-
-/// Drop the oldest tenth of an over-long history, keeping `SessionStarted`
-/// and the first user message so the history still opens the conversation.
-fn trim_history(history: &mut Vec<AgentEvent>) {
-    if history.len() < HISTORY_LIMIT {
-        return;
-    }
-    let start = usize::from(matches!(
-        history.first(),
-        Some(AgentEvent::SessionStarted { .. })
-    ));
-    let end = (start + HISTORY_LIMIT / 10).min(history.len());
-    match history[start..end]
-        .iter()
-        .position(|e| matches!(e, AgentEvent::UserMessage { .. }))
-    {
-        Some(first_user) => {
-            let pinned = start + first_user;
-            history.drain(pinned + 1..end);
-            history.drain(start..pinned);
-        }
-        None => {
-            history.drain(start..end);
-        }
-    }
-}
-
 struct Live {
+    generation: uuid::Uuid,
+    journal: Option<crate::conversation::Journal>,
     handle: SessionHandle,
     config: SessionConfig,
     status: SessionStatus,
@@ -265,8 +240,7 @@ impl SessionManager {
             {
                 continue;
             }
-            let Ok(backend) = self.account_backend(record.provider, record.account_id.as_deref())
-            else {
+            let Ok(backend) = self.session_backend(&record.id) else {
                 continue;
             };
             let Ok(Ok(Some(title))) = tokio::time::timeout(
@@ -326,7 +300,7 @@ impl SessionManager {
         if !crate::titles::due(record.title_turns, turns) {
             return Ok(false);
         }
-        let backend = self.account_backend(record.provider, record.account_id.as_deref())?;
+        let backend = self.session_backend(id)?;
         let _ = self.shared.all_tx.send(ManagerEvent::TitleLoading {
             session: id.clone(),
             loading: true,
@@ -441,7 +415,16 @@ impl SessionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
-        self.account_backend(record.provider, record.account_id.as_deref())
+        let inner = self.account_backend(record.provider, record.account_id.as_deref())?;
+        if record.segments.is_empty() {
+            return Ok(inner);
+        }
+        Ok(Arc::new(routed::RoutedBackend {
+            inner,
+            chat: id.clone(),
+            native: record.native_id().clone(),
+            context: record.segments.last().and_then(|s| s.context.clone()),
+        }))
     }
 
     pub async fn account_models(
@@ -489,10 +472,36 @@ impl SessionManager {
     /// one here, first in the session's history; any the backend emits itself
     /// is dropped. Returns the handle without its restored snapshot, which now
     /// lives only in the session history.
-    fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> SessionHandle {
+    fn attach(&self, mut handle: SessionHandle, config: SessionConfig) -> Result<SessionHandle> {
         let id = handle.id.clone();
+        if let Ok(record) = self.session_record(&id)
+            && let Some(tools) = self.shared.browser_tools.lock().unwrap().as_ref()
+        {
+            tools.credentials.bind_chat(record.native_id(), &id);
+        }
+        let has_journal = self
+            .shared
+            .live
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|l| l.journal.is_some());
+        let mut journal = if has_journal {
+            None
+        } else {
+            self.shared
+                .index
+                .lock()
+                .unwrap()
+                .get(&id)
+                .and_then(|r| r.segments.last())
+                .and_then(|s| s.journal.as_ref())
+                .map(|p| crate::conversation::Journal::open(p))
+                .transpose()?
+        };
         let mut rx = handle.subscribe();
         let mut restored = handle.take_history().to_vec();
+        restored.retain(|event| !matches!(event, AgentEvent::SessionStarted { .. }));
         let messages = self.peer_messages(&id);
         restored.retain(|event| !matches!(event, AgentEvent::UserMessage { text } if text == peers::CONTINUE_WORK));
         for event in &mut restored {
@@ -528,6 +537,7 @@ impl SessionManager {
         };
         let (fanout, history) = if let Some(old) = old {
             old.pump.abort();
+            journal = old.journal.or(journal);
             (old.fanout, old.history)
         } else {
             let (fanout, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -541,6 +551,12 @@ impl SessionManager {
         };
         drop(restored);
         let shared = self.shared.clone();
+        let generation = uuid::Uuid::new_v4();
+        let native = self
+            .session_record(&id)
+            .ok()
+            .filter(|r| !r.segments.is_empty())
+            .map(|r| r.native_id().clone());
         let pump_id = id.clone();
         let pump = tokio::spawn(async move {
             // Set after events were lost: the turn state is unknown until the
@@ -549,7 +565,10 @@ impl SessionManager {
             loop {
                 let (event, status) = match rx.recv().await {
                     Ok(AgentEvent::SessionStarted { .. }) => continue,
-                    Ok(event) => {
+                    Ok(mut event) => {
+                        if let Some(native) = &native {
+                            switching::namespace_event(&mut event, native);
+                        }
                         let mut status = None;
                         if resyncing {
                             match event {
@@ -588,7 +607,26 @@ impl SessionManager {
                     let Some(l) = live.get_mut(&pump_id) else {
                         continue;
                     };
-                    trim_history(&mut l.history);
+                    if l.generation != generation {
+                        break;
+                    }
+                    if let Some(journal) = l.journal.as_mut()
+                        && let Err(error) = journal.append(&event)
+                    {
+                        let failure = AgentEvent::Error {
+                            message: format!("Could not save conversation: {error}"),
+                            recoverable: false,
+                        };
+                        l.history.push(failure.clone());
+                        let _ = l.fanout.send(failure.clone());
+                        l.status = SessionStatus::Error;
+                        shared.publish_status(&pump_id, SessionStatus::Error);
+                        let _ = shared.all_tx.send(ManagerEvent::Event {
+                            session: pump_id.clone(),
+                            event: failure,
+                        });
+                        break;
+                    }
                     match &event {
                         AgentEvent::ApprovalRequested { id, .. } => {
                             l.pending_approvals.insert(id.clone());
@@ -629,6 +667,8 @@ impl SessionManager {
         live.insert(
             id,
             Live {
+                generation,
+                journal,
                 handle: handle.clone(),
                 config,
                 status: SessionStatus::Idle,
@@ -638,7 +678,7 @@ impl SessionManager {
                 pending_approvals: HashSet::new(),
             },
         );
-        handle
+        Ok(handle)
     }
 
     /// Keep one unused session ready, without publishing a chat or sending a prompt.
@@ -736,6 +776,7 @@ impl SessionManager {
         );
         let now = now_ms();
         let recorded = self.shared.index.lock().unwrap().upsert(SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: handle.id.clone(),
             provider: config.provider,
@@ -762,7 +803,7 @@ impl SessionManager {
             let _ = backend.close(&handle.id).await;
             return Err(error);
         }
-        Ok(self.attach(handle, applied_config))
+        self.attach(handle, applied_config)
     }
 
     /// Reattach a session from the index (or return the live one).
@@ -803,11 +844,37 @@ impl SessionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+        if crate::conversation::terminal_pending(&record)? {
+            let history = self
+                .session_backend(id)?
+                .read_session_history(&record.config(), id)
+                .await?;
+            crate::conversation::finish_terminal(&record, &history)?;
+        }
         let handle = self
-            .account_backend(record.provider, record.account_id.as_deref())?
+            .session_backend(id)?
             .resume(record.config(), id)
             .await?;
-        let handle = self.attach(handle, record.config());
+        let handle = if let Some(path) = record.segments.last().and_then(|s| s.journal.as_ref()) {
+            let mut history = crate::conversation::Journal::restore(path)?;
+            if let Some(event) = handle
+                .history()
+                .iter()
+                .rev()
+                .find(|e| matches!(e, AgentEvent::GoalUpdated { .. }))
+            {
+                crate::conversation::Journal::open(path)?.append(event)?;
+                history.push(event.clone());
+            }
+            handle.with_history(history)
+        } else if let Some(path) = record.segments.last().and_then(|s| s.history.as_ref()) {
+            let mut history = crate::conversation::load_history(path)?;
+            history.extend_from_slice(handle.history());
+            handle.with_history(history)
+        } else {
+            handle
+        };
+        let handle = self.attach(handle, record.config())?;
         // `attach` starts live sessions Idle; clear a persisted Error too.
         if record.status != SessionStatus::Idle {
             let _live = self.shared.live.lock().unwrap();
@@ -817,6 +884,15 @@ impl SessionManager {
     }
 
     pub async fn control_goal(&self, id: &SessionId, action: crate::GoalAction) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _control = lock.lock().await;
         self.live_provider(id)?;
         self.session_backend(id)?.control_goal(id, action).await
     }
@@ -826,6 +902,19 @@ impl SessionManager {
         id: &SessionId,
         action: Option<crate::GoalAction>,
     ) -> Result<Option<crate::Goal>> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _control = if action.is_some() {
+            Some(lock.lock().await)
+        } else {
+            None
+        };
         self.session_backend(id)?.agent_goal(id, action).await
     }
 
@@ -954,7 +1043,7 @@ impl SessionManager {
                 .await
             {
                 Ok(handle) => {
-                    self.attach(handle, config.clone());
+                    self.attach(handle, config.clone())?;
                 }
                 Err(error) => {
                     // The old process may already be closed. Keep the history,
@@ -1009,7 +1098,19 @@ impl SessionManager {
                 .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
             let position = session.history.len();
             if let Some(event) = &title_input {
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.append(event)?;
+                }
                 session.history.push(event.clone());
+                if !input.attachments.is_empty() {
+                    let event = AgentEvent::UserAttachments {
+                        attachments: input.attachments.clone(),
+                    };
+                    if let Some(journal) = session.journal.as_mut() {
+                        journal.append(&event)?;
+                    }
+                    session.history.push(event);
+                }
             }
             position
         };
@@ -1030,6 +1131,15 @@ impl SessionManager {
                     .is_some_and(|event| session.history.get(title_position) == Some(event))
             {
                 session.history.remove(title_position);
+                if matches!(
+                    session.history.get(title_position),
+                    Some(AgentEvent::UserAttachments { .. })
+                ) {
+                    session.history.remove(title_position);
+                }
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.replace(&session.history)?;
+                }
             }
             // Only undo our own Running; events may already have moved on.
             self.shared.transition(id, |current| {
@@ -1086,6 +1196,11 @@ impl SessionManager {
             .or_default()
             .clone();
         let _switching = lock.lock().await;
+        if self.is_terminal_owned(id) {
+            return Err(AgentError::Busy(
+                "This conversation is open in Terminal. Use /chat to return.".into(),
+            ));
+        }
         if matches!(
             self.status(id),
             Some(SessionStatus::Running | SessionStatus::WaitingApproval)
@@ -1106,10 +1221,17 @@ impl SessionManager {
             return Ok(());
         }
         let old = self.session_backend(id)?;
-        let target = self.account_backend(record.provider, account.as_deref())?;
+        let target: Arc<dyn AgentBackend> = Arc::new(routed::RoutedBackend {
+            inner: self.account_backend(record.provider, account.as_deref())?,
+            chat: id.clone(),
+            native: record.native_id().clone(),
+            context: record.segments.last().and_then(|s| s.context.clone()),
+        });
         old.close(id).await?;
         let result = async {
-            let path = transfer(record.clone()).await?;
+            let mut native_record = record.clone();
+            native_record.id = record.native_id().clone();
+            let path = transfer(native_record).await?;
             let handle = target
                 .resume_transferred(record.config(), id, path.as_deref())
                 .await?;
@@ -1120,24 +1242,29 @@ impl SessionManager {
                         .into(),
                 ));
             }
-            self.shared
-                .index
-                .lock()
-                .unwrap()
-                .update(id, |r| r.account_id = account)?;
+            let mut index = self.shared.index.lock().unwrap();
+            let mut updated = index
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AgentError::UnknownSession(id.clone()))?;
+            updated.account_id = account.clone();
+            if let Some(segment) = updated.segments.last_mut() {
+                segment.account_id = account;
+            }
+            index.replace_durable(updated)?;
             Ok(handle)
         }
         .await;
         match result {
             Ok(handle) => {
-                self.attach(handle, record.config());
+                self.attach(handle, record.config())?;
                 Ok(())
             }
             Err(error) => {
                 let _ = target.close(id).await;
                 match old.resume(record.config(), id).await {
                     Ok(handle) => {
-                        self.attach(handle, record.config());
+                        self.attach(handle, record.config())?;
                     }
                     Err(restore) => {
                         return Err(AgentError::Backend(format!(
@@ -1192,6 +1319,15 @@ impl SessionManager {
     }
 
     pub async fn steer_input(&self, id: &SessionId, input: UserInput) -> Result<()> {
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _steering = lock.lock().await;
         if self.pending_fork_context(id).is_some() {
             return Err(AgentError::Busy(
                 "updated fork context is waiting; queue a normal message instead of steering"
@@ -1216,9 +1352,21 @@ impl SessionManager {
             }
         }
         let text = input.text.clone();
+        let attachments = input.attachments.clone();
         backend.steer_input(id, input).await?;
         if let Some(session) = self.shared.live.lock().unwrap().get_mut(id) {
-            session.history.push(AgentEvent::UserMessage { text });
+            let event = AgentEvent::UserMessage { text };
+            if let Some(journal) = session.journal.as_mut() {
+                journal.append(&event)?;
+            }
+            session.history.push(event);
+            if !attachments.is_empty() {
+                let event = AgentEvent::UserAttachments { attachments };
+                if let Some(journal) = session.journal.as_mut() {
+                    journal.append(&event)?;
+                }
+                session.history.push(event);
+            }
         }
         let _ = self.shared.all_tx.send(ManagerEvent::PromptSent {
             session: id.clone(),
@@ -1313,14 +1461,27 @@ impl SessionManager {
         if self.is_temporary(id) && self.is_live(id) {
             let _ = self.interrupt(id).await;
         }
+        // Hold the send/resume lock until the record is gone: a resume that
+        // was in flight would otherwise attach a provider process for a
+        // session that no longer exists anywhere Del can reach or close it.
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _deleting = lock.lock().await;
         if self.is_live(id) {
-            let _ = self.close(id).await;
+            let _ = self.close_locked(id).await;
         }
-        self.shared.resume_locks.lock().unwrap().remove(id);
         self.shared.title_generation.lock().unwrap().remove(id);
         self.shared.title_polls.lock().unwrap().remove(id);
         self.forget_peer_session(id)?;
-        self.shared.index.lock().unwrap().remove(id)
+        let removed = self.shared.index.lock().unwrap().remove(id);
+        self.shared.resume_locks.lock().unwrap().remove(id);
+        removed
     }
 
     pub async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
@@ -2070,33 +2231,6 @@ mod tests {
         m.shutdown().await;
     }
 
-    #[test]
-    fn trimming_keeps_session_start_and_first_prompt() {
-        let delta = |i: usize| AgentEvent::AssistantTextDelta {
-            turn_id: "t".into(),
-            text: i.to_string(),
-        };
-        let mut history = vec![
-            AgentEvent::SessionStarted {
-                session_id: SessionId::new("s"),
-            },
-            delta(0),
-            AgentEvent::UserMessage {
-                text: "first".into(),
-            },
-        ];
-        history.extend((1..HISTORY_LIMIT).map(delta));
-        for _ in 0..3 {
-            let len = history.len();
-            trim_history(&mut history);
-            assert!(history.len() < len);
-            assert!(matches!(history[0], AgentEvent::SessionStarted { .. }));
-            assert!(matches!(&history[1], AgentEvent::UserMessage { text } if text == "first"));
-            history.extend((0..HISTORY_LIMIT).map(delta));
-        }
-        assert_eq!(history.last(), Some(&delta(HISTORY_LIMIT - 1)));
-    }
-
     #[tokio::test]
     async fn provider_resolved_approvals_resume_running_once_none_pend() {
         let dir = tempfile::tempdir().unwrap();
@@ -2287,5 +2421,226 @@ mod tests {
             next_status(SessionStatus::Idle, &resolved, false),
             SessionStatus::Idle
         );
+    }
+
+    /// Delegates to a mock, optionally holding `resume` until released.
+    struct GatedResume {
+        inner: MockBackend,
+        resumes: std::sync::atomic::AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl GatedResume {
+        fn new(provider: Provider) -> Self {
+            Self {
+                inner: MockBackend::new(provider),
+                resumes: Default::default(),
+                entered: Default::default(),
+                release: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentBackend for GatedResume {
+        fn provider(&self) -> Provider {
+            self.inner.provider()
+        }
+        async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+            self.inner.start_session(config).await
+        }
+        async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
+            self.inner.send_prompt(session, input).await
+        }
+        async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
+            self.inner.steer(session, text).await
+        }
+        async fn interrupt(&self, session: &SessionId) -> Result<()> {
+            self.inner.interrupt(session).await
+        }
+        async fn resume(
+            &self,
+            config: SessionConfig,
+            session: &SessionId,
+        ) -> Result<SessionHandle> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.resume(config, session).await
+        }
+        async fn respond_approval(
+            &self,
+            session: &SessionId,
+            approval_id: &str,
+            response: ApprovalResponse,
+        ) -> Result<()> {
+            self.inner
+                .respond_approval(session, approval_id, response)
+                .await
+        }
+        async fn close(&self, session: &SessionId) -> Result<()> {
+            self.inner.close(session).await
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_resumes_attach_the_provider_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(GatedResume::new(Provider::Codex));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [backend.clone() as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.close(&h.id).await.unwrap();
+        let first = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        backend.entered.notified().await;
+        let second = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        backend.release.notify_one();
+        let timeout = Duration::from_secs(5);
+        let first = tokio::time::timeout(timeout, first).await.unwrap().unwrap();
+        let second = tokio::time::timeout(timeout, second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.unwrap().id, h.id);
+        assert_eq!(second.unwrap().id, h.id);
+        assert_eq!(backend.resumes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let history = m.subscribe_with_history(&h.id).unwrap().0;
+        assert_eq!(
+            history
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delete_during_resume_leaves_no_orphan_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(GatedResume::new(Provider::Codex));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [backend.clone() as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.close(&h.id).await.unwrap();
+        let resuming = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        backend.entered.notified().await;
+        let deleting = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.delete(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        backend.release.notify_one();
+        let timeout = Duration::from_secs(5);
+        let _ = tokio::time::timeout(timeout, resuming).await.unwrap();
+        tokio::time::timeout(timeout, deleting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !m.is_live(&h.id),
+            "deleted session kept a provider attached"
+        );
+        assert!(m.session_record(&h.id).is_err());
+        assert!(m.list_sessions().is_empty());
+        assert!(matches!(
+            m.resume(&h.id).await,
+            Err(AgentError::UnknownSession(_))
+        ));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_overlapping_send_leaves_no_phantom_message_or_status_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = MockBackend::new(Provider::Codex).with_delay(Duration::from_millis(50));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [Arc::new(backend) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        let (first, second) = tokio::join!(
+            m.send_prompt(&h.id, UserInput::text("first")),
+            m.send_prompt(&h.id, UserInput::text("second")),
+        );
+        first.unwrap();
+        assert!(matches!(second, Err(AgentError::Busy(_))));
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Running));
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        let users: Vec<_> = m
+            .subscribe_with_history(&h.id)
+            .unwrap()
+            .0
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::UserMessage { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["first"]);
+        assert_eq!(m.list_sessions()[0].title.as_deref(), Some("first"));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_account_transfer_keeps_saved_account_and_history_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.jsonl");
+        let source: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let target: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let m = SessionManager::new(&path, [source.clone()]).unwrap();
+        m.register_account("second".into(), target.clone());
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("keep this history"))
+            .await
+            .unwrap();
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        let history = m.subscribe_with_history(&h.id).unwrap().0;
+        let failed = m
+            .switch_account(&h.id, Some("second".into()), |_| async {
+                Err(AgentError::Backend("transfer failed".into()))
+            })
+            .await;
+        assert!(matches!(failed, Err(AgentError::Backend(e)) if e == "transfer failed"));
+        let record = m.session_record(&h.id).unwrap();
+        assert_eq!(record.account_id, None);
+        assert_eq!(record.id, h.id);
+        assert!(m.is_live(&h.id));
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Idle));
+        assert_eq!(m.subscribe_with_history(&h.id).unwrap().0, history);
+        assert!(Arc::ptr_eq(&m.session_backend(&h.id).unwrap(), &source));
+        m.shutdown().await;
+        drop(m);
+        let restored = SessionManager::new(&path, [source.clone()]).unwrap();
+        restored.register_account("second".into(), target);
+        assert_eq!(restored.session_record(&h.id).unwrap().account_id, None);
+        restored.resume(&h.id).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &restored.session_backend(&h.id).unwrap(),
+            &source
+        ));
+        restored.shutdown().await;
     }
 }

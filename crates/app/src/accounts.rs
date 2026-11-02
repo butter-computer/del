@@ -879,6 +879,106 @@ mod tests {
     }
 
     #[test]
+    fn registry_tolerates_older_and_newer_fields_and_renumbers_legacy_profiles() {
+        let [a, b, c] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
+        // Older registries numbered the first saved profile 1 and lacked newer fields.
+        let accounts = parse_registry(
+            format!(
+                r#"[{{"id":"{a}","provider":"codex","number":1}},
+                    {{"id":"{b}","provider":"codex","number":2,"is_default":true,"future":true}},
+                    {{"id":"{c}","provider":"claude","number":2}}]"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let numbers: Vec<_> = accounts.iter().map(|a| (a.number, a.display())).collect();
+        assert_eq!(
+            numbers,
+            [
+                (2, "Account 2".into()),
+                (3, "Account 3".into()),
+                (2, "Account 2".to_string())
+            ]
+        );
+        assert!(accounts[1].is_default && !accounts[0].is_default);
+        assert!(!accounts[0].requires_login && accounts[0].identity.is_none());
+        // Account 1 is always the provider's own login, so renumbering is stable.
+        let saved = serde_json::to_vec(&accounts).unwrap();
+        let again = parse_registry(&saved).unwrap();
+        assert_eq!(
+            again.iter().map(|a| a.number).collect::<Vec<_>>(),
+            [2, 3, 2]
+        );
+        // A profile ID that is not a UUID could name an arbitrary directory.
+        assert!(parse_registry(br#"[{"id":"../../etc","provider":"codex","number":2}]"#).is_err());
+    }
+
+    #[test]
+    fn identities_compare_full_emails_but_display_usernames() {
+        assert_eq!(
+            identity_key(" User@Example.com "),
+            Some("user@example.com".into())
+        );
+        assert_eq!(identity_key("API key"), None);
+        assert_eq!(identity_key("@example.com"), None);
+        assert_eq!(identity_key("user@"), None);
+        assert_eq!(display_identity("user@example.com"), "user");
+        assert_eq!(display_identity("API key"), "API key");
+        let account = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            provider: Provider::Claude,
+            number: 4,
+            identity: Some("person@work.example".into()),
+            is_default: false,
+            requires_login: false,
+        };
+        assert_eq!(account.display(), "person");
+    }
+
+    #[test]
+    fn retention_purges_only_old_del_profiles_and_never_follows_links() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let removed = dir.path().join("removed-accounts");
+        assert_eq!(
+            retire_profile(&dir.path().join("missing"), &removed, "x").unwrap(),
+            None
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let retire = |stamp: u64| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let profile = dir.path().join(&id);
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("auth.json"), "secret").unwrap();
+            let retired = retire_profile(&profile, &removed, &id).unwrap().unwrap();
+            std::fs::write(retired.join(REMOVED_AT), stamp.to_string()).unwrap();
+            retired
+        };
+        let day = 24 * 60 * 60;
+        let recent = retire(now - 29 * day);
+        let expired = retire(now - 30 * day - 1);
+        let future = retire(now + 365 * day);
+        // A link with a Del-shaped name must not delete what it points to.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join(REMOVED_AT), "0").unwrap();
+        let link = removed.join(format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
+        symlink(&outside, &link).unwrap();
+        assert_eq!(purge_removed_profiles(&removed, REMOVED_RETENTION), 1);
+        assert!(recent.join("auth.json").exists());
+        assert!(!expired.exists());
+        assert!(future.exists(), "clock skew must not purge early");
+        assert!(outside.join(REMOVED_AT).exists() && link.exists());
+        assert_eq!(
+            purge_removed_profiles(&dir.path().join("absent"), REMOVED_RETENTION),
+            0
+        );
+    }
+
+    #[test]
     fn login_cleanup_removes_every_attempt_file() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("login-x");
@@ -1060,6 +1160,7 @@ mod tests {
     #[test]
     fn record_profiles_require_uuid_ids() {
         let mut record = del_agent::SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: del_agent::SessionId::new("s"),
             provider: Provider::Claude,

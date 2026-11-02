@@ -32,6 +32,18 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct MockBackend {
+    #[cfg(test)]
+    pub saved_histories: Arc<Mutex<HashMap<SessionId, Vec<AgentEvent>>>>,
+    #[cfg(test)]
+    pub attached_contexts: Arc<Mutex<HashMap<SessionId, String>>>,
+    #[cfg(test)]
+    pub submitted: Arc<Mutex<Vec<(SessionId, UserInput)>>>,
+    #[cfg(test)]
+    pub fail_context: bool,
+    #[cfg(test)]
+    pub context_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub context_release: Option<Arc<tokio::sync::Notify>>,
     provider: Provider,
     delay: Duration,
     completion_delay: Duration,
@@ -48,6 +60,18 @@ pub struct MockBackend {
 impl MockBackend {
     pub fn new(provider: Provider) -> Self {
         Self {
+            #[cfg(test)]
+            attached_contexts: Default::default(),
+            #[cfg(test)]
+            saved_histories: Default::default(),
+            #[cfg(test)]
+            submitted: Default::default(),
+            #[cfg(test)]
+            fail_context: false,
+            #[cfg(test)]
+            context_started: Default::default(),
+            #[cfg(test)]
+            context_release: None,
             provider,
             delay: Duration::ZERO,
             completion_delay: Duration::ZERO,
@@ -309,6 +333,55 @@ async fn run_turn(
 
 #[async_trait]
 impl AgentBackend for MockBackend {
+    #[cfg(test)]
+    async fn read_session_history(
+        &self,
+        _: &SessionConfig,
+        id: &SessionId,
+    ) -> Result<Vec<AgentEvent>> {
+        Ok(self
+            .saved_histories
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn agent_goal(
+        &self,
+        _: &SessionId,
+        _: Option<crate::GoalAction>,
+    ) -> Result<Option<crate::Goal>> {
+        Ok(None)
+    }
+    async fn start_session_with_context(
+        &self,
+        config: SessionConfig,
+        path: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        let context = std::fs::read_to_string(path)?;
+        #[cfg(test)]
+        {
+            self.context_started.notify_one();
+            if let Some(release) = &self.context_release {
+                release.notified().await;
+            }
+        }
+        #[cfg(test)]
+        if self.fail_context {
+            return Err(AgentError::Backend("injected context failure".into()));
+        }
+        let handle = self.start_session(config).await?;
+        #[cfg(test)]
+        self.attached_contexts
+            .lock()
+            .unwrap()
+            .insert(handle.id.clone(), context);
+        #[cfg(not(test))]
+        drop(context);
+        Ok(handle)
+    }
     fn provider(&self) -> Provider {
         self.provider
     }
@@ -343,6 +416,11 @@ impl AgentBackend for MockBackend {
     }
 
     async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
+        #[cfg(test)]
+        self.submitted
+            .lock()
+            .unwrap()
+            .push((session.clone(), input.clone()));
         let state = self.get(session)?;
         let mut inner = state.inner.lock().unwrap();
         if inner.task.as_ref().is_some_and(|t| !t.is_finished()) {

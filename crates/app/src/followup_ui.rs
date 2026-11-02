@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 #[derive(Clone)]
 struct QueueDrag {
-    owner: u64,
+    owner: EntityId,
     id: String,
 }
 struct QueueDragPreview;
@@ -49,8 +49,10 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
         })
 }
 fn action(id: SharedString, icon: ActionIcon, label: &'static str) -> Button {
-    Button::new(id)
+    Button::new(id.clone())
+        .debug_selector(move || id.to_string())
         .size(crate::icons::button_size())
+        .flex_none()
         .p_0()
         .ghost()
         .child(crate::icons::icon(icon))
@@ -398,171 +400,187 @@ impl AppShell {
         let Some(chat) = self.open_chat(cx) else {
             return div().into_any_element();
         };
-        // In-flight input is already visible in the transcript. Showing it here
-        // briefly grows the composer, then shrinks it again on acknowledgement.
-        let items: Vec<_> = chat
-            .read(cx)
-            .queue
-            .items
-            .iter()
-            .filter(|item| !item.sending)
-            .cloned()
-            .collect();
-        if items.is_empty() {
-            return div().into_any_element();
-        }
-        let owner = self.composer_owner(cx);
-        let overflow = items.len() > 4;
-        let count = items.len();
-        let height = items.iter().take(4).map(|_| 32.0).sum::<f32>() + 8.0;
-        div()
-            .relative()
-            .w_full()
-            .px_3()
-            .child(
-                v_flex()
-                    .id("followup-queue")
-                    .h(zpx(height))
-                    .overflow_y_scroll()
-                    .rounded_t(zpx(14.))
-                    .bg(rgba(QUEUE_SURFACE_RGBA))
-                    .py_1()
-                    .children(items.into_iter().enumerate().map(|(index, item)| {
-                        let group: SharedString = format!("followup-{}", item.id).into();
-                        let hover_id = item.id.clone();
-                        let edit = item.id.clone();
-                        let delete = item.id.clone();
-                        let send = item.id.clone();
-                        let target = item.id.clone();
-                        let delete_chat = chat.clone();
-                        let send_chat = chat.clone();
-                        let reorder_chat = chat.clone();
-                        h_flex()
-                            .id(group.clone())
-                            .group(group.clone())
-                            .h(zpx(32.))
-                            .flex_none()
-                            .px_2()
-                            .gap_2()
-                            .items_center()
-                            .when(index + 1 < count, |row| {
-                                row.border_b_1().border_color(rgba(0xffffff0c))
-                            })
-                            .on_hover(cx.listener(move |this, entered, _, cx| {
-                                if *entered {
-                                    this.queue_hovered = Some(hover_id.clone());
-                                } else if this.queue_hovered.as_ref() == Some(&hover_id) {
-                                    this.queue_hovered = None;
-                                }
-                                cx.notify();
-                            }))
-                            .on_drop(move |drag: &QueueDrag, _, cx| {
-                                if drag.owner == owner {
-                                    reorder_chat.update(cx, |chat, cx| {
-                                        chat.reorder_queued(&drag.id, &target, cx)
-                                    });
-                                }
-                            })
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("drag-{}", item.id)))
-                                    .cursor_grab()
-                                    .size(crate::icons::button_size())
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgba(0xffffff8c))
-                                    .opacity(0.0)
-                                    .on_drag(
-                                        QueueDrag {
-                                            owner,
-                                            id: item.id.clone(),
-                                        },
-                                        |_, _, _, cx| cx.new(|_| QueueDragPreview),
-                                    )
-                                    .child(
-                                        crate::icons::path("icons/grip.svg")
-                                            .text_color(rgba(0xffffff8c)),
-                                    ),
-                            )
-                            .child(
-                                crate::icons::path("icons/queue.svg").text_color(rgba(0xffffff70)),
-                            )
-                            .children(item.input.attachments.iter().take(3).map(thumbnail))
-                            .child(v_flex().flex_1().min_w_0().child(
-                                div().truncate().text_color(rgba(0xffffffcc)).child(
-                                    if item.input.text.is_empty() {
-                                        item.input
-                                            .attachments
-                                            .iter()
-                                            .map(crate::attachments::filename)
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    } else {
-                                        item.input.text.clone()
-                                    },
+        let shell = cx.entity().downgrade();
+        render_queue(&chat, cx, move |id, window, cx| {
+            let _ = shell.update(cx, |shell, cx| shell.edit_queued(id, window, cx));
+        })
+    }
+}
+
+/// Shared queue presentation and actions for main and Side chat composers.
+/// Drag ownership follows the chat entity so a drop cannot cross conversations.
+pub(crate) fn render_queue(
+    chat: &Entity<crate::chat::ChatView>,
+    cx: &App,
+    on_edit: impl Fn(&str, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    // In-flight input is already visible in the transcript. Showing it here
+    // briefly grows the composer, then shrinks it again on acknowledgement.
+    let items: Vec<_> = chat
+        .read(cx)
+        .queue
+        .items
+        .iter()
+        .filter(|item| !item.sending)
+        .cloned()
+        .collect();
+    if items.is_empty() {
+        return div().into_any_element();
+    }
+    let owner = chat.entity_id();
+    let on_edit = std::rc::Rc::new(on_edit);
+    let overflow = items.len() > 4;
+    let count = items.len();
+    let height = items.iter().take(4).map(|_| 32.0).sum::<f32>() + 8.0;
+    div()
+        .relative()
+        .w_full()
+        .px_3()
+        .child(
+            v_flex()
+                .id("followup-queue")
+                .debug_selector(|| "followup-queue".into())
+                .h(zpx(height))
+                .overflow_y_scroll()
+                .rounded_t(zpx(14.))
+                .bg(rgba(QUEUE_SURFACE_RGBA))
+                .py_1()
+                .children(items.into_iter().enumerate().map(|(index, item)| {
+                    let group: SharedString = format!("followup-{}", item.id).into();
+                    let on_edit = on_edit.clone();
+                    let edit = item.id.clone();
+                    let delete = item.id.clone();
+                    let send = item.id.clone();
+                    let target = item.id.clone();
+                    let delete_chat = chat.clone();
+                    let send_chat = chat.clone();
+                    let reorder_chat = chat.clone();
+                    h_flex()
+                        .id(group.clone())
+                        .group(group.clone())
+                        .h(zpx(32.))
+                        .min_w_0()
+                        .flex_none()
+                        .px_2()
+                        .gap_2()
+                        .items_center()
+                        .when(index + 1 < count, |row| {
+                            row.border_b_1().border_color(rgba(0xffffff0c))
+                        })
+                        .on_drop(move |drag: &QueueDrag, _, cx| {
+                            if drag.owner == owner {
+                                reorder_chat.update(cx, |chat, cx| {
+                                    chat.reorder_queued(&drag.id, &target, cx)
+                                });
+                            }
+                        })
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("drag-{}", item.id)))
+                                        .cursor_grab()
+                                        .w(crate::icons::size())
+                                        .h(crate::icons::button_size())
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgba(0xffffff70))
+                                        .on_drag(
+                                            QueueDrag {
+                                                owner,
+                                                id: item.id.clone(),
+                                            },
+                                            |_, _, _, cx| cx.new(|_| QueueDragPreview),
+                                        )
+                                        .child(
+                                            crate::icons::path("icons/queue.svg")
+                                                .text_color(rgba(0xffffff70)),
+                                        ),
+                                )
+                                .children(item.input.attachments.iter().take(3).map(thumbnail))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(rgba(0xffffffcc))
+                                        .child(if item.input.text.is_empty() {
+                                            item.input
+                                                .attachments
+                                                .iter()
+                                                .map(crate::attachments::filename)
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        } else {
+                                            item.input.text.clone()
+                                        }),
                                 ),
-                            ))
-                            .child(
-                                Button::new(SharedString::from(format!("steer-{}", item.id)))
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .child(
-                                        h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(crate::icons::path("icons/steer.svg"))
-                                            .child("Steer"),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        send_chat.update(cx, |chat, cx| {
-                                            chat.deliver_queued(send.clone(), chat.is_running(), cx)
-                                        })
-                                    }),
-                            )
-                            .child(
-                                action(
-                                    format!("delete-{}", item.id).into(),
-                                    ActionIcon::Trash,
-                                    "Delete queued message",
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("steer-{}", item.id)))
+                                .debug_selector(|| format!("steer-{}", item.id))
+                                .ghost()
+                                .small()
+                                .compact()
+                                .flex_none()
+                                .accessibility_label("Steer queued message")
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(crate::icons::path("icons/steer.svg"))
+                                        .child("Steer"),
                                 )
                                 .on_click(move |_, _, cx| {
-                                    delete_chat.update(cx, |chat, cx| {
-                                        chat.take_queued(&delete, cx);
-                                    });
+                                    send_chat.update(cx, |chat, cx| {
+                                        chat.deliver_queued(send.clone(), chat.is_running(), cx)
+                                    })
                                 }),
+                        )
+                        .child(
+                            action(
+                                format!("delete-{}", item.id).into(),
+                                ActionIcon::Trash,
+                                "Delete queued message",
                             )
-                            .child(
-                                action(
-                                    format!("edit-{}", item.id).into(),
-                                    ActionIcon::Pencil,
-                                    "Edit queued message",
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| this.edit_queued(&edit, window, cx),
-                                )),
+                            .on_click(move |_, _, cx| {
+                                delete_chat.update(cx, |chat, cx| {
+                                    chat.take_queued(&delete, cx);
+                                });
+                            }),
+                        )
+                        .child(
+                            action(
+                                format!("edit-{}", item.id).into(),
+                                ActionIcon::Pencil,
+                                "Edit queued message",
                             )
-                    })),
+                            .on_click(move |_, window, cx| on_edit(&edit, window, cx)),
+                        )
+                })),
+        )
+        .when(overflow, |queue| {
+            queue.child(
+                div()
+                    .absolute()
+                    .left(zpx(12.))
+                    .right(zpx(12.))
+                    .bottom_0()
+                    .h(zpx(12.))
+                    .bg(linear_gradient(
+                        0.,
+                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA), 0.),
+                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA & 0xffffff00), 1.),
+                    )),
             )
-            .when(overflow, |queue| {
-                queue.child(
-                    div()
-                        .absolute()
-                        .left(zpx(12.))
-                        .right(zpx(12.))
-                        .bottom_0()
-                        .h(zpx(12.))
-                        .bg(linear_gradient(
-                            0.,
-                            linear_color_stop(rgba(QUEUE_SURFACE_RGBA), 0.),
-                            linear_color_stop(rgba(QUEUE_SURFACE_RGBA & 0xffffff00), 1.),
-                        )),
-                )
-            })
-            .into_any_element()
-    }
+        })
+        .into_any_element()
 }
 
 fn attachment_overflow(offset: f32, max_offset: f32) -> (bool, bool) {

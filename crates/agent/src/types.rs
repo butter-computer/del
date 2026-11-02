@@ -190,6 +190,15 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    ProviderSwitched {
+        from: Provider,
+        to: Provider,
+        session_id: SessionId,
+        at_ms: u64,
+    },
+    UserAttachments {
+        attachments: Vec<Attachment>,
+    },
     PeerMessage {
         message: crate::peers::PeerMessage,
     },

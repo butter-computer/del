@@ -72,6 +72,10 @@ pub struct ApprovalBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
+    ProviderSwitch {
+        from: del_agent::Provider,
+        to: del_agent::Provider,
+    },
     Peer(del_agent::peers::PeerMessage),
     User {
         text: String,
@@ -280,6 +284,37 @@ impl ChatModel {
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::ProviderSwitched { from, to, .. } => {
+                self.seal();
+                self.goal = None;
+                self.goal_updated_at = None;
+                self.current_turn = None;
+                self.phase = Phase::Idle;
+                self.last_status = None;
+                Some(self.push(Block::ProviderSwitch {
+                    from: *from,
+                    to: *to,
+                }))
+            }
+            AgentEvent::UserAttachments { attachments } => {
+                let (index, block) = self
+                    .blocks
+                    .iter_mut()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, b)| matches!(b, Block::User { .. }))?;
+                if let Block::User {
+                    attachments: summary,
+                    ..
+                } = block
+                {
+                    *summary = AttachmentSummary::from_input(&del_agent::UserInput {
+                        attachments: attachments.clone(),
+                        ..Default::default()
+                    });
+                }
+                Some(Change::Updated(index))
+            }
             AgentEvent::PeerMessage { message } => {
                 if let Some(ix) = self
                     .blocks
@@ -1015,6 +1050,256 @@ mod tests {
         };
         assert!(t.expanded);
         assert_eq!(m.toggle(9), None);
+    }
+}
+
+#[cfg(test)]
+mod sequence_tests {
+    use super::*;
+    use del_agent::{Provider, SessionId};
+
+    fn started(turn: &str) -> AgentEvent {
+        AgentEvent::TurnStarted {
+            turn_id: turn.into(),
+        }
+    }
+    fn delta(turn: &str, text: &str) -> AgentEvent {
+        AgentEvent::AssistantTextDelta {
+            turn_id: turn.into(),
+            text: text.into(),
+        }
+    }
+    fn message(turn: &str, text: &str) -> AgentEvent {
+        AgentEvent::AssistantMessage {
+            turn_id: turn.into(),
+            text: text.into(),
+        }
+    }
+    fn completed(turn: &str, status: TurnStatus) -> AgentEvent {
+        AgentEvent::TurnCompleted {
+            turn_id: turn.into(),
+            status,
+        }
+    }
+    fn user(text: &str) -> AgentEvent {
+        AgentEvent::UserMessage { text: text.into() }
+    }
+    fn tool(id: &str) -> AgentEvent {
+        AgentEvent::ToolCallStarted {
+            id: id.into(),
+            name: "bash".into(),
+            input_summary: "ls".into(),
+        }
+    }
+    fn tool_done(id: &str) -> AgentEvent {
+        AgentEvent::ToolCallFinished {
+            id: id.into(),
+            status: ToolStatus::Completed,
+            output_summary: "ok".into(),
+        }
+    }
+
+    fn fold(events: &[AgentEvent]) -> ChatModel {
+        let mut model = ChatModel::default();
+        for event in events {
+            model.apply(event);
+        }
+        model
+    }
+
+    fn history() -> Vec<AgentEvent> {
+        vec![
+            started("t1"),
+            user("first"),
+            AgentEvent::UserAttachments {
+                attachments: vec![del_agent::Attachment {
+                    path: "/tmp/a.png".into(),
+                    mime: Some("image/png".into()),
+                }],
+            },
+            message("t1", "Looking."),
+            tool("c1"),
+            tool_done("c1"),
+            message("t1", "Done."),
+            completed("t1", TurnStatus::Completed),
+            started("t2"),
+            user("second"),
+            delta("t2", "Par"),
+            completed("t2", TurnStatus::Interrupted),
+        ]
+    }
+
+    #[test]
+    fn restored_history_builds_each_row_once_in_order() {
+        let model = fold(&history());
+        let kinds: Vec<&str> = model
+            .blocks
+            .iter()
+            .map(|block| match block {
+                Block::User { .. } => "user",
+                Block::Assistant { .. } => "assistant",
+                Block::Tool(_) => "tool",
+                Block::TurnEnd { .. } => "end",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "user",
+                "assistant",
+                "end"
+            ]
+        );
+        let Block::User { attachments, .. } = &model.blocks[0] else {
+            panic!("user row");
+        };
+        assert_eq!(attachments.label().as_deref(), Some("1 attachment"));
+        // Only the final answer of a completed turn owns the Copy footer.
+        assert!(!model.is_completed_response(1));
+        assert!(model.is_completed_response(3));
+        assert!(!model.is_completed_response(5));
+        assert!(matches!(
+            model.blocks[5],
+            Block::Assistant { open: false, .. }
+        ));
+        assert!(!model.is_running());
+        assert_eq!(model.last_status, Some(TurnStatus::Interrupted));
+        // Rebuilding from the same history (reopen or lagged resync) is identical.
+        assert_eq!(fold(&history()).blocks, model.blocks);
+    }
+
+    #[test]
+    fn late_events_after_completion_never_restart_the_working_phase() {
+        let mut model = fold(&[
+            started("t1"),
+            delta("t1", "Answer"),
+            completed("t1", TurnStatus::Completed),
+        ]);
+        assert!(!model.is_running());
+        // A straggling chunk is shown but does not resurrect the running state
+        // or reopen the completed answer.
+        assert_eq!(model.apply(&delta("t1", " more")), Some(Change::Pushed(1)));
+        assert!(!model.is_running());
+        assert!(matches!(
+            &model.blocks[0],
+            Block::Assistant { text, open: false, .. } if text == "Answer"
+        ));
+        assert!(model.is_completed_response(0));
+    }
+
+    #[test]
+    fn deltas_for_different_turns_never_merge() {
+        let mut model = ChatModel::default();
+        model.apply(&delta("t1", "one"));
+        assert_eq!(model.apply(&delta("t2", "two")), Some(Change::Pushed(1)));
+        assert!(
+            matches!(&model.blocks[0], Block::Assistant { open: false, text, .. } if text == "one")
+        );
+        // A final message only replaces its own turn's open row.
+        assert_eq!(
+            model.apply(&message("t2", "two!")),
+            Some(Change::Updated(1))
+        );
+        assert_eq!(model.blocks.len(), 2);
+        assert!(matches!(&model.blocks[0], Block::Assistant { text, .. } if text == "one"));
+    }
+
+    #[test]
+    fn provider_switch_marker_seals_and_resets_turn_state() {
+        let mut model = fold(&[started("t1"), delta("t1", "partial")]);
+        assert!(model.is_running());
+        let change = model.apply(&AgentEvent::ProviderSwitched {
+            from: Provider::Codex,
+            to: Provider::Claude,
+            session_id: SessionId::new("native"),
+            at_ms: 0,
+        });
+        assert_eq!(change, Some(Change::Pushed(1)));
+        assert!(!model.is_running());
+        assert_eq!(model.last_status, None);
+        assert!(matches!(
+            model.blocks[0],
+            Block::Assistant { open: false, .. }
+        ));
+        assert_eq!(
+            model.blocks[1],
+            Block::ProviderSwitch {
+                from: Provider::Codex,
+                to: Provider::Claude
+            }
+        );
+        // The new provider's first chunk starts a fresh row.
+        assert_eq!(model.apply(&delta("t1", "new")), Some(Change::Pushed(2)));
+    }
+
+    #[test]
+    fn failed_turn_leaves_marker_and_rejected_input_keeps_announced_turn() {
+        let mut model = ChatModel::default();
+        model.push_user("hi".into(), false);
+        assert!(model.is_running());
+        model.reject_input();
+        assert!(
+            !model.is_running(),
+            "a rejected prompt never invents a turn"
+        );
+        model.apply(&started("t1"));
+        model.push_user("queued".into(), false);
+        model.reject_input();
+        assert!(
+            model.is_running(),
+            "the provider's own turn is still running"
+        );
+        assert_eq!(
+            model.apply(&completed("t1", TurnStatus::Failed)),
+            Some(Change::Pushed(2))
+        );
+        assert_eq!(
+            model.blocks[2],
+            Block::TurnEnd {
+                status: TurnStatus::Failed
+            }
+        );
+        assert!(!model.is_running());
+    }
+
+    #[test]
+    fn peer_receipts_update_in_place_and_attachments_need_a_user_row() {
+        let peer = |state| del_agent::peers::PeerMessage {
+            id: "p1".into(),
+            idempotency_key: "k".into(),
+            from: SessionId::new("a"),
+            to: SessionId::new("b"),
+            reply_to: None,
+            text: "hello".into(),
+            created_at_ms: 0,
+            state,
+            error: None,
+        };
+        let mut model = ChatModel::default();
+        assert_eq!(
+            model.apply(&AgentEvent::UserAttachments {
+                attachments: Vec::new()
+            }),
+            None
+        );
+        assert_eq!(
+            model.apply(&AgentEvent::PeerMessage {
+                message: peer(del_agent::peers::DeliveryState::Queued)
+            }),
+            Some(Change::Pushed(0))
+        );
+        assert_eq!(
+            model.apply(&AgentEvent::PeerMessage {
+                message: peer(del_agent::peers::DeliveryState::Delivered)
+            }),
+            Some(Change::Updated(0))
+        );
+        assert_eq!(model.blocks.len(), 1);
     }
 }
 

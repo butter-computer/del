@@ -70,6 +70,21 @@ terminal imports reject conflicting provider/account/folder records instead of
 overwriting them. Terminal ownership is runtime-only; reopening Del returns saved
 chat conversations to Chat.
 
+## Provider-switch integration
+
+Terminal handoff uses the active provider segment's native ID after any provider
+switch. The full Del conversation stays in its journal. A durable checkpoint lets
+Chat append new terminal events exactly once, and lets Side chats and peer reads
+combine earlier provider segments with the live native transcript. Claude's launch
+reattaches the public context file and handles switching before its first turn.
+
+Codex threads use `thread_unload_delay_secs=0`; Del waits for `thread/closed` after
+unsubscribing before handing over ownership. An unsubscribe acknowledgement alone
+does not release the native lock when another chat keeps the app-server alive.
+This follows the [Codex app-server lifecycle](https://learn.chatgpt.com/docs/app-server).
+Terminal handoff probes working CLI installations like Chat startup, skipping a
+broken executable launcher. The user’s installed CLI files are never modified.
+
 ## Verification
 
 Run ordinary tests with debug assertions enabled: GPUI's test selectors are not
@@ -139,3 +154,6 @@ possible future CLI version, network failure, or external native-editor action.
   `Ran /terminal-setup` with expandable plain-text output. Its real messages and
   navigation survive another typed `/terminal` → `/chat` round trip. Light and
   dark appearance were checked; the app was left in its original dark appearance.
+
+For subsequent provider-switch compatibility and Side chat queue validation, see
+the [0.1.24 validation record](releases/0.1.24-validation.md).

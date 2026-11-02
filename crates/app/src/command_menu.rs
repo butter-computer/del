@@ -669,6 +669,72 @@ mod tests {
     }
 
     #[test]
+    fn filtering_matches_name_or_description_case_insensitively() {
+        use super::*;
+        let command = |name: &str, description: &str, kind| ComposerCommand {
+            name: name.into(),
+            description: description.into(),
+            argument_hint: String::new(),
+            kind,
+            source: "test".into(),
+            target: None,
+        };
+        let review = command("Review", "Inspect the diff", CommandKind::Skill);
+        let compact = command("compact", "Summarize context", CommandKind::Action);
+        assert!(matches(&review, ""));
+        assert!(matches(&review, "rev"));
+        assert!(matches(&review, "REVIEW"));
+        assert!(matches(&review, "diff"));
+        assert!(!matches(&review, "compact"));
+        assert!(matches(&compact, "summar"));
+        // `/skills` lists only skills, rather than matching by text.
+        assert!(matches(&review, "skills"));
+        assert!(!matches(&compact, "skills"));
+        assert!(!matches(
+            &command("skills-sync", "Sync skills", CommandKind::Action),
+            "Skills"
+        ));
+    }
+
+    #[test]
+    fn local_mode_commands_are_offered_except_for_acp() {
+        use super::*;
+        for provider in [Provider::Codex, Provider::Claude, Provider::OpenCode] {
+            let names: Vec<_> = local_commands(provider)
+                .into_iter()
+                .map(|command| {
+                    assert_eq!(command.source, "Del");
+                    assert_eq!(command.kind, CommandKind::Action);
+                    assert!(command.argument_hint.is_empty());
+                    command.name
+                })
+                .collect();
+            assert_eq!(names, ["terminal", "chat"]);
+        }
+        assert!(local_commands(Provider::Acp).is_empty());
+    }
+
+    #[test]
+    fn query_covers_the_whole_slash_word_around_the_caret() {
+        use super::*;
+        use gpui_kit::component::input::InputContent;
+        let content = InputContent::new("/review");
+        assert_eq!(query_range(&content, 4..4), Some(0..7));
+        assert_eq!(query_range(&content, 0..0), Some(0..7));
+        // A selection, prose before the slash, or a non-boundary caret never opens it.
+        assert_eq!(query_range(&content, 1..4), None);
+        assert_eq!(query_range(&InputContent::new("héllo /re"), 10..10), None);
+        assert_eq!(query_range(&InputContent::new("é"), 1..1), None);
+        assert_eq!(query_range(&InputContent::new("/re"), 9..9), None);
+        // Unicode whitespace before the slash is still only whitespace.
+        let text = "\u{3000}/re";
+        assert_eq!(
+            query_range(&InputContent::new(text), text.len()..text.len()),
+            Some(3..text.len())
+        );
+    }
+
+    #[test]
     fn menu_only_opens_for_unselected_prefix_commands() {
         use super::*;
         use gpui_kit::component::input::InputContent;

@@ -34,6 +34,7 @@ pub fn messages(model: &ChatModel) -> Vec<Message> {
 
 #[derive(Clone)]
 pub struct Source {
+    pub journal: Option<PathBuf>,
     pub account: Option<crate::accounts::Account>,
     pub tab: Tab,
     pub title: String,
@@ -170,30 +171,41 @@ impl Index {
         };
         for source in sources {
             let id = source.conversation_id.as_deref();
-            let path = match (source.provider, id) {
-                (Some(Provider::Claude), Some(id)) => match &source.account {
-                    Some(a) => del_claude::history::path_from(&a.root(), &source.cwd, id),
-                    None => del_claude::history::path(&source.cwd, id),
-                },
-                (Some(Provider::Codex), Some(id)) => {
-                    let root = source
-                        .account
-                        .as_ref()
-                        .map_or_else(crate::terminal_conversation::codex_root, |a| a.root());
-                    rollouts
-                        .entry(root)
-                        .or_insert_with_key(|root| {
-                            Rollouts::new(crate::terminal_conversation::rollouts(root))
-                        })
-                        .find(id)
-                }
-                _ => None,
-            };
+            let path = source
+                .journal
+                .clone()
+                .or_else(|| match (source.provider, id) {
+                    (Some(Provider::Claude), Some(id)) => match &source.account {
+                        Some(a) => del_claude::history::path_from(&a.root(), &source.cwd, id),
+                        None => del_claude::history::path(&source.cwd, id),
+                    },
+                    (Some(Provider::Codex), Some(id)) => {
+                        let root = source
+                            .account
+                            .as_ref()
+                            .map_or_else(crate::terminal_conversation::codex_root, |a| a.root());
+                        rollouts
+                            .entry(root)
+                            .or_insert_with_key(|root| {
+                                Rollouts::new(crate::terminal_conversation::rollouts(root))
+                            })
+                            .find(id)
+                    }
+                    _ => None,
+                });
             let mut saved = Arc::new(vec![]);
             let mut folded = FoldedMessages::default();
             if let Some(path) = path {
                 used.insert(path.clone());
-                match self.read(&path, source.provider, id.unwrap_or_default()) {
+                match self.read(
+                    &path,
+                    if source.journal.is_some() {
+                        None
+                    } else {
+                        source.provider
+                    },
+                    id.unwrap_or_default(),
+                ) {
                     Ok((messages, cached)) => {
                         saved = messages;
                         folded = cached;
@@ -202,6 +214,7 @@ impl Index {
                 }
             }
             if source.provider == Some(Provider::OpenCode)
+                && source.journal.is_none()
                 && let Some(id) = id
             {
                 match self.opencode.read_with_environment(
@@ -257,7 +270,15 @@ impl Index {
             return Ok((cached.messages.clone(), cached.folded.clone()));
         }
         let reader = std::io::BufReader::new(std::fs::File::open(path)?);
-        let messages = if provider == Some(Provider::Claude) {
+        let messages = if provider.is_none() {
+            let mut model = ChatModel::default();
+            for event in
+                del_agent::conversation::Journal::read(path).map_err(std::io::Error::other)?
+            {
+                model.apply(&event);
+            }
+            messages(&model)
+        } else if provider == Some(Provider::Claude) {
             let mut model = ChatModel::default();
             for event in del_claude::history::read(reader, id)? {
                 model.apply(&event);
@@ -486,6 +507,7 @@ mod tests {
     fn document(terminal: bool, archived: bool, text: &str) -> Arc<Document> {
         Arc::new(Document {
             source: Source {
+                journal: None,
                 account: None,
                 tab: if terminal {
                     Tab::Terminal(SessionId::new("t"))

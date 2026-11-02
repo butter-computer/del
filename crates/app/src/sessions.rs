@@ -362,6 +362,7 @@ mod tests {
 
     fn record(id: &str, title: Option<&str>, updated_ms: u64) -> SessionRecord {
         SessionRecord {
+            segments: Vec::new(),
             fork: None,
             id: SessionId::new(id),
             provider: Provider::Claude,
@@ -516,6 +517,133 @@ mod tests {
             2,
             "no temporary files remain"
         );
+    }
+
+    #[test]
+    fn older_and_newer_sidebar_files_load_with_defaults() {
+        // Pre-unread/order files and fields from a newer build both load.
+        let overrides: Overrides = serde_json::from_str(
+            r#"{"a":{"title":"Mine"},"b":{"pinned":true,"future_field":[1,2]},"c":{}}"#,
+        )
+        .unwrap();
+        let rows = overrides.rows(&[
+            record("a", Some("auto"), 3000),
+            record("b", None, 1000),
+            record("c", None, 2000),
+        ]);
+        assert_eq!(rows[0].id, SessionId::new("b"));
+        assert!(rows[0].pinned && !rows[0].unread && !rows[0].archived);
+        assert_eq!(rows[1].title, "Mine");
+        assert_eq!(overrides.order(&SessionId::new("a")), None);
+    }
+
+    #[test]
+    fn pinning_twice_keeps_position_and_activity_never_reorders_pins() {
+        let mut overrides = Overrides::default();
+        let [a, b, c] = ["a", "b", "c"].map(SessionId::new);
+        for id in [&a, &b, &c] {
+            overrides.set_pinned(id, true);
+        }
+        // A repeated pin request (e.g. a duplicate click) must not move the pin.
+        overrides.set_pinned(&a, true);
+        let mut records = vec![
+            record("a", None, 1),
+            record("b", None, 2),
+            record("c", None, 3),
+        ];
+        let ids = |o: &Overrides, r: &[SessionRecord]| {
+            o.rows(r).into_iter().map(|r| r.id.0).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&overrides, &records), ["a", "b", "c"]);
+        records[0].updated_at_ms = 99_000;
+        records[2].updated_at_ms = 0;
+        assert_eq!(ids(&overrides, &records), ["a", "b", "c"]);
+        // Unpinned rows below the pins remain most-recent first.
+        records.push(record("d", None, 5_000));
+        records.push(record("e", None, 7_000));
+        assert_eq!(ids(&overrides, &records), ["a", "b", "c", "e", "d"]);
+        overrides.set_pinned(&b, false);
+        assert_eq!(ids(&overrides, &records), ["a", "c", "e", "d", "b"]);
+        overrides.set_pinned(&b, true);
+        assert_eq!(ids(&overrides, &records), ["a", "c", "b", "e", "d"]);
+    }
+
+    #[test]
+    fn legacy_pins_keep_their_visible_order_when_migrated() {
+        let mut overrides: Overrides =
+            serde_json::from_str(r#"{"old":{"pinned":true},"older":{"pinned":true}}"#).unwrap();
+        let records = [record("older", None, 1_000), record("old", None, 2_000)];
+        let before: Vec<_> = overrides.rows(&records).into_iter().map(|r| r.id).collect();
+        overrides.initialize_pins(&records);
+        let after: Vec<_> = overrides.rows(&records).into_iter().map(|r| r.id).collect();
+        assert_eq!(before, after);
+        // Once migrated, later activity does not reorder them, and a new pin appends.
+        overrides.set_pinned(&SessionId::new("new"), true);
+        let records = [
+            record("older", None, 9_000),
+            record("old", None, 2_000),
+            record("new", None, 50_000),
+        ];
+        assert_eq!(
+            overrides
+                .rows(&records)
+                .into_iter()
+                .map(|r| r.id.0)
+                .collect::<Vec<_>>(),
+            ["old", "older", "new"]
+        );
+    }
+
+    #[test]
+    fn unread_state_is_per_session_and_side_chats_are_separate() {
+        let mut overrides = Overrides::default();
+        let [a, b] = ["a", "b"].map(SessionId::new);
+        overrides.set_unread(&a, true);
+        overrides.set_side_chat_unread(&b, "fork", true);
+        assert!(overrides.unread(&a) && overrides.main_unread(&a));
+        assert!(overrides.unread(&b) && !overrides.main_unread(&b));
+        // Clearing the main reply leaves hidden side-chat replies unread.
+        overrides.set_unread(&b, false);
+        assert!(overrides.unread(&b));
+        overrides.set_side_chat_unread(&b, "fork", false);
+        assert!(!overrides.unread(&b));
+        assert!(overrides.unread(&a), "other chats keep their dots");
+        let rows = overrides.rows(&[record("a", None, 0), record("b", None, 0)]);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.id.0.as_str(), r.unread))
+                .collect::<Vec<_>>(),
+            [("a", true), ("b", false)]
+        );
+    }
+
+    #[test]
+    fn atomic_writes_replace_whole_files_and_failures_keep_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/settings.json");
+        write_atomic(&path, b"first", PRIVATE).unwrap();
+        write_atomic(&path, b"second", PRIVATE).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        // Renaming over a directory fails; the existing file must remain intact.
+        let blocked = dir.path().join("nested/blocked");
+        std::fs::create_dir_all(blocked.join("child")).unwrap();
+        assert!(write_atomic(&blocked, b"new", PRIVATE).is_err());
+        assert!(blocked.join("child").is_dir());
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("nested"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn missing_settings_load_as_defaults_without_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (loaded, error): (Overrides, _) =
+            load_or_set_aside(&dir.path().join("absent.json"), "sidebar state");
+        assert_eq!(loaded, Overrides::default());
+        assert!(error.is_none());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

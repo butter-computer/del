@@ -107,6 +107,7 @@ async fn read_line_capped<R: AsyncBufRead + Unpin>(
 }
 
 struct Live {
+    initialization: AsyncMutex<Option<tokio::sync::oneshot::Receiver<Result<()>>>>,
     events: broadcast::Sender<AgentEvent>,
     goal: Mutex<Option<del_agent::Goal>>,
     stdin: AsyncMutex<ChildStdin>,
@@ -118,6 +119,19 @@ struct Live {
 }
 
 impl Live {
+    async fn initialize(&self) -> Result<()> {
+        let mut initialization = self.initialization.lock().await;
+        let Some(receiver) = initialization.take() else {
+            return Ok(());
+        };
+        self.write_line(&serde_json::json!({"type":"control_request", "request_id":"del-context-ready", "request":{"subtype":"initialize"}}).to_string()).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), receiver)
+            .await
+            .map_err(|_| AgentError::Backend("Claude context setup timed out".into()))?
+            .map_err(|_| {
+                AgentError::Backend("Claude exited before acknowledging context setup".into())
+            })?
+    }
     fn emit(&self, evs: Vec<AgentEvent>) {
         for e in evs {
             if let AgentEvent::GoalUpdated { goal } = &e {
@@ -151,6 +165,7 @@ impl Live {
 
 #[derive(Default)]
 pub struct ClaudeBackend {
+    contexts: Mutex<HashMap<SessionId, PathBuf>>,
     browser_tools: Mutex<Option<del_agent::backend::BrowserTools>>,
     options: ClaudeOptions,
     sessions: Mutex<HashMap<SessionId, Arc<Live>>>,
@@ -160,6 +175,7 @@ pub struct ClaudeBackend {
 impl ClaudeBackend {
     pub fn new(options: ClaudeOptions) -> Self {
         Self {
+            contexts: Mutex::default(),
             options,
             browser_tools: Mutex::new(None),
             sessions: Mutex::default(),
@@ -282,6 +298,21 @@ impl ClaudeBackend {
                 args[index + 1].push_str(del_agent::backend::GOAL_INSTRUCTIONS);
             }
         }
+        if let Some(path) = self.contexts.lock().unwrap().get(&id) {
+            let mut context = String::new();
+            if let Some(index) = args.iter().position(|arg| arg == "--append-system-prompt") {
+                context.push_str(&args[index + 1]);
+                context.push_str("\n\n");
+                args.drain(index..index + 2);
+            }
+            context.push_str(&std::fs::read_to_string(path)?);
+            let combined = path.with_extension("claude.txt");
+            del_agent::conversation::write_private(&combined, context.as_bytes())?;
+            args.extend([
+                "--append-system-prompt-file".into(),
+                combined.to_string_lossy().into_owned(),
+            ]);
+        }
         command
             .args(args)
             .current_dir(&config.cwd)
@@ -303,7 +334,9 @@ impl ClaudeBackend {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let live = Arc::new(Live {
+            initialization: AsyncMutex::new(Some(ready_rx)),
             events: tx.clone(),
             goal: Mutex::new(None),
             stdin: AsyncMutex::new(stdin),
@@ -330,10 +363,30 @@ impl ClaudeBackend {
 
         let reader = live.clone();
         tokio::spawn(async move {
+            let mut ready = Some(ready_tx);
             let mut stdout = BufReader::new(stdout);
             while let Ok(Some(line)) = read_line_capped(&mut stdout, MAX_LINE_BYTES).await {
                 match line {
                     Ok(line) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
+                            && value["type"] == "control_response"
+                            && value["response"]["request_id"] == "del-context-ready"
+                        {
+                            if let Some(ready) = ready.take() {
+                                let result = if value["response"]["subtype"] == "error" {
+                                    Err(AgentError::Backend(
+                                        value["response"]["error"]
+                                            .as_str()
+                                            .unwrap_or("Claude context setup failed")
+                                            .into(),
+                                    ))
+                                } else {
+                                    Ok(())
+                                };
+                                let _ = ready.send(result);
+                            }
+                            continue;
+                        }
                         let evs = reader.translator.lock().unwrap().handle_line(&line);
                         reader.emit(evs);
                     }
@@ -659,6 +712,52 @@ impl AgentBackend for ClaudeBackend {
         self.spawn(&config, SessionId::new(id.clone()), ["--session-id", &id])
     }
 
+    async fn start_session_with_context(
+        &self,
+        config: SessionConfig,
+        context: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        let id = SessionId::new(uuid::Uuid::new_v4().to_string());
+        self.contexts
+            .lock()
+            .unwrap()
+            .insert(id.clone(), context.to_path_buf());
+        let handle = self.spawn(&config, id.clone(), ["--session-id", id.as_str()])?;
+        if let Err(error) = self.live(&id)?.initialize().await {
+            let _ = self.close(&id).await;
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
+    async fn resume_with_context(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+        context: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .insert(session.clone(), context.to_path_buf());
+        let path = match &self.options.config_dir {
+            Some(root) => crate::history::path_from(root, &config.cwd, session.as_str()),
+            None => crate::history::path(&config.cwd, session.as_str()),
+        };
+        // A switch does not send a turn, so Claude may not have written its
+        // native transcript yet. Recreate that same empty session on restart.
+        let handle = if path.is_none() {
+            self.spawn(&config, session.clone(), ["--session-id", session.as_str()])?
+        } else {
+            self.resume(config, session).await?
+        };
+        if let Err(error) = self.live(session)?.initialize().await {
+            let _ = self.close(session).await;
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
     async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {
         let id = uuid::Uuid::new_v4().to_string();
         self.spawn_with_persistence(
@@ -728,6 +827,22 @@ impl AgentBackend for ClaudeBackend {
         Ok(self
             .spawn(&config, session.clone(), ["--resume", session.as_str()])?
             .with_history(history))
+    }
+
+    async fn reconfigure(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+    ) -> Result<SessionHandle> {
+        let context = self.contexts.lock().unwrap().get(session).cloned();
+        match self.close(session).await {
+            Ok(()) | Err(AgentError::UnknownSession(_)) => {}
+            Err(error) => return Err(error),
+        }
+        match context {
+            Some(path) => self.resume_with_context(config, session, &path).await,
+            None => self.resume(config, session).await,
+        }
     }
 
     async fn respond_approval(

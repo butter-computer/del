@@ -16,8 +16,11 @@ fn main() {
         let library = out.join("del-fluid.metallib");
         // Command-line-tools-only machines have `xcrun` but no `metal` compiler.
         // `xcrun` honors DEVELOPER_DIR from the environment, which cargo passes through.
+        // Newer Xcode releases ship `metal` as a stub until the separately
+        // downloaded Metal Toolchain component is installed, so `xcrun -f metal`
+        // succeeds even though compiling fails. Probe by running the compiler.
         let metal_available = std::process::Command::new("xcrun")
-            .args(["-sdk", "macosx", "-f", "metal"])
+            .args(["-sdk", "macosx", "metal", "--version"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

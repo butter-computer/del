@@ -104,6 +104,16 @@ fn coalesce_deltas(events: impl IntoIterator<Item = AgentEvent>) -> Vec<AgentEve
     ready
 }
 
+/// Whether the first history prompt is the row already shown as the opening
+/// prompt. A kept opening row holds prose only; native history may append
+/// attachment markers to the same prompt, so compare that prose as well.
+fn replays_opening_row(opening: Option<&str>, history: &str) -> bool {
+    opening.is_some_and(|opening| {
+        opening == history
+            || opening == super::attachments::AttachmentSummary::from_history(history).0
+    })
+}
+
 /// Every non-overlapping match of `needle`, as (text index, byte offset).
 /// Counting earlier occurrences and locating the hit must share this walk:
 /// otherwise a repeated short message lands inside a longer one containing it.
@@ -1050,7 +1060,7 @@ impl ChatView {
                         && opening_user
                     {
                         opening_user = false;
-                        if first_prompt.as_deref() == Some(text.as_str()) {
+                        if replays_opening_row(first_prompt.as_deref(), text) {
                             continue;
                         }
                     }
@@ -1417,7 +1427,7 @@ impl Render for ChatView {
                                                 ))
                                                 .group("message-tick")
                                                 .w_full()
-                                                .h(zpx(12.0))
+                                                .h(zpx(10.0))
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
@@ -1449,7 +1459,7 @@ impl Render for ChatView {
                                                         move |tick, t| {
                                                             let weight =
                                                                 previous + (next - previous) * t;
-                                                            let width = 7.0 + 15.0 * weight;
+                                                            let width = 6.0 + 12.0 * weight;
                                                             // Only the hovered marker (or current message when idle)
                                                             // is bright. Neighbor magnification changes width only.
                                                             let alpha =
@@ -1518,6 +1528,20 @@ mod tests {
         assert_eq!(active_prompt(&[0, 3, 6, 9], 8, false), Some(6));
         assert_eq!(active_prompt(&[], 0, true), None);
     }
+    #[test]
+    fn history_replay_skips_only_the_matching_opening_prompt() {
+        assert!(replays_opening_row(Some("Build it"), "Build it"));
+        // A resync keeps the opening row's prose; native history appends markers.
+        assert!(replays_opening_row(
+            Some("inspect these"),
+            "inspect these\n[attached image: /tmp/photo.png]"
+        ));
+        assert!(replays_opening_row(Some(""), "[Image]"));
+        assert!(!replays_opening_row(None, "Build it"));
+        assert!(!replays_opening_row(Some("Build it"), "Build it again"));
+        assert!(!replays_opening_row(Some("Build"), "Build it"));
+    }
+
     #[test]
     fn ready_deltas_coalesce_without_crossing_turns_or_tools() {
         let delta = |turn: &str, text: &str| AgentEvent::AssistantTextDelta {
@@ -2548,6 +2572,7 @@ mod search_tests {
     fn hit(messages: Vec<search::Message>, query: &str, n: usize) -> search::Hit {
         let doc = Arc::new(search::Document {
             source: search::Source {
+                journal: None,
                 account: None,
                 tab: crate::state::Tab::Session(SessionId::new("saved")),
                 title: "Task".into(),

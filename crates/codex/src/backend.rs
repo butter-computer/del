@@ -78,6 +78,7 @@ type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
 struct Connection {
     client: CodexClient,
+    closed_threads: broadcast::Sender<String>,
 }
 
 #[derive(Default)]
@@ -312,8 +313,17 @@ impl CodexBackend {
             client.shutdown(Duration::from_millis(500)).await;
             return Err(e);
         }
-        tokio::spawn(route(client.downgrade(), incoming, self.sessions.clone()));
-        Ok(Arc::new(Connection { client }))
+        let (closed_threads, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        tokio::spawn(route(
+            client.downgrade(),
+            incoming,
+            self.sessions.clone(),
+            closed_threads.clone(),
+        ));
+        Ok(Arc::new(Connection {
+            client,
+            closed_threads,
+        }))
     }
 
     fn live_connection(&self) -> Option<Arc<Connection>> {
@@ -395,6 +405,14 @@ impl CodexBackend {
         provider: Provider,
     ) -> Result<SessionHandle> {
         let opening = OpeningGuard::new(&self.opening);
+        // Del owns session lifetime. Release idle native ownership immediately
+        // on unsubscribe so another CLI can resume without a retention grace period.
+        params
+            .entry("config")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| be("Invalid thread configuration"))?
+            .insert("thread_unload_delay_secs".into(), json!(0));
         let conn = self.connection().await?;
         // The browser credential is bound to the thread. A new thread's id is
         // known only from the reply, so it starts on a provisional id.
@@ -593,6 +611,24 @@ impl AgentBackend for CodexBackend {
         Ok(())
     }
 
+    async fn agent_goal(
+        &self,
+        id: &SessionId,
+        action: Option<del_agent::GoalAction>,
+    ) -> Result<Option<del_agent::Goal>> {
+        if action.is_some() {
+            return Err(be("Use Codex's native goal controls to change this goal"));
+        }
+        let session = self.session(id)?;
+        let conn = self.thread_connection(id, &session).await?;
+        let response = conn
+            .client
+            .request("thread/goal/get", json!({"threadId": id.as_str()}))
+            .await
+            .map_err(be)?;
+        Ok(crate::commands::goal(&response["goal"]))
+    }
+
     async fn generate_title(&self, context: &str) -> Result<Option<String>> {
         let opening = OpeningGuard::new(&self.opening);
         let conn = self.connection().await?;
@@ -757,6 +793,37 @@ impl AgentBackend for CodexBackend {
         .await
     }
 
+    async fn start_session_with_context(
+        &self,
+        config: SessionConfig,
+        path: &std::path::Path,
+    ) -> Result<SessionHandle> {
+        let context = tokio::fs::read_to_string(path).await?;
+        let handle = self.start_session(config).await?;
+        let result = async {
+            let conn = self.connection().await?;
+            conn.client
+                .request(
+                    "thread/inject_items",
+                    json!({
+                        "threadId": handle.id.as_str(),
+                        "items": [{"type": "message", "role": "developer", "content": [
+                            {"type": "input_text", "text": context}
+                        ]}]
+                    }),
+                )
+                .await
+                .map_err(be)?;
+            Ok::<_, AgentError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = self.close(&handle.id).await;
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
     async fn start_temporary_session(&self, config: SessionConfig) -> Result<SessionHandle> {
         let mut params = thread_params(&config);
         params.insert("ephemeral".into(), json!(true));
@@ -916,13 +983,34 @@ impl AgentBackend for CodexBackend {
             }
         }
         if let Some(conn) = self.live_connection() {
-            let _ = conn
+            let mut closed = conn.closed_threads.subscribe();
+            let response = conn
                 .client
                 .request(
                     "thread/unsubscribe",
                     json!({ "threadId": session.as_str() }),
                 )
+                .await
+                .map_err(be)?;
+            if response["status"] != "notLoaded" {
+                // The acknowledgement only removes a subscriber. Wait until
+                // shutdown hooks finish and the native ownership lock is released.
+                let released = tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        match closed.recv().await {
+                            Ok(id) if id == session.as_str() => return Ok(()),
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(_) => return Err(be("Codex closed before releasing the thread")),
+                        }
+                    }
+                })
                 .await;
+                if !conn.client.is_closed() {
+                    released.map_err(|_| {
+                        be("Codex has not released this conversation yet. Try switching again.")
+                    })??;
+                }
+            }
         }
         Ok(())
     }
@@ -971,7 +1059,12 @@ async fn send_interrupt(client: &CodexClient, session: &SessionId, turn: &str) -
 }
 
 /// Demultiplex everything the server sends to the owning session.
-async fn route(client: WeakClient, mut rx: mpsc::UnboundedReceiver<Incoming>, sessions: Sessions) {
+async fn route(
+    client: WeakClient,
+    mut rx: mpsc::UnboundedReceiver<Incoming>,
+    sessions: Sessions,
+    closed_threads: broadcast::Sender<String>,
+) {
     let find = |params: &Value| -> Option<Arc<Session>> {
         let tid = params["threadId"].as_str()?;
         sessions.lock().unwrap().get(tid).cloned()
@@ -979,6 +1072,11 @@ async fn route(client: WeakClient, mut rx: mpsc::UnboundedReceiver<Incoming>, se
     while let Some(msg) = rx.recv().await {
         match msg {
             Incoming::Notification { method, params } => {
+                if method == "thread/closed"
+                    && let Some(id) = params["threadId"].as_str()
+                {
+                    let _ = closed_threads.send(id.to_owned());
+                }
                 let Some(s) = find(&params) else { continue };
                 if method == "serverRequest/resolved" {
                     // Resolved server-side (e.g. interrupt): the answer is moot,

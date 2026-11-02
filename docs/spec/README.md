@@ -18,8 +18,8 @@ Every spec below serves one loop:
 2. **Watch.** Ignore agents until one needs you ([attention](attention.md), on
    top of [agent state](agent-state.md)).
 3. **Test.** Run exactly the branch you mean to check ([run](run.md)).
-4. **Second opinion.** Move the thread to another provider, or ask one
-   ([provider switch](provider-switch.md)).
+4. **Second opinion.** Review with another provider using the existing
+   [provider controls](../../README.md#models-and-reasoning).
 5. **Automate the loop.** Turn repeated glue into reviewed workflows
    ([workflows](workflows.md)).
 
@@ -27,7 +27,6 @@ Every spec below serves one loop:
 
 | Spec | Summary |
 | --- | --- |
-| [provider-switch.md](provider-switch.md) | Switch a chat's provider mid-thread with context, or ask another provider a one-off question |
 | [agent-state.md](agent-state.md) | One reliable, normalized "what is this agent doing" signal for chats and terminals |
 | [attention.md](attention.md) | Replaces kanban: peripheral status, a Needs-you queue, "since you last looked", Done cards, and an Overview lens |
 | [run.md](run.md) | Run and test a session's branch with clear branch identity and feedback that goes back to the right chat |
@@ -35,13 +34,11 @@ Every spec below serves one loop:
 
 ## Build order
 
-1. **Provider switch.** Cross-provider transcript forks already exist for side
-   chats, so this is mostly wiring.
-2. **Agent state.** Attention is only as good as this signal. A wrong "needs
+1. **Agent state.** Attention is only as good as this signal. A wrong "needs
    you" is worse than none.
-3. **Attention.** Needs-you queue, status lines, recaps.
-4. **Run.** Per-session run commands, the live slot, branch identity.
-5. **Workflows.** These automate steps 1–4, so they come last.
+2. **Attention.** Needs-you queue, status lines, recaps.
+3. **Run.** Per-session run commands, the live slot, branch identity.
+4. **Workflows.** These automate the preceding capabilities, so they come last.
 
 ## Shared principles
 

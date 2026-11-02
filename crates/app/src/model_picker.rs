@@ -498,6 +498,14 @@ impl Render for ModelPanel {
                         })),
                 )
             });
+            if catalog.loaded && catalog.models.is_empty() && catalog.error.is_none() {
+                list = list.child(
+                    div()
+                        .p_2()
+                        .text_color(muted)
+                        .child("No models returned by this provider. Try Refresh."),
+                );
+            }
             if model_count == 0 && !catalog.loading {
                 list = list.child(div().p_2().text_color(muted).child("No matching models"));
             }
@@ -1083,6 +1091,63 @@ mod tests {
         );
         info.default_effort = None;
         assert_eq!(super::effort_label(None, Some(&info)), None);
+    }
+
+    fn model(id: &str, name: &str, is_default: bool) -> del_agent::ModelInfo {
+        del_agent::ModelInfo {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            efforts: Vec::new(),
+            default_effort: None,
+            fast_tier: None,
+            is_default,
+        }
+    }
+
+    #[test]
+    fn default_stays_distinct_from_an_explicit_model() {
+        let recommended = model("gpt-x", "GPT X", true);
+        assert_eq!(super::model_label(None, Some(&recommended)), "Default");
+        assert_eq!(super::model_label(Some("default"), None), "Default");
+        assert_eq!(
+            super::model_label(Some("gpt-x"), Some(&recommended)),
+            "GPT X"
+        );
+        // A saved model missing from the catalog keeps its ID rather than vanishing.
+        assert_eq!(super::model_label(Some("retired-1"), None), "retired-1");
+        let selection = |model: Option<&str>, models| super::ModelSelection {
+            above: false,
+            provider: del_agent::Provider::Codex,
+            model: model.map(str::to_owned),
+            catalog: crate::state::ModelCatalog {
+                models,
+                ..Default::default()
+            },
+            effort: None,
+            tier: None,
+            locked: false,
+        };
+        let catalog = vec![model("a", "A", false), model("b", "B", true)];
+        assert_eq!(
+            selection(None, catalog.clone()).info().map(|m| m.id),
+            Some("b".into())
+        );
+        assert_eq!(
+            selection(Some("a"), catalog.clone()).info().map(|m| m.id),
+            Some("a".into())
+        );
+        assert!(selection(Some("gone"), catalog).info().is_none());
+        assert!(selection(None, Vec::new()).info().is_none());
+    }
+
+    #[test]
+    fn unknown_effort_ids_keep_a_readable_name() {
+        assert_eq!(super::effort_label(None, None), None);
+        assert_eq!(
+            super::effort_label(Some("xhigh"), None),
+            Some(del_agent::EffortOption::named("xhigh").name)
+        );
     }
 
     #[test]

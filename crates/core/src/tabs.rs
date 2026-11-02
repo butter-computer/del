@@ -99,4 +99,20 @@ mod tests {
         tabs.select(999);
         assert_eq!(tabs.active_id(), first);
     }
+
+    #[test]
+    fn new_tabs_are_titled_and_ordered_by_creation() {
+        let mut tabs = Tabs::default();
+        assert_eq!(tabs, Tabs::new());
+        let ids: Vec<_> = (0..3).map(|_| tabs.add()).collect();
+        assert_eq!(ids, [1, 2, 3]);
+        assert_eq!(
+            tabs.tabs().iter().map(|t| t.id).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert!(tabs.tabs().iter().all(|t| t.title == NEW_TAB_TITLE));
+        // Selecting the active tab again is a no-op.
+        tabs.select(3);
+        assert_eq!(tabs.active_id(), 3);
+    }
 }

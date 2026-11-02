@@ -200,6 +200,56 @@ mod tests {
     }
 
     #[test]
+    fn legacy_coordinates_stop_at_the_last_representable_cell() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        let edge = encode_mouse(MouseAction::Press, MouseButton::Left, 222, 222, NO, mode).unwrap();
+        assert_eq!(edge, [0x1b, b'[', b'M', 32, 255, 255]);
+        for (col, row) in [(223, 0), (0, 223)] {
+            assert_eq!(
+                encode_mouse(MouseAction::Press, MouseButton::Left, col, row, NO, mode),
+                None
+            );
+        }
+        // SGR has no such limit.
+        let far = encode_mouse(MouseAction::Press, MouseButton::Left, 999, 499, NO, sgr()).unwrap();
+        assert_eq!(far, b"\x1b[<0;1000;500M");
+    }
+
+    #[test]
+    fn wheel_has_no_release_and_motion_codes_carry_the_held_button() {
+        for mode in [sgr(), TermMode::MOUSE_REPORT_CLICK] {
+            for wheel in [MouseButton::WheelUp, MouseButton::WheelDown] {
+                assert_eq!(
+                    encode_mouse(MouseAction::Release, wheel, 0, 0, NO, mode),
+                    None
+                );
+            }
+        }
+        let up = encode_mouse(MouseAction::Press, MouseButton::WheelUp, 0, 0, NO, sgr()).unwrap();
+        assert_eq!(up, b"\x1b[<64;1;1M");
+        let drag = TermMode::MOUSE_DRAG;
+        let legacy = encode_mouse(MouseAction::Motion, MouseButton::Right, 1, 2, NO, drag).unwrap();
+        assert_eq!(legacy, [0x1b, b'[', b'M', 32 + 34, 34, 35]);
+        let alt = MouseMods { alt: true, ..NO };
+        let middle =
+            encode_mouse(MouseAction::Press, MouseButton::Middle, 0, 0, alt, sgr()).unwrap();
+        assert_eq!(middle, b"\x1b[<9;1;1M");
+        // Motion requires a motion mode even when clicks are reported.
+        assert!(!reporting(TermMode::SGR_MOUSE));
+        assert_eq!(
+            encode_mouse(
+                MouseAction::Press,
+                MouseButton::Left,
+                0,
+                0,
+                NO,
+                TermMode::SGR_MOUSE
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn alternate_scroll() {
         let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
         assert_eq!(wheel_as_arrows(2, mode).unwrap(), b"\x1b[A\x1b[A");

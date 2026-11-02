@@ -176,4 +176,31 @@ mod tests {
         assert_eq!(*found.end(), Point::new(Line(2), Column(1)));
         assert!(locate(term.grid(), "absent", 0..6).is_none());
     }
+    #[test]
+    fn wide_characters_map_matches_to_their_own_cells() {
+        // 界 occupies columns 0-1, 字 columns 2-3; "ok" starts at column 5.
+        let term = terminal("界字 ok", 20, 3);
+        let found = locate(term.grid(), "字 ok", 0.."字 ok".len()).unwrap();
+        assert_eq!(*found.start(), Point::new(Line(0), Column(2)));
+        assert_eq!(*found.end(), Point::new(Line(0), Column(6)));
+        // A wide character wrapped to the next row (leading spacer) is still found.
+        let term = terminal("abc界", 4, 3);
+        let found = locate(term.grid(), "abc界", 0.."abc界".len()).unwrap();
+        assert_eq!(*found.start(), Point::new(Line(0), Column(0)));
+        assert_eq!(*found.end(), Point::new(Line(1), Column(0)));
+    }
+    #[test]
+    fn blank_invalid_and_whitespace_variant_queries() {
+        let term = terminal("a   b\tc", 20, 3);
+        assert!(locate(term.grid(), "   ", 0..3).is_none());
+        assert!(locate(term.grid(), "abc", 2..9).is_none());
+        // Range not on a char boundary is rejected instead of panicking.
+        assert!(locate(term.grid(), "界", 1..3).is_none());
+        assert!(!searchable("界", 0..1));
+        // Runs of whitespace (including tabs rendered as spaces) collapse.
+        let found = locate(term.grid(), "a b\nc", 0..5).unwrap();
+        assert_eq!(*found.start(), Point::new(Line(0), Column(0)));
+        // Case-insensitive.
+        assert!(locate(term.grid(), "A   B", 0..5).is_some());
+    }
 }

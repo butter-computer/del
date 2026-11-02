@@ -67,6 +67,7 @@ impl std::fmt::Debug for Credentials {
 
 #[derive(Default)]
 struct Scope {
+    chats: HashMap<SessionId, SessionId>,
     /// token -> session it authenticates as.
     tokens: HashMap<String, SessionId>,
     browser_only: HashSet<SessionId>,
@@ -84,7 +85,9 @@ impl Scope {
     /// A session is live while it holds a credential; exited children are
     /// revoked, so they stop counting against spawn quotas.
     fn live(&self, session: &SessionId) -> bool {
-        self.tokens.values().any(|s| s == session)
+        self.tokens
+            .values()
+            .any(|s| self.chats.get(s).unwrap_or(s) == session)
     }
 
     /// The caller, the sessions it spawned, and the session that spawned it.
@@ -265,6 +268,23 @@ impl McpServer {
         }
     }
 
+    pub fn bind_chat(&self, native: &SessionId, chat: &SessionId) {
+        let mut scope = self.inner.scope.lock().unwrap();
+        scope.chats.insert(native.clone(), chat.clone());
+        scope.chat_tools.insert(chat.clone());
+    }
+
+    pub fn chat_identity(&self, native: &SessionId) -> SessionId {
+        self.inner
+            .scope
+            .lock()
+            .unwrap()
+            .chats
+            .get(native)
+            .cloned()
+            .unwrap_or_else(|| native.clone())
+    }
+
     /// Mint a browser-only credential for `group`, a provider process that
     /// serves one MCP config to several chats. Its browser calls may touch
     /// exactly the chats added with [`set_shared_browser_member`](Self::set_shared_browser_member).
@@ -406,7 +426,7 @@ fn caller_of(inner: &Inner, h: &HeaderMap) -> Option<SessionId> {
     let mut found = None;
     for (t, s) in &scope.tokens {
         if ct_eq(t, tok) {
-            found = Some(s.clone());
+            found = Some(scope.chats.get(s).unwrap_or(s).clone());
         }
     }
     found

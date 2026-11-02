@@ -582,7 +582,7 @@ impl Inner {
             }),
             (None, Some(id)) => {
                 let tx = self.pending.lock().unwrap().remove(&id)?;
-                let outcome = match v.get("error") {
+                let outcome = match v.get("error").filter(|e| !e.is_null()) {
                     Some(err) => Err(serde_json::from_value::<RpcError>(err.clone()).unwrap_or(
                         RpcError {
                             code: -32603,

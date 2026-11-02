@@ -786,6 +786,12 @@ impl AppShell {
                     .filter(|chat| !chat.read(cx).is_loading())
                     .map(|chat| chat.read(cx).search_messages());
                 search::Source {
+                    journal: state
+                        .backend()
+                        .manager
+                        .session_record(&row.id)
+                        .ok()
+                        .and_then(|r| r.segments.last().and_then(|s| s.journal.clone())),
                     account: state.session_account(&row.id),
                     tab: Tab::Session(row.id.clone()),
                     title: row.title,
@@ -803,6 +809,7 @@ impl AppShell {
                 .records
                 .iter()
                 .map(|record| search::Source {
+                    journal: None,
                     account: None,
                     tab: Tab::Terminal(record.id.clone()),
                     title: state.current_title(&record.id),
@@ -1124,6 +1131,7 @@ mod tests {
             palette.update(cx, |palette, _| {
                 let document = Arc::new(search::Document {
                     source: search::Source {
+                        journal: None,
                         account: None,
                         tab: Tab::Session(del_agent::SessionId::new("markdown")),
                         title: "Preview".into(),
@@ -1185,6 +1193,7 @@ mod tests {
             palette.update(cx, |palette, cx| {
                 let document = Arc::new(search::Document {
                     source: search::Source {
+                        journal: None,
                         account: None,
                         tab: Tab::Terminal(del_agent::SessionId::new("terminal")),
                         title: "Test task".into(),

@@ -52,13 +52,15 @@ impl Reader {
         let mut reader = BufReader::new(file);
         let mut events = vec![];
         loop {
-            let mut line = String::new();
-            let bytes = reader.read_line(&mut line)?;
-            if bytes == 0 || !line.ends_with('\n') {
+            // Bytes, not `read_line`: invalid UTF-8 (or a write caught mid
+            // character) must not fail the read and drop the events before it.
+            let mut line = Vec::new();
+            let bytes = reader.read_until(b'\n', &mut line)?;
+            if bytes == 0 || line.last() != Some(&b'\n') {
                 break;
             }
             self.offset += bytes as u64;
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            let Ok(value) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) else {
                 continue;
             };
             if value["isSidechain"] == true
@@ -139,6 +141,47 @@ mod tests {
         writeln!(file, "{}", entry.replace("one", "two")).unwrap();
         file.flush().unwrap();
         assert!(reader.read(&path, "one").unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_utf8_and_split_characters_do_not_lose_goal_updates() {
+        use std::io::Write;
+        let path =
+            std::env::temp_dir().join(format!("del-goal-utf8-{}.jsonl", uuid::Uuid::new_v4()));
+        let goal = |objective: &str| {
+            json!({"type":"attachment","sessionId":"one","attachment":{
+                "type":"goal_status","condition":objective,"met":false}})
+            .to_string()
+        };
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{}", goal("first")).unwrap();
+        file.write_all(b"{\"type\":\"user\",\"text\":\"\xff\xfe\"}\n")
+            .unwrap();
+        writeln!(file, "{}", goal("second")).unwrap();
+        // A record caught mid-write, ending inside a multi-byte character.
+        let third = goal("thïrd");
+        let split = third.find('ï').unwrap() + 1;
+        file.write_all(&third.as_bytes()[..split]).unwrap();
+        file.flush().unwrap();
+        let mut reader = Reader::new();
+        let objectives = |events: Vec<AgentEvent>| -> Vec<String> {
+            events
+                .into_iter()
+                .filter_map(|e| match e {
+                    AgentEvent::GoalUpdated { goal: Some(goal) } => Some(goal.objective),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            objectives(reader.read(&path, "one").unwrap()),
+            ["first", "second"]
+        );
+        file.write_all(&third.as_bytes()[split..]).unwrap();
+        writeln!(file).unwrap();
+        file.flush().unwrap();
+        assert_eq!(objectives(reader.read(&path, "one").unwrap()), ["thïrd"]);
         std::fs::remove_file(path).unwrap();
     }
 }

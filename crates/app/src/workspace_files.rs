@@ -166,12 +166,9 @@ pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
         &base,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
-    let mut status =
-        String::from_utf8(status).map_err(|_| "Git paths contain unsupported text encoding")?;
-    // A listing cut off at the size cap ends mid-record; drop the partial one.
-    if !status.is_empty() && !status.ends_with('\0') {
-        status.truncate(status.rfind('\0').map_or(0, |i| i + 1));
-    }
+    // Drop the partial record before decoding: the cut may split a UTF-8 path.
+    let status = String::from_utf8(complete_records(status))
+        .map_err(|_| "Git paths contain unsupported text encoding")?;
     let mut records = status.split('\0').filter(|s| !s.is_empty());
     let mut files = Vec::new();
     while let Some(record) = records.next() {
@@ -189,6 +186,15 @@ pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
         });
     }
     Ok((base, files))
+}
+
+/// A listing cut off at the size cap ends mid-record; keep only whole
+/// NUL-terminated records.
+fn complete_records(mut status: Vec<u8>) -> Vec<u8> {
+    if status.last().is_some_and(|&b| b != 0) {
+        status.truncate(status.iter().rposition(|&b| b == 0).map_or(0, |i| i + 1));
+    }
+    status
 }
 
 /// `head` comes from [`has_head`], resolved once for all files of a refresh.
@@ -372,6 +378,19 @@ mod tests {
         assert_eq!(rows[3].new, Some(9));
         let rows = review_lines("New file: a\n+first\n+second\n");
         assert_eq!(rows[1].new, Some(2));
+    }
+
+    #[test]
+    fn capped_status_keeps_whole_records_even_mid_character() {
+        assert_eq!(complete_records(b" M a\0?? b\0".to_vec()), b" M a\0?? b\0");
+        // The cap can split a multi-byte path; the partial record is dropped
+        // before decoding so the listing still loads.
+        let mut cut = " M first\0?? café".as_bytes().to_vec();
+        cut.pop();
+        let whole = complete_records(cut);
+        assert_eq!(String::from_utf8(whole).unwrap(), " M first\0");
+        assert!(complete_records(b"?? partial".to_vec()).is_empty());
+        assert!(complete_records(Vec::new()).is_empty());
     }
 
     #[test]

@@ -98,30 +98,24 @@ fn path() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("appearance.json")
 }
+/// Older preferences stored just the light/dark boolean; removed fields such
+/// as an opacity value are ignored. Unreadable files fall back to dark.
+fn parse(bytes: &[u8]) -> Preferences {
+    if let Ok(light) = serde_json::from_slice::<bool>(bytes) {
+        Preferences { light }
+    } else {
+        serde_json::from_slice::<Preferences>(bytes).unwrap_or_default()
+    }
+}
 pub fn load(cx: &mut App) {
     let preferences = std::fs::read(path())
-        .ok()
-        .and_then(|bytes| {
-            // Older preferences stored just the light/dark boolean.
-            if let Ok(light) = serde_json::from_slice::<bool>(&bytes) {
-                Some(Preferences { light })
-            } else {
-                serde_json::from_slice::<Preferences>(&bytes).ok()
-            }
-        })
+        .map(|bytes| parse(&bytes))
         .unwrap_or_default();
     apply(preferences.light, cx);
 }
 fn save() {
-    let path = path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     if let Ok(bytes) = serde_json::to_vec(&Preferences { light: light() }) {
-        let temporary = path.with_extension("json.tmp");
-        if std::fs::write(&temporary, bytes).is_ok() {
-            let _ = std::fs::rename(temporary, path);
-        }
+        let _ = crate::sessions::write_atomic(&path(), &bytes, 0o644);
     }
 }
 pub fn set(light: bool, cx: &mut App) {
@@ -270,4 +264,21 @@ pub fn rgb(value: u32) -> Rgba {
 }
 pub fn rgba(value: u32) -> Rgba {
     palette(gpui_kit::rgba(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn saved_theme_tolerates_legacy_unknown_and_corrupt_files() {
+        assert!(parse(b"true").light);
+        assert!(!parse(b"false").light);
+        assert!(parse(br#"{"light":true}"#).light);
+        // Removed opacity settings and future fields never break loading.
+        assert!(parse(br#"{"light":true,"opacity":0.4,"future":[1]}"#).light);
+        assert!(!parse(br#"{}"#).light);
+        assert!(!parse(b"{not json").light);
+        let bytes = serde_json::to_vec(&Preferences { light: true }).unwrap();
+        assert!(parse(&bytes).light);
+    }
 }

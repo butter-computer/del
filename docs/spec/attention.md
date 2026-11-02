@@ -112,7 +112,7 @@ showing:
 - Evidence: tests run with pass/fail, browser screenshots the agent captured.
 - Actions:
   - **Run** (see [run](run.md)),
-  - **Review with <other provider>** (see [provider switch](provider-switch.md)),
+  - **Review with <other provider>** (see [existing provider controls](../../README.md#models-and-reasoning)),
   - open diff, open in editor, create PR.
 
 ## Overview lens (a glance, not a home screen)

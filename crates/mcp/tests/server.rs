@@ -851,6 +851,46 @@ async fn chat_browser_credentials_are_bound_to_their_chat() {
 }
 
 #[tokio::test]
+async fn provider_execution_credentials_keep_chat_scope_and_revoke_independently() {
+    let e = env().await;
+    let chat = SessionId::new("stable-chat");
+    let old = SessionId::new("old-native");
+    let next = SessionId::new("new-native");
+    let a = e.server.register_chat_client(&old);
+    e.server.bind_chat(&old, &chat);
+    let b = e.server.register_chat_client(&next);
+    e.server.bind_chat(&next, &chat);
+    let allowed = call(
+        &b,
+        "browser",
+        json!({"action":"snapshot", "session_id":chat}),
+    )
+    .await;
+    assert_eq!(
+        allowed["result"]["content"][0]["text"],
+        "This host has no browser"
+    );
+    let denied = call(
+        &b,
+        "browser",
+        json!({"action":"snapshot", "session_id":"unrelated-chat"}),
+    )
+    .await;
+    assert!(
+        denied["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("own session")
+    );
+    e.server.revoke_session(&old);
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(post(&a.url, auth(&a), body.clone()).await.0, 401);
+    assert_eq!(post(&b.url, auth(&b), body.clone()).await.0, 200);
+    e.server.revoke_session(&next);
+    assert_eq!(post(&b.url, auth(&b), body).await.0, 401);
+}
+
+#[tokio::test]
 async fn chat_credentials_expose_project_peers_and_own_goal() {
     let e = env().await;
     let chat = e.server.register_chat_client(&SessionId::new("chat"));
@@ -1009,4 +1049,288 @@ async fn authenticated_project_peers_read_request_reply_and_preserve_work() {
         del_agent::PermissionMode::Ask
     );
     manager.shutdown().await;
+}
+
+/// Raw request with an arbitrary method and body; returns (status, body, Allow).
+async fn raw(
+    method: &'static str,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, String, Option<String>) {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut resp = match method {
+            "POST" => {
+                let mut req = agent.post(&url);
+                for (k, v) in &headers {
+                    req = req.header(k, v);
+                }
+                req.send(&body[..]).unwrap()
+            }
+            "GET" => {
+                let mut req = agent.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k, v);
+                }
+                req.call().unwrap()
+            }
+            "DELETE" => {
+                let mut req = agent.delete(&url);
+                for (k, v) in &headers {
+                    req = req.header(k, v);
+                }
+                req.call().unwrap()
+            }
+            _ => unreachable!(),
+        };
+        let allow = resp
+            .headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        (
+            resp.status().as_u16(),
+            resp.body_mut().read_to_string().unwrap_or_default(),
+            allow,
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn transport_rejects_other_methods_parse_errors_batches_and_oversized_bodies() {
+    let e = env().await;
+    for method in ["GET", "DELETE"] {
+        let (status, _, allow) = raw(method, &e.me.url, auth(&e.me), vec![]).await;
+        assert_eq!((status, allow.as_deref()), (405, Some("POST")), "{method}");
+    }
+    let (status, body, _) = raw("POST", &e.me.url, auth(&e.me), b"{not json".to_vec()).await;
+    assert_eq!(status, 200);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["error"]["code"], -32700);
+    assert_eq!(response["id"], Value::Null);
+
+    let batch = json!([{"jsonrpc":"2.0","id":1,"method":"ping"}]);
+    let (status, body) = post(&e.me.url, auth(&e.me), batch).await;
+    assert_eq!(status, 200);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["error"]["code"], -32600);
+
+    // A notify call just over the 1 MiB limit is refused before dispatch.
+    let mut oversized = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"notify","arguments":{"title":"x","body":""}}})
+    .to_string()
+    .into_bytes();
+    oversized.extend(std::iter::repeat_n(b' ', 1 << 20));
+    let (status, _, _) = raw("POST", &e.me.url, auth(&e.me), oversized).await;
+    assert_eq!(status, 413);
+    assert!(e.host.notifications().is_empty());
+    // Just under the limit is still served.
+    let mut fits = json!({"jsonrpc":"2.0","id":1,"method":"ping"})
+        .to_string()
+        .into_bytes();
+    fits.extend(std::iter::repeat_n(b' ', (1 << 20) - fits.len()));
+    let (status, _, _) = raw("POST", &e.me.url, auth(&e.me), fits).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn bearer_tokens_must_match_exactly_and_auth_precedes_parsing() {
+    let e = env().await;
+    let ping = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+    let token = e.me.token.clone();
+    for value in [
+        format!("bearer {token}"),
+        format!("Token {token}"),
+        format!("Bearer {}", &token[..token.len() - 1]),
+        format!("Bearer {token}x"),
+        format!("Bearer  {token}"),
+        format!("Bearer {}", token.to_uppercase()),
+        token.clone(),
+        "Bearer ".into(),
+    ] {
+        let h = vec![("Authorization".to_string(), value.clone())];
+        let (status, _, _) = raw("POST", &e.me.url, h, ping.to_string().into_bytes()).await;
+        assert_eq!(status, 401, "{value}");
+    }
+    // Garbage bodies from unauthenticated callers never reach the parser.
+    let (status, _, _) = raw("POST", &e.me.url, vec![], b"{not json".to_vec()).await;
+    assert_eq!(status, 401);
+    // Origin and Host checks run even with a valid token.
+    let mut h = auth(&e.me);
+    h.push(("Origin".into(), "null".into()));
+    assert_eq!(post(&e.me.url, h, ping.clone()).await.0, 403);
+    let port = e.server.addr().port();
+    for host in [
+        format!("localhost:{}", port.wrapping_add(1)),
+        "localhost:".into(),
+        format!("evil.example:{port}"),
+        format!("localhost.evil.example:{port}"),
+        format!("127.0.0.1.nip.io:{port}"),
+    ] {
+        let mut h = auth(&e.me);
+        h.push(("Host".into(), host.clone()));
+        assert_eq!(post(&e.me.url, h, ping.clone()).await.0, 403, "{host}");
+    }
+    for host in [format!("localhost:{port}"), "127.0.0.1".into()] {
+        let mut h = auth(&e.me);
+        h.push(("Host".into(), host.clone()));
+        assert_eq!(post(&e.me.url, h, ping.clone()).await.0, 200, "{host}");
+    }
+    // One session's token never authenticates as another.
+    let other = e.server.register_session(&SessionId::new("other"));
+    let r = call(
+        &other,
+        "report_status",
+        json!({"session_id":"me","state":"done","summary":"x"}),
+    )
+    .await;
+    assert!(is_error(&r));
+    assert!(e.host.reports().is_empty());
+    e.server.revoke_session(&SessionId::new("other"));
+    assert_eq!(post(&e.me.url, auth(&e.me), ping.clone()).await.0, 200);
+    assert_eq!(post(&other.url, auth(&other), ping).await.0, 401);
+}
+
+#[tokio::test]
+async fn notifications_never_run_tools_and_errors_echo_request_ids() {
+    let e = env().await;
+    let (status, body) = post(
+        &e.me.url,
+        auth(&e.me),
+        json!({"jsonrpc":"2.0","method":"tools/call",
+            "params":{"name":"notify","arguments":{"title":"t","body":"b"}}}),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (202, ""));
+    assert!(e.host.notifications().is_empty());
+
+    let request = |id: Value, params: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params});
+    for (id, params) in [
+        (json!("abc"), json!({"name":"no_such_tool","arguments":{}})),
+        (json!(7), json!({"arguments":{}})),
+        (json!(8), json!({"name":"notify","arguments":"title"})),
+        (json!(9), json!({"name":"notify","arguments":{"title":"t"}})),
+        (
+            json!(10),
+            json!({"name":"report_status","arguments":{"state":"done"}}),
+        ),
+    ] {
+        let (status, body) = post(&e.me.url, auth(&e.me), request(id.clone(), params)).await;
+        assert_eq!(status, 200);
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    // Absent arguments mean an empty object.
+    let r = rpc(&e.me, "tools/call", json!({"name":"list_sessions"})).await;
+    assert!(!is_error(&r), "{r}");
+    assert!(e.host.notifications().is_empty());
+}
+
+#[tokio::test]
+async fn tool_inputs_are_bounded_server_side() {
+    let e = env().await;
+    let long = |n: usize| "x".repeat(n);
+    for (tool, args) in [
+        (
+            "report_status",
+            json!({"state":"working","summary":long(501)}),
+        ),
+        ("report_status", json!({"state":"working","summary":" "})),
+        ("ask_user", json!({"question":long(4001)})),
+        ("ask_user", json!({"question":"q","options":[long(201)]})),
+        ("ask_user", json!({"question":"q","options":[" "]})),
+        ("notify", json!({"title":long(121),"body":""})),
+        ("notify", json!({"title":"  ","body":""})),
+        ("notify", json!({"title":"t","body":long(1001)})),
+        (
+            "send_to_session",
+            json!({"session_id":"me","text":long(20_001),"idempotency_key":"k"}),
+        ),
+        (
+            "send_to_session",
+            json!({"session_id":"me","text":"","idempotency_key":"k"}),
+        ),
+        (
+            "spawn_session",
+            json!({"provider":"codex","cwd":"/tmp","prompt":" "}),
+        ),
+        (
+            "spawn_session",
+            json!({"provider":"codex","cwd":"/tmp","prompt":long(50_001)}),
+        ),
+    ] {
+        let r = call(&e.me, tool, args).await;
+        assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+    }
+    assert!(e.host.reports().is_empty());
+    assert!(e.host.notifications().is_empty());
+    assert!(e.host.sent().is_empty());
+    assert!(e.host.spawned().is_empty());
+    // Exactly at the limits is accepted.
+    let ok = call(
+        &e.me,
+        "report_status",
+        json!({"state":"idle","summary":long(500)}),
+    )
+    .await;
+    assert!(!is_error(&ok));
+    let ok = call(
+        &e.me,
+        "notify",
+        json!({"title":long(120),"body":long(1000)}),
+    )
+    .await;
+    assert_eq!(ok["result"]["content"][0]["text"], "notified");
+    assert!(ok["result"].get("structuredContent").is_none());
+    // Unknown providers are invalid params, not tool errors.
+    let r = call(
+        &e.me,
+        "spawn_session",
+        json!({"provider":"gpt","cwd":"/tmp","prompt":"x"}),
+    )
+    .await;
+    assert_eq!(r["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn chat_and_terminal_credentials_keep_their_tool_boundaries() {
+    let e = env().await;
+    let chat = e.server.register_chat_client(&SessionId::new("chat"));
+    for (tool, args) in [
+        ("report_status", json!({"state":"done","summary":"x"})),
+        ("ask_user", json!({"question":"q"})),
+        ("notify", json!({"title":"t","body":"b"})),
+        ("no_such_tool", json!({})),
+    ] {
+        let r = call(&chat, tool, args).await;
+        assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+    }
+    assert!(e.host.reports().is_empty());
+    assert!(e.host.notifications().is_empty());
+    // Full (terminal) credentials have no goal tool.
+    let r = call(&e.me, "goal", json!({"action":"get"})).await;
+    assert_eq!(r["result"]["isError"], true);
+    let browser = e.server.register_browser_client(&SessionId::new("b"));
+    for tool in [
+        "report_status",
+        "spawn_session",
+        "session_work",
+        "send_to_session",
+    ] {
+        let r = call(&browser, tool, json!({})).await;
+        assert_eq!(r["result"]["isError"], true, "{tool}");
+    }
+    // Revocation clears the kind; the next registration chooses it again.
+    e.server.revoke_session(&SessionId::new("b"));
+    let rotated = e.server.register_session(&SessionId::new("b"));
+    let list = rpc(&rotated, "tools/list", json!({})).await;
+    assert!(list["result"]["tools"].as_array().unwrap().len() > 1);
 }
