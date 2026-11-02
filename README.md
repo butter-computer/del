@@ -1065,12 +1065,20 @@ behind a chat or terminal. Each style has its own response rather than a shared 
 | Contours | A low, broad swell that gently bends the nearby lines |
 | Drift | Stirs the air so dust swirls and follows, and holds a small light |
 | Fluted Glass | A light behind the glass, bending through the fixed ribs |
-| Curtains, Window Curtains | A hand that presses into the cloth and drags it as it sweeps, up to a firm limit however fast it moves |
+| Curtains | A hand that presses into the cloth and drags it as it sweeps, up to a firm limit however fast it moves |
+| Window Curtains | The same passing hand; press and hold on a curtain to drag it, as described below |
 | Rain | An umbrella: drops land on it, and it's dry underneath |
 | Clouds | Clears a trail through the cloud that slowly fills back in |
 | Falling Leaves | Blows leaves aside and sets them spinning |
 | Pudding | Nothing on hover; press and hold on it to stretch and pull it around |
 | Seafloor | Nothing on hover; a click drops a stone, and the caustics follow its rings |
+
+Each Window Curtains panel can be taken hold of. A soft patch of fabric under the cursor
+follows the hand without being crushed, and the hand closes gently, so taking hold sends no
+shock through the panel. Held near the rail it slides the hooks at once, bunching them ahead of the
+hand; held low it swings first and only pulls the rail once the fabric is tight, and a hand
+can lift it part way. Let go and it floats down and settles with no ripple. Each panel has its
+own travel limit, stays where it is left, and moves without disturbing its neighbours. Presses on the input bar and footer don't count.
 
 Rendering stays on the GPU, with a shared fade toward the bottom and soft blur
 behind the composer. Heavier styles (Curtains, Clouds, Fluted Glass) use more GPU.

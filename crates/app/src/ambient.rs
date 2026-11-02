@@ -228,7 +228,9 @@ impl LifeBackground {
                 AmbientSurface::Chat | AmbientSurface::Terminal
             ));
             if surface != AmbientSurface::Landing {
-                self.fluid.clear_region(1); // Only the landing page has the options footer.
+                // Only the landing page has the options footer's two groups.
+                self.fluid.clear_region(1);
+                self.fluid.clear_region(2);
             }
             if surface == AmbientSurface::Terminal {
                 self.fluid.clear_region(0); // Terminals have no input bar to land on.

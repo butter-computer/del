@@ -88,6 +88,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
         const char *mode = getenv("DEL_RENDER_MOUSE");
         bool sweep = mode && strcmp(mode, "sweep") == 0, pull = mode && strcmp(mode, "pull") == 0;
         bool fast = mode && strcmp(mode, "fast") == 0, click = mode && strcmp(mode, "click") == 0;
+        // =draglow or =dragtop take hold of the right curtain there and drag it towards the middle.
+        bool dragLow = mode && strcmp(mode, "draglow") == 0, dragTop = mode && strcmp(mode, "dragtop") == 0;
         if (getenv("DEL_RENDER_BLUR")) del_fluid_blurred(renderer, true);
         double start = CACurrentMediaTime(), gpu = 0, worst = 0;
         int frames = 0, shot = 0;
@@ -103,7 +105,12 @@ int main(int argc, const char **argv) { @autoreleasepool {
             }
             if (fast) { mx = LOGICAL_W * (0.5 + 0.42 * sin(now * 24)); my = LOGICAL_H * (0.45 + 0.30 * sin(now * 17)); }
             if (click) { mx = LOGICAL_W * 0.5; my = LOGICAL_H * 0.32; del_fluid_force_press(renderer, now > seconds - 0.55 && now < seconds - 0.45); }
-            CVPixelBufferRef buffer = del_fluid_frame(renderer, LOGICAL_W, LOGICAL_H, SCALE, 1, 12, mx, my, 0, 0, light, style, tint.x, tint.y, tint.z, tint.w, sweep || pull || fast || click);
+            if (dragLow || dragTop) {
+                double t = fmin(fmax((now - seconds * 0.45) / (seconds * 0.45), 0), 1);
+                mx = 945 - t * 330; my = (dragLow ? 480 : 40) - (dragLow ? t * 120 : 0);
+                del_fluid_force_press(renderer, now > seconds * 0.35 && now < seconds + 2.0);
+            }
+            CVPixelBufferRef buffer = del_fluid_frame(renderer, LOGICAL_W, LOGICAL_H, SCALE, 1, 12, mx, my, 0, 0, light, style, tint.x, tint.y, tint.z, tint.w, sweep || pull || fast || click || dragLow || dragTop);
             id<MTLCommandBuffer> command = [queue commandBuffer];
             del_fluid_prepare(buffer, (__bridge void *)command);
             [command commit];

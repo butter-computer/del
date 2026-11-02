@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/dictation.m");
     println!("cargo:rerun-if-changed=src/fluid.m");
     println!("cargo:rerun-if-changed=src/weather.h");
+    println!("cargo:rerun-if-changed=src/curtain.h");
     println!("cargo:rerun-if-changed=src/backdrop.m");
     println!("cargo:rerun-if-changed=src/fluid.metal");
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");

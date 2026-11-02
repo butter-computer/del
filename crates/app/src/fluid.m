@@ -4,8 +4,10 @@
 #import <QuartzCore/QuartzCore.h>
 #import <simd/simd.h>
 #import "weather.h"
+#import "curtain.h"
+#import <stdatomic.h>
 
-struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, composer, footer, blur, tint, animation, stroke; simd_float4 rain[DEL_RAIN_COUNT]; float lean[DEL_RAIN_COUNT]; };
+struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, composer, footer, blur, tint, animation, stroke; simd_float4 rain[DEL_RAIN_COUNT]; float lean[DEL_RAIN_COUNT]; simd_float4 rails[DEL_CURTAIN_PANELS]; simd_float4 footerSide; };
 @class DelFluidRenderer;
 @interface DelFluidOwner : NSObject
 @property(nonatomic,weak) DelFluidRenderer *renderer;
@@ -24,12 +26,26 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     id<MTLTexture> _windowScene, _branches, _shafts[2], _sea[2], _seaSurface, _caustics, _strong[2];
     simd_float4 _seaWaves[26];
     BOOL _seaWavesReady, _wasPressed, _pressBegan;
+    // A held Window Curtains panel. Rails are stored as shares of the width, so they survive
+    // resizing; picking copies the cloth to the CPU once, on the frame the button goes down.
+    DelCurtainRail _rails[DEL_CURTAIN_PANELS];
+    BOOL _railsReady, _clothHeld, _pickWanted, _pickPending;
+    id<MTLBuffer> _pickBuffer;
+    atomic_bool _pickReady;
+    int _heldColumn, _heldRow;
+    simd_float2 _heldOffset, _heldTarget;
+    simd_float3 _heldPoint;
+    simd_float2 _heldNatural;
+    float _heldAge, _heldDepth;
+    float _heldFirmness, _heldSettle, _letGoAge, _handShare;
+    BOOL _lettingGo, _cursorMoved;
+    simd_float2 _letGoAt;
     simd_float2 _seaDrop;
     float _seaDropAge, _seaBusyUntil;
     BOOL _seaDirty;
     DelRunoff _runoff[DEL_RUNOFF_COUNT];
     DelRunoffDroplet _droplets[DEL_RUNOFF_COUNT];
-    simd_float4 _regions[2];
+    simd_float4 _regions[3];
     simd_float2 _radii;
     NSUInteger _dyeIndex, _simWidth, _simHeight, _generation, _universeSeed;
     struct DelFluidParams _params;
@@ -46,7 +62,7 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     float _nextKick, _kickUntil, _plateY;
     simd_float3 _kick;
     NSMutableDictionary *_renderPipelines, *_computePipelines;
-    simd_float4 _rainComposer, _rainFooter, _rainGeometry;
+    simd_float4 _rainComposer, _rainFooter, _rainSide, _rainGeometry;
     simd_float2 _rainRadii;
     float _rainTime;
     BOOL _running, _clear;
@@ -79,7 +95,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     return [device newLibraryWithData:data error:error];
 }
 @implementation DelFluidRenderer
-- (instancetype)init { if((self=[super init])) { _clear=YES;_seaDropAge=1;_universeSeed=arc4random_uniform(65536); } return self; }
+- (instancetype)init { if((self=[super init])) { _clear=YES;_seaDropAge=1;_handShare=1;_cursorMoved=YES;_universeSeed=arc4random_uniform(65536); } return self; }
 - (void)dealloc { if(_surface)CFRelease(_surface);if(_cache)CFRelease(_cache);if(_buffer)CFRelease(_buffer); }
 - (void)setBlurred:(BOOL)blurred { _blurred=blurred; }
 - (void)forcePress:(BOOL)pressed { _forcePress=pressed; }
@@ -87,8 +103,9 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     if(_running!=running) { _running=running;_lastFrame=0;_liquidPointerValid=NO;_rainReady=NO; }
 }
 - (void)region:(NSUInteger)slot x:(double)x y:(double)y width:(double)width height:(double)height radius:(double)radius {
-    if(slot>1)return;
-    _regions[slot]=(simd_float4){x,y,width,height};_radii[slot]=radius;
+    if(slot>2)return;
+    // Slots 1 and 2 are the two groups under the input bar, which share one corner radius.
+    _regions[slot]=(simd_float4){x,y,width,height};_radii[slot==0?0:1]=radius;
 }
 - (CVPixelBufferRef)frameWidth:(double)width height:(double)height scale:(double)scale zoom:(double)zoom radius:(double)radius
     mouseX:(double)x mouseY:(double)y light:(BOOL)light style:(unsigned int)style tint:(simd_float4)tint reactive:(BOOL)reactive {
@@ -113,9 +130,10 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     if(!_pointerInitialized&&inside) {
         _params.pointer.z=point.x;_params.pointer.w=point.y;_pointerInitialized=YES;
     }
-    _params.composer=_regions[0];_params.footer=_regions[1];
+    _params.composer=_regions[0];_params.footer=_regions[1];_params.footerSide=_regions[2];
     _params.composer.x-=self.origin.x;_params.composer.y-=self.origin.y;
     _params.footer.x-=self.origin.x;_params.footer.y-=self.origin.y;
+    _params.footerSide.x-=self.origin.x;_params.footerSide.y-=self.origin.y;
     _params.blur=(simd_float4){_radii.x,_radii.y,scale,0};
     _params.clock.y=light?1:0;
     _params.tint=tint;_params.animation.x=style;_params.animation.y=reactive?1:0;
@@ -159,6 +177,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     _particles[0]=_particles[1]=nil;_puddingX[0]=_puddingX[1]=nil;_puddingV[0]=_puddingV[1]=nil;
     _contour=nil;_cloudNoise=nil;_cloud[0]=_cloud[1]=nil;_cloudWake[0]=_cloudWake[1]=nil;_field=nil;_fieldSamples=nil;_fieldDepth=nil;
     _windowScene=nil;_branches=nil;_shafts[0]=_shafts[1]=nil;_sea[0]=_sea[1]=nil;_seaSurface=nil;_caustics=nil;_grabbing=NO;_seaDropAge=1;
+    _railsReady=NO;_clothHeld=NO;_pickWanted=NO;_pickPending=NO;_heldFirmness=0;_heldSettle=0;_lettingGo=NO;_handShare=1;_cursorMoved=YES;
     memset(_runoff,0,sizeof(_runoff));memset(_droplets,0,sizeof(_droplets));
     _liquidPointerValid=NO;_clearStyle=YES;
 }
@@ -242,6 +261,12 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
     NSUInteger steps=MAX(1,(NSUInteger)ceilf(dt*120.0f));
     struct DelFluidParams cloth=_params;
     cloth.impulse.w=dt/(float)steps;
+    // A held curtain follows the hand directly; the passing-hand wind and dent stand down.
+    cloth.animation.z*=_handShare;cloth.impulse.x*=_handShare;cloth.impulse.y*=_handShare;
+    if(_clothHeld||_heldFirmness>0||_heldSettle>0) {
+        cloth.life=(simd_float4){_heldColumn,_heldRow,_heldFirmness,_heldSettle};
+        cloth.stroke=(simd_float4){_heldPoint.x,_heldPoint.y,_heldPoint.z,0};
+    } else cloth.life=(simd_float4){0,0,0,0};
     [encoder setBytes:&cloth length:sizeof(cloth) atIndex:0];
     for(NSUInteger step=0;step<steps;step++) {
         [encoder setTexture:_clothX atIndex:0];[encoder setTexture:_clothV[0] atIndex:1];[encoder setTexture:_clothP[0] atIndex:2];
@@ -256,6 +281,79 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         id<MTLTexture> swap=_clothX;_clothX=_clothP[0];_clothP[0]=swap;
         swap=_clothV[0];_clothV[0]=_clothV[1];_clothV[1]=swap;
     }
+}
+// One frame of taking hold of, dragging and letting go of a Window Curtains panel.
+- (void)holdCurtains:(float)dt {
+    float zoom=fmaxf(_params.geometry.z,0.1f);
+    simd_float2 extent={_params.geometry.x/zoom,_params.geometry.y/zoom};
+    if(!_railsReady) {
+        for(int i=0;i<DEL_CURTAIN_PANELS;i++) {
+            DelCurtainRail rest=del_curtain_rest(i,extent.x);
+            _rails[i]=(DelCurtainRail){rest.left/extent.x,rest.hook/extent.x,rest.right/extent.x,rest.at};
+        }
+        _railsReady=YES;
+    }
+    simd_float2 cursor={_params.pointer.x*extent.x,_params.pointer.y*extent.y};
+    if(_pressBegan&&_params.animation.y>0.5f&&_params.pointer.x>=0&&_params.pointer.y>=0&&_params.pointer.x<1&&_params.pointer.y<1)_pickWanted=YES;
+    if(_pickPending&&atomic_load(&_pickReady)) {
+        _pickPending=NO;
+        int column=0,row=0;
+        if(_pressed&&del_curtain_pick(_pickBuffer.contents,DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS,DEL_CURTAIN_ROWS,cursor,&column,&row)) {
+            const float *p=(const float *)_pickBuffer.contents+(row*DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS+column)*4;
+            _clothHeld=YES;_lettingGo=NO;_heldSettle=0;_heldColumn=column;_heldRow=row;
+            _heldOffset=(simd_float2){p[0],p[1]}-cursor;
+            _heldTarget=(simd_float2){p[0],p[1]};
+            _heldPoint=(simd_float3){p[0],p[1],p[2]};
+            _heldDepth=p[2];_heldAge=0;
+            // Take hold at this hook, leaving every hook where it hangs.
+            int panel=column/DEL_CURTAIN_PANEL_COLUMNS;
+            float s=(float)(column%DEL_CURTAIN_PANEL_COLUMNS)/(DEL_CURTAIN_PANEL_COLUMNS-1);
+            DelCurtainRail *rail=&_rails[panel];
+            rail->hook=del_curtain_hook_x(*rail,s);rail->at=fminf(fmaxf(s,0.02f),0.98f);
+            // Limits count from how it's hanging now, so taking hold moves nothing by itself.
+            _heldNatural=(simd_float2){p[0]-rail->hook*extent.x,p[1]};
+        }
+    }
+    if(_clothHeld&&!_pressed){_clothHeld=NO;_lettingGo=YES;_letGoAge=0;_cursorMoved=NO;_letGoAt=cursor;}
+    if(!_cursorMoved&&simd_distance(cursor,_letGoAt)>10.0f)_cursorMoved=YES;
+    _handShare=del_curtain_hand(_handShare,_clothHeld||_heldFirmness>0,_cursorMoved,dt);
+    if(_clothHeld) {
+        _heldAge+=dt;
+        _heldFirmness=del_curtain_grip_in(_heldAge);
+        _heldSettle=DEL_CURTAIN_HELD_CALM;
+    }
+    if(_lettingGo&&dt>0) {
+        // The hand opens slowly and the point sinks to hang below its hook again.
+        _letGoAge+=dt;
+        int panel=_heldColumn/DEL_CURTAIN_PANEL_COLUMNS;
+        float s=(float)(_heldColumn%DEL_CURTAIN_PANEL_COLUMNS)/(DEL_CURTAIN_PANEL_COLUMNS-1);
+        DelCurtainRail *stored=&_rails[panel];
+        DelCurtainRail rail={stored->left*extent.x,stored->hook*extent.x,stored->right*extent.x,stored->at};
+        // Exactly where this fabric was hanging when taken hold of, relative to where its hook is
+        // now. Sinking anywhere else pulls it out of shape, and it springs back as a late ripple.
+        simd_float3 hanging={del_curtain_hook_x(rail,s)+_heldNatural.x,_heldNatural.y,_heldDepth};
+        _heldPoint=del_curtain_sink(_heldPoint,hanging,_letGoAge,dt);
+        _heldFirmness=fminf(_heldFirmness,del_curtain_grip(_letGoAge));
+        _heldSettle=del_curtain_settle(_letGoAge);
+        if(_letGoAge>=DEL_CURTAIN_SETTLE_SECONDS){_lettingGo=NO;_heldFirmness=0;_heldSettle=0;}
+    }
+    if(_clothHeld&&dt>0) {
+        // The hand has weight: it follows the cursor closely, but a flick can't teleport it.
+        simd_float2 wanted=cursor+_heldOffset,step=(wanted-_heldTarget)*(1.0f-expf(-dt*14.0f));
+        float travel=simd_length(step),most=900.0f*dt;
+        if(travel>most)step*=most/travel;
+        _heldTarget+=step;
+        int panel=_heldColumn/DEL_CURTAIN_PANEL_COLUMNS;
+        DelCurtainHome home=del_curtain_home(panel,extent.x);
+        DelCurtainRail *stored=&_rails[panel];
+        DelCurtainRail rail={stored->left*extent.x,stored->hook*extent.x,stored->right*extent.x,stored->at};
+        float restV=(extent.y+70.0f)/(DEL_CURTAIN_ROWS-1);
+        simd_float2 held=del_curtain_hold(&rail,_heldTarget,_heldRow*restV,_heldNatural,dt,home);
+        *stored=(DelCurtainRail){rail.left/extent.x,rail.hook/extent.x,rail.right/extent.x,rail.at};
+        // Held fabric comes very slightly forward, towards the hand.
+        _heldPoint=(simd_float3){held.x,held.y,_heldPoint.z+(_heldDepth+14.0f-_heldPoint.z)*(1.0f-expf(-dt*2.0f))};
+    }
+    for(int i=0;i<DEL_CURTAIN_PANELS;i++)_params.rails[i]=(simd_float4){_rails[i].left,_rails[i].hook,_rails[i].right,_rails[i].at};
 }
 - (void)stepParticles:(id<MTLComputeCommandEncoder>)encoder kernel:(NSString *)name width:(NSUInteger)width height:(NSUInteger)height dt:(float)dt {
     id<MTLComputePipelineState> pipeline=[self compute:name];
@@ -651,7 +749,14 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         }
         _params.pointer.z+=step.x;_params.pointer.w+=step.y;
     }
-    _pressBegan=_pressed&&!_wasPressed;_wasPressed=_pressed;
+    // A press only counts on the background itself, not on the input bar or its footer.
+    {
+        simd_float2 at={_params.pointer.x*_params.geometry.x,_params.pointer.y*_params.geometry.y};
+        simd_float4 bars[3]={_params.composer,_params.footer,_params.footerSide};
+        BOOL onBar=NO;
+        for(int i=0;i<3;i++)if(bars[i].z>0&&bars[i].w>0&&at.x>=bars[i].x&&at.y>=bars[i].y&&at.x<bars[i].x+bars[i].z&&at.y<bars[i].y+bars[i].w)onBar=YES;
+        _pressBegan=_pressed&&!_wasPressed&&!onBar;_wasPressed=_pressed;
+    }
     if(_params.animation.y<0.5f)_reaction=0;
     else _reaction+=(_params.life.z-_reaction)*(1.0f-expf(-dt*7.0f));
     _params.animation.z=_reaction;
@@ -679,21 +784,23 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
     _params.life.x=generation?1:0;_params.life.y=(float)_generation;_params.life.w=(float)_universeSeed;
     unsigned int style=(unsigned int)_params.animation.x;
     if(style!=_activeStyle) {[self releaseStyleState];_activeStyle=style;}
+    if(style==12)[self holdCurtains:dt];
+    else memset(_params.rails,0,sizeof(_params.rails));
     _frameCount++;
     if(style==8) {
         float zoom=fmaxf(_params.geometry.z,0.1f);
         simd_float2 extent=(simd_float2){_params.geometry.x,_params.geometry.y}/zoom;
-        simd_float4 composer=_params.composer/zoom,footer=_params.footer/zoom;
+        simd_float4 composer=_params.composer/zoom,footer=_params.footer/zoom,side=_params.footerSide/zoom;
         simd_float2 radii=(simd_float2){_params.blur.x,_params.blur.y}/zoom;
         simd_float3 shelter={_params.pointer.z*extent.x,_params.pointer.w*extent.y,64.0f*_reaction};
-        BOOL stable=_rainReady&&simd_all(composer==_rainComposer)&&simd_all(footer==_rainFooter)
+        BOOL stable=_rainReady&&simd_all(composer==_rainComposer)&&simd_all(footer==_rainFooter)&&simd_all(side==_rainSide)
             &&simd_all(_params.geometry==_rainGeometry)&&simd_all(radii==_rainRadii);
-        simd_float4 surfaces[2]={composer,footer};
+        simd_float4 surfaces[3]={composer,footer,side};
         for(unsigned i=0;i<DEL_RAIN_COUNT;i++) {
             float lean=0;
-            simd_float4 drop=del_rain_drop(i,_time,extent,composer,footer,radii,shelter,&lean);
-            int surface=del_rain_surface(drop,composer,footer,radii);
-            if(stable&&_running&&surface>=0&&del_rain_impact(del_rain_drop(i,_rainTime,extent,composer,footer,radii,shelter,NULL),drop)) {
+            simd_float4 drop=del_rain_drop(i,_time,extent,composer,footer,side,radii,shelter,&lean);
+            int surface=del_rain_surface(drop,composer,footer,side,radii);
+            if(stable&&_running&&surface>=0&&del_rain_impact(del_rain_drop(i,_rainTime,extent,composer,footer,side,radii,shelter,NULL),drop)) {
                 // Every drop that lands leaves a bead behind.
                 del_runoff_spawn(_runoff,surface,(simd_float2){drop.x,drop.y},surfaces[surface],surface==0?radii.x:radii.y,1.05f+0.75f*del_weather_random(i*31u+(uint32_t)(_time*60.0f)));
             }
@@ -701,7 +808,7 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         }
         if(_running)del_runoff_step(_runoff,dt,surfaces,radii,extent.y+30,_droplets);
         _params.stroke.x=del_rain_slope(_time);
-        _rainComposer=composer;_rainFooter=footer;_rainGeometry=_params.geometry;_rainRadii=radii;
+        _rainComposer=composer;_rainFooter=footer;_rainSide=side;_rainGeometry=_params.geometry;_rainRadii=radii;
         _rainTime=_time;_rainReady=_running;
     } else _rainReady=NO;
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
@@ -779,6 +886,22 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         id<MTLBlitCommandEncoder> blit=[command blitCommandEncoder];
         [blit generateMipmapsForTexture:_clothDetail];[blit endEncoding];
         _clothDetailDirty=NO;
+    }
+    if(_pickWanted&&_clothX) {
+        // Copy where the cloth is right now; the next frames pick the fabric under the cursor.
+        _pickWanted=NO;
+        NSUInteger columns=DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS;
+        if(!_pickBuffer)_pickBuffer=[self.device newBufferWithLength:columns*DEL_CURTAIN_ROWS*16 options:MTLResourceStorageModeShared];
+        id<MTLBlitCommandEncoder> copy=[command blitCommandEncoder];
+        [copy copyFromTexture:_clothX sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(columns,DEL_CURTAIN_ROWS,1)
+            toBuffer:_pickBuffer destinationOffset:0 destinationBytesPerRow:columns*16 destinationBytesPerImage:columns*DEL_CURTAIN_ROWS*16];
+        [copy endEncoding];
+        atomic_store(&_pickReady,false);_pickPending=YES;
+        __weak DelFluidRenderer *weakSelf=self;
+        [command addCompletedHandler:^(id<MTLCommandBuffer> finished) {
+            DelFluidRenderer *strong=weakSelf;
+            if(strong)atomic_store(&strong->_pickReady,true);
+        }];
     }
     if(style==5||style==7||style==8||style==11||style==12)[self drawField:command style:style];
     // Reusable offscreen scene + two half-resolution Gaussian intermediates.

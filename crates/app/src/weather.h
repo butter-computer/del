@@ -33,16 +33,16 @@ static inline float del_rain_slope(float time) {
 }
 // March one straight slanted drop until it meets a bar or the umbrella, and report where.
 // The same walk runs on the GPU for the far rain, so both layers share one collision.
-static inline float del_rain_scene(simd_float2 p,simd_float4 composer,simd_float4 footer,simd_float2 radii,simd_float3 shelter) {
-    float d=fminf(del_rain_bar(p,composer,radii.x),del_rain_bar(p,footer,radii.y));
+static inline float del_rain_scene(simd_float2 p,simd_float4 composer,simd_float4 footer,simd_float4 side,simd_float2 radii,simd_float3 shelter) {
+    float d=fminf(del_rain_bar(p,composer,radii.x),fminf(del_rain_bar(p,footer,radii.y),del_rain_bar(p,side,radii.y)));
     if(shelter.z>=1)d=fminf(d,simd_distance(p,(simd_float2){shelter.x,shelter.y})-shelter.z);
     return d;
 }
-static inline simd_float2 del_rain_land(float top,float slope,float bottom,simd_float4 composer,simd_float4 footer,simd_float2 radii,simd_float3 shelter) {
+static inline simd_float2 del_rain_land(float top,float slope,float bottom,simd_float4 composer,simd_float4 footer,simd_float4 side,simd_float2 radii,simd_float3 shelter) {
     float scale=1.0f/sqrtf(1+slope*slope),y=-60;
     for(int i=0;i<48&&y<bottom;i++) {
         simd_float2 p={top+slope*y,y};
-        float d=del_rain_scene(p,composer,footer,radii,shelter);
+        float d=del_rain_scene(p,composer,footer,side,radii,shelter);
         if(d<0.02f)return p;
         y+=d*scale;
     }
@@ -54,7 +54,7 @@ static inline simd_float2 del_rain_land(float top,float slope,float bottom,simd_
 // drops, and every lane re-rolls its position each cycle. `lean` receives that slope.
 // shelter is the mouse-reactive umbrella: x, y and radius (0 when there is none).
 static inline simd_float4 del_rain_drop(unsigned lane,float time,simd_float2 extent,
-    simd_float4 composer,simd_float4 footer,simd_float2 radii,simd_float3 shelter,float *lean) {
+    simd_float4 composer,simd_float4 footer,simd_float4 side,simd_float2 radii,simd_float3 shelter,float *lean) {
     float bottom=extent.y+40;
     float period=(bottom+60)/DEL_RAIN_MIN_SPEED+0.35f+del_weather_random(lane)*1.1f;
     float shifted=time+del_weather_random(lane+131)*period;
@@ -66,17 +66,19 @@ static inline simd_float4 del_rain_drop(unsigned lane,float time,simd_float2 ext
     // Spread lanes along the top edge, reaching far enough upwind to cover the whole window.
     float upwind=slope*(bottom+60);
     float top=(lane+0.05f+0.9f*del_weather_random(key))/DEL_RAIN_COUNT*(extent.x+upwind)-upwind;
-    simd_float2 land=del_rain_land(top,slope,bottom,composer,footer,radii,shelter);
+    simd_float2 land=del_rain_land(top,slope,bottom,composer,footer,side,radii,shelter);
     float speed=DEL_RAIN_MIN_SPEED+(DEL_RAIN_MAX_SPEED-DEL_RAIN_MIN_SPEED)*del_weather_random(key+73);
     float age=local-(land.y+60)/speed;
     if(del_weather_random(key+211)>del_rain_intensity(start))return (simd_float4){land.x,land.y,age,0};
     return (simd_float4){land.x,land.y,age,land.y<bottom?speed:-speed};
 }
-// Which bar a drop stopped on: 0 composer, 1 footer, -1 neither (the umbrella, or a miss).
-static inline int del_rain_surface(simd_float4 drop,simd_float4 composer,simd_float4 footer,simd_float2 radii) {
+// Which bar a drop stopped on: 0 composer, 1 and 2 the two groups under it, -1 neither (the
+// umbrella, or a miss). Those groups are separate: the space between them is open air.
+static inline int del_rain_surface(simd_float4 drop,simd_float4 composer,simd_float4 footer,simd_float4 side,simd_float2 radii) {
     if(drop.w<=0)return -1;
     simd_float2 p={drop.x,drop.y};
     if(del_rain_bar(p,footer,radii.y)<0.05f)return 1;
+    if(del_rain_bar(p,side,radii.y)<0.05f)return 2;
     if(del_rain_bar(p,composer,radii.x)<0.05f)return 0;
     return -1;
 }
@@ -147,7 +149,7 @@ static inline void del_runoff_spawn(DelRunoff *pool,int surface,simd_float2 poin
     }
     pool[slot]=(DelRunoff){.live=true,.falling=false,.surface=surface,.side=side,.distance=distance,.speed=8,.radius=size,.age=0};
 }
-static inline void del_runoff_step(DelRunoff *pool,float dt,simd_float4 rects[2],simd_float2 radii,float bottom,DelRunoffDroplet *out) {
+static inline void del_runoff_step(DelRunoff *pool,float dt,simd_float4 rects[3],simd_float2 radii,float bottom,DelRunoffDroplet *out) {
     for(int i=0;i<DEL_RUNOFF_COUNT;i++) {
         DelRunoff *d=&pool[i];
         out[i].shape=(simd_float4){0,0,0,0};

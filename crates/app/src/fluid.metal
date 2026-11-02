@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; float4 tint; float4 animation; float4 stroke; float4 rain[64]; float lean[64]; };
+struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; float4 tint; float4 animation; float4 stroke; float4 rain[64]; float lean[64]; float4 rails[3]; float4 footerSide; };
 // Stable integer hashes are used only for initial soup / rare localized reseeds.
 // The visible state between those events is determined exclusively by Conway.
 float randomCell(uint2 p,uint seed) {
@@ -231,7 +231,7 @@ constant int CLOTH_COLUMNS=CLOTH_PANELS*CLOTH_PANEL_COLUMNS;
 // However hard the cursor sweeps: the strongest wind it can raise, and the furthest any
 // point may swing from below its pin. Slow moves stay fully responsive; fast ones saturate,
 // so fabric can never whip round itself and clip through its own folds.
-constant float CLOTH_HAND_WIND=760.0f,CLOTH_SWAY=70.0f,CLOTH_SWAY_DROP=0.20f,CLOTH_TOP_SPEED=800.0f,CLOTH_LEAST_DROP=0.84f;
+constant float CLOTH_HAND_WIND=760.0f,CLOTH_SWAY=70.0f,CLOTH_SWAY_DROP=0.20f,CLOTH_TOP_SPEED=800.0f,CLOTH_CALM_SPEED=250.0f,CLOTH_LEAST_DROP=0.84f;
 struct ClothRig { float panelWidth,gap,left,restU,restV,amplitude; };
 ClothRig clothRig(float2 extent,float style) {
     ClothRig r;
@@ -245,8 +245,11 @@ ClothRig clothRig(float2 extent,float style) {
     r.amplitude=wavelength*0.36f;
     return r;
 }
-float3 clothRail(int column,float2 extent,float style) {
-    ClothRig r=clothRig(extent,style);
+// Where each thread is pinned. Window Curtains' hooks can be dragged along the rail (rails:
+// left, held hook and right as shares of the width, then how far along the hook is). Fabric
+// doesn't change length, so where hooks bunch up the pleats between them run deeper.
+float3 clothRail(int column,float2 extent,constant Params &u) {
+    ClothRig r=clothRig(extent,u.animation.x);
     int panel=column/CLOTH_PANEL_COLUMNS;
     float s=float(column%CLOTH_PANEL_COLUMNS)/float(CLOTH_PANEL_COLUMNS-1);
     // The middle panel hangs on a rail further back, so panels overlap in depth.
@@ -254,8 +257,16 @@ float3 clothRail(int column,float2 extent,float style) {
     // Hand-hung pleats: uneven spacing and depth, so the rail never reads as a comb.
     float warped=s+0.035f*sin(s*11.0f+float(panel)*2.3f)+0.018f*sin(s*23.0f+float(panel)*4.1f);
     float depth=r.amplitude*(0.72f+0.38f*sin(s*7.0f+float(panel)*1.1f));
-    return float3(r.left+float(panel)*(r.panelWidth+r.gap)+s*r.panelWidth,-6.0f,
-                  layer+depth*sin(warped*5.0f*6.2831853f+float(panel)*1.7f));
+    float x=r.left+float(panel)*(r.panelWidth+r.gap)+s*r.panelWidth;
+    float4 rail=u.rails[panel];
+    if(u.animation.x>11.5f&&u.animation.x<12.5f&&rail.z>rail.x) {
+        float left=rail.x*extent.x,hook=rail.y*extent.x,right=rail.z*extent.x,at=rail.w;
+        float before=(hook-left)/max(at,0.001f),after=(right-hook)/max(1.0f-at,0.001f);
+        x=s<=at?left+s*before:hook+(s-at)*after;
+        float spacing=mix(before,after,smoothstep(at-0.08f,at+0.08f,s));
+        depth*=clamp(1.0f+0.50f*(r.panelWidth/max(spacing,1.0f)-1.0f),0.65f,1.8f);
+    }
+    return float3(x,-6.0f,layer+depth*sin(warped*5.0f*6.2831853f+float(panel)*1.7f));
 }
 bool sameCloth(int2 a,int2 b) {
     return b.x>=0&&b.y>=0&&b.x<CLOTH_COLUMNS&&b.y<CLOTH_ROWS&&a.x/CLOTH_PANEL_COLUMNS==b.x/CLOTH_PANEL_COLUMNS;
@@ -273,7 +284,7 @@ float3 clothNormal(texture2d<float> position,int2 id) {
 kernel void cloth_init(texture2d<float,access::write> position [[texture(0)]],texture2d<float,access::write> velocity [[texture(1)]],
  constant Params &u [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
     float2 extent=extentOf(u);
-    float3 rail=clothRail(int(id.x),extent,u.animation.x);
+    float3 rail=clothRail(int(id.x),extent,u);
     ClothRig r=clothRig(extent,u.animation.x);
     float descent=float(id.y)*r.restV,fall=descent/(extent.y+70.0f);
     // Fabric never falls plumb: pleats wander as they descend and open towards the hem.
@@ -292,7 +303,7 @@ kernel void cloth_predict(texture2d<float> position [[texture(0)]],texture2d<flo
  texture2d<float,access::write> predicted [[texture(2)]],constant Params &u [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
     float2 extent=extentOf(u);
     float3 x=position.read(id).xyz;
-    if(id.y==0) {predicted.write(float4(clothRail(int(id.x),extent,u.animation.x),1),id);return;}
+    if(id.y==0) {predicted.write(float4(clothRail(int(id.x),extent,u),1),id);return;}
     float dt=u.impulse.w,t=u.clock.x;
     float3 v=velocity.read(id).xyz;
     float3 normal=clothNormal(position,int2(id));
@@ -312,7 +323,9 @@ kernel void cloth_predict(texture2d<float> position [[texture(0)]],texture2d<flo
     float3 relative=air-v;
     float3 accel=normal*dot(normal,relative)*abs(dot(normal,relative))*0.024f+relative*0.08f+float3(0,1500.0f,0);
     v+=accel*dt;
-    v*=exp(-0.65f*dt);
+    // life.w: this panel was just let go. Thick air lets it float down instead of whipping.
+    float settling=int(id.x)/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS?u.life.w:0.0f;
+    v*=exp(-(0.65f+8.0f*settling)*dt);
     x+=v*dt;
     predicted.write(float4(x,1),id);
 }
@@ -366,20 +379,38 @@ kernel void cloth_relax(texture2d<float,access::read> input [[texture(0)]],textu
             // The profile has no steep rim, so a passing hand cannot snap the cloth.
             float dome=1.0f-distance*distance/(radius*radius);
             float dent=52.0f*dome*dome*reaction;
-            // Eased over the solver's iterations, so a passing hand can't tear the warp.
-            x.z+=min(-dent-x.z,0.0f)*0.30f;
+            // A hand presses at a limited speed. Folds standing proud of the dent would otherwise
+            // all be shoved flat at once, however lightly it touched, and snap into a ripple.
+            x.z+=clamp((-dent-x.z)*0.30f,-0.09f,0.0f);
         }
     }
+    // Held: a hand gathers a soft patch of fabric and carries it together, so nothing in the
+    // patch is crushed and there is no stored squeeze waiting to spring out on release. life.xy
+    // is the thread and row held, life.z the grip, life.w how settled the panel is since being
+    // let go, stroke.xyz the hand. Other panels aren't touched.
+    // Limits always pull back gently. A hard stop anywhere would yank whatever fabric is outside
+    // it at that moment, which is a ripple from nowhere, seconds after the hand has gone.
+    float drawnOut=0.0f;
+    const float limitEase=0.03f;
+    if(max(u.life.z,u.life.w)>0.001f&&p.x/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS) {
+        float2 fabric=float2(p-int2(u.life.xy))*float2(r.restU,r.restV);
+        float reachSquared=dot(fabric,fabric);
+        float3 carry=u.stroke.xyz-input.read(uint2(u.life.xy)).xyz;
+        x+=carry*exp(-reachSquared/(2.0f*52.0f*52.0f))*0.06f*u.life.z;
+        // The wider limits outlast the grip, so settling fabric is never caught by one.
+        drawnOut=exp(-reachSquared/(2.0f*130.0f*130.0f))*max(u.life.z,u.life.w);
+    }
     // Long-range attachment: no point can sit further from its pin than the fabric reaches.
-    float3 pin=clothRail(p.x,extent,u.animation.x);
+    float3 pin=clothRail(p.x,extent,u);
     float reach=float(p.y)*r.restV*1.01f;
     float3 fromPin=x-pin;
     float distance=length(fromPin);
     if(distance>reach)x=pin+fromPin*reach/distance;
-    float sway=CLOTH_SWAY+float(p.y)*r.restV*CLOTH_SWAY_DROP;
-    x.x=clamp(x.x,pin.x-sway,pin.x+sway);
-    x.z=clamp(x.z,pin.z-sway,pin.z+sway);
-    x.y=max(x.y,pin.y+float(p.y)*r.restV*CLOTH_LEAST_DROP); // Fabric bunches a little, never rises.
+    float sway=CLOTH_SWAY+float(p.y)*r.restV*CLOTH_SWAY_DROP+drawnOut*90.0f;
+    x.x=mix(x.x,clamp(x.x,pin.x-sway,pin.x+sway),limitEase);
+    x.z=mix(x.z,clamp(x.z,pin.z-sway,pin.z+sway),limitEase);
+    // Fabric bunches a little and never rises by itself; a hand can lift it part way.
+    x.y=mix(x.y,max(x.y,pin.y+float(p.y)*r.restV*mix(CLOTH_LEAST_DROP,0.42f,drawnOut)),limitEase);
     output.write(float4(x,1),id);
 }
 kernel void cloth_commit(texture2d<float> previous [[texture(0)]],texture2d<float> corrected [[texture(1)]],
@@ -396,9 +427,22 @@ kernel void cloth_commit(texture2d<float> previous [[texture(0)]],texture2d<floa
         if(!sameCloth(p,n))continue;
         mean+=(corrected.read(uint2(n)).xyz-previous.read(uint2(n)).xyz)*inverse;count+=1;
     }
-    if(count>0)v=mix(v,mean/count,0.42f);
-    float speed=length(v);
-    if(speed>CLOTH_TOP_SPEED)v*=CLOTH_TOP_SPEED/speed;
+    float settling=p.x/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS?u.life.w:0.0f;
+    if(count>0)v=mix(v,mean/count,mix(0.42f,0.85f,settling));
+    // Wind alone never moves fabric faster than the calm limit. Anything quicker is a fold
+    // snapping through, which whips along the hem as a ripple, so it's held back. The full
+    // speed is only for fabric being carried: a held panel, or right around a moving hand.
+    // A cursor that's merely resting frees nothing.
+    float2 fromHand=x.xy-u.pointer.zw*extentOf(u);
+    float sweeping=saturate(length(u.impulse.xy)/300.0f)*saturate(u.animation.z)*exp(-dot(fromHand,fromHand)/(2.0f*150.0f*150.0f));
+    if(u.life.z>0.001f&&p.x/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS) {
+        // Only fabric near the hand follows it quickly; further off, nothing gets a shock.
+        ClothRig rig=clothRig(extentOf(u),u.animation.x);
+        float2 fabric=float2(p-int2(u.life.xy))*float2(rig.restU,rig.restV);
+        sweeping=max(sweeping,exp(-dot(fabric,fabric)/(2.0f*90.0f*90.0f))*u.life.z);
+    }
+    float speed=length(v),top=mix(mix(CLOTH_CALM_SPEED,55.0f,settling),CLOTH_TOP_SPEED,sweeping);
+    if(speed>top)v*=top/speed;
     velocity.write(float4(id.y==0?float3(0):v,0),id);
 }
 struct ClothVertex { float4 position [[position]]; float3 normal; float3 world; float2 rest; float speed; float edge; float2 shadow; float shadowDepth; };
@@ -850,12 +894,12 @@ constant uint RAIN_LANES=64,RAIN_FAR=340,RAIN_BEADS=3;
 // The cursor is an umbrella, a dome of radius 64 that keeps the rain off whatever is under it.
 float rainStop(float top,float slope,float bottom,constant Params &u) {
     float zoom=max(u.geometry.z,0.1f),scale=1.0f/sqrt(1.0f+slope*slope),y=-140.0f;
-    float4 composer=u.composer/zoom,footer=u.footer/zoom;
+    float4 composer=u.composer/zoom,footer=u.footer/zoom,side=u.footerSide/zoom;
     float radius=64.0f*u.animation.z;
     float2 center=u.pointer.zw*extentOf(u);
     for(int i=0;i<24&&y<bottom;i++) {
         float2 p=float2(top+slope*y,y);
-        float d=min(barDistance(p,composer,u.blur.x/zoom),barDistance(p,footer,u.blur.y/zoom));
+        float d=min(barDistance(p,composer,u.blur.x/zoom),min(barDistance(p,footer,u.blur.y/zoom),barDistance(p,side,u.blur.y/zoom)));
         if(radius>=1.0f)d=min(d,length(p-center)-radius);
         if(d<0.5f)return y;
         y+=d*scale;
@@ -1583,8 +1627,9 @@ float regionMask(float2 p,float4 rect,float radius,bool bottomOnly,float zoom) {
 fragment float4 cell_composite(Vertex in [[stage_in]],texture2d<float> scene [[texture(0)]],
  texture2d<float> blurred [[texture(1)]],texture2d<float> strong [[texture(2)]],constant Params &u [[buffer(0)]]) {
     float2 p=in.uv*u.geometry.xy;
+    // Only behind the bars themselves: the space between the footer's groups stays clear.
     float mask=max(regionMask(p,u.composer,u.blur.x,false,u.geometry.z),
-                   regionMask(p,u.footer,u.blur.y,true,u.geometry.z));
+                   max(regionMask(p,u.footer,u.blur.y,true,u.geometry.z),regionMask(p,u.footerSide,u.blur.y,true,u.geometry.z)));
     float4 sharp=scene.sample(sceneSampler,in.uv);
     float4 soft=blurred.sample(sceneSampler,in.uv); // premultiplied Gaussian
     float4 result=mix(float4(sharp.rgb*sharp.a,sharp.a),soft,mask);

@@ -58,7 +58,16 @@ This records the final decisions, including corrections to earlier experiments.
 - Window Curtains keep the same cloth in front of a real window: sharp where no fabric
   hangs, refracted and diffused through fabric, with hard-edged sunbeams marched through a
   real volume. Cloth divides the light: beams stay sharp only through real gaps, and fabric
-  blocks them, passing on only a soft glow. The cursor can never lift a panel.
+  blocks them, passing on only a soft glow. Passing cursors can never lift a panel. A press
+  and hold on a panel drags it: behaviour depends on where it is held (near the rail it slides
+  the hooks, low down it swings until pulled tight), each panel has its own hard limits and
+  stays where it is left, neighbours are undisturbed, and presses on the input bar don't count.
+  A hold never crushes the fabric, and taking hold or dragging sends no shock through the
+  panel: the hand closes gradually and moves nothing until dragged, and only fabric near it
+  follows quickly. Letting go, including straight after a drag, settles it with no ripple,
+  then or later:
+  without a hand moving it, no cloth moves faster than wind alone could move it. After a hold,
+  the hover response stays away from a resting cursor until the cursor actually moves.
 - Seafloor caustics come from refracting a mesh of light rays through a wave surface, never
   a scrolling caustic texture. They fill the whole page edge to edge, stay subtle, and have
   no sand or other visible floor.
@@ -69,6 +78,8 @@ This records the final decisions, including corrections to earlier experiments.
   the conversation as a soft blur. Page-level terminals of every provider show the same
   blur through default-background cells and a program's dominant solid background;
   other program colours stay opaque. Off/Reduce Motion return terminals to fully opaque.
+- Behind the bars, the background is only ever blurred and collided with inside each measured
+  shape. The empty space between the footer's two groups is plain background, never a band.
 - Rain falls at a clear angle. Each drop is one straight line colliding with the measured
   rounded composer/footer outline, including side walls. Landed water beads
   along the edge, merges, runs round the corners and down the sides, then falls. Rain has no

@@ -2573,13 +2573,25 @@ impl AppShell {
                                             .gap_2()
                                             .child(
                                                 new_tab_group()
+                                                    .relative()
                                                     .min_w_0()
-                                                    .child(self.render_new_session_options(cx)),
+                                                    .child(self.render_new_session_options(cx))
+                                                    .child(
+                                                        self.ambient
+                                                            .read(cx)
+                                                            .region_probe(1, zpx(8.0)),
+                                                    ),
                                             )
                                             .child(
-                                                new_tab_group().child(self.render_mode_picker(cx)),
-                                            )
-                                            .child(self.ambient.read(cx).region_probe(1, zpx(8.0))),
+                                                new_tab_group()
+                                                    .relative()
+                                                    .child(self.render_mode_picker(cx))
+                                                    .child(
+                                                        self.ambient
+                                                            .read(cx)
+                                                            .region_probe(2, zpx(8.0)),
+                                                    ),
+                                            ),
                                     ),
                             ),
                     )
