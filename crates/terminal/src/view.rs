@@ -467,14 +467,15 @@ fn color(c: Rgb) -> Hsla {
 
 /// Some TUIs (OpenCode, for one) paint an explicit theme colour behind everything rather
 /// than leaving the default background. A single colour covering most of the screen is
-/// that program's background, not content, so it can become glass too. Anything else it
-/// paints, such as panels, selections and highlights, keeps its colour.
+/// that program's background. Only dark fills compatible with our dark glass can
+/// become transparent: light fills must remain opaque to preserve dark text contrast.
+/// Panels, selections and highlights otherwise keep their colour.
 fn painted_background(
     colors: &std::collections::HashMap<(u8, u8, u8), usize>,
     total: usize,
 ) -> Option<Rgb> {
     let (&(r, g, b), &count) = colors.iter().max_by_key(|(_, count)| **count)?;
-    (count * 2 > total).then_some(Rgb { r, g, b })
+    (count * 2 > total && r.max(g).max(b) <= 0x30).then_some(Rgb { r, g, b })
 }
 fn transparent_background(background: Color, flags: Flags) -> bool {
     // Explicit colours, even black matching the default palette, are content.
@@ -1132,6 +1133,15 @@ mod tests {
         let theme =
             painted_background(&colors(&[((10, 10, 12), 900), ((60, 60, 70), 50)]), 1000).unwrap();
         assert_eq!((theme.r, theme.g, theme.b), (10, 10, 12));
+        // Light TUI fills cannot be replaced by dark glass: their foreground may be black.
+        for fill in [
+            (255, 255, 255),
+            (240, 235, 225),
+            (128, 128, 128),
+            (220, 40, 40),
+        ] {
+            assert!(painted_background(&colors(&[(fill, 1000)]), 1000).is_none());
+        }
         // Claude/Codex-style sparse highlights over the default background stay content.
         assert!(painted_background(&colors(&[((60, 60, 70), 80)]), 1000).is_none());
         // Half the screen in one panel colour isn't enough to be sure.

@@ -1670,6 +1670,7 @@ impl AppShell {
         if self.search_open {
             return;
         }
+        self.tab_zone.set(tab_zone::Zone::Main);
         if let Selection::Session(id) = &self.state.read(cx).selection
             && let Some(terminal) = self.mode_terminals.get(id)
         {
@@ -2102,7 +2103,7 @@ impl AppShell {
                             // the chat page's left edge.
                             .child(self.render_nav(nav_width, cx))
                             .child(
-                                div()
+                                tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Main)
                                     .relative()
                                     .flex_basis(zpx(strip_width))
                                     .flex_grow_0()
@@ -3062,6 +3063,13 @@ impl Render for AppShell {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.state.read(cx).panel == Panel::Chat
+                    && this.active_tab_zone() == tab_zone::Zone::Right
+                {
+                    this.right
+                        .update(cx, |panel, cx| panel.close_active_tab(window, cx));
+                    return;
+                }
                 this.tab_zone.set(tab_zone::Zone::Main);
                 this.state.update(cx, |state, cx| {
                     if state.panel == Panel::Providers {
@@ -3336,8 +3344,8 @@ fn main() {
                 KeyBinding::new("cmd-t", NewWorkspaceTab, None),
                 KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
                 KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-w", CloseWorkspaceTab, None),
-                KeyBinding::new("cmd-shift-w", CloseTab, None),
+                KeyBinding::new("cmd-w", CloseTab, None),
+                KeyBinding::new("cmd-shift-w", CloseWorkspaceTab, None),
                 KeyBinding::new("ctrl-shift-g", OpenChanges, None),
                 KeyBinding::new("cmd-p", OpenFiles, None),
                 KeyBinding::new("alt-cmd-s", OpenSideChat, None),

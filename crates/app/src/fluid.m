@@ -15,6 +15,19 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
 @implementation DelFluidOwner
 @end
 
+// A pick owns its readback until that command completes. Replaced/cancelled picks
+// can finish safely without publishing readiness into a newer request.
+@interface DelClothPick : NSObject {
+@public
+    atomic_bool ready;
+}
+@property(nonatomic,strong) id<MTLBuffer> buffer;
+@property(nonatomic) BOOL succeeded;
+@end
+@implementation DelClothPick
+- (instancetype)init { if((self=[super init]))atomic_init(&ready,false);return self; }
+@end
+
 @interface DelFluidRenderer : NSObject {
     CVPixelBufferRef _buffer;
     CVMetalTextureCacheRef _cache;
@@ -29,9 +42,8 @@ struct DelFluidParams { simd_float4 geometry, pointer, impulse, clock, life, com
     // A held Window Curtains panel. Rails are stored as shares of the width, so they survive
     // resizing; picking copies the cloth to the CPU once, on the frame the button goes down.
     DelCurtainRail _rails[DEL_CURTAIN_PANELS];
-    BOOL _railsReady, _clothHeld, _pickWanted, _pickPending;
-    id<MTLBuffer> _pickBuffer;
-    atomic_bool _pickReady;
+    BOOL _railsReady, _clothHeld, _pickWanted;
+    DelClothPick *_pick;
     int _heldColumn, _heldRow;
     simd_float2 _heldOffset, _heldTarget;
     simd_float3 _heldPoint;
@@ -138,7 +150,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     _params.clock.y=light?1:0;
     _params.tint=tint;_params.animation.x=style;_params.animation.y=reactive?1:0;
     _params.life.z=(_running&&inside&&reactive)?1:0;
-    _pressed=_forcePress||(reactive&&([NSEvent pressedMouseButtons]&1)!=0);
+    _pressed=_running&&reactive&&(_forcePress||([NSEvent pressedMouseButtons]&1)!=0);
     // Simulation time is consumed in encode, never in GPUI paint preparation.
     return _buffer;
 }
@@ -177,7 +189,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     _particles[0]=_particles[1]=nil;_puddingX[0]=_puddingX[1]=nil;_puddingV[0]=_puddingV[1]=nil;
     _contour=nil;_cloudNoise=nil;_cloud[0]=_cloud[1]=nil;_cloudWake[0]=_cloudWake[1]=nil;_field=nil;_fieldSamples=nil;_fieldDepth=nil;
     _windowScene=nil;_branches=nil;_shafts[0]=_shafts[1]=nil;_sea[0]=_sea[1]=nil;_seaSurface=nil;_caustics=nil;_grabbing=NO;_seaDropAge=1;
-    _railsReady=NO;_clothHeld=NO;_pickWanted=NO;_pickPending=NO;_heldFirmness=0;_heldSettle=0;_lettingGo=NO;_handShare=1;_cursorMoved=YES;
+    _railsReady=NO;_clothHeld=NO;_pickWanted=NO;_pick=nil;_heldFirmness=0;_heldSettle=0;_lettingGo=NO;_handShare=1;_cursorMoved=YES;
     memset(_runoff,0,sizeof(_runoff));memset(_droplets,0,sizeof(_droplets));
     _liquidPointerValid=NO;_clearStyle=YES;
 }
@@ -294,12 +306,16 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         _railsReady=YES;
     }
     simd_float2 cursor={_params.pointer.x*extent.x,_params.pointer.y*extent.y};
-    if(_pressBegan&&_params.animation.y>0.5f&&_params.pointer.x>=0&&_params.pointer.y>=0&&_params.pointer.x<1&&_params.pointer.y<1)_pickWanted=YES;
-    if(_pickPending&&atomic_load(&_pickReady)) {
-        _pickPending=NO;
+    if(!_pressed) {_pick=nil;_pickWanted=NO;}
+    else if(_pressBegan&&_params.pointer.x>=0&&_params.pointer.y>=0&&_params.pointer.x<1&&_params.pointer.y<1) {
+        _pick=nil;_pickWanted=YES;
+    }
+    DelClothPick *pick=_pick;
+    if(pick&&atomic_load(&pick->ready)) {
+        _pick=nil;
         int column=0,row=0;
-        if(_pressed&&del_curtain_pick(_pickBuffer.contents,DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS,DEL_CURTAIN_ROWS,cursor,&column,&row)) {
-            const float *p=(const float *)_pickBuffer.contents+(row*DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS+column)*4;
+        if(pick.succeeded&&_pressed&&del_curtain_pick(pick.buffer.contents,DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS,DEL_CURTAIN_ROWS,cursor,&column,&row)) {
+            const float *p=(const float *)pick.buffer.contents+(row*DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS+column)*4;
             _clothHeld=YES;_lettingGo=NO;_heldSettle=0;_heldColumn=column;_heldRow=row;
             _heldOffset=(simd_float2){p[0],p[1]}-cursor;
             _heldTarget=(simd_float2){p[0],p[1]};
@@ -891,16 +907,16 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
         // Copy where the cloth is right now; the next frames pick the fabric under the cursor.
         _pickWanted=NO;
         NSUInteger columns=DEL_CURTAIN_PANELS*DEL_CURTAIN_PANEL_COLUMNS;
-        if(!_pickBuffer)_pickBuffer=[self.device newBufferWithLength:columns*DEL_CURTAIN_ROWS*16 options:MTLResourceStorageModeShared];
+        DelClothPick *pick=[DelClothPick new];
+        pick.buffer=[self.device newBufferWithLength:columns*DEL_CURTAIN_ROWS*16 options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> copy=[command blitCommandEncoder];
         [copy copyFromTexture:_clothX sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(columns,DEL_CURTAIN_ROWS,1)
-            toBuffer:_pickBuffer destinationOffset:0 destinationBytesPerRow:columns*16 destinationBytesPerImage:columns*DEL_CURTAIN_ROWS*16];
+            toBuffer:pick.buffer destinationOffset:0 destinationBytesPerRow:columns*16 destinationBytesPerImage:columns*DEL_CURTAIN_ROWS*16];
         [copy endEncoding];
-        atomic_store(&_pickReady,false);_pickPending=YES;
-        __weak DelFluidRenderer *weakSelf=self;
+        _pick=pick;
         [command addCompletedHandler:^(id<MTLCommandBuffer> finished) {
-            DelFluidRenderer *strong=weakSelf;
-            if(strong)atomic_store(&strong->_pickReady,true);
+            pick.succeeded=finished.status==MTLCommandBufferStatusCompleted;
+            atomic_store(&pick->ready,true);
         }];
     }
     if(style==5||style==7||style==8||style==11||style==12)[self drawField:command style:style];

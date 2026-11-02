@@ -41,7 +41,8 @@ This records the final decisions, including corrections to earlier experiments.
   reads as off while the effective background is Off, keeping the saved choice for later.
   Its on and off states must be clearly different in every theme, including those whose
   primary is white. It applies to every style, but only on
-  the new-session page: behind a chat or terminal the background ignores the cursor.
+  the new-session page: behind a chat or terminal, or under an open dialog, sheet, or
+  prompt, the background ignores the cursor.
   Smooth the cursor response and fade it away on exit. Every style has its own physically
   motivated response, never a shared warp of the picture; see the README table. Life is
   stirred by a moving cursor, with Conway rules untouched everywhere else. Pudding reacts
@@ -76,8 +77,8 @@ This records the final decisions, including corrections to earlier experiments.
   veins, flutter and tumbling motion.
 - The new-chat page shows the background sharp. After a message is sent it stays behind
   the conversation as a soft blur. Page-level terminals of every provider show the same
-  blur through default-background cells and a program's dominant solid background;
-  other program colours stay opaque. Off/Reduce Motion return terminals to fully opaque.
+  blur through default-background cells and a program's dominant compatible dark fill;
+  light/bright fills and other program colours stay opaque to preserve text contrast. Off/Reduce Motion return terminals to fully opaque.
 - Behind the bars, the background is only ever blurred and collided with inside each measured
   shape. The empty space between the footer's two groups is plain background, never a band.
 - Rain falls at a clear angle. Each drop is one straight line colliding with the measured
@@ -628,9 +629,12 @@ This records the final decisions, including corrections to earlier experiments.
   groups. These shortcuts work from the composer too; Shift variants retain text selection.
 - Command-T and Control-T always create a right-sidebar tab and open the sidebar if hidden. Reveal the
   active tab immediately, including repeated opens after horizontal overflow.
-- Command-W closes only the active right-sidebar tab; it must never
-  fall through to closing the top-level session. Command-Shift-W closes the top-level
-  session even while an inner tool is active.
+- Command-W follows the active zone: close the top-level session from the main
+  chat or its session strip, and the active tool tab from the right sidebar or its
+  strip. Keyboard focus back to the main composer also selects the main zone.
+  A hidden sidebar never receives Command-W; an empty active sidebar never falls
+  through to closing the session. Command-Shift-W always closes only the active
+  right-sidebar tab.
 - Changes (Control-Shift-G), Terminal (Control-backtick), Files (Command-P), and
   Side chat (Option-Command-S) always open in the right sidebar. Show these shortcuts
   in the new-tab launcher with neutral icons and subtle surfaces. Stack the four

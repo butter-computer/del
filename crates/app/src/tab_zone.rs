@@ -1,4 +1,5 @@
-//! Tracks composer focus; tool-tab commands always target the right sidebar.
+//! Tracks the last-used zone for close-tab and composer commands.
+//! New-tool commands always target the right sidebar.
 use crate::{
     right_panel::{Pane, RightPanel},
     workspace_tabs::WorkspaceTabs,
@@ -113,7 +114,7 @@ mod tests {
             gpui_kit::init(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-t", crate::NewWorkspaceTab, None),
-                KeyBinding::new("cmd-w", crate::CloseWorkspaceTab, None),
+                KeyBinding::new("cmd-shift-w", crate::CloseWorkspaceTab, None),
                 KeyBinding::new("ctrl-shift-g", crate::OpenChanges, None),
             ]);
         });
@@ -166,11 +167,11 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(right_blanks(cx), 13);
         assert_eq!(main_tabs(cx), 0);
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-shift-w");
         cx.run_until_parked();
         assert_eq!(right_blanks(cx), 12);
         click_zone(cx, "main-zone");
-        cx.simulate_keystrokes("cmd-t cmd-t cmd-w");
+        cx.simulate_keystrokes("cmd-t cmd-t cmd-shift-w");
         cx.run_until_parked();
         assert_eq!(main_tabs(cx), 0);
         assert_eq!(right_blanks(cx), 13);
@@ -181,7 +182,7 @@ mod tests {
             assert_eq!(value["pane"], "Changes");
         });
         assert_eq!(main_tabs(cx), 0);
-        cx.simulate_keystrokes("cmd-w cmd-w");
+        cx.simulate_keystrokes("cmd-shift-w cmd-shift-w");
         cx.run_until_parked();
         assert_eq!(main_tabs(cx), 0);
         assert!(main.read_with(cx, |main, _| main.is_chat()));

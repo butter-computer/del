@@ -1,6 +1,7 @@
 //! Display-synchronized native Metal backgrounds, composited as one GPUI alpha surface.
 //! Every simulation and all shading stay on the GPU, including cloth, soft bodies and
 //! volumes. Rain uses analytic trajectories shared with impact feedback, without readback.
+use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -153,8 +154,8 @@ pub fn terminal_glass(cx: &App) -> Option<f32> {
 
 /// The cursor only plays with the background on the new-session page. Behind a chat or
 /// terminal the pointer is busy with real work, so the background ignores it.
-fn surface_follows_cursor(surface: AmbientSurface) -> bool {
-    surface == AmbientSurface::Landing
+fn surface_follows_cursor(surface: AmbientSurface, obstructed: bool) -> bool {
+    surface == AmbientSurface::Landing && !obstructed
 }
 
 pub struct LifeBackground {
@@ -257,8 +258,14 @@ impl Render for LifeBackground {
                 window.request_animation_frame();
             }
             let fluid = self.fluid.clone();
-            let interactive =
-                crate::appearance::mouse_reactive() && surface_follows_cursor(self.surface);
+            // Native effects sample mouse buttons directly, so GPUI's modal hit testing
+            // alone cannot protect controls from also grabbing the background behind them.
+            let obstructed = window.has_active_dialog(cx)
+                || window.has_active_sheet(cx)
+                || window.has_active_prompt();
+            let interactive = crate::appearance::mouse_reactive()
+                && self.animates(window, cx)
+                && surface_follows_cursor(self.surface, obstructed);
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
@@ -283,13 +290,15 @@ mod tests {
 
     #[test]
     fn only_the_new_session_page_follows_the_cursor() {
-        assert!(surface_follows_cursor(AmbientSurface::Landing));
+        assert!(surface_follows_cursor(AmbientSurface::Landing, false));
+        assert!(!surface_follows_cursor(AmbientSurface::Landing, true));
         for surface in [
             AmbientSurface::Hidden,
             AmbientSurface::Chat,
             AmbientSurface::Terminal,
         ] {
-            assert!(!surface_follows_cursor(surface));
+            assert!(!surface_follows_cursor(surface, false));
+            assert!(!surface_follows_cursor(surface, true));
         }
     }
 }

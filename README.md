@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.24` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.25` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.24 source release notes](docs/releases/0.1.24.md) and
-[validation record](docs/releases/0.1.24-validation.md).
+See the [0.1.25 release notes](docs/releases/0.1.25.md) and
+[validation record](docs/releases/0.1.25-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -17,9 +17,9 @@ when making future changes.
 
 ## Download and install
 
-The latest release is **0.1.23**; see its [release notes](docs/releases/0.1.23.md)
-and [validation record](docs/releases/0.1.23-validation.md).
-Download **Del-0.1.23-arm64.dmg** from the [0.1.23 release](https://github.com/butter-computer/del/releases/tag/v0.1.23),
+The latest release is **0.1.25**; see its [release notes](docs/releases/0.1.25.md)
+and [validation record](docs/releases/0.1.25-validation.md).
+Download **Del-0.1.25-arm64.dmg** from the [0.1.25 release](https://github.com/butter-computer/del/releases/tag/v0.1.25),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.24-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.25-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -779,7 +779,9 @@ session's sidebar, preserving their drafts, browser profiles, and side chats.
 
 Command-T opens a new right-sidebar tab and reveals the sidebar if hidden,
 regardless of where you last clicked. Tool shortcuts also target the right sidebar.
-Command-W closes its active tool tab; Command-Shift-W closes the top-level session.
+Command-W closes the active tab in the last-used zone: the top-level session from
+the main chat, or the active tool tab from the right sidebar. A hidden sidebar
+never receives Command-W. Command-Shift-W always closes the active right-sidebar tool tab.
 Control-Tab and Control-Shift-Tab cycle sidebar tabs. Composer/model shortcuts still
 follow the active main chat or side chat.
 
@@ -1025,7 +1027,8 @@ uses the current theme accent (including monochrome for Vercel/Onyx). Light them
 draw lit scenes as ink, so sunlit areas stay paper-white. The new-chat page shows the
 background sharp. Once a message is sent it stays behind the conversation as a soft
 blur, and terminals of every provider show the same blur through their default
-background (or through a program's own solid background colour, such as OpenCode's).
+background (or through a program's compatible dark fill, such as OpenCode's).
+Light and bright program fills stay opaque so dark text remains readable.
 
 - **Life** runs exact Conway rules. **Contours** draws constant-width isolines over
   slowly shifting terrain, with heavier index lines and faint hill shading.
@@ -1056,7 +1059,8 @@ background (or through a program's own solid background colour, such as OpenCode
 
 **Mouse reactive** is a separate saved switch; it starts off and is unavailable when the
 background is Off. The cursor only affects the background on the new-session page, never
-behind a chat or terminal. Each style has its own response rather than a shared distortion:
+behind a chat or terminal, or while a dialog, sheet, or prompt covers the page.
+Each style has its own response rather than a shared distortion:
 
 | Style | What the cursor does |
 | --- | --- |
@@ -1078,7 +1082,9 @@ follows the hand without being crushed, and the hand closes gently, so taking ho
 shock through the panel. Held near the rail it slides the hooks at once, bunching them ahead of the
 hand; held low it swings first and only pulls the rail once the fabric is tight, and a hand
 can lift it part way. Let go and it floats down and settles with no ripple. Each panel has its
-own travel limit, stays where it is left, and moves without disturbing its neighbours. Presses on the input bar and footer don't count.
+own travel limit, stays where it is left, and moves without disturbing its neighbours.
+Presses on the input bar and footer don't count. Each GPU pick owns its readback
+buffer; cancelled or replaced picks cannot complete a newer drag.
 
 Rendering stays on the GPU, with a shared fade toward the bottom and soft blur
 behind the composer. Heavier styles (Curtains, Clouds, Fluted Glass) use more GPU.
@@ -1101,8 +1107,8 @@ session shortcuts.
 | Command-N | New session |
 | Command-T / Control-T | New right-sidebar tab |
 | Command-K | Open or close conversation search |
-| Command-Shift-W | Close the top-level session tab |
-| Command-W | Close the active right-sidebar tab |
+| Command-W | Close the active tab in the focused zone (main session or right sidebar) |
+| Command-Shift-W | Close the active right-sidebar tab |
 | Control-Shift-G | Open Changes in the right sidebar |
 | Command-P | Open Files in the right sidebar |
 | Option-Command-S | Open Side chat in the right sidebar |

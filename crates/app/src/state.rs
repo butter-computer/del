@@ -1861,7 +1861,7 @@ impl AppState {
         cx.notify();
     }
 
-    /// Close the top-level session tab (Cmd-Shift-W).
+    /// Close the top-level session tab (Cmd-W).
     pub fn close_active_tab(&mut self, cx: &mut Context<Self>) {
         let tab = match &self.selection {
             Selection::Draft(k) => Tab::Draft(*k),
