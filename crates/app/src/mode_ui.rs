@@ -1247,7 +1247,7 @@ impl AppShell {
                 )
             })
             .when(git, |row| {
-                row.child(
+                row.pr(zpx(6.)).child(
                     gpui_kit::component::checkbox::Checkbox::new("new-worktree")
                         .small()
                         .focus_ring(false)

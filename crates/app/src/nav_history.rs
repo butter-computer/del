@@ -52,18 +52,6 @@ impl NavHistory {
         self.index = at;
         Some(self.entries[at].clone())
     }
-
-    /// Distinct visited entries, most recent first, without the current one.
-    pub fn recent(&self, valid: impl Fn(&Tab) -> bool) -> Vec<Tab> {
-        let current = self.entries.get(self.index);
-        let mut seen = Vec::new();
-        for entry in self.entries.iter().rev() {
-            if Some(entry) != current && valid(entry) && !seen.contains(entry) {
-                seen.push(entry.clone());
-            }
-        }
-        seen
-    }
 }
 
 #[cfg(test)]
@@ -88,6 +76,7 @@ mod tests {
         assert_eq!(history.step(1, all), Some(tab("b")));
         history.visit(tab("d"));
         assert!(!history.can_step(1, all));
-        assert_eq!(history.recent(all), vec![tab("b"), tab("a")]);
+        assert_eq!(history.step(-1, all), Some(tab("b")));
+        assert_eq!(history.step(-1, all), Some(tab("a")));
     }
 }

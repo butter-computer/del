@@ -135,10 +135,15 @@ impl Render for BranchPicker {
                             )
                             .accessibility_label(format!("Starting branch: {selected}"))
                             .child(
-                                div()
+                                h_flex()
                                     .min_w_0()
-                                    .truncate()
-                                    .child(format!("Branch: {selected}")),
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        crate::icons::path("icons/git-branch.svg")
+                                            .text_color(appearance::rgba(0xffffff8c)),
+                                    )
+                                    .child(div().min_w_0().truncate().child(selected)),
                             ),
                     )
                     .on_open_change(cx.listener(|this, open: &bool, window, cx| {

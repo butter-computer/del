@@ -103,7 +103,7 @@ const WINDOW_SIZE: gpui_kit::Size<Pixels> = size(px(1120.0), px(760.0));
 const SIDEBAR_ENABLED: bool = true;
 
 /// Every tab is this wide once settled; it animates to and from 0.
-const TAB_WIDTH: f32 = 220.0;
+const TAB_WIDTH: f32 = 144.0;
 
 /// Session tab height inside the 40 px title bar.
 const TAB_HEIGHT: f32 = 26.0;
@@ -333,7 +333,7 @@ struct SidebarWidths {
 }
 
 const LEFT_SIDEBAR_MIN: f32 = 180.0;
-const LEFT_SIDEBAR_MAX: f32 = 460.0;
+const LEFT_SIDEBAR_MAX: f32 = 320.0;
 const LEFT_SIDEBAR_COLLAPSE_THRESHOLD: f32 = LEFT_SIDEBAR_MIN - 80.0;
 const LEFT_SIDEBAR_REOPEN_THRESHOLD: f32 = LEFT_SIDEBAR_COLLAPSE_THRESHOLD + 32.0;
 const LEFT_SIDEBAR_RESIZE_TARGET: f32 = 16.0;
@@ -2365,14 +2365,6 @@ impl AppShell {
                             ),
                     )
                     .child(
-                        workbench::chrome_button("toggle-bottom-panel", "Toggle terminal panel", true)
-                            .when(self.state.read(cx).panel == Panel::Providers, |b| b.invisible())
-                            .when(self.bottom.open, |b| b.bg(rgba(0xffffff14)))
-                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Terminal panel (⌘J)").build(window, cx))
-                            .on_click(cx.listener(|this, _, window, cx| this.toggle_bottom_panel(window, cx)))
-                            .child(crate::icons::path("icons/panel-bottom.svg")),
-                    )
-                    .child(
                         h_flex()
                             .id("right-titlebar")
                             .relative()
@@ -3420,12 +3412,12 @@ mod sidebar_width_tests {
     #[test]
     fn left_cap_preserves_default_minimum_and_right_widths() {
         assert_eq!(SidebarWidths::default().left, 264.);
-        assert_eq!(sidebar_width(600., false, 1600., 0.), 460.);
+        assert_eq!(sidebar_width(600., false, 1600., 0.), 320.);
         assert_eq!(sidebar_width(190., false, 1600., 0.), 190.);
         assert_eq!(sidebar_width(-100., false, 1600., 0.), 180.);
         assert_eq!(sidebar_width(400., false, 450., 100.), 180.);
         assert_eq!(sidebar_width(300., false, 650., 100.), 270.);
-        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 460.);
+        assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 320.);
         assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
         assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
     }
@@ -3434,7 +3426,7 @@ mod sidebar_width_tests {
     fn persisted_left_width_is_clamped_and_right_width_is_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sidebar-widths.json");
-        for (saved, expected) in [(600., 460.), (216., 216.), (190., 190.), (20., 180.)] {
+        for (saved, expected) in [(600., 320.), (216., 216.), (190., 190.), (20., 180.)] {
             std::fs::write(&path, format!("{{\"left\":{saved},\"right\":725}}")).unwrap();
             let loaded = SidebarWidths::read(&path);
             assert_eq!(loaded.left, expected);

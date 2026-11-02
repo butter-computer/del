@@ -24,8 +24,8 @@ const PANEL_HEADER_HEIGHT: f32 = 30.0;
 pub const STATUS_BAR_HEIGHT: f32 = 22.0;
 /// Title-bar control size, matching the sidebar's header buttons.
 const NAV_BUTTON: f32 = 28.0;
-/// Narrowest navigation zone: toggle, recent, back and forward with their gaps.
-pub const NAV_MIN_WIDTH: f32 = NAV_BUTTON * 4.0 + 2.0 * 2.0 + 12.0 + 8.0;
+/// Narrowest navigation zone: toggle, back and forward with their gaps.
+pub const NAV_MIN_WIDTH: f32 = NAV_BUTTON * 3.0 + 2.0 * 2.0 + 12.0 + 8.0;
 
 /// The bottom panel: one shell per project, kept alive while hidden.
 #[derive(Default)]
@@ -148,7 +148,7 @@ impl AppShell {
         }
     }
 
-    /// Sidebar toggle, then recent, back and forward right-aligned to the
+    /// Sidebar toggle, then back and forward right-aligned to the
     /// sidebar's edge. With the sidebar hidden the zone shrinks to its
     /// buttons and the tabs follow it.
     pub(super) fn render_nav(&self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
@@ -156,7 +156,6 @@ impl AppShell {
         let back = self.nav.can_step(-1, reachable(state));
         let forward = self.nav.can_step(1, reachable(state));
         let settings = state.panel == Panel::Providers;
-        let shell = cx.entity();
         h_flex()
             .flex_none()
             .w(width)
@@ -173,51 +172,6 @@ impl AppShell {
                     .motion_child(true, |feedback| feedback.glyph(Glyph::PanelLeft)),
             )
             .child(div().flex_1().min_w(zpx(12.0)))
-            .child(
-                div()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        Button::new("nav-recent")
-                            .ghost()
-                            .size(zpx(NAV_BUTTON))
-                            .p_0()
-                            .rounded(zpx(6.0))
-                            .text_color(rgba(0xffffff8c))
-                            .tooltip("Recent sessions")
-                            .accessibility_label("Recent sessions")
-                            .child(crate::icons::path("icons/clock.svg"))
-                            .dropdown_menu(move |mut menu, _, cx| {
-                                let (state, recent) = {
-                                    let this = shell.read(cx);
-                                    let state = this.state.clone();
-                                    let recent = this.nav.recent(reachable(state.read(cx)));
-                                    (state, recent)
-                                };
-                                if recent.is_empty() {
-                                    return menu.item(PopupMenuItem::label("No recent sessions"));
-                                }
-                                for tab in recent.into_iter().take(12) {
-                                    let (title, _) = state.read(cx).tab_info(&tab);
-                                    let state = state.clone();
-                                    menu = menu.item(PopupMenuItem::new(title).on_click(
-                                        move |_, _, cx| {
-                                            let tab = tab.clone();
-                                            state.update(cx, |state, cx| match &tab {
-                                                Tab::Session(id) if !state.tabs.contains(&tab) => {
-                                                    state.select(id.clone(), cx)
-                                                }
-                                                Tab::Terminal(id) if !state.tabs.contains(&tab) => {
-                                                    state.select_terminal(id.clone(), cx)
-                                                }
-                                                _ => state.select_tab(&tab, cx),
-                                            });
-                                        },
-                                    ));
-                                }
-                                menu.min_w(zpx(220.0))
-                            }),
-                    ),
-            )
             .child(
                 chrome_button("nav-back", "Back", back)
                     .tooltip(|window, cx| {

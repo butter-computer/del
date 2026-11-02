@@ -8,7 +8,6 @@ use std::f32::consts::{PI, TAU};
 #[derive(Clone, Copy, Debug)]
 pub enum Glyph {
     Add,
-    Search,
     Settings,
     Refresh,
     Archive,
@@ -71,15 +70,6 @@ pub(crate) fn geometry(kind: Glyph, hover: f32, press: f32) -> Vec<Stroke> {
             vec![
                 line(&[[3. - d, 8.], [13. + d, 8.]]),
                 line(&[[8., 3. - d], [8., 13. + d]]),
-            ]
-        }
-        Glyph::Search => {
-            let mut glint = arc(6.5, 6.5, 2.4, PI, PI / 2.);
-            glint.opacity = h;
-            vec![
-                arc(6.5, 6.5, 4.2, 0., TAU),
-                line(&[[9.7, 9.7], [13. + h, 13. + h]]),
-                glint,
             ]
         }
         Glyph::Settings => {
@@ -393,7 +383,6 @@ mod tests {
     fn animated_parts_stay_inside_their_fixed_icon_box() {
         let kinds = [
             Glyph::Add,
-            Glyph::Search,
             Glyph::Settings,
             Glyph::Refresh,
             Glyph::Archive,

@@ -253,8 +253,8 @@ section. Projects are created automatically from session folders. Git subfolders
 and linked worktrees group under the parent repository, while non-Git folders use
 their canonical full paths. Existing histories, pins, titles, and unread state are
 preserved. Project membership is derived from the stored working directory, so no
-provider transcript migration is needed. The archive button beside Settings switches to **Archived**, showing only archived
-sessions grouped by project, with a selected background on the toggle. The heading
+provider transcript migration is needed. The **Archived sessions** toggle in the Space switcher menu opens **Archived**,
+showing only archived sessions grouped by project; the menu item is checked while active. The heading
 and project-row plus buttons are hidden in this view; the global New Session
 action returns to active Projects. Project identities and collapsed state
 persist in `projects.json`. Hover a project for **+** and its three-dot menu;
@@ -324,16 +324,20 @@ or pending-draft references, no changed/untracked/ignored files, and no commits 
 creation. Branches are always preserved. Worktrees containing work remain on disk
 for normal Git review and cleanup.
 
-The sidebar header has the Space switcher with **Search** (⌘K) and **Archive**
-(the archived view) beside it. Sessions are grouped by project, with a session count
-and an amber "N needs you" when sessions wait for approval. Each row shows its age and
-a status glyph: working, waiting for you, failed, done (filled while unread, with a
-bold title), or idle. The footer holds **Keep Mac awake**, **Memory usage**, and
-**Settings**. Keep-awake uses a neutral hover-colored background and animated gold
+The sidebar header has the Space switcher and **Space actions** (+). The plus
+opens Create Space, Create Project, Rename Space, and Delete Space. Search is
+available through ⌘K. Four rounded buttons at the bottom provide **Keep Mac awake**,
+**Archive**, **Memory usage**, and **Settings**. Archive toggles archived sessions;
+the same toggle is available in the Space menu. Empty Spaces show a playful orbit
+illustration and a hint to create a project from +. Sessions are
+indented 12 px under their project, with provider logos and no mode text labels.
+Project headings show a session count and an amber "N needs you" when sessions
+wait for approval. Each row shows its age and a status glyph for working, waiting
+for you, failed, or unread (a filled tick with a bold title, cleared when the chat is read). Read, inactive rows
+have no status marker. Hide timestamps while unread ticks are visible. Keep-awake uses a neutral hover-colored background and animated gold
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
 
-The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) and recent
-sessions sit in the title bar above the sidebar, session tabs start at the chat
+The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat
 page's edge, and a 22 px status bar shows the Space and project, branch (with
 dirty and ahead marks), worktree, running and waiting agents, provider, model and
 effort, Chat/Terminal, keep-awake, queued follow-ups, and the version; each item
@@ -502,15 +506,16 @@ conversation. Unloading a running session also stops its current work.
 - Running chats show a thin rotating ring with a fading tail in their sidebar row and top tab. Terminal
   sessions show it when their agent reports Working. Hover hides the spinner and
   reveals the usual actions in the same slot.
-- While working, the spinner replaces the unread dot in the same trailing slot;
-  unread state is preserved and the dot returns after work finishes if still unread.
-- A blue dot at the far right marks unread conversations, including background
+- While working, the spinner replaces the unread marker in the same trailing slot;
+  unread state is preserved and the marker returns after work finishes if still unread.
+- A filled tick at the far right marks unread conversations, including background
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
-  the dot. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
+  the tick. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
 - Both sidebars resize from their panel boundaries. The right tab row has a thin,
   floating divider; the content area stays borderless. The left sidebar only
-  resizes at its boundary, with a 16-point hover target centered on the gutter.
+  resizes between 180 and 320 px at its boundary, with a 16-point hover target
+  centered on the gutter.
   Dragging 80 logical pixels past its minimum width smoothly collapses it.
   Keep holding the mouse and drag back to reopen and continue resizing; a
   32-point gap between the close and reopen thresholds prevents flickering.
