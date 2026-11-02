@@ -178,7 +178,12 @@ pub fn encode_key(k: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option
 pub fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        let safe = normalized.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        // Removing one marker can join its neighbours into another
+        // (`\x1b[20` + marker + `1~`), so strip until none remain.
+        let mut safe = normalized;
+        while safe.contains("\x1b[201~") || safe.contains("\x1b[200~") {
+            safe = safe.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        }
         format!("\x1b[200~{safe}\x1b[201~").into_bytes()
     } else {
         normalized
@@ -294,6 +299,79 @@ mod tests {
         assert_eq!(
             encode_paste("x\x1b[201~rm", TermMode::BRACKETED_PASTE),
             b"\x1b[200~xrm\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn nested_paste_markers_cannot_reassemble_an_end_marker() {
+        for hostile in [
+            "a\x1b[20\x1b[201~1~b",
+            "a\x1b[2\x1b[201~01~b",
+            "a\x1b[20\x1b[200~1~b",
+            "a\x1b\x1b[201~[201~b",
+            "a\x1b[20\x1b[20\x1b[201~1~1~b",
+        ] {
+            let out = encode_paste(hostile, TermMode::BRACKETED_PASTE);
+            let inner = &out[b"\x1b[200~".len()..out.len() - b"\x1b[201~".len()];
+            let inner = String::from_utf8(inner.to_vec()).unwrap();
+            assert!(
+                !inner.contains("\x1b[201~") && !inner.contains("\x1b[200~"),
+                "{hostile:?} -> {inner:?}"
+            );
+            assert!(out.starts_with(b"\x1b[200~a") && out.ends_with(b"b\x1b[201~"));
+        }
+    }
+
+    #[test]
+    fn modified_editing_keys_and_navigation_encodings_are_stable() {
+        assert_eq!(enc("shift-enter").unwrap(), "\n");
+        assert_eq!(enc("ctrl-backspace").unwrap(), "\x08");
+        assert_eq!(enc("alt-tab").unwrap(), "\x1b\t");
+        assert_eq!(enc("ctrl-tab").unwrap(), "\t");
+        assert_eq!(enc("alt-escape").unwrap(), "\x1b\x1b");
+        assert_eq!(enc("insert").unwrap(), "\x1b[2~");
+        assert_eq!(enc("shift-delete").unwrap(), "\x1b[3;2~");
+        assert_eq!(enc("ctrl-pageup").unwrap(), "\x1b[5;5~");
+        assert_eq!(enc("home").unwrap(), "\x1b[H");
+        assert_eq!(enc("end").unwrap(), "\x1b[F");
+        assert_eq!(enc_mode("end", TermMode::APP_CURSOR).unwrap(), "\x1bOF");
+        assert_eq!(enc("alt-up").unwrap(), "\x1b[1;3A");
+        assert_eq!(enc("ctrl-shift-alt-down").unwrap(), "\x1b[1;8B");
+        // Shift+alt arrows are not word motion.
+        assert_eq!(enc("alt-shift-left").unwrap(), "\x1b[1;4D");
+    }
+
+    #[test]
+    fn control_punctuation_function_key_limits_and_platform_keys() {
+        assert_eq!(enc("ctrl-@").unwrap(), "\0");
+        assert_eq!(enc("ctrl-2").unwrap(), "\0");
+        assert_eq!(enc("ctrl-]").unwrap(), "\x1d");
+        assert_eq!(enc("ctrl-^").unwrap(), "\x1e");
+        assert_eq!(enc("ctrl-_").unwrap(), "\x1f");
+        assert_eq!(enc("ctrl-/").unwrap(), "\x1f");
+        assert_eq!(enc("ctrl-?").unwrap(), "\x7f");
+        assert_eq!(enc("ctrl-8").unwrap(), "\x7f");
+        assert_eq!(enc("f20").unwrap(), "\x1b[34~");
+        assert_eq!(enc("f21"), None);
+        assert_eq!(enc("f0"), None);
+        assert_eq!(enc("alt-shift-f2").unwrap(), "\x1b[1;4Q");
+        // Platform (cmd) shortcuts belong to the app, never the program.
+        assert_eq!(enc("cmd-enter"), None);
+        assert_eq!(enc("cmd-left"), None);
+        assert_eq!(enc("ctrl-cmd-c"), None);
+        // Unknown named keys are not guessed at.
+        assert_eq!(enc("ctrl-shift-unknownkey"), None);
+    }
+
+    #[test]
+    fn plain_paste_normalizes_lone_cr_and_keeps_unicode() {
+        assert_eq!(
+            encode_paste("é\r界\r\n😀", TermMode::NONE),
+            "é\r界\r😀".as_bytes()
+        );
+        assert_eq!(
+            encode_paste("", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~\x1b[201~"
         );
     }
 }

@@ -484,12 +484,15 @@ impl SessionManager {
             );
         }
         if !record.segments.is_empty() {
-            let segment = if requested == *target {
+            // A rebound mailbox alias names the chat itself, not a retired segment.
+            let current =
+                requested == *target || !record.segments.iter().any(|s| s.session_id == requested);
+            let segment = if current {
                 record.segments.last()
             } else {
                 record.segments.iter().find(|s| s.session_id == requested)
             };
-            let events = if requested == *target && self.is_live(target) {
+            let events = if current && self.is_live(target) {
                 self.subscribe_with_history(target)?.0
             } else if let Some(path) = segment.and_then(|s| s.journal.as_ref()) {
                 crate::conversation::Journal::read(path)?
@@ -1019,6 +1022,112 @@ mod tests {
                 .await
                 .is_err()
         );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mail_queued_during_terminal_mode_survives_restart_and_is_delivered_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let manager = SessionManager::new(
+            &path,
+            [Arc::new(crate::MockBackend::new(Provider::Codex)) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let a = manager
+            .start_session(config(Provider::Codex, dir.path()))
+            .await
+            .unwrap();
+        let b = manager
+            .start_session(config(Provider::Codex, dir.path()))
+            .await
+            .unwrap();
+        manager.handoff_to_terminal(&a.id).await.unwrap();
+        let message = manager
+            .send_to_peer(&b.id, &a.id, "terminal-mail", "Handle this later")
+            .unwrap();
+        assert!(!manager.dispatch_peer(&a.id).await.unwrap());
+        manager.shutdown().await;
+        drop(manager);
+
+        let backend = crate::MockBackend::new(Provider::Codex);
+        let submitted = backend.submitted.clone();
+        let manager =
+            SessionManager::new(&path, [Arc::new(backend) as Arc<dyn AgentBackend>]).unwrap();
+        // Terminal ownership is runtime-only; the saved chat returns to Chat.
+        assert!(!manager.is_terminal_owned(&a.id));
+        let pending = manager.pending_peer(&a.id).unwrap();
+        assert_eq!(
+            (pending.id.as_str(), pending.state),
+            (message.id.as_str(), DeliveryState::Queued)
+        );
+        assert!(manager.dispatch_peer(&a.id).await.unwrap());
+        idle(&manager, &a.id).await;
+        // A later tick may continue the work but never redelivers the message.
+        manager.dispatch_peer(&a.id).await.unwrap();
+        idle(&manager, &a.id).await;
+        assert_eq!(
+            manager.peer_messages(&a.id)[0].state,
+            DeliveryState::Delivered
+        );
+        let delivered = submitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, input)| {
+                input.text.contains(&message.id) && input.text.starts_with("<del_peer_message")
+            })
+            .count();
+        assert_eq!(delivered, 1);
+        let history = manager.subscribe_with_history(&a.id).unwrap().0;
+        assert_eq!(
+            history
+                .iter()
+                .filter(
+                    |e| matches!(e, AgentEvent::PeerMessage { message: m } if m.id == message.id)
+                )
+                .count(),
+            1
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rebound_alias_reads_the_current_conversation_after_a_provider_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("index"),
+            [
+                Arc::new(crate::MockBackend::new(Provider::Codex)) as Arc<dyn AgentBackend>,
+                Arc::new(crate::MockBackend::new(Provider::Claude)),
+            ],
+        )
+        .unwrap();
+        let old = manager
+            .start_session(config(Provider::Codex, dir.path()))
+            .await
+            .unwrap();
+        // Not yet registered, so the earlier mailbox can be rebound to it.
+        let chat = manager
+            .start_session(config(Provider::Codex, Path::new("relative")))
+            .await
+            .unwrap();
+        manager.rebind_peer(&old.id, &chat.id).unwrap();
+        manager
+            .switch_provider(&chat.id, Provider::Claude, None)
+            .await
+            .unwrap();
+        manager
+            .send_prompt(&chat.id, UserInput::text("fact after the switch"))
+            .await
+            .unwrap();
+        idle(&manager, &chat.id).await;
+        let page = manager
+            .read_peer_context(&chat.id, &old.id, None, 64_000)
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&page.chunks).unwrap();
+        assert!(text.contains("fact after the switch"), "{text}");
         manager.shutdown().await;
     }
 }

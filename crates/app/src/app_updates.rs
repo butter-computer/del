@@ -1259,6 +1259,22 @@ mod tests {
         assert!(version("0.2.0/../app").is_none());
     }
     #[test]
+    fn versions_compare_numerically_with_an_optional_v_prefix() {
+        assert_eq!(version("v1.2.3"), version("1.2.3"));
+        assert_eq!(version("0.1.24"), Some((0, 1, 24)));
+        assert!(version("0.1.24") > version("0.1.9"));
+        assert!(version("1.0.0") > version("0.99.99"));
+        assert!(version("0.2.0") > version("0.1.99"));
+        for invalid in [
+            "", "v", "vv1.2.3", "+1.2.3", "1.2.+3", " 1.2.3", "1.2.3\n", "1..2",
+        ] {
+            assert!(version(invalid).is_none(), "{invalid:?}");
+        }
+        // The running version is compared with the same parser.
+        assert!(version(env!("CARGO_PKG_VERSION")).is_some());
+    }
+
+    #[test]
     fn checksum_requires_matching_digest_and_filename() {
         let digest = "a".repeat(64);
         assert!(checksum_matches(

@@ -106,7 +106,12 @@ fn version(value: &str) -> Option<(u64, u64, u64)> {
         .trim_start_matches('v')
         .split('.')
         .collect::<Vec<_>>();
-    if parts.len() != 3 {
+    // `u64::from_str` alone accepts a leading `+`; registry versions are digits only.
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     Some((
@@ -593,6 +598,29 @@ esac
             "../x", "x\n",
         ] {
             assert!(!valid_npm_package(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn versions_compare_numerically_and_reject_non_release_forms() {
+        assert_eq!(version("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(version(" v0.10.0\n"), Some((0, 10, 0)));
+        assert!(version("0.10.0") > version("0.9.9"));
+        assert!(version("2.0.0") > version("1.99.99"));
+        for bad in [
+            "",
+            "1.2",
+            "1.2.3.4",
+            "1.2.3-beta.1",
+            "1.2.3-beta",
+            "+1.2.3",
+            "1.+2.3",
+            "1..3",
+            "1.2.x",
+            "1. 2.3",
+            "١.٢.٣",
+        ] {
+            assert_eq!(version(bad), None, "{bad:?}");
         }
     }
 

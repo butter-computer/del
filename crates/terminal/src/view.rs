@@ -416,12 +416,21 @@ impl TerminalView {
             mouse::MouseButton::WheelDown
         };
         if mouse::reporting(self.session.mode()) && !e.modifiers.shift {
+            // Reported like a click: the program may move its editor cursor.
+            if let Some(command) = &mut self.chat_command {
+                command.invalidate();
+            }
             for _ in 0..lines.unsigned_abs().min(100) {
                 self.report_mouse(mouse::MouseAction::Press, button, e.position, e.modifiers);
             }
         } else if !e.modifiers.shift
             && let Some(bytes) = mouse::wheel_as_arrows(lines.clamp(-100, 100), self.session.mode())
         {
+            // Wheel arrows can recall editor history exactly like typed
+            // arrows, so they make the tracked line uncertain too.
+            if let Some(command) = &mut self.chat_command {
+                command.input(&bytes);
+            }
             self.session.write(bytes);
         } else {
             self.session

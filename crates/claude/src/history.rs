@@ -143,6 +143,14 @@ pub fn read(mut reader: impl BufRead, id: &str) -> std::io::Result<Vec<AgentEven
             }
         }
         if record["type"] == "assistant" {
+            if turn.is_none() {
+                // A reply with no visible user message before it (e.g. a meta
+                // or empty prompt) still needs a turn that history closes;
+                // otherwise the translator opens a native turn left running.
+                let turn_id = record["uuid"].as_str().unwrap_or("history").to_owned();
+                out.extend(translator.enqueue_turn(turn_id.clone()));
+                turn = Some(turn_id);
+            }
             for block in content.as_array().into_iter().flatten() {
                 if let Some(text) = block["thinking"].as_str().filter(|s| !s.is_empty()) {
                     out.push(AgentEvent::ReasoningDelta {
@@ -242,5 +250,132 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn transcript(records: &[Value]) -> String {
+        records.iter().map(|r| format!("{r}\n")).collect()
+    }
+
+    /// Every turn history opens is also closed, so a restored chat is idle.
+    fn assert_balanced(events: &[AgentEvent]) {
+        let mut open = Vec::new();
+        for event in events {
+            match event {
+                AgentEvent::TurnStarted { turn_id } => open.push(turn_id.clone()),
+                AgentEvent::TurnCompleted { turn_id, .. } => {
+                    assert_eq!(open.pop().as_ref(), Some(turn_id), "{events:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(open.is_empty(), "turns left running: {open:?}");
+    }
+
+    #[test]
+    fn reply_without_a_visible_prompt_is_closed_not_left_running() {
+        let records = [
+            json!({"type":"user","uuid":"m","parentUuid":null,"isMeta":true,"message":{"content":"meta"}}),
+            json!({"type":"assistant","uuid":"a","parentUuid":"m","message":{"content":[
+                {"type":"thinking","thinking":"plan"},{"type":"text","text":"orphan reply"}]}}),
+            json!({"type":"user","uuid":"u","parentUuid":"a","message":{"content":"next"}}),
+            json!({"type":"assistant","uuid":"b","parentUuid":"u","message":{"content":[{"type":"text","text":"answer"}]}}),
+        ];
+        let events = read(transcript(&records).as_bytes(), "s").unwrap();
+        assert_balanced(&events);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserMessage { text } if text == "meta"))
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::ReasoningDelta { turn_id, text } if turn_id == "a" && text == "plan")
+        ));
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::AssistantMessage { turn_id, text } if turn_id == "a" && text == "orphan reply")
+        ));
+    }
+
+    #[test]
+    fn prompts_tools_and_file_changes_restore_in_order_for_this_session_only() {
+        let records = [
+            json!({"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","message":{"content":[
+                {"type":"text","text":"look"},{"type":"image","source":{}},{"type":"document"}]}}),
+            json!({"type":"user","uuid":"x","parentUuid":"u1","sessionId":"other","message":{"content":"foreign"}}),
+            json!({"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s","message":{"content":[
+                {"type":"tool_use","id":"w","name":"Write","input":{"file_path":"/w/new.txt","content":"one\ntwo"}}]}}),
+            json!({"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"s",
+                "tool_use_result":{"type":"create"},
+                "message":{"content":[{"type":"tool_result","tool_use_id":"w","content":[{"type":"text","text":"written"}]}]}}),
+            json!({"type":"assistant","uuid":"a2","parentUuid":"r1","sessionId":"s","message":{"content":[
+                {"type":"tool_use","id":"b","name":"Bash","input":{"command":"false"}}]}}),
+            json!({"type":"user","uuid":"r2","parentUuid":"a2","sessionId":"s",
+                "message":{"content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"exit 1"}]}}),
+            json!({"type":"assistant","uuid":"a3","parentUuid":"r2","sessionId":"s","message":{"content":[{"type":"text","text":"done"}]}}),
+        ];
+        let events = read(transcript(&records).as_bytes(), "s").unwrap();
+        assert_balanced(&events);
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::UserMessage {
+                    text: "look\n[Image]\n[Document]".into()
+                },
+                AgentEvent::TurnStarted {
+                    turn_id: "u1".into()
+                },
+                AgentEvent::ToolCallStarted {
+                    id: "w".into(),
+                    name: "Write".into(),
+                    input_summary: "/w/new.txt".into()
+                },
+                AgentEvent::ToolCallFinished {
+                    id: "w".into(),
+                    status: del_agent::ToolStatus::Completed,
+                    output_summary: "written".into()
+                },
+                AgentEvent::FileChange {
+                    path: "/w/new.txt".into(),
+                    kind: del_agent::FileChangeKind::Created,
+                    diff: Some("+one\n+two\n".into())
+                },
+                AgentEvent::ToolCallStarted {
+                    id: "b".into(),
+                    name: "Bash".into(),
+                    input_summary: "false".into()
+                },
+                AgentEvent::ToolCallFinished {
+                    id: "b".into(),
+                    status: del_agent::ToolStatus::Failed,
+                    output_summary: "exit 1".into()
+                },
+                AgentEvent::AssistantMessage {
+                    turn_id: "u1".into(),
+                    text: "done".into()
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "u1".into(),
+                    status: TurnStatus::Completed
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_or_missing_transcripts_restore_nothing() {
+        assert!(read(&b""[..], "s").unwrap().is_empty());
+        assert!(read(&b"\n\nnot json\n"[..], "s").unwrap().is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        // Ids are filenames, never paths: a non-UUID id is not looked up.
+        assert!(
+            load_from(dir.path(), dir.path(), "../escape")
+                .unwrap()
+                .is_empty()
+        );
+        let missing = uuid::Uuid::new_v4().to_string();
+        assert!(
+            load_from(dir.path(), dir.path(), &missing)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

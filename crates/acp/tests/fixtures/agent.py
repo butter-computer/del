@@ -55,7 +55,17 @@ for line in sys.stdin:
                 assert params['sessionId'] == remote
                 update(dict(sessionUpdate='user_message_chunk', content=dict(type='text', text='earlier')))
                 text('reply')
-            result(id, dict(sessionId=remote))
+            response = dict(sessionId=remote)
+            if os.getenv('MODES'):
+                response['modes'] = dict(currentModeId='default', availableModes=[
+                    dict(id='default', name='Default'), dict(id='plan', name='Plan')])
+            if os.getenv('MODELS'):
+                response['models'] = dict(currentModelId='m1', availableModels=[
+                    dict(modelId='m1', name='Model One'), dict(modelId='m2'), dict(name='no id')])
+            result(id, response)
+    elif method == 'session/set_mode':
+        assert params == dict(sessionId=remote, modeId='plan'), params
+        result(id, {})
     elif method == 'session/set_model':
         result(id, {})
     elif method == 'session/prompt':
@@ -71,6 +81,9 @@ for line in sys.stdin:
         elif prompt == 'fail':
             send(dict(id=id, error=dict(code=-32603, message='mock failure')))
             active = None
+        elif prompt == 'null-error':
+            send(dict(id=id, result=dict(stopReason='end_turn'), error=None))
+            active = None
         elif prompt == 'stop-error':
             finish('error')
         elif prompt == 'exit':
@@ -83,13 +96,23 @@ for line in sys.stdin:
             callbacks = {201: 'fs/read_text_file', 202: 'fs/write_text_file', 203: 'terminal/create'}
             for key, name in callbacks.items():
                 send(dict(id=key, method=name, params=dict(sessionId=remote)))
+        elif prompt == 'unknown-update':
+            update(dict(sessionUpdate='future_update_kind', payload=dict(x=1)))
+            update(dict(sessionUpdate='tool_call', toolCallId='odd-1', title='Odd tool', kind='brand_new_kind',
+                        status='pending', futureField=True))
+            update(dict(sessionUpdate='tool_call_update', toolCallId='odd-1', status='completed',
+                        rawOutput=dict(ok=True)))
+            send(dict(method='future/notification', params=dict(sessionId=remote)))
+            text('after')
+            finish()
         elif prompt.startswith('permission'):
-            update(dict(sessionUpdate='tool_call', toolCallId='tool-1', title='Run printf', kind='execute', status='pending'))
+            kind = 'edit' if prompt == 'permission-edit' else 'execute'
+            update(dict(sessionUpdate='tool_call', toolCallId='tool-1', title='Run printf', kind=kind, status='pending'))
             allow = 'allow_always' if prompt == 'permission-always' else 'allow_once'
             permission = 100
             send(dict(id=permission, method='session/request_permission', params=dict(
                 sessionId=remote,
-                toolCall=dict(toolCallId='tool-1', kind='execute', title='Run printf', rawInput=dict(command='printf acp')),
+                toolCall=dict(toolCallId='tool-1', kind=kind, title='Run printf', rawInput=dict(command='printf acp')),
                 options=[dict(optionId='yes', name='Allow', kind=allow), dict(optionId='no', name='Deny', kind='reject_once')]
             )))
         else:

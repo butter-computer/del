@@ -277,3 +277,142 @@ pub fn is_peer_tool(name: &str) -> bool {
             | "session_work"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(name: &str) -> Value {
+        tool_list()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} missing"))
+    }
+
+    #[test]
+    fn every_schema_is_a_closed_object_with_annotations() {
+        let list = tool_list();
+        let tools = list.as_array().unwrap();
+        let mut names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), tools.len(), "duplicate tool names");
+        for t in tools {
+            let schema = &t["inputSchema"];
+            assert_eq!(schema["type"], "object", "{}", t["name"]);
+            assert_eq!(schema["additionalProperties"], false, "{}", t["name"]);
+            for required in schema["required"].as_array().into_iter().flatten() {
+                assert!(
+                    schema["properties"]
+                        .get(required.as_str().unwrap())
+                        .is_some(),
+                    "{} requires undeclared {required}",
+                    t["name"]
+                );
+            }
+            assert!(t["annotations"].is_object(), "{}", t["name"]);
+            assert!(!t["title"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn schema_limits_match_server_side_validation() {
+        let p = |name: &str| tool(name)["inputSchema"]["properties"].clone();
+        assert_eq!(p("report_status")["summary"]["maxLength"], MAX_SUMMARY);
+        assert_eq!(
+            p("report_status")["state"]["enum"],
+            serde_json::json!(ReportedState::ALL)
+        );
+        assert_eq!(p("ask_user")["question"]["maxLength"], MAX_QUESTION);
+        assert_eq!(p("ask_user")["options"]["maxItems"], MAX_OPTIONS);
+        assert_eq!(p("ask_user")["options"]["items"]["maxLength"], MAX_OPTION);
+        assert_eq!(p("spawn_session")["prompt"]["maxLength"], MAX_PROMPT);
+        assert_eq!(
+            p("spawn_session")["provider"]["enum"],
+            serde_json::json!(["codex", "claude", "opencode", "acp"])
+        );
+        assert_eq!(p("send_to_session")["text"]["maxLength"], MAX_TEXT);
+        assert_eq!(p("reply_to_session")["text"]["maxLength"], MAX_TEXT);
+        assert_eq!(p("notify")["title"]["maxLength"], MAX_TITLE);
+        assert_eq!(p("notify")["body"]["maxLength"], MAX_BODY);
+        assert_eq!(p("read_session")["max_characters"]["minimum"], 1000);
+        assert_eq!(p("read_session")["max_characters"]["maximum"], 64000);
+        assert_eq!(
+            p("session_work")["action"]["enum"],
+            serde_json::json!(["get", "receive", "complete", "wait", "pause", "resume"])
+        );
+        assert_eq!(
+            p("goal")["action"]["enum"],
+            serde_json::json!(["get", "set", "resume", "clear"])
+        );
+    }
+
+    #[test]
+    fn peer_tools_are_exactly_the_collaboration_set() {
+        for name in [
+            "list_sessions",
+            "spawn_session",
+            "get_session_summary",
+            "read_session",
+            "send_to_session",
+            "reply_to_session",
+            "session_work",
+        ] {
+            assert!(is_peer_tool(name), "{name}");
+        }
+        for name in ["browser", "goal", "report_status", "ask_user", "notify", ""] {
+            assert!(!is_peer_tool(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn length_limits_count_characters_and_reject_blank_text() {
+        assert!(non_empty_max("summary", &"界".repeat(MAX_SUMMARY), MAX_SUMMARY).is_ok());
+        assert!(non_empty_max("summary", &"界".repeat(MAX_SUMMARY + 1), MAX_SUMMARY).is_err());
+        assert_eq!(
+            non_empty_max("title", " \n\t", MAX_TITLE),
+            Err("title must not be empty".into())
+        );
+        assert_eq!(
+            non_empty_max("title", &"x".repeat(MAX_TITLE + 1), MAX_TITLE),
+            Err(format!("title is longer than {MAX_TITLE} characters"))
+        );
+    }
+
+    #[test]
+    fn goal_actions_parse_strictly() {
+        let goal = |action: &str, objective: Option<&str>| {
+            GoalArgs {
+                action: action.into(),
+                objective: objective.map(Into::into),
+            }
+            .action()
+        };
+        assert!(matches!(goal("get", None), Ok(None)));
+        assert!(matches!(
+            goal("resume", None),
+            Ok(Some(del_agent::GoalAction::Resume))
+        ));
+        assert!(matches!(
+            goal("clear", None),
+            Ok(Some(del_agent::GoalAction::Clear))
+        ));
+        assert!(matches!(
+            goal("set", Some("Ship it")),
+            Ok(Some(del_agent::GoalAction::Set(text))) if text == "Ship it"
+        ));
+        assert!(goal("set", None).is_err());
+        assert!(goal("set", Some("  ")).is_err());
+        assert!(goal("set", Some(&"x".repeat(4001))).is_err());
+        assert!(goal("set", Some(&"界".repeat(4000))).is_ok());
+        for native in ["clear", " STOP ", "Off", "reset", "none", "cancel"] {
+            assert!(goal("set", Some(native)).is_err(), "{native}");
+        }
+        assert!(goal("get", Some("x")).is_err());
+        assert!(goal("clear", Some("x")).is_err());
+        assert!(goal("delete", None).is_err());
+    }
+}

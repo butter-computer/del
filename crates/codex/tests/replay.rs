@@ -1208,3 +1208,214 @@ async fn closing_one_of_two_chats_waits_for_native_lock_release() {
         "server must not retain idle ownership after unsubscribe"
     );
 }
+
+#[tokio::test]
+async fn model_catalog_follows_pages_and_rejects_a_repeated_cursor() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"model/list","params":{"cursor":null}}"#,
+        r#"< {"id":3,"result":{"data":[{"model":"m1","displayName":"One","isDefault":true,"futureField":{}},{"model":"secret","hidden":true},{"displayName":"no id"}],"nextCursor":"p2"}}"#,
+        r#"> {"id":4,"method":"model/list","params":{"cursor":"p2"}}"#,
+        r#"< {"id":4,"result":{"data":[{"model":"m2","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"bogus":1}]}],"nextCursor":null}}"#,
+        r#"> {"id":5,"method":"model/list","params":{"cursor":null}}"#,
+        r#"< {"id":5,"result":{"data":[],"nextCursor":"same"}}"#,
+        r#"> {"id":6,"method":"model/list","params":{"cursor":"same"}}"#,
+        r#"< {"id":6,"result":{"data":[],"nextCursor":"same"}}"#,
+        r#"> {"id":7,"method":"model/list","params":{"cursor":null}}"#,
+        r#"< {"id":7,"result":{"models":[]}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let cwd = std::path::Path::new("/work");
+    let models = backend.list_models(cwd).await.unwrap();
+    let rows: Vec<_> = models
+        .iter()
+        .map(|m| {
+            (
+                m.id.as_str(),
+                m.name.as_str(),
+                m.is_default,
+                m.efforts.len(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [("m1", "One", true, 0), ("m2", "m2", false, 1)]);
+    let repeated = backend.list_models(cwd).await.unwrap_err();
+    assert!(
+        repeated.to_string().contains("repeated its cursor"),
+        "{repeated}"
+    );
+    let malformed = backend.list_models(cwd).await.unwrap_err();
+    assert!(
+        malformed.to_string().contains("no model list"),
+        "{malformed}"
+    );
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn saved_history_read_rebuilds_turns_without_touching_live_state() {
+    let lines = script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+        r#"> {"id":3,"method":"thread/read","params":{"threadId":"saved","includeTurns":true}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"saved","turns":[{"id":"t1","status":"inProgress","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"hi"}]},{"type":"agentMessage","id":"a","text":"partial"}]}]}}}"#,
+    ]);
+    let (client, rx, server) = replay(lines);
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    let history = backend
+        .read_session_history(&config(), &SessionId::new("saved"))
+        .await
+        .unwrap();
+    assert_eq!(
+        history,
+        vec![
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into()
+            },
+            AgentEvent::UserMessage { text: "hi".into() },
+            AgentEvent::AssistantMessage {
+                turn_id: "t1".into(),
+                text: "partial".into()
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                status: TurnStatus::Interrupted
+            },
+        ]
+    );
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn in_flight_request_fails_promptly_when_the_server_exits() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (client, mut rx) = del_codex::CodexClient::from_io(cr, cw);
+    let request = {
+        let client = client.clone();
+        tokio::spawn(async move { client.request("model/list", serde_json::json!({})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(server_io);
+    let result = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .expect("a pending request must not wait for its timeout")
+        .unwrap();
+    assert!(
+        matches!(result, Err(del_codex::ClientError::Disconnected(_))),
+        "{result:?}"
+    );
+    assert!(client.is_closed());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap(),
+        Some(del_codex::Incoming::Closed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn noise_partial_writes_and_null_error_fields_are_tolerated() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (sr, mut sw) = tokio::io::split(server_io);
+    let (client, mut rx) = del_codex::CodexClient::from_io(cr, cw);
+    let server = tokio::spawn(async move {
+        let mut lines = BufReader::new(sr).lines();
+        let request: serde_json::Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let id = &request["id"];
+        sw.write_all(b"warning: not json\n\n[1,2]\n{\"id\":999,\"result\":{}}\n")
+            .await
+            .unwrap();
+        // One response split across writes, with an explicit null error.
+        let reply = format!("{{\"id\":{id},\"error\":null,\"result\":{{\"ok\":true}}}}\r\n");
+        let (a, b) = reply.split_at(7);
+        sw.write_all(a.as_bytes()).await.unwrap();
+        sw.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        sw.write_all(b.as_bytes()).await.unwrap();
+        sw.write_all(b"{\"method\":\"future/notification\",\"params\":{\"x\":1}}\n")
+            .await
+            .unwrap();
+        sw.flush().await.unwrap();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+    let result = client.request("thread/list", serde_json::json!({})).await;
+    assert_eq!(result.unwrap(), serde_json::json!({"ok":true}));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap(),
+        Some(del_codex::Incoming::Notification {
+            method: "future/notification".into(),
+            params: serde_json::json!({"x":1})
+        })
+    );
+    client.shutdown(Duration::from_millis(100)).await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn spawned_app_server_gets_goal_feature_flag_and_account_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("codex-fixture");
+    let capture = dir.path().join("launch.json");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import json, os, sys
+with open(os.environ['DEL_TEST_CAPTURE'], 'w') as f:
+    json.dump({'argv': sys.argv[1:], 'home': os.environ.get('CODEX_HOME'),
+        'profile': os.environ.get('DEL_ACCOUNT_PROFILE')}, f)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if 'id' not in msg:
+        continue
+    result = {'account/read': {'account': {'type': 'apiKey'}, 'requiresOpenaiAuth': True}}.get(msg['method'], {})
+    print(json.dumps({'id': msg['id'], 'result': result}), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = dir.path().join("codex-home");
+    let backend = CodexBackend::new(CodexOptions {
+        spawn: del_codex::SpawnOptions {
+            program: script,
+            global_args: vec!["-c".into(), "user=1".into()],
+            env: vec![
+                ("CODEX_HOME".into(), home.display().to_string()),
+                ("DEL_ACCOUNT_PROFILE".into(), "1".into()),
+                ("DEL_TEST_CAPTURE".into(), capture.display().to_string()),
+            ],
+        },
+        api_key: None,
+        shutdown_grace: Duration::from_millis(500),
+        ..Default::default()
+    });
+    assert_eq!(
+        backend.check_auth().await.unwrap(),
+        del_codex::AuthStatus::ApiKey
+    );
+    let launch: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+    assert_eq!(
+        launch["argv"],
+        serde_json::json!(["-c", "user=1", "-c", "features.goals=true", "app-server"])
+    );
+    assert_eq!(launch["home"], home.display().to_string());
+    assert_eq!(launch["profile"], "1");
+    backend.shutdown().await.unwrap();
+}

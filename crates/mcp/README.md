@@ -50,7 +50,7 @@ be megabytes, are sent once as `content[0].text` JSON.
 | `browser` | `action`, optional `session_id`, `tab_id`, `url`, `selector`, `value`, `key`, `script` | page/tab JSON or PNG image content |
 | `report_status` | `state` (`working\|idle\|blocked\|done\|error`), `summary` (≤500), `session_id?` (must equal your own) | text `status recorded` |
 | `ask_user` | `question` (≤4000), `options?` (≤8 strings, ≤200 each) | `{answered: true, answer, option_index?}` or `{answered: false, dismissed: true}`; blocks until the user answers in del; error on timeout |
-| `list_sessions` | none | `{sessions: [{id, provider, cwd, title, status, reported_state, is_self}]}` |
+| `list_sessions` | none | `{sessions: [{id, provider, mode, command, cwd, title, status, reported_state, is_self}]}` |
 | `get_session_summary` | `session_id` | `{info, reported_summary, last_output}` |
 | `spawn_session` | `provider` (`codex\|claude\|opencode\|acp`; ACP is chat-only), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
 | `read_session` | `session_id`, `cursor?`, `max_characters?` (1000–64000) | recorded public event chunks, next cursor, retention notice |
@@ -58,6 +58,7 @@ be megabytes, are sent once as `content[0].text` JSON.
 | `reply_to_session` | `request_id`, `text`, `idempotency_key` | reply receipt, routed to the original sender |
 | `session_work` | `action`: `get`, `receive`, `complete`, `wait`, `pause`, `resume` | current work state; `receive` pulls a terminal agent's next peer message |
 | `notify` | `title` (≤120), `body` (≤1000) | text `notified` |
+| `goal` | `action` (`get\|set\|resume\|clear`), `objective` (`set` only, 1–4000) | `{goal, queued}`; chat credentials only, own session |
 
 `initialize` returns instructions telling the agent its own session id.
 

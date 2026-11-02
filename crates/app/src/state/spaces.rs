@@ -441,11 +441,24 @@ impl AppState {
             return;
         };
         self.checkpoint_space();
+        // The first Space also shows legacy (pre-Spaces) pins without an explicit entry.
+        let legacy_pins: HashSet<String> = self
+            .unified_rows()
+            .into_iter()
+            .filter(|row| row.pinned)
+            .map(|row| row.id.0)
+            .collect();
         let removed = self.spaces.items.remove(index);
         let target = &mut self.spaces.items[0];
         target.projects.extend(removed.projects);
+        // Moving pins must never unpin: a pin in either collection stays pinned.
         for (id, pinned) in removed.pins {
-            target.pins.entry(id).or_insert(pinned);
+            let current = target
+                .pins
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| legacy_pins.contains(&id));
+            target.pins.insert(id, current || pinned);
         }
         for id in removed.order {
             if !target.order.contains(&id) {
@@ -965,6 +978,83 @@ mod tests {
         assert!(swipe.offset > 0. && swipe.offset < 30.);
         assert!(swipe.target.is_none());
     }
+    #[gpui::test]
+    fn deleting_a_space_never_unpins_sessions_in_either_collection(cx: &mut gpui::TestAppContext) {
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            let root = std::path::PathBuf::from("/pinned-project");
+            let row = |id: &str, pinned: bool| crate::sessions::TerminalRow {
+                id: SessionId(id.into()),
+                title: id.into(),
+                cwd: root.clone(),
+                account_id: None,
+                provider: None,
+                active: false,
+                summary: String::new(),
+                pinned,
+            };
+            // A pre-Spaces pin, a pin made in Work, and a Default unpin that Work pinned.
+            let legacy = SessionId("legacy-pin".into());
+            let work_pin = SessionId("work-pin".into());
+            let both = SessionId("pinned-in-work-only".into());
+            s.terminal_rows.push(row(&legacy.0, true));
+            s.terminal_rows.push(row(&work_pin.0, false));
+            s.terminal_rows.push(row(&both.0, false));
+            s.create_space("Work".into(), cx);
+            let work = s.spaces.active.clone();
+            s.spaces.current_mut().projects.insert(root.clone());
+            // Pinned then unpinned in Work: Work stores an explicit `false`.
+            s.toggle_space_pin(&legacy, true, cx);
+            s.toggle_space_pin(&legacy, true, cx);
+            assert!(!s.space_pinned(&legacy, true));
+            s.toggle_space_pin(&work_pin, false, cx);
+            s.toggle_space_pin(&both, false, cx);
+            s.switch_space("default", cx);
+            s.spaces.current_mut().pins.insert(both.0.clone(), false);
+            assert!(s.space_pinned(&legacy, true));
+            s.delete_space(&work, cx);
+            assert_eq!(s.spaces.items.len(), 1);
+            assert!(s.space_pinned(&legacy, true), "Default's own pin survives");
+            assert!(s.space_pinned(&work_pin, false), "Work's pins move over");
+            assert!(s.space_pinned(&both, false));
+            assert!(s.space_has_project(&root));
+            assert_eq!(s.terminal_rows.len(), 3);
+        });
+    }
+
+    #[test]
+    fn saved_spaces_tolerate_unknown_fields_and_missing_sections() {
+        let mut spaces: Spaces = serde_json::from_str(
+            r#"{"items":[
+                {"id":"default","name":"Default","future":1,
+                 "deck":{"tabs":[{"Draft":3},{"Session":"chat"}],"selected":{"Session":"chat"},"extra":true}},
+                {"id":"default","name":"Duplicate"},
+                {"id":"work","name":"  "}],
+               "active":"work","new_flag":true}"#,
+        )
+        .unwrap();
+        spaces.normalize();
+        assert_eq!(
+            spaces
+                .items
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Default", "Space"]
+        );
+        assert_eq!(spaces.active, "work");
+        assert!(!spaces.global_tabs);
+        let default = &spaces.items[0];
+        assert_eq!(
+            default.deck.tabs,
+            [Tab::Draft(3), Tab::Session(SessionId("chat".into()))]
+        );
+        assert!(default.pins.is_empty() && default.order.is_empty());
+        let again: Spaces = serde_json::from_slice(&serde_json::to_vec(&spaces).unwrap()).unwrap();
+        assert_eq!(again.items.len(), 2);
+        assert_eq!(again.items[0].deck.selected, default.deck.selected);
+    }
+
     #[test]
     fn invalid_saved_spaces_recover_to_a_valid_collection() {
         let mut spaces: Spaces =

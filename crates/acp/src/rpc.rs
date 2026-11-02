@@ -205,10 +205,6 @@ impl Rpc {
                 }
             }
             r.closed.store(true, Ordering::SeqCst);
-            let waiters: Vec<_> = r.pending.lock().unwrap().drain().collect();
-            for (_, w) in waiters {
-                let _ = w.send(Err(closed_error()));
-            }
             let tail = tail.lock().unwrap().trim().to_owned();
             // Report the real exit code when the process has already gone; do
             // not wait for it here: a process can close stdout yet ignore
@@ -217,7 +213,13 @@ impl Rpc {
                 Ok(mut child) => child.try_wait().ok().flatten().and_then(|s| s.code()),
                 Err(_) => None,
             };
+            // Report the exit before failing waiters: a failed prompt waiter
+            // finishing first would add a second, generic error for the turn.
             handler.closed(exit, tail);
+            let waiters: Vec<_> = r.pending.lock().unwrap().drain().collect();
+            for (_, w) in waiters {
+                let _ = w.send(Err(closed_error()));
+            }
             r.kill(Duration::from_secs(2)).await;
         });
         Ok(rpc)
@@ -248,7 +250,7 @@ impl Rpc {
                 let Some(w) = self.pending.lock().unwrap().remove(&id) else {
                     return;
                 };
-                let res = match msg.get("error") {
+                let res = match msg.get("error").filter(|e| !e.is_null()) {
                     Some(e) => Err(RpcError {
                         code: e["code"].as_i64().unwrap_or(-32603),
                         message: e["message"].as_str().unwrap_or("error").to_owned(),

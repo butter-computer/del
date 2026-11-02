@@ -61,6 +61,14 @@ pub(super) fn mode_command(text: &str) -> Option<SessionMode> {
     }
 }
 
+/// Only Codex, Claude, and OpenCode chats and drafts can become terminals.
+/// Sidebar terminals ignore `/terminal`, so they are never rejected here.
+fn terminal_unsupported(mode: SessionMode, selection: &Selection, provider: Provider) -> bool {
+    mode == SessionMode::Terminal
+        && matches!(selection, Selection::Draft(_) | Selection::Session(_))
+        && provider == Provider::Acp
+}
+
 pub(super) async fn chat_terminal_spec(
     record: &del_agent::SessionRecord,
 ) -> Result<TerminalLaunchSpec, String> {
@@ -129,17 +137,17 @@ impl AppShell {
         if self.state.read(cx).is_starting() {
             return true;
         }
+        // Reject ACP before a handoff closes its chat backend and writes a
+        // terminal checkpoint for a terminal that can never launch.
+        if terminal_unsupported(mode, &selection, self.state.read(cx).effective().0) {
+            self.set_mode_error(
+                "Terminal mode supports Codex, Claude, and OpenCode.".into(),
+                cx,
+            );
+            return true;
+        }
         match selection {
             Selection::Draft(_) => {
-                if mode == SessionMode::Terminal
-                    && self.state.read(cx).effective().0 == Provider::Acp
-                {
-                    self.set_mode_error(
-                        "Terminal mode supports Codex, Claude, and OpenCode.".into(),
-                        cx,
-                    );
-                    return true;
-                }
                 self.state.update(cx, |s, cx| s.set_mode(mode, cx));
             }
             Selection::Session(id) => match mode {
@@ -549,5 +557,206 @@ mod tests {
         ] {
             assert_eq!(mode_command(text), None);
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn mode_commands_are_exact_lowercase_words_without_arguments() {
+        assert_eq!(mode_command("\t/chat  "), Some(SessionMode::Chat));
+        for text in [
+            "",
+            "/",
+            "terminal",
+            "chat",
+            "/Terminal",
+            "/CHAT",
+            "/chat/",
+            "/terminal.",
+            "//terminal",
+            "/ terminal",
+            "/chat\n/terminal",
+            "/goal /terminal",
+            "/terminal --resume",
+        ] {
+            assert_eq!(mode_command(text), None, "{text:?}");
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn acp_is_rejected_before_handoff_and_sidebar_terminals_are_never_rejected() {
+        let session = Selection::Session(SessionId::new("s"));
+        let draft = Selection::Draft(1);
+        let terminal = Selection::Terminal(SessionId::new("t"));
+        assert!(terminal_unsupported(
+            SessionMode::Terminal,
+            &session,
+            Provider::Acp
+        ));
+        assert!(terminal_unsupported(
+            SessionMode::Terminal,
+            &draft,
+            Provider::Acp
+        ));
+        assert!(!terminal_unsupported(
+            SessionMode::Terminal,
+            &terminal,
+            Provider::Acp
+        ));
+        assert!(!terminal_unsupported(
+            SessionMode::Chat,
+            &session,
+            Provider::Acp
+        ));
+        for provider in [Provider::Codex, Provider::Claude, Provider::OpenCode] {
+            for selection in [&session, &draft, &terminal] {
+                assert!(!terminal_unsupported(
+                    SessionMode::Terminal,
+                    selection,
+                    provider
+                ));
+            }
+        }
+    }
+
+    /// A launch that fails after the manager granted ownership drops its lease;
+    /// that must release the native conversation so Chat can resume it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_handoff_lease_releases_terminal_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent: std::sync::Arc<dyn del_agent::AgentBackend> =
+            std::sync::Arc::new(del_agent::MockBackend::new(Provider::Codex));
+        let manager = SessionManager::new(dir.path().join("index"), [agent]).unwrap();
+        let (events, _ui) = tokio::sync::mpsc::unbounded_channel();
+        let bridge =
+            crate::mcp_bridge::McpBridge::start(manager.clone(), events, dir.path().join("mcp"))
+                .await
+                .unwrap();
+        let session = manager
+            .start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: Default::default(),
+            })
+            .await
+            .unwrap();
+        manager.handoff_to_terminal(&session.id).await.unwrap();
+        assert!(manager.is_terminal_owned(&session.id));
+        // A terminal-owned conversation refuses a second handoff and chat prompts.
+        assert!(manager.handoff_to_terminal(&session.id).await.is_err());
+        assert!(
+            manager
+                .send_prompt(&session.id, del_agent::UserInput::text("hi"))
+                .await
+                .is_err()
+        );
+        let lease = HandoffLease {
+            manager: manager.clone(),
+            id: session.id.clone(),
+            bridge: bridge.handle(),
+            _terminal: None,
+        };
+        drop(lease);
+        assert!(!manager.is_terminal_owned(&session.id));
+        manager.resume(&session.id).await.unwrap();
+        bridge.shutdown();
+        manager.shutdown().await;
+    }
+
+    fn record(provider: Provider, id: &str) -> del_agent::SessionRecord {
+        del_agent::SessionRecord {
+            fork: None,
+            segments: Vec::new(),
+            id: SessionId::new(id),
+            provider,
+            account_id: None,
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: Default::default(),
+            title: None,
+            title_turns: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            status: del_agent::SessionStatus::Idle,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn handoff_args_resume_the_exact_native_conversation() {
+        let id = "01a16585-21de-7e41-9a31-9857f8268084";
+        let bridge = vec!["--mcp-config".to_string(), "/tmp/mcp.json".into()];
+        assert_eq!(
+            chat_terminal_args(&record(Provider::Codex, id), bridge.clone()).unwrap(),
+            [
+                "--mcp-config",
+                "/tmp/mcp.json",
+                "-c",
+                "check_for_update_on_startup=false",
+                "resume",
+                id
+            ]
+        );
+        assert_eq!(
+            chat_terminal_args(&record(Provider::Claude, id), Vec::new()).unwrap(),
+            ["--resume", id]
+        );
+        assert_eq!(
+            chat_terminal_args(&record(Provider::OpenCode, "ses_abc123"), Vec::new()).unwrap(),
+            ["--session", "ses_abc123"]
+        );
+        // A malformed saved identity never reaches the provider's argv.
+        assert!(chat_terminal_args(&record(Provider::Codex, "not-a-uuid"), Vec::new()).is_err());
+        assert!(chat_terminal_args(&record(Provider::OpenCode, "ses_a;b"), Vec::new()).is_err());
+    }
+
+    #[::core::prelude::v1::test]
+    fn claude_handoff_uses_the_latest_segment_and_merges_its_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join("segment.context.md");
+        std::fs::write(&context, "public context").unwrap();
+        let mut record = record(Provider::Claude, "01a16585-21de-7e41-9a31-9857f8268084");
+        let native = "11111111-2222-4333-8444-555555555555";
+        record.segments.push(del_agent::conversation::Segment {
+            session_id: SessionId::new(native),
+            provider: Provider::Claude,
+            account_id: None,
+            started_at_ms: 0,
+            history: None,
+            context: Some(context.clone()),
+            journal: None,
+        });
+        let args = chat_terminal_args(
+            &record,
+            vec![
+                "--mcp-config".into(),
+                "/tmp/mcp.json".into(),
+                "--append-system-prompt".into(),
+                "browser rules".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            args[..2],
+            ["--mcp-config".to_string(), "/tmp/mcp.json".into()]
+        );
+        assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        let file = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt-file")
+            .map(|ix| std::path::PathBuf::from(&args[ix + 1]))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "browser rules\n\npublic context"
+        );
+        assert_eq!(
+            args[args.len() - 2..],
+            ["--resume".to_string(), native.into()]
+        );
+        // A dangling flag is an error rather than a silently dropped prompt.
+        assert!(chat_terminal_args(&record, vec!["--append-system-prompt".into()]).is_err());
     }
 }

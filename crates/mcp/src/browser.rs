@@ -83,3 +83,112 @@ impl BrowserRequest {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(action: &str) -> BrowserRequest {
+        BrowserRequest {
+            action: action.into(),
+            session_id: None,
+            tab_id: None,
+            url: None,
+            selector: None,
+            value: None,
+            script: None,
+            key: None,
+        }
+    }
+
+    #[test]
+    fn every_documented_action_validates_with_its_required_argument() {
+        for action in [
+            "list_tabs",
+            "new_tab",
+            "select_tab",
+            "close_tab",
+            "back",
+            "forward",
+            "reload",
+            "snapshot",
+            "screenshot",
+        ] {
+            assert_eq!(request(action).validate(), Ok(()), "{action}");
+        }
+        let with = |action: &str, set: fn(&mut BrowserRequest)| {
+            let mut r = request(action);
+            set(&mut r);
+            r
+        };
+        assert!(
+            with("navigate", |r| r.url = Some("https://a.test".into()))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with("click", |r| r.selector = Some("#go".into()))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with("evaluate", |r| r.script = Some("return 1".into()))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with("press_key", |r| r.key = Some("Enter".into()))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with("fill", |r| {
+                r.selector = Some("#q".into());
+                r.value = Some(String::new());
+            })
+            .validate()
+            .is_ok(),
+            "an empty fill value clears the field"
+        );
+    }
+
+    #[test]
+    fn missing_blank_unknown_oversized_and_nul_arguments_are_rejected() {
+        for action in ["navigate", "click", "fill", "evaluate", "press_key"] {
+            assert!(request(action).validate().is_err(), "{action}");
+        }
+        let mut r = request("navigate");
+        r.url = Some("   ".into());
+        assert!(r.validate().is_err());
+        let mut r = request("fill");
+        r.selector = Some("#q".into());
+        assert_eq!(r.validate(), Err("fill requires value".into()));
+        for action in ["", "List_tabs", "open", "close"] {
+            assert_eq!(
+                request(action).validate(),
+                Err("Unknown browser action".into())
+            );
+        }
+        let mut r = request("snapshot");
+        r.tab_id = Some("x".repeat(50_000));
+        assert!(r.validate().is_ok());
+        r.tab_id = Some("x".repeat(50_001));
+        assert!(r.validate().is_err());
+        let mut r = request("evaluate");
+        r.script = Some("return 1\0".into());
+        assert!(r.validate().is_err());
+        let mut r = request("snapshot");
+        r.session_id = Some("a\0b".into());
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_when_parsing() {
+        let parsed: Result<BrowserRequest, _> =
+            serde_json::from_value(serde_json::json!({"action":"snapshot","frame":"x"}));
+        assert!(parsed.is_err());
+        let parsed: BrowserRequest =
+            serde_json::from_value(serde_json::json!({"action":"snapshot"})).unwrap();
+        assert_eq!(parsed.validate(), Ok(()));
+    }
+}

@@ -411,7 +411,9 @@ impl BridgeHandle {
                     let credentials = server.register_chat_client(id);
                     let config =
                         launch::claude(&credentials, &Transport::Http, &service.config_dir)?;
-                    let file = config.files[0].clone();
+                    let file = config.files.first().cloned().ok_or_else(|| {
+                        io::Error::other("Claude MCP launch configuration has no file")
+                    })?;
                     service
                         .files
                         .lock()

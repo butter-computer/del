@@ -605,3 +605,217 @@ async fn peer_tools_use_negotiated_transport_and_revoke_rebound_identity() {
         );
     }
 }
+
+fn mode_config(mode: PermissionMode) -> SessionConfig {
+    SessionConfig {
+        permission_mode: mode,
+        ..config()
+    }
+}
+
+/// Run one permission prompt and return (whether a card was shown, the reply text).
+async fn permission_outcome(
+    backend: &AcpBackend,
+    handle: &SessionHandle,
+    prompt: &str,
+) -> (bool, String) {
+    let mut rx = handle.subscribe();
+    backend
+        .send_prompt(&handle.id, UserInput::text(prompt))
+        .await
+        .unwrap();
+    let mut asked = false;
+    let mut reply = String::new();
+    loop {
+        match next(&mut rx).await {
+            AgentEvent::ApprovalRequested { id, .. } => {
+                asked = true;
+                backend
+                    .respond_approval(&handle.id, &id, ApprovalResponse::Deny)
+                    .await
+                    .unwrap();
+            }
+            AgentEvent::AssistantMessage { text, .. } => reply = text,
+            AgentEvent::TurnCompleted { .. } => return (asked, reply),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn permission_modes_answer_without_prompting_only_where_allowed() {
+    let backend = backend(&[("MODES", "1")]);
+    let full = backend
+        .start_session(mode_config(PermissionMode::FullAuto))
+        .await
+        .unwrap();
+    let (asked, reply) = permission_outcome(&backend, &full, "permission").await;
+    assert!(!asked, "full access never shows a card");
+    assert!(reply.contains("\"optionId\": \"yes\""), "{reply}");
+
+    let edit = backend
+        .start_session(mode_config(PermissionMode::AutoEdit))
+        .await
+        .unwrap();
+    let (asked, reply) = permission_outcome(&backend, &edit, "permission-edit").await;
+    assert!(!asked && reply.contains("\"optionId\": \"yes\""), "{reply}");
+    let (asked, reply) = permission_outcome(&backend, &edit, "permission").await;
+    assert!(asked, "auto-edit still asks before commands");
+    assert!(reply.contains("\"optionId\": \"no\""), "{reply}");
+
+    let plan = backend
+        .start_session(mode_config(PermissionMode::Plan))
+        .await
+        .unwrap();
+    let (asked, reply) = permission_outcome(&backend, &plan, "permission").await;
+    assert!(!asked && reply.contains("\"optionId\": \"no\""), "{reply}");
+    backend.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn plan_mode_and_effort_require_the_agent_to_advertise_them() {
+    let backend = backend(&[]);
+    let error = backend
+        .start_session(mode_config(PermissionMode::Plan))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not advertise plan mode"),
+        "{error}"
+    );
+    let mut effort = config();
+    effort.reasoning_effort = Some("high".into());
+    let error = backend.start_session(effort).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise reasoning effort"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn model_catalog_lists_the_agent_default_then_its_models() {
+    let backend = backend(&[("MODELS", "1")]);
+    let models = backend.list_models(&std::env::temp_dir()).await.unwrap();
+    let rows: Vec<_> = models
+        .iter()
+        .map(|m| (m.id.as_str(), m.name.as_str(), m.is_default))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("mock", "Mock ACP", true),
+            ("mock/m1", "Model One", false),
+            ("mock/m2", "m2", false),
+        ]
+    );
+    // A failing probe still offers the agent itself, with the reason.
+    let failing = self::backend(&[("AUTH_REQUIRED", "1")]);
+    let models = failing.list_models(&std::env::temp_dir()).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "mock");
+    assert!(models[0].description.starts_with("Agent default · "));
+}
+
+#[tokio::test]
+async fn unknown_updates_kinds_and_notifications_are_tolerated() {
+    let backend = backend(&[]);
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut rx = handle.subscribe();
+    backend
+        .send_prompt(&handle.id, UserInput::text("unknown-update"))
+        .await
+        .unwrap();
+    let events = completed(&mut rx).await;
+    assert!(events.iter().any(|e| matches!(e,
+        AgentEvent::ToolCallStarted { id, name, .. } if id == "odd-1" && name == "Tool")));
+    assert!(events.iter().any(|e| matches!(e,
+        AgentEvent::ToolCallFinished { id, status: ToolStatus::Completed, output_summary }
+            if id == "odd-1" && output_summary == "{\"ok\":true}")));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AssistantMessage { text, .. } if text == "after"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        })
+    ));
+    backend.shutdown().await.unwrap();
+}
+
+// Multi-threaded like the app, where a failed prompt waiter can run while the
+// reader is still reporting the exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_exit_mid_turn_reports_one_error_and_fails_the_turn() {
+    for _ in 0..5 {
+        let backend = backend(&[]);
+        let handle = backend.start_session(config()).await.unwrap();
+        let mut rx = handle.subscribe();
+        backend
+            .send_prompt(&handle.id, UserInput::text("exit"))
+            .await
+            .unwrap();
+        let mut events = completed(&mut rx).await;
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            })
+        ));
+        // Collect anything else the exit produced.
+        while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+        {
+            events.push(event);
+        }
+        let errors: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Error {
+                    message,
+                    recoverable,
+                } => Some((message.clone(), *recoverable)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(!errors[0].1, "process exit is not recoverable");
+        assert!(errors[0].0.starts_with("ACP agent exited"), "{errors:?}");
+        assert!(
+            backend
+                .send_prompt(&handle.id, UserInput::text("hello"))
+                .await
+                .is_err()
+        );
+        backend.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn response_with_a_null_error_member_is_a_success() {
+    let backend = backend(&[]);
+    let handle = backend.start_session(config()).await.unwrap();
+    let mut rx = handle.subscribe();
+    backend
+        .send_prompt(&handle.id, UserInput::text("null-error"))
+        .await
+        .unwrap();
+    let events = completed(&mut rx).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        })
+    ));
+    backend.shutdown().await.unwrap();
+}

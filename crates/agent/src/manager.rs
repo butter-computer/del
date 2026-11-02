@@ -1461,14 +1461,27 @@ impl SessionManager {
         if self.is_temporary(id) && self.is_live(id) {
             let _ = self.interrupt(id).await;
         }
+        // Hold the send/resume lock until the record is gone: a resume that
+        // was in flight would otherwise attach a provider process for a
+        // session that no longer exists anywhere Del can reach or close it.
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _deleting = lock.lock().await;
         if self.is_live(id) {
-            let _ = self.close(id).await;
+            let _ = self.close_locked(id).await;
         }
-        self.shared.resume_locks.lock().unwrap().remove(id);
         self.shared.title_generation.lock().unwrap().remove(id);
         self.shared.title_polls.lock().unwrap().remove(id);
         self.forget_peer_session(id)?;
-        self.shared.index.lock().unwrap().remove(id)
+        let removed = self.shared.index.lock().unwrap().remove(id);
+        self.shared.resume_locks.lock().unwrap().remove(id);
+        removed
     }
 
     pub async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
@@ -2408,5 +2421,226 @@ mod tests {
             next_status(SessionStatus::Idle, &resolved, false),
             SessionStatus::Idle
         );
+    }
+
+    /// Delegates to a mock, optionally holding `resume` until released.
+    struct GatedResume {
+        inner: MockBackend,
+        resumes: std::sync::atomic::AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl GatedResume {
+        fn new(provider: Provider) -> Self {
+            Self {
+                inner: MockBackend::new(provider),
+                resumes: Default::default(),
+                entered: Default::default(),
+                release: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentBackend for GatedResume {
+        fn provider(&self) -> Provider {
+            self.inner.provider()
+        }
+        async fn start_session(&self, config: SessionConfig) -> Result<SessionHandle> {
+            self.inner.start_session(config).await
+        }
+        async fn send_prompt(&self, session: &SessionId, input: UserInput) -> Result<()> {
+            self.inner.send_prompt(session, input).await
+        }
+        async fn steer(&self, session: &SessionId, text: String) -> Result<()> {
+            self.inner.steer(session, text).await
+        }
+        async fn interrupt(&self, session: &SessionId) -> Result<()> {
+            self.inner.interrupt(session).await
+        }
+        async fn resume(
+            &self,
+            config: SessionConfig,
+            session: &SessionId,
+        ) -> Result<SessionHandle> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.resume(config, session).await
+        }
+        async fn respond_approval(
+            &self,
+            session: &SessionId,
+            approval_id: &str,
+            response: ApprovalResponse,
+        ) -> Result<()> {
+            self.inner
+                .respond_approval(session, approval_id, response)
+                .await
+        }
+        async fn close(&self, session: &SessionId) -> Result<()> {
+            self.inner.close(session).await
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_resumes_attach_the_provider_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(GatedResume::new(Provider::Codex));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [backend.clone() as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.close(&h.id).await.unwrap();
+        let first = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        backend.entered.notified().await;
+        let second = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        backend.release.notify_one();
+        let timeout = Duration::from_secs(5);
+        let first = tokio::time::timeout(timeout, first).await.unwrap().unwrap();
+        let second = tokio::time::timeout(timeout, second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.unwrap().id, h.id);
+        assert_eq!(second.unwrap().id, h.id);
+        assert_eq!(backend.resumes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let history = m.subscribe_with_history(&h.id).unwrap().0;
+        assert_eq!(
+            history
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delete_during_resume_leaves_no_orphan_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(GatedResume::new(Provider::Codex));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [backend.clone() as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        m.close(&h.id).await.unwrap();
+        let resuming = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.resume(&id).await }
+        });
+        backend.entered.notified().await;
+        let deleting = tokio::spawn({
+            let (m, id) = (m.clone(), h.id.clone());
+            async move { m.delete(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        backend.release.notify_one();
+        let timeout = Duration::from_secs(5);
+        let _ = tokio::time::timeout(timeout, resuming).await.unwrap();
+        tokio::time::timeout(timeout, deleting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !m.is_live(&h.id),
+            "deleted session kept a provider attached"
+        );
+        assert!(m.session_record(&h.id).is_err());
+        assert!(m.list_sessions().is_empty());
+        assert!(matches!(
+            m.resume(&h.id).await,
+            Err(AgentError::UnknownSession(_))
+        ));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_overlapping_send_leaves_no_phantom_message_or_status_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = MockBackend::new(Provider::Codex).with_delay(Duration::from_millis(50));
+        let m = SessionManager::new(
+            dir.path().join("i.jsonl"),
+            [Arc::new(backend) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        let (first, second) = tokio::join!(
+            m.send_prompt(&h.id, UserInput::text("first")),
+            m.send_prompt(&h.id, UserInput::text("second")),
+        );
+        first.unwrap();
+        assert!(matches!(second, Err(AgentError::Busy(_))));
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Running));
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        let users: Vec<_> = m
+            .subscribe_with_history(&h.id)
+            .unwrap()
+            .0
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::UserMessage { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["first"]);
+        assert_eq!(m.list_sessions()[0].title.as_deref(), Some("first"));
+        m.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_account_transfer_keeps_saved_account_and_history_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.jsonl");
+        let source: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let target: Arc<dyn AgentBackend> = Arc::new(MockBackend::new(Provider::Codex));
+        let m = SessionManager::new(&path, [source.clone()]).unwrap();
+        m.register_account("second".into(), target.clone());
+        let h = m.start_session(cfg(Provider::Codex)).await.unwrap();
+        let mut events = m.subscribe_all();
+        m.send_prompt(&h.id, UserInput::text("keep this history"))
+            .await
+            .unwrap();
+        wait_status(&mut events, &h.id, SessionStatus::Idle).await;
+        let history = m.subscribe_with_history(&h.id).unwrap().0;
+        let failed = m
+            .switch_account(&h.id, Some("second".into()), |_| async {
+                Err(AgentError::Backend("transfer failed".into()))
+            })
+            .await;
+        assert!(matches!(failed, Err(AgentError::Backend(e)) if e == "transfer failed"));
+        let record = m.session_record(&h.id).unwrap();
+        assert_eq!(record.account_id, None);
+        assert_eq!(record.id, h.id);
+        assert!(m.is_live(&h.id));
+        assert_eq!(m.status(&h.id), Some(SessionStatus::Idle));
+        assert_eq!(m.subscribe_with_history(&h.id).unwrap().0, history);
+        assert!(Arc::ptr_eq(&m.session_backend(&h.id).unwrap(), &source));
+        m.shutdown().await;
+        drop(m);
+        let restored = SessionManager::new(&path, [source.clone()]).unwrap();
+        restored.register_account("second".into(), target);
+        assert_eq!(restored.session_record(&h.id).unwrap().account_id, None);
+        restored.resume(&h.id).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &restored.session_backend(&h.id).unwrap(),
+            &source
+        ));
+        restored.shutdown().await;
     }
 }

@@ -1153,6 +1153,95 @@ mod tests {
     use ::core::prelude::v1::test;
     use std::{sync::Arc, time::Duration};
 
+    async fn idle(manager: &del_agent::SessionManager, id: &SessionId) {
+        for _ in 0..500 {
+            if manager.status(id) == Some(del_agent::SessionStatus::Idle) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("session never finished its turn");
+    }
+
+    /// docs/chat-terminal.md: temporary Side chats cannot become main terminals,
+    /// and a saved fork keeps its undelivered context in Chat. Neither rejection
+    /// may take terminal ownership or disturb the parent conversation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn side_chats_only_become_terminals_after_their_context_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent: Arc<dyn del_agent::AgentBackend> = Arc::new(
+            del_agent::MockBackend::new(Provider::Codex).with_delay(Duration::from_millis(1)),
+        );
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), [agent]).unwrap();
+        let parent = manager
+            .start_session(SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Plan,
+            })
+            .await
+            .unwrap();
+        manager
+            .send_prompt(&parent.id, UserInput::text("parent context"))
+            .await
+            .unwrap();
+        idle(&manager, &parent.id).await;
+
+        let temporary = manager
+            .fork(
+                ForkSource::Session(parent.id.clone()),
+                ForkLifetime::Temporary,
+            )
+            .await
+            .unwrap()
+            .handle
+            .id;
+        let error = manager
+            .handoff_to_terminal(&temporary)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Temporary side chats"), "{error}");
+        assert!(!manager.is_terminal_owned(&temporary));
+        // The rejected fork keeps working as a chat.
+        manager
+            .send_prompt(&temporary, UserInput::text("still a chat"))
+            .await
+            .unwrap();
+        idle(&manager, &temporary).await;
+
+        let saved = manager
+            .fork(ForkSource::Session(parent.id.clone()), ForkLifetime::Saved)
+            .await
+            .unwrap()
+            .handle
+            .id;
+        let error = manager
+            .handoff_to_terminal(&saved)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Send the next message in Chat"), "{error}");
+        assert!(!manager.is_terminal_owned(&saved));
+        assert!(!manager.is_terminal_owned(&parent.id));
+        // Sending in Chat delivers the context; the fork can then switch.
+        manager
+            .send_prompt(&saved, UserInput::text("deliver context"))
+            .await
+            .unwrap();
+        idle(&manager, &saved).await;
+        manager.handoff_to_terminal(&saved).await.unwrap();
+        assert!(manager.is_terminal_owned(&saved));
+        assert!(!manager.is_terminal_owned(&parent.id));
+        manager.release_terminal(&saved);
+        assert!(!manager.is_terminal_owned(&saved));
+        manager.resume(&saved).await.unwrap();
+        manager.shutdown().await;
+    }
+
     #[::gpui::test]
     fn codex_side_queue_matches_main_chat(cx: &mut gpui::TestAppContext) {
         side_queue_scenario(cx, Provider::Codex);

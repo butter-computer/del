@@ -172,4 +172,25 @@ mod tests {
         assert_eq!(models[0].fast_tier.as_deref(), Some("fast"));
         assert!(models[1].fast_tier.is_none());
     }
+
+    #[test]
+    fn missing_catalogs_are_errors_and_odd_rows_are_skipped() {
+        assert!(parse_models(&json!({})).is_err());
+        assert!(parse_models(&json!({"models":{}})).is_err());
+        assert!(
+            parse_models(&json!({"models":[1, null, {"displayName":"no value"}]}))
+                .unwrap()
+                .is_empty()
+        );
+        // Effort levels are listed only when the model says it supports effort.
+        let models = parse_models(&json!({"models":[
+            {"value":"m","supportsEffort":false,"supportedEffortLevels":["high"],"defaultEffort":"high"}
+        ]}))
+        .unwrap();
+        assert!(models[0].efforts.is_empty());
+        assert_eq!(models[0].default_effort.as_deref(), Some("high"));
+        assert!(!models[0].is_default);
+        assert!(parse_commands(&json!({})).is_empty());
+        assert!(parse_commands(&json!({"commands":[{"description":"no name"}]})).is_empty());
+    }
 }

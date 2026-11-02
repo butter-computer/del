@@ -1393,6 +1393,89 @@ export default Plugin.define({{
         assert_eq!(body["delivery"], "steer");
     }
     #[test]
+    fn commands_send_only_their_arguments_and_attachments_are_file_uris() {
+        let command = ComposerCommand {
+            name: "init".into(),
+            description: String::new(),
+            argument_hint: String::new(),
+            kind: CommandKind::Action,
+            source: "OpenCode".into(),
+            target: None,
+        };
+        let input = UserInput::text("/init  with care");
+        let body = prompt_body(&input, &[], Some(&command), false).unwrap();
+        assert_eq!(body["name"], "init");
+        assert_eq!(body["text"], "with care");
+        assert_eq!(body["delivery"], "queue");
+        assert_eq!(body["files"], json!([]));
+        assert!(body.get("skills").is_none());
+        // A command picked without typing its name keeps the whole text.
+        let body = prompt_body(&UserInput::text("plain"), &[], Some(&command), false).unwrap();
+        assert_eq!(body["text"], "plain");
+
+        let paths = [PathBuf::from("/w/a b.png"), PathBuf::from("/w/notes.md")];
+        let body = prompt_body(&UserInput::text("  look  "), &paths, None, false).unwrap();
+        assert_eq!(body["text"], "look");
+        assert_eq!(
+            body["files"],
+            json!([
+                {"uri":"file:///w/a%20b.png","name":"a b.png"},
+                {"uri":"file:///w/notes.md","name":"notes.md"}
+            ])
+        );
+        assert!(prompt_body(&input, &[PathBuf::from("relative")], None, false).is_err());
+
+        let mut skill_input = UserInput::text("/review");
+        skill_input.skills.push(ComposerCommand {
+            kind: CommandKind::Skill,
+            name: "review".into(),
+            ..command
+        });
+        assert!(
+            prompt_body(&skill_input, &[], None, false)
+                .unwrap_err()
+                .to_string()
+                .contains("native ID")
+        );
+    }
+
+    #[test]
+    fn permission_rules_follow_the_selected_mode() {
+        let rule = |effect: &str| json!({"action":"*","resource":"*","effect":effect});
+        assert_eq!(permissions(PermissionMode::Ask), json!([rule("ask")]));
+        assert_eq!(permissions(PermissionMode::Plan), json!([rule("ask")]));
+        assert_eq!(
+            permissions(PermissionMode::FullAuto),
+            json!([rule("allow")])
+        );
+        assert_eq!(
+            permissions(PermissionMode::AutoEdit),
+            json!([rule("ask"), {"action":"edit","resource":"*","effect":"allow"}])
+        );
+    }
+
+    #[test]
+    fn model_reference_requires_a_provider_and_default_is_none() {
+        let mut c = SessionConfig {
+            provider: Provider::OpenCode,
+            cwd: "/tmp".into(),
+            model: None,
+            reasoning_effort: Some("high".into()),
+            service_tier: None,
+            permission_mode: PermissionMode::Ask,
+        };
+        assert_eq!(model_ref(&c).unwrap(), None);
+        c.model = Some("no-provider".into());
+        assert!(model_ref(&c).is_err());
+        c.model = Some("local/m".into());
+        c.reasoning_effort = None;
+        assert_eq!(
+            model_ref(&c).unwrap(),
+            Some(json!({"id":"m","providerID":"local"}))
+        );
+    }
+
+    #[test]
     fn model_reference_preserves_variant() {
         let c = SessionConfig {
             provider: Provider::OpenCode,

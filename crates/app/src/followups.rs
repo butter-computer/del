@@ -209,6 +209,51 @@ mod tests {
         assert!(queue.items.is_empty());
     }
     #[test]
+    fn queue_delivers_in_order_one_at_a_time_and_drag_moves_to_target_slot() {
+        let mut queue = Queue::default();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|t| queue.push(UserInput::text(t)));
+        let order = |q: &Queue| {
+            q.items
+                .iter()
+                .map(|i| i.input.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&queue), ["a", "b", "c", "d"]);
+        // Dragging down lands after the target; dragging up lands before it.
+        queue.reorder(&a, &c);
+        assert_eq!(order(&queue), ["b", "c", "a", "d"]);
+        queue.reorder(&d, &b);
+        assert_eq!(order(&queue), ["d", "b", "c", "a"]);
+        queue.reorder(&a, "missing");
+        queue.reorder("missing", &a);
+        assert_eq!(order(&queue), ["d", "b", "c", "a"]);
+        assert_eq!(queue.next(), Some(d.clone()));
+        // Only one delivery may be in flight; the sending item cannot be moved or taken.
+        assert!(queue.begin(&d).is_some());
+        assert!(queue.begin(&b).is_none());
+        queue.reorder(&d, &a);
+        assert_eq!(order(&queue), ["d", "b", "c", "a"]);
+        assert!(
+            queue.next().is_none(),
+            "nothing auto-sends while one is in flight"
+        );
+        // A Busy rejection puts it back at the head, still first in line.
+        queue.wait(&d);
+        assert_eq!(queue.next(), Some(d.clone()));
+        queue.begin(&d);
+        queue.finish(&d, None);
+        assert_eq!(queue.next(), Some(b.clone()));
+        // A failed head blocks automatic delivery instead of skipping ahead.
+        queue.begin(&b);
+        queue.finish(&b, Some("offline".into()));
+        assert!(queue.next().is_none());
+        assert_eq!(order(&queue), ["b", "c", "a"]);
+        // Explicit delivery of a later item clears the way.
+        assert!(queue.begin(&c).is_some());
+        assert!(queue.items[0].error.is_some());
+    }
+
+    #[test]
     fn restart_preserves_order_and_never_replays_unacknowledged_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");

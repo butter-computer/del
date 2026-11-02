@@ -192,14 +192,17 @@ pub struct SessionIndex {
 
 impl SessionIndex {
     /// Load the index, creating nothing on disk until the first write.
-    /// Unparseable lines are preserved verbatim. Sessions recorded as
+    /// Unparseable lines are preserved verbatim (invalid UTF-8 bytes become
+    /// U+FFFD). Sessions recorded as
     /// in-flight are normalized to `Idle`: nothing survives a restart.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let mut records: Vec<SessionRecord> = Vec::new();
         let mut unparsed = Vec::new();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                // Decode per line: one damaged byte must not hide every session.
+                let text = String::from_utf8_lossy(&bytes);
                 let mut positions: HashMap<SessionId, usize> = HashMap::new();
                 for line in text.lines().filter(|l| !l.trim().is_empty()) {
                     match serde_json::from_str::<SessionRecord>(line) {
@@ -273,7 +276,9 @@ impl SessionIndex {
     /// durable. The caller holds the index lock; earlier background writes
     /// finish first so they cannot overwrite this commit.
     pub fn replace_durable(&mut self, record: SessionRecord) -> Result<()> {
-        self.flusher().wait()?;
+        // Only the ordering matters: this commit rewrites every record, so an
+        // earlier failed background write must not block it.
+        let _ = self.flusher().wait();
         let mut records = self.records.clone();
         let slot = records
             .iter_mut()
@@ -301,6 +306,9 @@ impl SessionIndex {
             eprintln!("[del] index replacement is visible but directory sync failed: {error}");
         }
         self.records = records;
+        // The caller holds `&mut self`, so no newer write is queued; the file
+        // now reflects every record and supersedes any earlier failure.
+        self.writer.lock().error = None;
         Ok(())
     }
 
@@ -447,6 +455,69 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("not json\n"));
         assert!(text.contains(newer));
+    }
+
+    #[test]
+    fn invalid_utf8_line_does_not_hide_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let mut bytes = serde_json::to_vec(&rec("a", 1, SessionStatus::Idle)).unwrap();
+        bytes.extend_from_slice(b"\n{\"id\":\"\xff\xfe damaged\"}\n");
+        bytes.extend(serde_json::to_vec(&rec("b", 2, SessionStatus::Idle)).unwrap());
+        std::fs::write(&p, bytes).unwrap();
+        let mut idx = SessionIndex::open(&p).unwrap();
+        assert_eq!(
+            idx.list().iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        idx.remove(&SessionId::new("b")).unwrap();
+        drop(idx);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("damaged"), "damaged line must not be erased");
+        assert_eq!(SessionIndex::open(&p).unwrap().list().len(), 1);
+    }
+
+    #[test]
+    fn durable_replacement_recovers_after_failed_background_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let future = r#"{"id":"z","provider":"future_provider"}"#;
+        std::fs::write(&p, format!("{future}\n")).unwrap();
+        let mut idx = SessionIndex::open(&p).unwrap();
+        idx.upsert(rec("a", 1, SessionStatus::Idle)).unwrap();
+        idx.flusher().wait().unwrap();
+        // Make one background write fail, then repair the path.
+        std::fs::remove_file(&p).unwrap();
+        std::fs::create_dir(&p).unwrap();
+        idx.upsert_temporary(rec("temp", 3, SessionStatus::Idle))
+            .unwrap();
+        assert!(idx.flusher().wait().is_err());
+        std::fs::remove_dir(&p).unwrap();
+        let mut replaced = rec("a", 1, SessionStatus::Idle);
+        replaced.provider = Provider::Codex;
+        replaced.account_id = Some("second".into());
+        idx.replace_durable(replaced.clone()).unwrap();
+        assert!(idx.flusher().wait().is_ok(), "stale error must clear");
+        assert_eq!(idx.get(&replaced.id), Some(&replaced));
+        drop(idx);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains(future));
+        assert!(!text.contains("\"temp\""));
+        let again = SessionIndex::open(&p).unwrap();
+        assert_eq!(again.list(), vec![replaced]);
+    }
+
+    #[test]
+    fn replacing_an_unknown_session_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let mut idx = SessionIndex::open(&p).unwrap();
+        idx.upsert(rec("a", 1, SessionStatus::Idle)).unwrap();
+        assert!(matches!(
+            idx.replace_durable(rec("missing", 2, SessionStatus::Idle)),
+            Err(crate::AgentError::UnknownSession(_))
+        ));
+        assert_eq!(idx.list().len(), 1);
     }
 
     #[test]

@@ -191,7 +191,14 @@ impl Journal {
         let mut bytes =
             serde_json::to_vec(event).map_err(|e| AgentError::Backend(e.to_string()))?;
         bytes.push(b'\n');
-        self.file.write_all(&bytes)?;
+        let start = self.file.metadata()?.len();
+        if let Err(error) = self.file.write_all(&bytes) {
+            // A short write (e.g. a full disk) leaves a partial record. Later
+            // appends would land after it and turn it into middle corruption,
+            // which `read` refuses, losing the whole conversation.
+            let _ = self.file.set_len(start);
+            return Err(error.into());
+        }
         if matches!(
             event,
             AgentEvent::TurnCompleted { .. } | AgentEvent::ProviderSwitched { .. }
@@ -394,6 +401,60 @@ mod tests {
         assert_eq!(Journal::read(&path).unwrap(), vec![event.clone(), event]);
         journal.file.write_all(b"broken\n").unwrap();
         assert!(Journal::read(&path).is_err());
+    }
+
+    /// A short write must not leave a partial record that later appends turn
+    /// into unreadable middle corruption. The file-size limit is process-wide,
+    /// so the write failure is produced in a child running only this test.
+    #[test]
+    fn short_write_is_rolled_back_so_later_appends_stay_readable() {
+        const CHILD: &str = "DEL_JOURNAL_SHORT_WRITE_CHILD";
+        let Some(dir) = std::env::var_os(CHILD) else {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "conversation::tests::short_write_is_rolled_back_so_later_appends_stay_readable",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let path = dir.path().join("events.jsonl");
+            assert_eq!(Journal::read(&path).unwrap().len(), 2);
+            return;
+        };
+        let path = std::path::PathBuf::from(dir).join("events.jsonl");
+        let small = AgentEvent::UserMessage {
+            text: "kept 雪".into(),
+        };
+        let mut journal = Journal::create(&path, std::slice::from_ref(&small)).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        // SAFETY: plain libc calls on process-local state; this child runs one test.
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            let original = limit.rlim_cur;
+            limit.rlim_cur = size + 8;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            let large = AgentEvent::UserMessage {
+                text: "x".repeat(4096),
+            };
+            assert!(journal.append(&large).is_err());
+            limit.rlim_cur = original;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        journal.append(&small).unwrap();
+        assert_eq!(Journal::read(&path).unwrap(), vec![small.clone(), small]);
     }
 
     #[test]

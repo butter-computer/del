@@ -361,4 +361,275 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn execution_lifecycle_tools_usage_and_permissions() {
+        let mut s = Stream::default();
+        let ev = |kind: &str, data: Value| json!({"type":kind,"id":"evt","data":data});
+        assert_eq!(
+            s.event(&json!({"type":"session.execution.started","id":"exec_1","data":{}})),
+            vec![AgentEvent::TurnStarted {
+                turn_id: "exec_1".into()
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "session.tool.input.started",
+                json!({"id":"call","name":"bash"})
+            )),
+            vec![AgentEvent::ToolCallStarted {
+                id: "call".into(),
+                name: "bash".into(),
+                input_summary: String::new()
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "session.tool.called",
+                json!({"id":"call","input":{"command":"ls"}})
+            )),
+            vec![AgentEvent::ToolCallUpdated {
+                id: "call".into(),
+                output_summary: "{\"command\":\"ls\"}".into()
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "session.tool.success",
+                json!({"id":"call","content":[{"type":"text","text":"a"},{"type":"file"},{"type":"text","text":"b"}]})
+            )),
+            vec![AgentEvent::ToolCallFinished {
+                id: "call".into(),
+                status: ToolStatus::Completed,
+                output_summary: "a\nb".into()
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "session.tool.failed",
+                json!({"id":"other","error":"plain string error"})
+            )),
+            vec![AgentEvent::ToolCallFinished {
+                id: "other".into(),
+                status: ToolStatus::Failed,
+                output_summary: "plain string error".into()
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "session.step.ended",
+                json!({"tokens":{"input":5,"output":2,"cache":{"read":3,"write":1}}})
+            )),
+            vec![AgentEvent::TokenUsage {
+                input: 5,
+                output: 2,
+                cached: 3
+            }]
+        );
+        assert_eq!(
+            s.event(&ev(
+                "permission.asked",
+                json!({"id":"perm_1","action":"edit","resources":["/w/a.rs"]})
+            )),
+            vec![AgentEvent::ApprovalRequested {
+                id: "perm_1".into(),
+                kind: ApprovalKind::Other,
+                detail: "edit: [\"/w/a.rs\"]".into()
+            }]
+        );
+        assert_eq!(
+            s.event(&json!({"type":"session.execution.interrupted"})),
+            vec![AgentEvent::TurnCompleted {
+                turn_id: "exec_1".into(),
+                status: TurnStatus::Interrupted
+            }]
+        );
+        assert_eq!(
+            s.event(&json!({"type":"session.execution.succeeded"})),
+            vec![AgentEvent::TurnCompleted {
+                turn_id: "exec_1".into(),
+                status: TurnStatus::Completed
+            }]
+        );
+        // A failure without a message still says something readable.
+        let failed = s.event(&ev(
+            "session.execution.failed",
+            json!({"error":{"message":"  "}}),
+        ));
+        assert_eq!(
+            failed[0],
+            AgentEvent::Error {
+                message: "OpenCode request failed.".into(),
+                recoverable: true
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_and_malformed_events_are_ignored() {
+        let mut s = Stream::default();
+        for event in [
+            json!({"type":"session.future.event","data":{}}),
+            json!({"type":7}),
+            json!({}),
+            json!(null),
+            json!([1, 2]),
+            json!({"type":"server.connected"}),
+        ] {
+            assert!(s.event(&event).is_empty(), "{event}");
+        }
+        // Missing fields degrade to empty values rather than panicking.
+        assert_eq!(
+            s.event(&json!({"type":"session.text.delta"})),
+            vec![AgentEvent::AssistantTextDelta {
+                turn_id: ":0".into(),
+                text: String::new()
+            }]
+        );
+        assert_eq!(
+            s.event(&json!({"type":"session.step.ended"})),
+            vec![AgentEvent::TokenUsage {
+                input: 0,
+                output: 0,
+                cached: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn reasoning_end_emits_only_the_unstreamed_remainder() {
+        let mut s = Stream::default();
+        let event = |kind: &str, text: &str| json!({"type":kind,"data":{"assistantMessageID":"m","ordinal":1,"delta":text,"text":text}});
+        s.event(&event("session.reasoning.delta", "Think"));
+        assert_eq!(
+            s.event(&event("session.reasoning.ended", "Think harder")),
+            vec![AgentEvent::ReasoningDelta {
+                turn_id: "m:1".into(),
+                text: " harder".into()
+            }]
+        );
+        // Text that does not extend what was streamed is not repeated.
+        s.event(&event("session.reasoning.delta", "abc"));
+        assert!(s.event(&event("session.reasoning.ended", "xyz")).is_empty());
+    }
+
+    #[test]
+    fn saved_messages_restore_text_reasoning_tools_and_usage() {
+        let mut s = Stream::default();
+        assert_eq!(
+            s.message(&json!({"type":"user","id":"u","text":"hello"})),
+            vec![AgentEvent::UserMessage {
+                text: "hello".into()
+            }]
+        );
+        let events = s.message(&json!({"type":"assistant","id":"a","content":[
+            {"type":"reasoning","text":"think"},
+            {"type":"text","text":"answer"},
+            {"type":"tool","id":"t1","name":"read","state":{"status":"completed","input":{"path":"x"},"content":[{"text":"body"}]}},
+            {"type":"tool","id":"t2","name":"bash","state":{"status":"error","input":{},"error":{"message":"denied"}}},
+            {"type":"tool","id":"t3","name":"edit","state":{"status":"running","input":{}}},
+            {"type":"future"}
+        ],"tokens":{"input":1,"output":2,"cache":{"read":0}}}));
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ReasoningDelta {
+                    turn_id: "a:0".into(),
+                    text: "think".into()
+                },
+                AgentEvent::AssistantMessage {
+                    turn_id: "a:1".into(),
+                    text: "answer".into()
+                },
+                AgentEvent::ToolCallStarted {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input_summary: "{\"path\":\"x\"}".into()
+                },
+                AgentEvent::ToolCallFinished {
+                    id: "t1".into(),
+                    status: ToolStatus::Completed,
+                    output_summary: "body".into()
+                },
+                AgentEvent::ToolCallStarted {
+                    id: "t2".into(),
+                    name: "bash".into(),
+                    input_summary: "{}".into()
+                },
+                AgentEvent::ToolCallFinished {
+                    id: "t2".into(),
+                    status: ToolStatus::Failed,
+                    output_summary: "denied".into()
+                },
+                AgentEvent::ToolCallStarted {
+                    id: "t3".into(),
+                    name: "edit".into(),
+                    input_summary: "{}".into()
+                },
+                AgentEvent::TokenUsage {
+                    input: 1,
+                    output: 2,
+                    cached: 0
+                },
+            ]
+        );
+        assert!(s.message(&json!({"type":"system"})).is_empty());
+        assert!(s.message(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn diffs_and_command_catalog_are_tolerant() {
+        let cwd = std::path::Path::new("/w");
+        let events = diffs(
+            cwd,
+            &json!({"data":[
+                {"file":"a.rs","status":"added","patch":"+a"},
+                {"file":"b.rs","status":"deleted"},
+                {"file":"c.rs","status":"modified","patch":"@@"},
+                {"file":"d.rs","status":"renamed"},
+                {"status":"added"}
+            ]}),
+        );
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::FileChange {
+                    path: "/w/a.rs".into(),
+                    kind: FileChangeKind::Created,
+                    diff: Some("+a".into())
+                },
+                AgentEvent::FileChange {
+                    path: "/w/b.rs".into(),
+                    kind: FileChangeKind::Deleted,
+                    diff: None
+                },
+                AgentEvent::FileChange {
+                    path: "/w/c.rs".into(),
+                    kind: FileChangeKind::Modified,
+                    diff: Some("@@".into())
+                },
+            ]
+        );
+        assert!(diffs(cwd, &json!({"error":"x"})).is_empty());
+        // A command shadowed by a skill of the same name is listed once, as the skill.
+        let rows = commands(
+            &json!({"data":[{"name":"review","description":"cmd"},{"name":"init","description":"Init"}]}),
+            &json!({"data":[{"id":"sk","name":"review","description":"skill"}]}),
+        );
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind, c.target.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("review", CommandKind::Skill, Some("sk")),
+                ("init", CommandKind::Action, None)
+            ]
+        );
+        assert!(models(&json!({}), &json!({})).is_empty());
+        let unnamed = models(&json!({"data":[{"id":"m","providerID":"p"}]}), &json!({}));
+        assert_eq!(unnamed[0].id, "p/m");
+        assert!(!unnamed[0].is_default);
+    }
 }

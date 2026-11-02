@@ -258,3 +258,260 @@ fn steering_consumed_in_current_response_does_not_leave_phantom_turn() {
     );
     assert!(!events.iter().any(|e| matches!(e, E::TurnStarted { .. })));
 }
+
+fn line(t: &mut Translator, value: serde_json::Value) -> Vec<E> {
+    t.handle_line(&value.to_string())
+}
+
+#[test]
+fn failed_result_reports_its_error_and_usage_counts_cache_creation() {
+    let mut t = Translator::new();
+    t.enqueue_turn("t".into());
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"result","is_error":true,"result":"Prompt is too long",
+            "usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}),
+    );
+    assert_eq!(
+        evs,
+        vec![
+            E::TokenUsage {
+                input: 3,
+                output: 4,
+                cached: 3
+            },
+            E::Error {
+                message: "Prompt is too long".into(),
+                recoverable: true
+            },
+            E::TurnCompleted {
+                turn_id: "t".into(),
+                status: TurnStatus::Failed
+            },
+        ]
+    );
+    // Without a result string the error list is joined; missing usage is zero.
+    t.enqueue_turn("u".into());
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"result","is_error":true,"errors":["a",7,"b"]}),
+    );
+    assert_eq!(
+        evs[0],
+        E::TokenUsage {
+            input: 0,
+            output: 0,
+            cached: 0
+        }
+    );
+    assert_eq!(
+        evs[1],
+        E::Error {
+            message: "a; b".into(),
+            recoverable: true
+        }
+    );
+}
+
+#[test]
+fn interrupt_wins_over_an_error_result() {
+    let mut t = Translator::new();
+    t.enqueue_turn("t".into());
+    t.mark_interrupting();
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"result","is_error":true,"result":"aborted"}),
+    );
+    assert!(!evs.iter().any(|e| matches!(e, E::Error { .. })));
+    assert_eq!(
+        evs.last(),
+        Some(&E::TurnCompleted {
+            turn_id: "t".into(),
+            status: TurnStatus::Interrupted
+        })
+    );
+    // The flag is per turn.
+    t.enqueue_turn("u".into());
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"result","is_error":false}),
+    );
+    assert_eq!(
+        evs.last(),
+        Some(&E::TurnCompleted {
+            turn_id: "u".into(),
+            status: TurnStatus::Completed
+        })
+    );
+}
+
+#[test]
+fn approval_kinds_details_and_deny_reply() {
+    let mut t = Translator::new();
+    t.enqueue_turn("t".into());
+    let ask = |t: &mut Translator, id: &str, tool: &str, input: serde_json::Value| {
+        line(
+            t,
+            serde_json::json!({"type":"control_request","request_id":id,
+                "request":{"subtype":"can_use_tool","tool_name":tool,"input":input}}),
+        )
+    };
+    assert_eq!(
+        ask(
+            &mut t,
+            "1",
+            "Edit",
+            serde_json::json!({"file_path":"/w/a.rs","old_string":"a","new_string":"b"})
+        ),
+        vec![E::ApprovalRequested {
+            id: "1".into(),
+            kind: ApprovalKind::FileChange,
+            detail: "/w/a.rs".into()
+        }]
+    );
+    assert_eq!(
+        ask(&mut t, "2", "mcp__server__tool", serde_json::json!({"q":1})),
+        vec![E::ApprovalRequested {
+            id: "2".into(),
+            kind: ApprovalKind::Other,
+            detail: "mcp__server__tool: {\"q\":1}".into()
+        }]
+    );
+    let deny: serde_json::Value =
+        serde_json::from_str(&t.approval_reply("1", ApprovalResponse::Deny).unwrap()).unwrap();
+    assert_eq!(
+        deny,
+        serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":"1",
+            "response":{"behavior":"deny","message":"Denied by the user in del"}}})
+    );
+    // Other control requests (and malformed ones) raise no prompt.
+    assert!(
+        line(
+            &mut t,
+            serde_json::json!({"type":"control_request","request_id":"3","request":{"subtype":"hook_callback"}})
+        )
+        .is_empty()
+    );
+    assert!(
+        line(
+            &mut t,
+            serde_json::json!({"type":"control_request","request":{"subtype":"can_use_tool"}})
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn tool_results_map_status_output_and_edit_diffs() {
+    let mut t = Translator::new();
+    t.enqueue_turn("t".into());
+    line(
+        &mut t,
+        serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","id":"e","name":"Edit","input":{"file_path":"/w/a.rs","old_string":"old","new_string":"new"}},
+            {"type":"tool_use","id":"p","name":"Edit","input":{"file_path":"/w/b.rs"}},
+            {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"/w/c.rs"}},
+            {"type":"tool_use","name":"Broken"}
+        ]}}),
+    );
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"e","content":"ok"},
+            {"type":"tool_result","tool_use_id":"r","content":[{"type":"text","text":"x".repeat(600)}]}
+        ]}}),
+    );
+    assert_eq!(
+        evs[1],
+        E::FileChange {
+            path: "/w/a.rs".into(),
+            kind: FileChangeKind::Modified,
+            diff: Some("-old\n+new\n".into())
+        }
+    );
+    let E::ToolCallFinished { output_summary, .. } = &evs[2] else {
+        panic!("{evs:?}")
+    };
+    assert_eq!(
+        output_summary.chars().count(),
+        501,
+        "500 chars and an ellipsis"
+    );
+    assert!(output_summary.ends_with('…'));
+    // structuredPatch hunks win over the input-derived diff.
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"user",
+            "tool_use_result":{"structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-a","+b"]}]},
+            "message":{"content":[{"type":"tool_result","tool_use_id":"p","content":"ok"}]}}),
+    );
+    assert_eq!(
+        evs[1],
+        E::FileChange {
+            path: "/w/b.rs".into(),
+            kind: FileChangeKind::Modified,
+            diff: Some("@@ -1,1 +1,1 @@\n-a\n+b\n".into())
+        }
+    );
+}
+
+#[test]
+fn malformed_and_unknown_records_are_tolerated() {
+    let mut t = Translator::new();
+    t.enqueue_turn("t".into());
+    for raw in [
+        "",
+        "   ",
+        "[1,2]",
+        "42",
+        "null",
+        "{\"type\":7}",
+        "{\"type\":\"assistant\"}",
+        "{\"type\":\"assistant\",\"message\":{\"content\":\"text, not blocks\"}}",
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\"}]}}",
+        "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\"}}}",
+        "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\"}}}",
+        "{\"type\":\"control_cancel_request\"}",
+        "{\"type\":\"system\",\"subtype\":\"hook_started\"}",
+        "{\"type\":\"result\"",
+    ] {
+        assert!(t.handle_line(raw).is_empty(), "{raw:?}");
+    }
+    assert!(t.is_busy(), "noise does not end the turn");
+    let evs = line(
+        &mut t,
+        serde_json::json!({"type":"system","subtype":"init","session_id":"native-1"}),
+    );
+    assert!(evs.is_empty());
+    assert_eq!(t.session_id(), Some("native-1"));
+}
+
+#[test]
+fn native_goal_acknowledgements_and_status_records() {
+    let mut t = Translator::new();
+    let ack = |text: &str| {
+        serde_json::json!({"type":"user","local_command_run":{"command":"goal"},
+            "message":{"content":[{"type":"text","text":text}]}})
+    };
+    assert!(matches!(
+        &line(&mut t, ack("Goal set: ship it"))[..],
+        [E::GoalUpdated { goal: Some(goal) }] if goal.objective == "ship it"
+    ));
+    assert_eq!(
+        line(&mut t, ack("Goal cleared: ship it")),
+        vec![E::GoalUpdated { goal: None }]
+    );
+    assert_eq!(
+        line(&mut t, ack("No goal set")),
+        vec![E::GoalUpdated { goal: None }]
+    );
+    // Prose quoting the acknowledgement is not a goal record.
+    assert!(
+        !line(
+            &mut t,
+            serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"Goal set: fake"}]}})
+        )
+        .iter()
+        .any(|e| matches!(e, E::GoalUpdated { .. }))
+    );
+}
