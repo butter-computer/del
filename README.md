@@ -848,7 +848,9 @@ changes and keeps your draft instead of overwriting them. Markdown supports
 
 **Changes** shows only staged, unstaged, and untracked changes when any exist.
 When there are none, it shows the current branch’s 50 most recent commits with
-subject, author, date, and short hash. It switches automatically every two seconds
+subject, author, date, short hash, and added/removed line counts. The header totals
+those counts across the displayed commits (merge counts compare with their first
+parent; binary files do not contribute text lines). It switches automatically every two seconds
 while visible, with no mode toggle or action toolbar. Unchanged diffs retain their
 selection and scroll position during refreshes.
 

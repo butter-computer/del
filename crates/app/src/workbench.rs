@@ -20,7 +20,7 @@ use std::path::PathBuf;
 pub const PANEL_DEFAULT_HEIGHT: f32 = 200.0;
 const PANEL_MIN_HEIGHT: f32 = 96.0;
 const PANEL_HEADER_HEIGHT: f32 = 30.0;
-pub const STATUS_BAR_HEIGHT: f32 = 22.0;
+pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Title-bar control size, matching the sidebar's header buttons.
 const NAV_BUTTON: f32 = 28.0;
 /// Narrowest navigation zone: toggle, back and forward with their gaps.
@@ -75,6 +75,8 @@ fn status_item(id: impl Into<ElementId>) -> Button {
         .ghost()
         .h(zpx(STATUS_BAR_HEIGHT - 2.0))
         .px(zpx(6.0))
+        .py_0()
+        .line_height(zpx(16.0))
         .rounded(zpx(4.0))
         .text_size(zpx(TEXT_SM))
         .text_color(rgba(0xffffff8c))
@@ -566,7 +568,7 @@ impl AppShell {
             .flex_none()
             .w_full()
             .h(zpx(STATUS_BAR_HEIGHT))
-            .px(zpx(6.))
+            .px(zpx(8.))
             .gap(zpx(2.))
             .items_center()
             .overflow_hidden()
@@ -583,22 +585,42 @@ impl AppShell {
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_1()
+                            .gap(zpx(6.))
                             .items_center()
-                            .child(status_icon("icons/git-branch.svg"))
-                            .child(div().min_w_0().truncate().child(branch))
-                            .when_some(git.changed_lines, |row, (added, removed)| {
-                                row.child(
-                                    div()
-                                        .text_color(ActionTone::Success.foreground())
-                                        .child(format!("+{added}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(ActionTone::Danger.foreground())
-                                        .child(format!("−{removed}")),
-                                )
-                            }),
+                            .text_size(zpx(TEXT_SM))
+                            .line_height(zpx(16.))
+                            .child(
+                                h_flex()
+                                    .w(zpx(14.))
+                                    .h(zpx(16.))
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(status_icon("icons/git-branch.svg")),
+                            )
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap(zpx(6.))
+                                    .items_baseline()
+                                    .child(div().min_w_0().truncate().child(branch))
+                                    .when_some(git.changed_lines, |row, (added, removed)| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .whitespace_nowrap()
+                                                .text_color(ActionTone::Success.foreground())
+                                                .child(format!("+{added}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .whitespace_nowrap()
+                                                .text_color(ActionTone::Danger.foreground())
+                                                .child(format!("−{removed}")),
+                                        )
+                                    }),
+                            ),
                     )
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::OpenChanges), cx)

@@ -603,7 +603,9 @@ This records the final decisions, including corrections to earlier experiments.
   symlinks and file permissions. Changes is a read-only Git review pane that
   refreshes automatically while visible. Show only pending changes whenever staged,
   unstaged, or untracked files exist; otherwise show recent commits on the current
-  branch. Switch automatically, with no mode toggle or redundant clean-state message.
+  branch. Include added/removed lines per commit and totals for the displayed
+  commits; ignore binary line counts and compare merges against their first parent.
+  Switch automatically, with no mode toggle or redundant clean-state message.
   No Refresh, Edit file, or Ask about this
   buttons; no Ask about this buttons in Files or Terminal either.
 - The no-Git indicator is informational and must not accept clicks.

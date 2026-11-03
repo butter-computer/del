@@ -3079,10 +3079,21 @@ impl RightPanel {
         self.change_request += 1;
         let request = self.change_request;
         let root = self.root.clone();
+        let previous_root = self.change_root.clone();
+        let previous_commits = self.change_commits.clone();
         let work = cx.background_executor().spawn(async move {
             let (root, mut files) = crate::workspace_files::changes(&root)?;
             let commits = if files.is_empty() {
-                crate::workspace_files::recent_commits(&root)?
+                if root == previous_root
+                    && previous_commits.first().is_some_and(|commit| {
+                        crate::workspace_files::head_id(&root).as_deref()
+                            == Some(commit.id.as_str())
+                    })
+                {
+                    previous_commits
+                } else {
+                    crate::workspace_files::recent_commits(&root)?
+                }
             } else {
                 Vec::new()
             };
@@ -3175,6 +3186,12 @@ impl RightPanel {
             .fold((0usize, 0usize), |(added, removed), review| {
                 (added + review.added, removed + review.removed)
             });
+        let (commit_added, commit_removed) = self
+            .change_commits
+            .iter()
+            .fold((0u64, 0u64), |(added, removed), commit| {
+                (added + commit.added, removed + commit.removed)
+            });
         let shown = self.change_files.len();
         let total_files = shown + self.change_omitted;
         v_flex()
@@ -3216,12 +3233,32 @@ impl RightPanel {
                         .w_full()
                         .min_w_0()
                         .child(
-                            div()
+                            v_flex()
                                 .px_3()
                                 .py_2()
+                                .gap_1()
                                 .text_size(zpx(TEXT_SM))
                                 .text_color(rgba(0xffffff8c))
-                                .child("Recent commits"),
+                                .child("Recent commits")
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_baseline()
+                                        .child(format!(
+                                            "{} commits · Total",
+                                            self.change_commits.len()
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0x5fc27e))
+                                                .child(format!("+{commit_added}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0xf0716b))
+                                                .child(format!("−{commit_removed}")),
+                                        ),
+                                ),
                         )
                         .children(self.change_commits.iter().map(|commit| {
                             v_flex()
@@ -3239,6 +3276,22 @@ impl RightPanel {
                                         .text_size(zpx(TEXT_MD))
                                         .whitespace_normal()
                                         .child(commit.subject.clone()),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_baseline()
+                                        .text_size(zpx(TEXT_SM))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0x5fc27e))
+                                                .child(format!("+{}", commit.added)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0xf0716b))
+                                                .child(format!("−{}", commit.removed)),
+                                        ),
                                 )
                                 .child(
                                     h_flex()
@@ -4923,6 +4976,13 @@ mod tests {
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.change_commits[0].subject, "Initial commit");
             assert_eq!(panel.change_commits[0].author, "Review Tester");
+            assert_eq!(
+                (
+                    panel.change_commits[0].added,
+                    panel.change_commits[0].removed
+                ),
+                (1, 0)
+            );
         });
         // Untracked files, unstaged changes, and staged-only changes all hide history.
         for kind in ["untracked", "unstaged", "staged"] {
@@ -4952,6 +5012,13 @@ mod tests {
             assert!(panel.change_files.is_empty());
             assert_eq!(panel.change_commits.len(), 2);
             assert_eq!(panel.change_commits[0].subject, "Save changes café");
+            assert_eq!(
+                (
+                    panel.change_commits[0].added,
+                    panel.change_commits[0].removed
+                ),
+                (1, 1)
+            );
             assert_eq!(panel.change_commits[1].subject, "Initial commit");
         });
         // A clean-to-clean poll retains the commit list instead of showing Loading.

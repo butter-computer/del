@@ -151,7 +151,13 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 
 /// Whether the repository has a commit to diff against. Resolve once per refresh.
 pub fn has_head(root: &Path) -> bool {
-    git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok()
+    head_id(root).is_some()
+}
+
+pub fn head_id(root: &Path) -> Option<String> {
+    git(root, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
 pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
@@ -195,6 +201,8 @@ pub struct Commit {
     pub subject: String,
     pub author: String,
     pub date: String,
+    pub added: u64,
+    pub removed: u64,
 }
 
 /// Recent history of the current branch, used only when there are no changes.
@@ -202,31 +210,71 @@ pub fn recent_commits(root: &Path) -> Result<Vec<Commit>, String> {
     if !has_head(root) {
         return Ok(Vec::new());
     }
-    let output = git(
-        root,
-        &[
-            "log",
-            "-50",
-            "-z",
-            "--format=%H%x00%h%x00%s%x00%an%x00%cs",
-            "HEAD",
-            "--",
-        ],
-    )?;
-    let output = String::from_utf8_lossy(&output);
-    let fields: Vec<_> = output.split_terminator('\0').collect();
-    Ok(fields
-        .as_chunks::<5>()
-        .0
-        .iter()
-        .map(|row| Commit {
-            id: row[0].into(),
-            short_id: row[1].into(),
-            subject: row[2].into(),
-            author: row[3].into(),
-            date: row[4].into(),
-        })
-        .collect())
+    let args: Vec<_> = [
+        "log",
+        "-50",
+        "-z",
+        "--numstat",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--diff-merges=first-parent",
+        "--format=%x00%H%x00%h%x00%s%x00%an%x00%cs",
+        "HEAD",
+        "--",
+    ]
+    .into_iter()
+    .map(std::ffi::OsStr::new)
+    .collect();
+    let (output, truncated) = git_bounded(root, &args, MAX_STATUS_BYTES)?;
+    if truncated {
+        return Err("Commit history is too large to load line totals.".into());
+    }
+    parse_commits(&String::from_utf8_lossy(&output))
+}
+
+fn parse_commits(output: &str) -> Result<Vec<Commit>, String> {
+    let mut fields = output.split_terminator('\0');
+    let mut commits: Vec<Commit> = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            let mut next = || {
+                fields
+                    .next()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "Incomplete Git commit metadata".to_string())
+            };
+            commits.push(Commit {
+                id: next()?,
+                short_id: next()?,
+                subject: next()?,
+                author: next()?,
+                date: next()?,
+                added: 0,
+                removed: 0,
+            });
+            continue;
+        }
+        let mut stat = field.trim_start_matches('\n').splitn(3, '\t');
+        let added = stat.next().ok_or("Invalid Git line totals")?;
+        let removed = stat.next().ok_or("Invalid Git line totals")?;
+        let path = stat.next().ok_or("Missing Git diff path")?;
+        if path.is_empty() {
+            // With -z, renames carry two separate NUL-terminated paths.
+            fields.next().ok_or("Missing original Git path")?;
+            fields.next().ok_or("Missing renamed Git path")?;
+        }
+        let commit = commits.last_mut().ok_or("Missing Git commit metadata")?;
+        if added != "-" && removed != "-" {
+            commit.added += added
+                .parse::<u64>()
+                .map_err(|_| "Invalid Git added lines")?;
+            commit.removed += removed
+                .parse::<u64>()
+                .map_err(|_| "Invalid Git removed lines")?;
+        }
+    }
+    Ok(commits)
 }
 
 /// A listing cut off at the size cap ends mid-record; keep only whole
@@ -408,6 +456,59 @@ pub fn review_lines(text: &str) -> Vec<ReviewLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn commit_line_totals_handle_roots_renames_binary_and_empty_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]).unwrap();
+        git(root, &["config", "user.name", "Tester"]).unwrap();
+        git(root, &["config", "user.email", "test@example.invalid"]).unwrap();
+        let commit = |message: &str| {
+            git(root, &["add", "."]).unwrap();
+            git(root, &["commit", "--allow-empty", "-qm", message]).unwrap();
+        };
+        let old = "old\tfile\nname";
+        let new = "new\tfile\nname";
+        std::fs::write(root.join(old), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("binary"), b"hello\0world").unwrap();
+        commit("initial");
+        git(root, &["mv", old, new]).unwrap();
+        commit("rename");
+        std::fs::write(root.join(new), "one\nchanged\nthree\nfour\n").unwrap();
+        std::fs::write(root.join("binary"), b"new\0binary").unwrap();
+        commit("edit");
+        commit("empty");
+        let commits = recent_commits(root).unwrap();
+        assert_eq!(
+            commits
+                .iter()
+                .map(|c| (c.subject.as_str(), c.added, c.removed))
+                .collect::<Vec<_>>(),
+            vec![
+                ("empty", 0, 0),
+                ("edit", 2, 1),
+                ("rename", 0, 0),
+                ("initial", 3, 0)
+            ]
+        );
+        // Merge rows compare against the first parent, without repeating a commit.
+        git(root, &["checkout", "-qb", "side"]).unwrap();
+        std::fs::write(root.join("side.txt"), "side\n").unwrap();
+        commit("side change");
+        git(root, &["checkout", "-q", "-"]).unwrap();
+        git(root, &["merge", "--no-ff", "-qm", "merge side", "side"]).unwrap();
+        let commits = recent_commits(root).unwrap();
+        assert_eq!(
+            (
+                commits[0].subject.as_str(),
+                commits[0].added,
+                commits[0].removed
+            ),
+            ("merge side", 1, 0)
+        );
+        assert_eq!(commits.len(), 6);
+    }
+
     #[test]
     fn review_tracks_hunk_numbers_and_does_not_count_file_headers() {
         let rows = review_lines(
