@@ -846,9 +846,11 @@ Unsaved drafts survive file switches and app restarts. Saving detects external
 changes and keeps your draft instead of overwriting them. Markdown supports
 **Markdown / Preview** modes. Text files are capped at 512 KiB.
 
-**Changes** automatically refreshes staged, unstaged, and untracked Git changes
-every two seconds while visible, with selectable diffs and no action toolbar. Unchanged diffs retain
-their selection and scroll position during refreshes.
+**Changes** shows only staged, unstaged, and untracked changes when any exist.
+When there are none, it shows the current branch’s 50 most recent commits with
+subject, author, date, and short hash. It switches automatically every two seconds
+while visible, with no mode toggle or action toolbar. Unchanged diffs retain their
+selection and scroll position during refreshes.
 
 On macOS, PDFs render with PDFKit in a continuous vertical scroll without floating
 page-arrow controls. Word documents (`.doc`/`.docx`) render inside the sidebar using

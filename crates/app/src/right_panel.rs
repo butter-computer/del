@@ -437,6 +437,7 @@ pub struct RightPanel {
     saving: HashSet<PathBuf>,
     file_error: Option<String>,
     change_files: Vec<crate::workspace_files::ChangedFile>,
+    change_commits: Vec<crate::workspace_files::Commit>,
     change_root: PathBuf,
     change_diffs: HashMap<PathBuf, String>,
     change_reviews: HashMap<PathBuf, Rc<ChangeReview>>,
@@ -1761,6 +1762,7 @@ impl RightPanel {
             saving: HashSet::new(),
             file_error: None,
             change_files: Vec::new(),
+            change_commits: Vec::new(),
             change_root: PathBuf::new(),
             change_diffs: HashMap::new(),
             change_reviews: HashMap::new(),
@@ -1802,6 +1804,7 @@ impl RightPanel {
             self.terminal_active = 0;
             self.change_request += 1;
             self.change_files.clear();
+            self.change_commits.clear();
             self.change_diffs.clear();
             self.change_reviews.clear();
             self.change_omitted = 0;
@@ -3078,6 +3081,11 @@ impl RightPanel {
         let root = self.root.clone();
         let work = cx.background_executor().spawn(async move {
             let (root, mut files) = crate::workspace_files::changes(&root)?;
+            let commits = if files.is_empty() {
+                crate::workspace_files::recent_commits(&root)?
+            } else {
+                Vec::new()
+            };
             let omitted = files.len().saturating_sub(MAX_REVIEW_FILES);
             files.truncate(MAX_REVIEW_FILES);
             let head = crate::workspace_files::has_head(&root);
@@ -3091,7 +3099,7 @@ impl RightPanel {
                     )
                 })
                 .collect::<HashMap<_, _>>();
-            Ok::<_, String>((root, files, omitted, diffs))
+            Ok::<_, String>((root, files, omitted, diffs, commits))
         });
         cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -3101,12 +3109,13 @@ impl RightPanel {
                 }
                 this.changes_loading = false;
                 // "Loading changes…" shows only while the list is empty.
-                let mut changed = this.change_files.is_empty();
+                let mut changed = this.change_files.is_empty() && this.change_commits.is_empty();
                 match result {
-                    Ok((root, files, omitted, diffs)) => {
+                    Ok((root, files, omitted, diffs, commits)) => {
                         if this.change_error.is_none()
                             && this.change_root == root
                             && this.change_files == files
+                            && this.change_commits == commits
                             && this.change_omitted == omitted
                             && this.change_diffs == diffs
                         {
@@ -3133,6 +3142,7 @@ impl RightPanel {
                             this.change_error = None;
                             this.change_expanded.retain(|path| diffs.contains_key(path));
                             this.change_files = files;
+                            this.change_commits = commits;
                             this.change_omitted = omitted;
                             this.change_diffs = diffs;
                         }
@@ -3141,6 +3151,7 @@ impl RightPanel {
                         changed |= this.change_error.as_ref() != Some(&error);
                         this.change_error = Some(error);
                         this.change_files.clear();
+                        this.change_commits.clear();
                         this.change_diffs.clear();
                         this.change_reviews.clear();
                         this.change_omitted = 0;
@@ -3153,7 +3164,7 @@ impl RightPanel {
             });
         })
         .detach();
-        if self.change_files.is_empty() {
+        if self.change_files.is_empty() && self.change_commits.is_empty() {
             cx.notify();
         }
     }
@@ -3182,7 +3193,9 @@ impl RightPanel {
                 )
             })
             .when(
-                self.change_files.is_empty() && self.change_error.is_none(),
+                self.change_files.is_empty()
+                    && self.change_commits.is_empty()
+                    && self.change_error.is_none(),
                 |view| {
                     view.child(
                         div()
@@ -3191,14 +3204,70 @@ impl RightPanel {
                             .child(if self.changes_loading {
                                 "Loading changes…"
                             } else {
-                                "Working tree clean"
+                                "No commits yet"
                             }),
                     )
                 },
             )
+            .when(!self.change_commits.is_empty(), |view| {
+                view.child(
+                    v_flex()
+                        .debug_selector(|| "changes-history".into())
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .text_size(zpx(TEXT_SM))
+                                .text_color(rgba(0xffffff8c))
+                                .child("Recent commits"),
+                        )
+                        .children(self.change_commits.iter().map(|commit| {
+                            v_flex()
+                                .id(SharedString::from(commit.id.clone()))
+                                .w_full()
+                                .min_w_0()
+                                .flex_none()
+                                .px_3()
+                                .py_2()
+                                .gap_1()
+                                .border_t_1()
+                                .border_color(rgba(0xffffff14))
+                                .child(
+                                    div()
+                                        .text_size(zpx(TEXT_MD))
+                                        .whitespace_normal()
+                                        .child(commit.subject.clone()),
+                                )
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .gap_2()
+                                        .text_size(zpx(TEXT_SM))
+                                        .text_color(rgba(0xffffff8c))
+                                        .child(
+                                            div()
+                                                .font_family(MONO)
+                                                .flex_none()
+                                                .child(commit.short_id.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(commit.author.clone()),
+                                        )
+                                        .child(div().flex_none().child(commit.date.clone())),
+                                )
+                        })),
+                )
+            })
             .when(!self.change_files.is_empty(), |view| {
                 view.child(
                     h_flex()
+                        .debug_selector(|| "changes-files".into())
                         .px_3()
                         .py_2()
                         .gap_2()
@@ -4811,6 +4880,87 @@ mod tests {
             assert_eq!(panel.snapshot(true, cx).selected, Some(path.clone()));
         });
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[::gpui::test]
+    fn changes_switch_between_history_and_pending_files(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new(crate::projects::git_program().unwrap())
+                .arg("-C")
+                .arg(root)
+                .args([
+                    "-c",
+                    "user.name=Review Tester",
+                    "-c",
+                    "user.email=review@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        let path = root.join("example.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "Initial commit"]);
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = legacy_panel(root.into(), window, cx);
+            panel.pane = Pane::Changes;
+            panel.prepare_to_show(window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-history").is_some());
+        assert!(cx.debug_bounds("changes-files").is_none());
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.change_commits[0].subject, "Initial commit");
+            assert_eq!(panel.change_commits[0].author, "Review Tester");
+        });
+        // Untracked files, unstaged changes, and staged-only changes all hide history.
+        for kind in ["untracked", "unstaged", "staged"] {
+            if kind == "untracked" {
+                std::fs::write(root.join("new.txt"), "new\n").unwrap();
+            } else {
+                std::fs::write(&path, "after\n").unwrap();
+                if kind == "staged" {
+                    git(&["add", "."]);
+                }
+            }
+            panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("changes-files").is_some(), "{kind}");
+            assert!(cx.debug_bounds("changes-history").is_none(), "{kind}");
+            panel.read_with(cx, |panel, _| assert!(panel.change_commits.is_empty()));
+            if kind == "untracked" {
+                std::fs::remove_file(root.join("new.txt")).unwrap();
+            }
+        }
+        git(&["commit", "-qm", "Save changes café"]);
+        panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-history").is_some());
+        assert!(cx.debug_bounds("changes-files").is_none());
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.change_files.is_empty());
+            assert_eq!(panel.change_commits.len(), 2);
+            assert_eq!(panel.change_commits[0].subject, "Save changes café");
+            assert_eq!(panel.change_commits[1].subject, "Initial commit");
+        });
+        // A clean-to-clean poll retains the commit list instead of showing Loading.
+        panel.update(cx, |panel, cx| {
+            panel.refresh_changes(cx);
+            assert_eq!(panel.change_commits.len(), 2);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-history").is_some());
     }
 
     #[::gpui::test]

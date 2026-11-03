@@ -188,6 +188,47 @@ pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
     Ok((base, files))
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Commit {
+    pub id: String,
+    pub short_id: String,
+    pub subject: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// Recent history of the current branch, used only when there are no changes.
+pub fn recent_commits(root: &Path) -> Result<Vec<Commit>, String> {
+    if !has_head(root) {
+        return Ok(Vec::new());
+    }
+    let output = git(
+        root,
+        &[
+            "log",
+            "-50",
+            "-z",
+            "--format=%H%x00%h%x00%s%x00%an%x00%cs",
+            "HEAD",
+            "--",
+        ],
+    )?;
+    let output = String::from_utf8_lossy(&output);
+    let fields: Vec<_> = output.split_terminator('\0').collect();
+    Ok(fields
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .map(|row| Commit {
+            id: row[0].into(),
+            short_id: row[1].into(),
+            subject: row[2].into(),
+            author: row[3].into(),
+            date: row[4].into(),
+        })
+        .collect())
+}
+
 /// A listing cut off at the size cap ends mid-record; keep only whole
 /// NUL-terminated records.
 fn complete_records(mut status: Vec<u8>) -> Vec<u8> {
@@ -432,6 +473,7 @@ mod tests {
         std::fs::write(root.join(name), "old\n").unwrap();
         git(root, &["add", "--", name]).unwrap();
         assert!(!has_head(root));
+        assert!(recent_commits(root).unwrap().is_empty());
         assert!(
             diff(root, &changes(root).unwrap().1[0], false)
                 .unwrap()
