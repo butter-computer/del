@@ -298,6 +298,16 @@ pub trait AgentBackend: Send + Sync {
         }
         self.resume(config, session).await
     }
+    /// Reconfigure a non-persistent fork. The boolean requests that the manager
+    /// deliver its saved conversation context on the next prompt when the native
+    /// process cannot retain it. The returned handle must keep the same ID.
+    async fn reconfigure_temporary(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+    ) -> Result<(SessionHandle, bool)> {
+        Ok((self.reconfigure(config, session).await?, false))
+    }
     /// Answer a pending `ApprovalRequested`.
     async fn respond_approval(
         &self,

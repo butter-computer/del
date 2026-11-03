@@ -554,6 +554,20 @@ impl SessionManager {
         })
     }
 
+    pub(super) fn replay_fork_context(&self, id: &SessionId) -> Result<()> {
+        let snapshot = self.export_fork(id)?;
+        let context = bounded(format!(
+            "{}\n{}",
+            snapshot.inherited,
+            transcript(&snapshot.history)
+        ));
+        self.shared.index.lock().unwrap().update(id, |record| {
+            if let Some(fork) = &mut record.fork {
+                fork.pending = Some(context);
+            }
+        })
+    }
+
     pub(super) fn pending_fork_context(&self, id: &SessionId) -> Option<String> {
         self.shared
             .index

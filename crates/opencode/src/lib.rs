@@ -1002,6 +1002,12 @@ mod tests {
         let backend = OpenCodeBackend::with_environment(environment);
         let first = backend.list_models(dir.path()).await.unwrap();
         assert!(!first.is_empty());
+        let default = first
+            .iter()
+            .find(|model| model.is_default)
+            .expect("native default must resolve to a catalog model");
+        assert!(!default.name.is_empty());
+        eprintln!("OpenCode resolved default: {}", default.name);
         let server = backend.server(dir.path()).await.unwrap();
         let original = server.pid;
         del_agent::procgroup::signal_group(original, true);

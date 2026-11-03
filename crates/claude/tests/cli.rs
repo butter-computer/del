@@ -27,7 +27,7 @@ for line in sys.stdin:
             continue
         if request['subtype'] == 'initialize':
             body = {'models': [
-                {'value': 'default', 'displayName': 'Default', 'supportsEffort': True,
+                {'value': 'default', 'displayName': 'Default', 'resolvedModel': 'claude-fixture-default', 'supportsEffort': True,
                  'supportedEffortLevels': ['low', 'high'], 'supportsFastMode': True},
                 {'value': 'fixture-model', 'description': 'No display name'},
                 {'displayName': 'missing value'}],
@@ -39,11 +39,15 @@ for line in sys.stdin:
                 {'name': 'color', 'description': 'Terminal only', 'builtin': True},
                 {'name': '_internal', 'description': 'Hidden'},
                 {'name': 'old', 'description': '(removed) gone'}]}
+        elif request['subtype'] == 'get_settings':
+            body = {'effective': {'model': 'fixture-model'} if mode == 'configured' else {'modelSettings': {'claude-fixture-default': {'effortLevel': 'high'}}}}
         else:
             body = {'echo': request, 'five_hour': {'utilization': 12}}
         send({'type': 'control_response', 'response': {'subtype': 'success',
             'request_id': message['request_id'], 'response': body}})
     elif message['type'] == 'user':
+        with open(os.path.join(profile, 'inputs.jsonl'), 'a') as f:
+            f.write(json.dumps(message) + '\n')
         if message['message']['content'] == 'exit':
             sys.stderr.write('fixture stderr detail\n')
             sys.stderr.flush()
@@ -151,6 +155,100 @@ async fn until_turn_end(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
 }
 
 #[tokio::test]
+async fn temporary_effort_changes_restart_without_resume_and_preserve_context() {
+    let f = fixture();
+    let backend = std::sync::Arc::new(ClaudeBackend::new(f.options.clone()));
+    let manager = SessionManager::new(
+        f._dir.path().join("index"),
+        [backend as std::sync::Arc<dyn AgentBackend>],
+    )
+    .unwrap();
+    let fork = manager
+        .fork(
+            ForkSource::New {
+                config: config(&f.cwd, PermissionMode::Plan),
+                account_id: None,
+            },
+            ForkLifetime::Temporary,
+        )
+        .await
+        .unwrap();
+    let id = fork.handle.id;
+    let (_, mut rx) = manager.subscribe_with_history(&id).unwrap();
+    manager
+        .send_prompt(&id, UserInput::text("remember the blue balloon"))
+        .await
+        .unwrap();
+    until_turn_end(&mut rx).await;
+    for effort in ["low", "high"] {
+        manager
+            .set_model_settings(&id, Some("fixture-model".into()), Some(effort.into()), None)
+            .unwrap();
+        manager
+            .send_prompt(&id, UserInput::text(format!("continue at {effort}")))
+            .await
+            .unwrap();
+        let events = until_turn_end(&mut rx).await;
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+    }
+    let rows = launches(&f.profile, 3).await;
+    for effort in ["low", "high"] {
+        let args = rows
+            .iter()
+            .map(argv)
+            .find(|args| has_pair(args, "--effort", effort))
+            .unwrap();
+        assert!(args.iter().any(|a| a == "--no-session-persistence"));
+        assert!(has_pair(&args, "--session-id", id.as_str()));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+    let inputs: Vec<Value> = std::fs::read_to_string(f.profile.join("inputs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(inputs.len(), 3);
+    for input in &inputs[1..] {
+        let text = input["message"]["content"].as_str().unwrap();
+        assert!(text.contains("remember the blue balloon"));
+        assert!(text.contains("reply é"));
+        assert!(text.contains("reference material"));
+    }
+    assert!(
+        inputs[2]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("continue at low")
+    );
+    assert!(manager.is_temporary(&id));
+    let history = manager.subscribe_with_history(&id).unwrap().0;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::UserMessage { .. }))
+            .count(),
+        3
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_default_uses_effective_settings_without_changing_the_alias() {
+    let f = fixture();
+    std::fs::write(
+        f.options.config_dir.as_ref().unwrap().join("mode"),
+        "configured",
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(f.options.clone());
+    let models = backend.list_models(&f.cwd).await.unwrap();
+    let default = models.iter().find(|m| m.is_default).unwrap();
+    assert_eq!(default.id, "default");
+    assert_eq!(default.name, "fixture-model");
+    assert!(default.efforts.is_empty() && default.fast_tier.is_none());
+}
+
+#[tokio::test]
 async fn catalog_discovery_uses_the_selected_profile_without_persisting_a_session() {
     let f = fixture();
     let backend = ClaudeBackend::new(f.options.clone());
@@ -162,7 +260,8 @@ async fn catalog_discovery_uses_the_selected_profile_without_persisting_a_sessio
         "rows without a value are skipped"
     );
     assert!(models[0].is_default);
-    assert_eq!(models[0].name, "Default");
+    assert_eq!(models[0].name, "claude-fixture-default");
+    assert_eq!(models[0].default_effort.as_deref(), Some("high"));
     assert!(models[0].supports_effort("high"));
     assert_eq!(models[0].fast_tier.as_deref(), Some("fast"));
     assert_eq!(models[1].name, "fixture-model", "name falls back to the id");

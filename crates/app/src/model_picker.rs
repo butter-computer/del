@@ -15,16 +15,21 @@ use gpui_kit::*;
 use std::{cell::Cell, rc::Rc};
 
 fn model_label(selected: Option<&str>, info: Option<&del_agent::ModelInfo>) -> String {
-    match selected {
-        None | Some("default") => "Default".into(),
-        Some(id) => info
-            .map(|model| model.name.clone())
-            .unwrap_or_else(|| id.into()),
-    }
+    info.map(|model| model.name.clone()).unwrap_or_else(|| {
+        selected
+            .filter(|id| *id != "default")
+            .unwrap_or("Automatic")
+            .into()
+    })
 }
 
 fn effort_label(explicit: Option<&str>, info: Option<&del_agent::ModelInfo>) -> Option<String> {
-    let id = explicit.or_else(|| info.and_then(|model| model.default_effort.as_deref()))?;
+    let Some(id) = explicit.or_else(|| info.and_then(|model| model.default_effort.as_deref()))
+    else {
+        return info
+            .filter(|model| !model.efforts.is_empty())
+            .map(|_| "Auto effort".into());
+    };
     Some(
         info.and_then(|model| model.efforts.iter().find(|effort| effort.id == id))
             .map(|effort| effort.name.clone())
@@ -62,7 +67,12 @@ impl ModelSelection {
         self.catalog
             .models
             .iter()
-            .find(|m| self.model.as_ref().map_or(m.is_default, |id| &m.id == id))
+            .find(|m| {
+                self.model
+                    .as_deref()
+                    .filter(|id| *id != "default")
+                    .map_or(m.is_default, |id| m.id == id)
+            })
             .cloned()
     }
 }
@@ -256,7 +266,13 @@ impl Render for ModelPicker {
                             .text_size(zpx(15.))
                             .disabled(state.locked)
                             .tooltip_with_action("Select model", &crate::SelectModel, None)
-                            .accessibility_label(format!("Select model: {label}"))
+                            .accessibility_label(format!(
+                                "Select model: {label}{}",
+                                effort
+                                    .as_ref()
+                                    .map(|effort| format!(" · {effort}"))
+                                    .unwrap_or_default()
+                            ))
                             .child(h_flex().gap_1().items_center().child(label).when_some(
                                 effort,
                                 |row, effort| {
@@ -322,12 +338,22 @@ impl EventEmitter<CloseModelPicker> for ModelPanel {}
 
 impl ModelPanel {
     fn choose_effort(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.state.read(cx).locked || index == self.effort_index {
+        let state = self.state.read(cx);
+        if state.locked {
             return;
         }
         let Some(level) = self.levels.get(index) else {
             return;
         };
+        let info = state.info();
+        if state
+            .effort
+            .as_deref()
+            .or_else(|| info.as_ref().and_then(|m| m.default_effort.as_deref()))
+            == Some(level.id.as_str())
+        {
+            return;
+        }
         let effort = Some(level.id.clone());
         self.previous_effort_index = self.effort_index;
         self.effort_index = index;
@@ -434,7 +460,11 @@ impl Render for ModelPanel {
             .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
-            let show_default = fuzzy_model_matches(&query, "Default recommended");
+            let default = catalog.models.iter().find(|model| model.is_default);
+            let default_label = model_label(None, default);
+            let show_default = fuzzy_model_matches(&query, "Default recommended automatic")
+                || fuzzy_model_matches(&query, &default_label)
+                || default.is_some_and(|model| fuzzy_model_matches(&query, &model.id));
             let models: Vec<_> = catalog
                 .models
                 .iter()
@@ -460,7 +490,7 @@ impl Render for ModelPanel {
                     Button::new("model-default")
                         .size(crate::icons::button_size())
                         .p_0()
-                        .accessibility_label("Default model")
+                        .accessibility_label(format!("{default_label} (automatic)"))
                         .when(self.highlighted == Some(0), |button| {
                             button.bg(rgba(0xffffff14))
                         })
@@ -483,12 +513,12 @@ impl Render for ModelPanel {
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child("Default")
+                                .child(default_label)
                                 .child(
                                     div()
                                         .text_size(zpx(10.5))
                                         .text_color(muted)
-                                        .child("Use the provider’s recommended model"),
+                                        .child("Automatic · follows provider settings"),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -698,10 +728,10 @@ impl Render for ModelPanel {
         let effective_effort = effort
             .clone()
             .or_else(|| info.as_ref().and_then(|m| m.default_effort.clone()));
-        let index = effective_effort
+        let selected_index = effective_effort
             .as_ref()
-            .and_then(|e| self.levels.iter().position(|v| &v.id == e))
-            .unwrap_or(0);
+            .and_then(|e| self.levels.iter().position(|v| &v.id == e));
+        let index = selected_index.unwrap_or(0);
         let max = self.levels.len().saturating_sub(1).max(1) as f32;
         if self.effort_index != index {
             self.previous_effort_index = self.effort_index;
@@ -812,6 +842,7 @@ impl Render for ModelPanel {
             col.child(
                 div()
                     .id("effort-track")
+                    .debug_selector(|| "effort-track".into())
                     .relative()
                     .w(zpx(TRACK_WIDTH))
                     .h(zpx(32.))
@@ -846,16 +877,21 @@ impl Render for ModelPanel {
                             .overflow_hidden()
                             .bg(rgb(0x2a2a2d))
                             .child(
-                                div().h_full().rounded(zpx(12.)).bg(accent).with_animation(
-                                    SharedString::from(format!(
-                                        "effort-fill-{old_fill}-{new_fill}"
-                                    )),
-                                    Animation::new(std::time::Duration::from_millis(180))
-                                        .with_easing(ease_out_quint()),
-                                    move |fill, t| {
-                                        fill.w(zpx(old_fill + (new_fill - old_fill) * t))
-                                    },
-                                ),
+                                div()
+                                    .h_full()
+                                    .rounded(zpx(12.))
+                                    .bg(accent)
+                                    .opacity(if selected_index.is_some() { 1.0 } else { 0.0 })
+                                    .with_animation(
+                                        SharedString::from(format!(
+                                            "effort-fill-{old_fill}-{new_fill}"
+                                        )),
+                                        Animation::new(std::time::Duration::from_millis(180))
+                                            .with_easing(ease_out_quint()),
+                                        move |fill, t| {
+                                            fill.w(zpx(old_fill + (new_fill - old_fill) * t))
+                                        },
+                                    ),
                             ),
                     )
                     .child(
@@ -880,6 +916,7 @@ impl Render for ModelPanel {
                             .size(zpx(THUMB_SIZE))
                             .rounded_full()
                             .bg(rgb(0xf4f4f4))
+                            .opacity(if selected_index.is_some() { 1.0 } else { 0.0 })
                             .shadow_md()
                             .with_animation(
                                 SharedString::from(format!(
@@ -910,11 +947,15 @@ impl Render for ModelPanel {
             )
         })
         .when(self.levels.is_empty(), |col| {
-            col.child(
-                div()
-                    .text_color(muted)
-                    .child("This model does not advertise an effort setting."),
-            )
+            col.child(div().text_color(muted).child(
+                if catalog.loading || !catalog.loaded || state.locked {
+                    "Loading effort settings…"
+                } else if info.is_none() {
+                    "Effort settings are unavailable. Refresh the model list."
+                } else {
+                    "This model does not advertise an effort setting."
+                },
+            ))
         })
         .into_any_element()
     }
@@ -1103,7 +1144,10 @@ mod tests {
             Some("High")
         );
         info.default_effort = None;
-        assert_eq!(super::effort_label(None, Some(&info)), None);
+        assert_eq!(
+            super::effort_label(None, Some(&info)).as_deref(),
+            Some("Auto effort")
+        );
     }
 
     fn model(id: &str, name: &str, is_default: bool) -> del_agent::ModelInfo {
@@ -1119,10 +1163,10 @@ mod tests {
     }
 
     #[test]
-    fn default_stays_distinct_from_an_explicit_model() {
+    fn automatic_displays_resolved_model_without_becoming_an_explicit_selection() {
         let recommended = model("gpt-x", "GPT X", true);
-        assert_eq!(super::model_label(None, Some(&recommended)), "Default");
-        assert_eq!(super::model_label(Some("default"), None), "Default");
+        assert_eq!(super::model_label(None, Some(&recommended)), "GPT X");
+        assert_eq!(super::model_label(Some("default"), None), "Automatic");
         assert_eq!(
             super::model_label(Some("gpt-x"), Some(&recommended)),
             "GPT X"
@@ -1152,6 +1196,21 @@ mod tests {
         );
         assert!(selection(Some("gone"), catalog).info().is_none());
         assert!(selection(None, Vec::new()).info().is_none());
+        for provider in [
+            del_agent::Provider::Claude,
+            del_agent::Provider::Codex,
+            del_agent::Provider::OpenCode,
+        ] {
+            for saved in [None, Some("default")] {
+                let mut state = selection(saved, vec![model("resolved", "Resolved Model", true)]);
+                state.provider = provider;
+                assert_eq!(
+                    super::model_label(state.model.as_deref(), state.info().as_ref()),
+                    "Resolved Model"
+                );
+                assert_eq!(state.model.as_deref(), saved); // Display never pins the model.
+            }
+        }
     }
 
     #[test]

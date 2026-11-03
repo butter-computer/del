@@ -204,6 +204,9 @@ async fn model_catalog_starts_without_a_running_chat() {
         let models = result.expect("model picker must start Claude on demand");
         assert!(!models.is_empty());
         assert!(models.iter().any(|model| model.is_default));
+        let default = models.iter().find(|model| model.is_default).unwrap();
+        assert!(!default.name.to_lowercase().starts_with("default"));
+        eprintln!("Claude resolved default: {}", default.name);
     }
 }
 

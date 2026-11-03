@@ -1037,12 +1037,20 @@ impl SessionManager {
                     "settings apply after the current turn finishes".into(),
                 ));
             }
-            match self
-                .session_backend(id)?
-                .reconfigure(config.clone(), id)
-                .await
-            {
-                Ok(handle) => {
+            let backend = self.session_backend(id)?;
+            let result = if self.is_temporary(id) {
+                backend.reconfigure_temporary(config.clone(), id).await
+            } else {
+                backend
+                    .reconfigure(config.clone(), id)
+                    .await
+                    .map(|handle| (handle, false))
+            };
+            match result {
+                Ok((handle, replay_context)) => {
+                    if replay_context {
+                        self.replay_fork_context(id)?;
+                    }
                     self.attach(handle, config.clone())?;
                 }
                 Err(error) => {

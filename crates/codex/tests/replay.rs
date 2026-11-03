@@ -1052,6 +1052,7 @@ async fn closing_last_chat_does_not_interrupt_model_loading() {
                     continue;
                 }
                 "thread/unsubscribe" => json!({"status":"unsubscribed"}),
+                "config/read" => json!({"config":{}}),
                 method => panic!("unexpected request {method}"),
             };
             let reply = json!({"id":request["id"],"result":result});
@@ -1236,12 +1237,14 @@ async fn model_catalog_follows_pages_and_rejects_a_repeated_cursor() {
         r#"< {"id":3,"result":{"data":[{"model":"m1","displayName":"One","isDefault":true,"futureField":{}},{"model":"secret","hidden":true},{"displayName":"no id"}],"nextCursor":"p2"}}"#,
         r#"> {"id":4,"method":"model/list","params":{"cursor":"p2"}}"#,
         r#"< {"id":4,"result":{"data":[{"model":"m2","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"bogus":1}]}],"nextCursor":null}}"#,
-        r#"> {"id":5,"method":"model/list","params":{"cursor":null}}"#,
-        r#"< {"id":5,"result":{"data":[],"nextCursor":"same"}}"#,
-        r#"> {"id":6,"method":"model/list","params":{"cursor":"same"}}"#,
+        r#"> {"id":5,"method":"config/read","params":{"cwd":"/work","includeLayers":false}}"#,
+        r#"< {"id":5,"result":{"config":{"model":"m2"}}}"#,
+        r#"> {"id":6,"method":"model/list","params":{"cursor":null}}"#,
         r#"< {"id":6,"result":{"data":[],"nextCursor":"same"}}"#,
-        r#"> {"id":7,"method":"model/list","params":{"cursor":null}}"#,
-        r#"< {"id":7,"result":{"models":[]}}"#,
+        r#"> {"id":7,"method":"model/list","params":{"cursor":"same"}}"#,
+        r#"< {"id":7,"result":{"data":[],"nextCursor":"same"}}"#,
+        r#"> {"id":8,"method":"model/list","params":{"cursor":null}}"#,
+        r#"< {"id":8,"result":{"models":[]}}"#,
     ]);
     let (client, rx, server) = replay(lines);
     let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
@@ -1258,7 +1261,7 @@ async fn model_catalog_follows_pages_and_rejects_a_repeated_cursor() {
             )
         })
         .collect();
-    assert_eq!(rows, [("m1", "One", true, 0), ("m2", "m2", false, 1)]);
+    assert_eq!(rows, [("m1", "One", false, 0), ("m2", "m2", true, 1)]);
     let repeated = backend.list_models(cwd).await.unwrap_err();
     assert!(
         repeated.to_string().contains("repeated its cursor"),

@@ -697,7 +697,7 @@ impl AgentBackend for CodexBackend {
         result
     }
 
-    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
+    async fn list_models(&self, cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
         let conn = self.connection().await?;
         let mut models = Vec::new();
         let mut cursor: Option<String> = None;
@@ -716,6 +716,15 @@ impl AgentBackend for CodexBackend {
                 return Err(be("model/list repeated its cursor"));
             }
             cursor = next;
+        }
+        // The catalog recommendation can differ from the user's project/account setting.
+        match conn
+            .client
+            .call::<Value>("config/read", json!({"cwd":cwd,"includeLayers":false}))
+            .await
+        {
+            Ok(config) => crate::models::apply_configured_default(&mut models, &config),
+            Err(_) => models.iter_mut().for_each(|model| model.is_default = false),
         }
         Ok(models)
     }

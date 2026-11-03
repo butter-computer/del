@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.28` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.29` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.28 source update notes](docs/releases/0.1.28.md) and
-[validation record](docs/releases/0.1.28-validation.md).
+See the [0.1.29 source update notes](docs/releases/0.1.29.md) and
+[validation record](docs/releases/0.1.29-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.28-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.29-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -71,7 +71,7 @@ a small ring without a number. Claude usage comes from its native `get_usage`
 control request, without sending a prompt or reading credentials. Unavailable quota
 (including older Claude CLIs without this query) stays hidden.
 
-In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection. An empty model catalog is reported explicitly with a Refresh action. Default keeps the provider’s configured choice.
+In the composer's provider picker, click a provider to select its default account, or hover its arrow to choose the default account or a saved account. Only the account selected for the current chat has green text; the picker has no account checkmarks. Model lists and commands load for that selection. An empty model catalog is reported explicitly with a Refresh action. Automatic selection keeps the provider’s configured choice and displays its resolved model name.
 A new chat remembers its account across restarts. Choosing a different account of the same provider
 resumes the existing chat with its native history under that account. Switching
 is blocked during a running response; a failed transfer reconnects the original
@@ -553,7 +553,10 @@ The picker opens with a **Search models…** field. It fuzzy-filters names and
 provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
 choices. Opening the picker again starts with an empty search. Use **↑/↓** to
 navigate results, **Enter** to select, and **Escape** to close. The provider
-default is labeled **Default**.
+default shows the resolved model name, with **Automatic** in the picker to distinguish it
+from an explicit choice. Claude resolves native aliases and effective settings; Codex reads
+project/account config; OpenCode supplies its native default. An unresolved default shows
+**Automatic** rather than guessing a model. Main chats and Side chats use the same labels.
 
 | Provider | Model discovery and controls |
 | --- | --- |
@@ -567,14 +570,20 @@ Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
 The model pill immediately shows the effective effort, including the catalog
-default before any adjustment. Reset clears explicit effort/fast settings and refreshes the catalog.
+default before any adjustment. Claude model-specific settings and Codex configured
+reasoning effort are resolved before opening the picker. Providers that advertise
+effort choices without a default show **Auto effort** until one is chosen. Side chat
+effort changes preserve the session and catalog throughout a drag. Reset clears
+explicit effort/fast settings and refreshes the catalog.
 Changing effort by dragging, clicking a stop, or using arrow keys emits one native
 haptic tick per level transition on supported macOS hardware. Movement within the
 same level stays silent; devices without haptic support receive no feedback.
 
 Model, effort, and service-tier selections are stored with the conversation.
 Existing chat settings apply on subsequent prompts through the backend's
-reconfiguration path; they do not rewrite a turn already in flight. Changing a
+reconfiguration path; they do not rewrite a turn already in flight. Claude's
+temporary Side chats restart without disk resume when launch settings change;
+their saved context accompanies the next prompt while the Del session stays intact. Changing a
 model clears incompatible effort/tier choices. Provider changes in existing chats
 keep the same tab and working directory and reset model/effort/tier to the target's defaults.
 Catalog discovery submits no prompt, but can start a CLI process. ACP is no longer

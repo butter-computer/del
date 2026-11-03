@@ -845,6 +845,28 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
+    async fn reconfigure_temporary(
+        &self,
+        config: SessionConfig,
+        session: &SessionId,
+    ) -> Result<(SessionHandle, bool)> {
+        match self.close(session).await {
+            Ok(()) | Err(AgentError::UnknownSession(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let handle = self.spawn_with_persistence(
+            &config,
+            session.clone(),
+            ["--session-id", session.as_str()],
+            false,
+        )?;
+        if let Err(error) = self.live(session)?.initialize().await {
+            let _ = self.close(session).await;
+            return Err(error);
+        }
+        Ok((handle, true))
+    }
+
     async fn respond_approval(
         &self,
         session: &SessionId,

@@ -1539,10 +1539,12 @@ impl AppState {
 
     pub fn model_info(&self) -> Option<ModelInfo> {
         let (_, selected, _) = self.effective();
-        self.model_catalog()
-            .models
-            .into_iter()
-            .find(|m| selected.as_ref().map_or(m.is_default, |id| &m.id == id))
+        self.model_catalog().models.into_iter().find(|m| {
+            selected
+                .as_deref()
+                .filter(|id| *id != "default")
+                .map_or(m.is_default, |id| m.id == id)
+        })
     }
 
     pub fn effort(&self) -> Option<String> {
@@ -4116,110 +4118,124 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn model_choices_validate_and_reset_effort(cx: &mut gpui::TestAppContext) {
-        let state = draft(cx);
-        state.update(cx, |s, cx| {
-            let (provider, _, cwd) = s.effective();
-            s.apply(
-                super::Msg::Models(
-                    provider,
-                    None,
-                    cwd,
-                    Ok(vec![del_agent::ModelInfo {
-                        id: "model-a".into(),
-                        name: "Model A".into(),
-                        description: String::new(),
-                        efforts: vec![del_agent::EffortOption::named("high")],
-                        default_effort: None,
-                        is_default: true,
-                        fast_tier: Some("priority".into()),
-                    }]),
-                ),
-                cx,
-            );
-            s.set_effort(Some("invalid".into()), cx);
-            assert_eq!(s.effort(), None);
-            s.set_fast_mode(true, cx);
-            assert_eq!(s.service_tier().as_deref(), Some("priority"));
-            s.set_effort(Some("high".into()), cx);
-            assert_eq!(s.service_tier().as_deref(), Some("priority"));
-            assert_eq!(s.effective().1.as_deref(), Some("model-a"));
-            s.set_model(Some("model-a".into()), cx);
-            assert_eq!(s.effort().as_deref(), Some("high"));
-            s.set_model(Some("model-b".into()), cx);
-            assert_eq!(s.effort(), None);
-            assert_eq!(s.service_tier(), None);
-            s.set_fast_mode(true, cx);
-            assert_eq!(s.service_tier(), None);
-            s.set_model(Some("model-a".into()), cx);
-            s.set_fast_mode(true, cx);
-            s.set_fast_mode(false, cx);
-            assert_eq!(s.service_tier(), None);
-            s.set_fast_mode(true, cx);
-            s.set_effort(Some("high".into()), cx);
-            s.reset_model_settings(cx);
-            assert_eq!(s.service_tier(), None);
-            assert_eq!(s.effort(), None);
-            assert!(s.model_catalog().loading);
-            s.set_effort(Some("high".into()), cx);
-            s.set_provider(
-                if provider == del_agent::Provider::Claude {
-                    del_agent::Provider::Codex
-                } else {
-                    del_agent::Provider::Claude
-                },
-                cx,
-            );
-            assert_eq!(s.effort(), None);
-        });
+        for provider in [
+            del_agent::Provider::Claude,
+            del_agent::Provider::Codex,
+            del_agent::Provider::OpenCode,
+        ] {
+            let state = draft(cx);
+            state.update(cx, |s, cx| s.set_provider(provider, cx));
+            state.update(cx, |s, cx| {
+                let (provider, _, cwd) = s.effective();
+                s.apply(
+                    super::Msg::Models(
+                        provider,
+                        None,
+                        cwd,
+                        Ok(vec![del_agent::ModelInfo {
+                            id: "model-a".into(),
+                            name: "Model A".into(),
+                            description: String::new(),
+                            efforts: vec![del_agent::EffortOption::named("high")],
+                            default_effort: None,
+                            is_default: true,
+                            fast_tier: Some("priority".into()),
+                        }]),
+                    ),
+                    cx,
+                );
+                s.set_effort(Some("invalid".into()), cx);
+                assert_eq!(s.effort(), None);
+                s.set_fast_mode(true, cx);
+                assert_eq!(s.service_tier().as_deref(), Some("priority"));
+                s.set_effort(Some("high".into()), cx);
+                assert_eq!(s.service_tier().as_deref(), Some("priority"));
+                assert_eq!(s.effective().1.as_deref(), Some("model-a"));
+                s.set_model(Some("model-a".into()), cx);
+                assert_eq!(s.effort().as_deref(), Some("high"));
+                s.set_model(Some("model-b".into()), cx);
+                assert_eq!(s.effort(), None);
+                assert_eq!(s.service_tier(), None);
+                s.set_fast_mode(true, cx);
+                assert_eq!(s.service_tier(), None);
+                s.set_model(Some("model-a".into()), cx);
+                s.set_fast_mode(true, cx);
+                s.set_fast_mode(false, cx);
+                assert_eq!(s.service_tier(), None);
+                s.set_fast_mode(true, cx);
+                s.set_effort(Some("high".into()), cx);
+                s.reset_model_settings(cx);
+                assert_eq!(s.service_tier(), None);
+                assert_eq!(s.effort(), None);
+                assert!(s.model_catalog().loading);
+                s.set_effort(Some("high".into()), cx);
+                s.set_provider(
+                    if provider == del_agent::Provider::Claude {
+                        del_agent::Provider::Codex
+                    } else {
+                        del_agent::Provider::Claude
+                    },
+                    cx,
+                );
+                assert_eq!(s.effort(), None);
+            });
+        }
     }
     #[gpui::test]
     fn existing_chat_model_and_effort_changes_keep_the_same_session(cx: &mut gpui::TestAppContext) {
-        let state = draft(cx);
-        let dir = tempfile::tempdir().unwrap();
-        state.update(cx, |s, cx| {
-            let config = s.draft().unwrap().clone();
-            s.manager = SessionManager::new(
-                dir.path().join("sessions.jsonl"),
-                [Arc::new(del_agent::MockBackend::new(config.provider))
-                    as Arc<dyn del_agent::AgentBackend>],
-            )
-            .unwrap();
-            let handle =
-                s.rt.block_on(s.manager.start_session(config.clone()))
-                    .unwrap();
-            s.set_records(s.manager.list_sessions());
-            s.selection = Selection::Session(handle.id.clone());
-            s.tabs = vec![Tab::Session(handle.id.clone())];
-            s.apply(
-                super::Msg::Models(
-                    config.provider,
-                    None,
-                    config.cwd,
-                    Ok(vec![del_agent::ModelInfo {
-                        id: "model-a".into(),
-                        name: "Model A".into(),
-                        description: String::new(),
-                        efforts: vec![del_agent::EffortOption::named("high")],
-                        default_effort: Some("high".into()),
-                        is_default: true,
-                        fast_tier: Some("priority".into()),
-                    }]),
-                ),
-                cx,
-            );
-            let selection = s.selection.clone();
-            let tabs = s.tabs.clone();
-            s.set_effort(Some("high".into()), cx);
-            assert_eq!(s.selection, selection, "effort must not open a new chat");
-            s.set_model(Some("model-a".into()), cx);
-            s.set_fast_mode(true, cx);
-            assert_eq!(s.selection, selection);
-            assert_eq!(s.tabs, tabs);
-            let saved = &s.manager.list_sessions()[0];
-            assert_eq!(saved.model.as_deref(), Some("model-a"));
-            assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
-            assert_eq!(saved.service_tier.as_deref(), Some("priority"));
-        });
+        for provider in [
+            del_agent::Provider::Claude,
+            del_agent::Provider::Codex,
+            del_agent::Provider::OpenCode,
+        ] {
+            let state = draft(cx);
+            state.update(cx, |s, cx| s.set_provider(provider, cx));
+            let dir = tempfile::tempdir().unwrap();
+            state.update(cx, |s, cx| {
+                let config = s.draft().unwrap().clone();
+                s.manager = SessionManager::new(
+                    dir.path().join("sessions.jsonl"),
+                    [Arc::new(del_agent::MockBackend::new(config.provider))
+                        as Arc<dyn del_agent::AgentBackend>],
+                )
+                .unwrap();
+                let handle =
+                    s.rt.block_on(s.manager.start_session(config.clone()))
+                        .unwrap();
+                s.set_records(s.manager.list_sessions());
+                s.selection = Selection::Session(handle.id.clone());
+                s.tabs = vec![Tab::Session(handle.id.clone())];
+                s.apply(
+                    super::Msg::Models(
+                        config.provider,
+                        None,
+                        config.cwd,
+                        Ok(vec![del_agent::ModelInfo {
+                            id: "model-a".into(),
+                            name: "Model A".into(),
+                            description: String::new(),
+                            efforts: vec![del_agent::EffortOption::named("high")],
+                            default_effort: Some("high".into()),
+                            is_default: true,
+                            fast_tier: Some("priority".into()),
+                        }]),
+                    ),
+                    cx,
+                );
+                let selection = s.selection.clone();
+                let tabs = s.tabs.clone();
+                s.set_effort(Some("high".into()), cx);
+                assert_eq!(s.selection, selection, "effort must not open a new chat");
+                s.set_model(Some("model-a".into()), cx);
+                s.set_fast_mode(true, cx);
+                assert_eq!(s.selection, selection);
+                assert_eq!(s.tabs, tabs);
+                let saved = &s.manager.list_sessions()[0];
+                assert_eq!(saved.model.as_deref(), Some("model-a"));
+                assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
+                assert_eq!(saved.service_tier.as_deref(), Some("priority"));
+            });
+        }
     }
 
     #[gpui::test]

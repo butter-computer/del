@@ -526,6 +526,29 @@ impl SideChat {
             return;
         }
         let id = self.session.clone();
+        // Model/effort/tier changes apply on the next turn, just like main chats.
+        // Replacing the fork here clears the catalog and interrupts a slider drag.
+        if let Some(record) = self.record()
+            && record.provider == config.provider
+            && record.account_id == account
+            && record.cwd == config.cwd
+            && record.permission_mode == config.permission_mode
+        {
+            match self.context.backend.manager.set_model_settings(
+                &record.id,
+                config.model,
+                config.reasoning_effort,
+                config.service_tier,
+            ) {
+                Ok(()) => {
+                    self.error = None;
+                    self.save(cx);
+                }
+                Err(error) => self.error = Some(format!("Could not save model settings: {error}")),
+            }
+            cx.notify();
+            return;
+        }
         self.save(cx);
         self.loading = true;
         self.error = None;
@@ -974,10 +997,13 @@ impl SideChat {
         let Some((mut config, account)) = self.configuration() else {
             return;
         };
-        let info = self
-            .models
-            .iter()
-            .find(|m| config.model.as_ref().map_or(m.is_default, |id| &m.id == id));
+        let info = self.models.iter().find(|m| {
+            config
+                .model
+                .as_deref()
+                .filter(|id| *id != "default")
+                .map_or(m.is_default, |id| m.id == id)
+        });
         match change {
             ModelChange::Model(model) => {
                 config.model = model;
@@ -1532,6 +1558,147 @@ mod tests {
             "Side queue actions must never deliver to the parent"
         );
         side.update(cx, |side, cx| side.forget(cx));
+    }
+
+    #[::gpui::test]
+    fn effort_changes_preserve_side_chat_and_catalog_across_providers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let providers = [Provider::Claude, Provider::Codex, Provider::OpenCode];
+        let agents = providers
+            .map(|p| Arc::new(del_agent::MockBackend::new(p)) as Arc<dyn del_agent::AgentBackend>);
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), agents).unwrap();
+        let config = SessionConfig {
+            cwd: dir.path().into(),
+            provider: Provider::Claude,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: del_agent::PermissionMode::Plan,
+        };
+        let parent = runtime.block_on(manager.start_session(config)).unwrap();
+        let context = Context {
+            activity_owner: None,
+            backend: Backend {
+                runtime: runtime.handle().clone(),
+                manager: manager.clone(),
+            },
+            source: ForkSource::Session(parent.id.clone()),
+            accounts: vec![],
+        };
+        let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::OpenCode,
+            Provider::Claude,
+        ] {
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if side.read_with(cx, |s, cx| {
+                    s.chat.is_some() && !s.settings_locked(cx) && !s.models_loading
+                }) {
+                    break;
+                }
+                runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+            }
+            side.update(cx, |s, cx| {
+                let (mut config, _) = s.configuration().unwrap();
+                config.provider = provider;
+                config.model = None;
+                config.reasoning_effort = None;
+                s.change_settings(config, None, cx);
+            });
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if side.read_with(cx, |s, cx| !s.settings_locked(cx) && !s.models_loading) {
+                    break;
+                }
+                runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+            }
+            side.update(cx, |s, cx| {
+                assert!(s.error.is_none(), "{:?}", s.error);
+                assert_eq!(s.configuration().unwrap().0.provider, provider);
+                s.models = vec![del_agent::ModelInfo {
+                    id: "model-a".into(),
+                    name: "Model A".into(),
+                    description: String::new(),
+                    efforts: ["low", "medium", "high"]
+                        .map(del_agent::EffortOption::named)
+                        .to_vec(),
+                    default_effort: Some("medium".into()),
+                    is_default: true,
+                    fast_tier: None,
+                }];
+                let session = s.session.clone();
+                let chat = s.chat.as_ref().unwrap().entity_id();
+                let generation = s.model_generation;
+                for effort in ["low", "high", "medium", "low"] {
+                    s.change_model(
+                        crate::model_picker::ModelChange::Effort(Some(effort.into())),
+                        cx,
+                    );
+                    assert!(!s.settings_locked(cx));
+                    assert!(!s.models_loading);
+                    assert_eq!(s.models.len(), 1);
+                    assert_eq!(s.model_generation, generation);
+                    assert_eq!(s.session, session);
+                    assert_eq!(s.chat.as_ref().unwrap().entity_id(), chat);
+                    assert_eq!(s.model_selection(cx).effort.as_deref(), Some(effort));
+                    assert_eq!(
+                        s.saved
+                            .snapshot
+                            .as_ref()
+                            .unwrap()
+                            .config
+                            .reasoning_effort
+                            .as_deref(),
+                        Some(effort)
+                    );
+                    assert!(s.error.is_none());
+                }
+                assert!(
+                    manager
+                        .session_record(&parent.id)
+                        .unwrap()
+                        .reasoning_effort
+                        .is_none()
+                );
+            });
+            cx.update(|window, cx| {
+                side.update(cx, |s, cx| {
+                    s.open_composer_picker(crate::keybinds::Picker::Effort, window, cx)
+                })
+            });
+            cx.run_until_parked();
+            let track = cx.debug_bounds("effort-track").unwrap();
+            let low = gpui::point(track.left() + gpui::px(14.), track.center().y);
+            let high = gpui::point(track.right() - gpui::px(14.), track.center().y);
+            cx.simulate_mouse_move(low, None, Default::default());
+            cx.simulate_mouse_down(low, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(track.center(), gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            cx.simulate_mouse_move(high, gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            side.read_with(cx, |s, cx| {
+                assert_eq!(s.model_selection(cx).effort.as_deref(), Some("high"))
+            });
+            cx.simulate_mouse_move(low, gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            side.read_with(cx, |s, cx| {
+                assert_eq!(s.model_selection(cx).effort.as_deref(), Some("low"))
+            });
+            cx.simulate_mouse_up(low, gpui::MouseButton::Left, Default::default());
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+        side.update(cx, |s, cx| s.forget(cx));
     }
 
     #[::gpui::test]

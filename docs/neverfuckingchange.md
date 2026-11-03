@@ -205,9 +205,19 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Model and effort controls
 
+- Resolve configured effort before opening the picker. Preserve Side chat sessions,
+  transcripts, and catalogs during model/effort/tier-only changes. A loading catalog
+  must never be described as a model without effort support. Unknown defaults
+  must not be displayed as the lowest advertised effort.
+- Temporary Claude settings changes must restart without disk resume and deliver
+  the inherited context plus Side chat history on the next prompt. Keep the same
+  Del session, subscribers, and peer identity.
+
 - An empty model catalog must show an explicit empty state with Refresh. Keep
-  Default distinct from an explicit model; catalog recommendations can differ
-  from the provider’s configured default.
+  automatic selection distinct from an explicit model while displaying its resolved name.
+  Resolve provider settings before using catalog recommendations; the configured default
+  can differ. Keep model selection unset when merely displaying the resolved name, including
+  in Side chats. If resolution is unavailable, show Automatic rather than guessing.
 
 - Effort slider changes emit one native haptic tick per level transition on supported
   macOS hardware, for dragging, clicking stops, and arrow keys.

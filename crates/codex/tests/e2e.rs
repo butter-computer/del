@@ -83,6 +83,10 @@ async fn installed_cli_returns_model_catalog() {
     let models = result.expect("installed Codex must return its model catalog");
     assert!(!models.is_empty());
     assert!(models.iter().any(|model| model.is_default));
+    eprintln!(
+        "Codex resolved default: {}",
+        models.iter().find(|model| model.is_default).unwrap().name
+    );
 }
 
 /// A stopped idle server must be started on demand without a manual refresh.
