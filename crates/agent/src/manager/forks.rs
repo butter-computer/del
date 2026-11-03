@@ -215,7 +215,12 @@ impl SessionManager {
             if let Some(previous) = &snapshot.session_id {
                 self.rebind_peer(previous, &handle.id)?;
             }
-            self.register_inherited_peer(&handle.id, snapshot.parent.as_ref(), &snapshot.config.cwd)
+            self.register_inherited_peer(
+                &handle.id,
+                snapshot.parent.as_ref(),
+                &snapshot.config.cwd,
+            )?;
+            self.record_side_chat(&handle.id)
         })();
         if let Err(error) = registered {
             let _ = backend.close(&handle.id).await;
@@ -491,7 +496,8 @@ impl SessionManager {
             if retain_history && let Some(previous) = &parent {
                 self.rebind_peer(previous, &handle.id)?;
             }
-            self.register_inherited_peer(&handle.id, original_parent.as_ref(), &config.cwd)
+            self.register_inherited_peer(&handle.id, original_parent.as_ref(), &config.cwd)?;
+            self.record_side_chat(&handle.id)
         })();
         if let Err(error) = registered {
             let _ = backend.close(&handle.id).await;
@@ -786,6 +792,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_side_chat_links_to_its_later_main_session_and_keeps_history_after_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Recorder::default());
+        let manager =
+            SessionManager::new(dir.path().join("index"), [backend as Arc<dyn AgentBackend>])
+                .unwrap();
+        let child = manager
+            .fork(
+                ForkSource::New {
+                    config: config(),
+                    account_id: None,
+                },
+                ForkLifetime::Temporary,
+            )
+            .await
+            .unwrap();
+        assert!(manager.peer_parent(&child.handle.id).is_none());
+        let parent = manager.start_session(config()).await.unwrap();
+        manager
+            .link_side_chat_parent(&child.handle.id, &parent.id)
+            .unwrap();
+        assert_eq!(
+            manager.peer_parent(&child.handle.id),
+            Some(parent.id.clone())
+        );
+        assert_eq!(manager.side_chats(&parent.id, &parent.id).unwrap().len(), 1);
+        let other = manager.start_session(config()).await.unwrap();
+        assert!(
+            manager
+                .link_side_chat_parent(&child.handle.id, &other.id)
+                .is_err()
+        );
+        let mut foreign = config();
+        foreign.cwd = "/other-project".into();
+        let outsider = manager.start_session(foreign).await.unwrap();
+        assert!(manager.side_chats(&outsider.id, &parent.id).is_err());
+        let snapshot = manager.export_fork(&child.handle.id).unwrap();
+        assert_eq!(snapshot.parent, Some(parent.id.clone()));
+        manager.close(&child.handle.id).await.unwrap();
+        let restored = manager.restore_fork(snapshot).await.unwrap();
+        assert_eq!(
+            manager.peer_parent(&restored.handle.id),
+            Some(parent.id.clone())
+        );
+        manager.delete(&restored.handle.id).await.unwrap();
+        let history = manager.side_chats(&parent.id, &parent.id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].session_id, restored.handle.id);
+        assert!(!manager.is_live(&history[0].session_id));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn peer_mailbox_survives_restart_reconfiguration_and_old_session_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index");
@@ -804,6 +863,10 @@ mod tests {
             .await
             .unwrap();
         let old = child.handle.id.clone();
+        assert_eq!(
+            manager.side_chats(&parent.id, &parent.id).unwrap()[0].session_id,
+            old
+        );
         let request = manager
             .send_to_peer(
                 &parent.id,
@@ -833,7 +896,16 @@ mod tests {
         manager.shutdown().await;
 
         let manager = SessionManager::new(&path, backends()).unwrap();
+        let past = manager.side_chats(&parent.id, &parent.id).unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].session_id, old);
+        assert!(!manager.is_live(&old));
         let restored = manager.restore_fork(snapshot).await.unwrap();
+        assert_eq!(manager.side_chats(&parent.id, &parent.id).unwrap().len(), 1);
+        assert_eq!(
+            manager.side_chats(&parent.id, &parent.id).unwrap()[0].session_id,
+            restored.handle.id
+        );
         assert_eq!(manager.resolve_peer(&old), restored.handle.id);
         let assert_canonical_history = |manager: &SessionManager, id: &SessionId| {
             let history = manager.subscribe_with_history(id).unwrap().0;
@@ -898,6 +970,13 @@ mod tests {
             .await
             .unwrap();
         manager.delete(&restored.handle.id).await.unwrap();
+        let sides = manager.side_chats(&parent.id, &parent.id).unwrap();
+        assert_eq!(
+            sides.len(),
+            1,
+            "replaced native IDs must not become extra historical Side chats"
+        );
+        assert_eq!(sides[0].session_id, replacement.handle.id);
         assert_eq!(manager.resolve_peer(&old), replacement.handle.id);
         assert_canonical_history(&manager, &replacement.handle.id);
         assert_eq!(

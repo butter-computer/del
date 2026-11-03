@@ -65,3 +65,10 @@ After integration with main's 0.1.24 provider-switching, shared Side chat queue,
 and Harp workbench changes, the locked workspace suite passed 748 tests (46 ignored), and
 workspace/all-target Clippy passed again with warnings denied. The queue controls
 retain the shared edit callback, accessibility labels, and regression selectors.
+
+The main tab strip uses the current intrinsic width of its animated slots, so
+the new-tab button follows a closing tab on every frame. Closing ghosts no longer
+reserve their full width until cleanup. A GPUI regression checks intermediate
+closing widths and verifies that overflow keeps the plus button reachable.
+The rebuilt macOS app was also checked by opening and closing a temporary tab
+on 2026-11-03.

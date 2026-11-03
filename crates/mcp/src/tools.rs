@@ -72,7 +72,7 @@ pub fn tool_list() -> Value {
         {
             "name": "list_sessions",
             "title": "List sessions",
-            "description": "List peer sessions in your Del project (id, provider, cwd, title, status, and the state each last reported). Your own session is marked.",
+            "description": "List peer sessions in your Del project, including open Side chats. Rows identify parent_session_id, is_side_chat and is_open. The response also includes your parent_session_id and side_chats: all Side chats you currently have or previously had, with is_open and can_message flags. Use send_to_session and reply_to_session for main-to-side, side-to-main and other project peers through the same durable mailbox. Closed Side chats must be reopened in Del before messaging; never poll a closed chat. Your own session is marked.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         },

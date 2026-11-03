@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.26` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.27` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.26 source update notes](docs/releases/0.1.26.md) and
-[validation record](docs/releases/0.1.26-validation.md).
+See the [0.1.27 source update notes](docs/releases/0.1.27.md) and
+[validation record](docs/releases/0.1.27-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.26-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.27-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -275,8 +275,9 @@ Rename edits the project name in place in the sidebar, like session renaming.
 Enter saves; Escape or leaving the field cancels. Project deletion uses an opaque
 confirmation dialog with Cancel and a red Permanently delete button.
 Archiving or deleting the last project leaves an empty, usable new-session page,
-without inventing a replacement `/` project. App startup also shows an empty
-composer without creating a draft tab or project. You can submit directly from
+without inventing a replacement `/` or home project. Empty Spaces and app startup
+also show an unlisted composer. Switching Spaces or restarting does not bring back
+automatic draft tabs belonging to a deleted project. You can submit directly from
 that page; starting a conversation creates its session and directory group.
 Explicit New Session actions still create separate draft tabs immediately.
 
@@ -761,7 +762,11 @@ explicit idle reports; their native CLI input queue remains owned by the CLI.
 For example, ask “Read the context of the API chat in this project” or “Ask the
 Tests chat to check your changes and report back.” Agents use the tools to find
 and contact that session; there is no required orchestrator or parent/child role.
-See [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
+Main agents and Side chats use these same messaging tools in both directions.
+`list_sessions` identifies each Side chat's parent and lists the caller's open
+and previously opened Side chats, including whether they can currently receive
+messages. The list survives restart and provider changes. See
+[peer sessions](docs/peer-sessions.md) for details and recovery behavior.
 
 ## Files, terminals, and browser
 
@@ -778,17 +783,20 @@ button sit in the top title bar directly above that panel, alongside the session
 tabs, separated by a short, centered hairline with space around the plus controls.
 The sidebar content starts immediately below the title bar, without a second
 tab row. The header and panel open and close together with an interruptible reveal;
-reduced-motion settings show or hide them immediately. New sessions start
-with one **New tab** chooser and **+**, with no Files, Changes, Terminal, or Browser
-preopened. Existing tools saved in the former main-area strip migrate into that
+reduced-motion settings show or hide them immediately. New sessions start with
+the right sidebar closed. Opening it shows one **New tab** chooser and **+**, with
+no Files, Changes, Terminal, or Browser preopened. Each session remembers whether
+its sidebar was open or closed across tab/Space switches and app restarts. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.
 
 Project lists initially show five sessions, plus the active session when it sits
 farther down. Drafts stay visible; **Show more** reveals the rest and **Show less**
 restores the compact list. Space dots above the sidebar footer switch between Spaces.
 
-Command-T opens a new right-sidebar tab and reveals the sidebar if hidden,
-regardless of where you last clicked. Tool shortcuts also target the right sidebar.
+Command-T / Control-T follow the active area: create a new session from the main
+chat or session strip, or a new sidebar tab from the right sidebar or its strip.
+When the sidebar is hidden, they create a new session. Command-N always creates a
+new session. Explicit tool shortcuts still target the right sidebar.
 Command-W closes the active tab in the last-used zone: the top-level session from
 the main chat, or the active tool tab from the right sidebar. A hidden sidebar
 never receives Command-W. Command-Shift-W always closes the active right-sidebar tool tab.
@@ -1116,7 +1124,7 @@ session shortcuts.
 | --- | --- |
 | Command-1–9 | Select a top tab by position |
 | Command-N | New session |
-| Command-T / Control-T | New right-sidebar tab |
+| Command-T / Control-T | New session or sidebar tab in the active area |
 | Command-K | Open or close conversation search |
 | Command-W | Close the active tab in the focused zone (main session or right sidebar) |
 | Command-Shift-W | Close the active right-sidebar tab |

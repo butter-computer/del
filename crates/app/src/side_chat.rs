@@ -59,6 +59,30 @@ impl EventEmitter<crate::chat::OpenLink> for SideChat {}
 impl EventEmitter<crate::chat::OpenPeer> for SideChat {}
 
 impl SideChat {
+    fn link_parent(&mut self, cx: &App) {
+        if self.parent.is_some() || self.closed {
+            return;
+        }
+        let Some(child) = &self.session else { return };
+        let Some((state, owner)) = &self.context.activity_owner else {
+            return;
+        };
+        let Some(state) = state.upgrade() else { return };
+        let parent = match state.read(cx).side_chat_owner(*owner) {
+            Some(crate::state::Tab::Session(id) | crate::state::Tab::Terminal(id)) => id.clone(),
+            _ => return,
+        };
+        match self
+            .context
+            .backend
+            .manager
+            .link_side_chat_parent(child, &parent)
+        {
+            Ok(()) => self.parent = Some(parent),
+            Err(error) => eprintln!("Could not link Side chat to its main session: {error}"),
+        }
+    }
+
     pub fn is_unread(&self, cx: &App) -> bool {
         self.context
             .activity_owner
@@ -157,6 +181,7 @@ impl SideChat {
             && let Some(state) = state.upgrade()
         {
             cx.observe(&state, |this, _, cx| {
+                this.link_parent(cx);
                 if this.is_visible(cx) {
                     this.set_unread(false, cx);
                 }
@@ -398,6 +423,7 @@ impl SideChat {
                         })
                         .detach();
                         this.chat = Some(chat);
+                        this.link_parent(cx);
                         this.save(cx);
                         this.load_models(cx);
                         if let Some(old) = old {

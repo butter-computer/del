@@ -1401,10 +1401,7 @@ impl AppShell {
             self.remember_right(cx);
             let newly_created = !self.right_cache.contains_key(&owner);
             let (panel, open) = if let Some(cached) = self.right_cache.get(&owner) {
-                (
-                    cached.panel.clone(),
-                    cached.open && !cached.panel.read(cx).is_changes(),
-                )
+                (cached.panel.clone(), cached.open)
             } else {
                 let saved = key
                     .as_deref()
@@ -1575,11 +1572,7 @@ impl AppShell {
     }
 
     fn active_tab_zone(&self) -> tab_zone::Zone {
-        if self.right_open {
-            self.tab_zone.get()
-        } else {
-            tab_zone::Zone::Main
-        }
+        self.tab_zone.get().active(self.right_open)
     }
 
     fn open_composer_picker(
@@ -1644,10 +1637,10 @@ impl AppShell {
         if self.workspace(cx).is_none() {
             self.sync_workspaces(window, cx);
         }
-        if let Some(workspace) = self.workspace(cx) {
+        if self.workspace(cx).is_some() {
             self.set_right(true, cx);
             self.tab_zone.set(tab_zone::Zone::Right);
-            tab_zone::Zone::Right.new_tab(&workspace, &self.right, window, cx);
+            tab_zone::Zone::Right.new_tab(&self.state, &self.right, window, cx);
         }
     }
 
@@ -1983,9 +1976,6 @@ impl AppShell {
         {
             self.tab_scroll.scroll_to_item(index);
         }
-        // The strip is as wide as its tabs, so the + follows the last tab; it
-        // shrinks and scrolls once the tabs overflow.
-        let strip_width = tabs.len() as f32 * (TAB_WIDTH + TAB_GAP) + self.metrics.page_inset;
         let dragging_tab = self.dragging_tab;
         let drag_target = self.drag_target;
         let previous_drag_target = self.previous_drag_target;
@@ -2110,18 +2100,13 @@ impl AppShell {
                             // the chat page's left edge.
                             .child(self.render_nav(nav_width, cx))
                             .child(
-                                tab_zone::track(div(), self.tab_zone.clone(), tab_zone::Zone::Main)
-                                    .relative()
-                                    .flex_basis(zpx(strip_width))
-                                    .flex_grow_0()
-                                    .flex_shrink_1()
-                                    .min_w_0()
+                                tab_zone::track(tab_motion::viewport(), self.tab_zone.clone(), tab_zone::Zone::Main)
                                     .h_full()
                                     .pl(zpx(self.metrics.page_inset))
                                     .overflow_hidden()
                                     .child(h_flex()
                                     .id("tab-scroll")
-                                    .w_full()
+                                    .flex_shrink_1()
                                     .min_w_0()
                                     .h_full()
                                     .items_center()
@@ -2347,6 +2332,7 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
+                                    .debug_selector(|| "new-main-tab".into())
                                     .ml(zpx(8.5))
                                     .role(gpui::Role::Button)
                                     .aria_label("New tab")
@@ -3097,8 +3083,14 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &Tab8, w, cx| this.go_tab(7, w, cx)))
             .on_action(cx.listener(|this, _: &Tab9, w, cx| this.go_tab(8, w, cx)))
             .on_action(cx.listener(|this, _: &NewWorkspaceTab, window, cx| {
-                if this.state.read(cx).panel == Panel::Chat {
+                if this.state.read(cx).panel == Panel::Chat
+                    && this.active_tab_zone() == tab_zone::Zone::Right
+                {
                     this.new_inner_tab(window, cx);
+                } else {
+                    this.tab_zone.set(tab_zone::Zone::Main);
+                    tab_zone::Zone::Main.new_tab(&this.state, &this.right, window, cx);
+                    this.focus_composer(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {

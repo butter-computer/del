@@ -1013,7 +1013,7 @@ impl AppState {
         }
     }
 
-    fn side_chat_owner(&self, uid: u64) -> Option<&Tab> {
+    pub(crate) fn side_chat_owner(&self, uid: u64) -> Option<&Tab> {
         self.uids
             .iter()
             .find_map(|(tab, id)| (*id == uid).then_some(tab))
@@ -1660,7 +1660,14 @@ impl AppState {
         } else {
             self.project_preferences
                 .last_directory
-                .clone()
+                .as_ref()
+                .filter(|path| {
+                    let root = self.project_root(path);
+                    self.space_has_project(&root)
+                        && !self.project_preferences.deleted.contains(&root)
+                        && !self.project_preferences.archived.contains(&root)
+                })
+                .cloned()
                 .unwrap_or(cwd)
         };
         self.project_preferences.last_directory = Some(cwd.clone());

@@ -1,7 +1,8 @@
-//! Tracks the last-used zone for close-tab and composer commands.
-//! New-tool commands always target the right sidebar.
+//! Tracks the last-used zone for new/close-tab and composer commands.
+//! Explicit tool commands always target the right sidebar.
 use crate::{
     right_panel::{Pane, RightPanel},
+    state::AppState,
     workspace_tabs::WorkspaceTabs,
 };
 use gpui_kit::*;
@@ -21,14 +22,21 @@ pub(crate) fn track(div: Div, active: Rc<Cell<Zone>>, zone: Zone) -> Div {
 }
 
 impl Zone {
+    pub fn active(self, right_open: bool) -> Self {
+        if right_open { self } else { Self::Main }
+    }
+
     pub fn new_tab(
         self,
-        _main: &Entity<WorkspaceTabs>,
+        state: &Entity<AppState>,
         right: &Entity<RightPanel>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        right.update(cx, |tabs, cx| tabs.open_new_tab(window, cx));
+        match self {
+            Self::Main => state.update(cx, |state, cx| state.new_session(cx)),
+            Self::Right => right.update(cx, |tabs, cx| tabs.open_new_tab(window, cx)),
+        }
     }
     pub fn close_tab(
         self,
@@ -58,9 +66,13 @@ mod tests {
     use gpui_kit::component::*;
 
     #[::gpui::test]
-    fn keyboard_commands_always_use_sidebar_from_either_zone(cx: &mut gpui::TestAppContext) {
+    fn new_tab_follows_active_zone_and_explicit_tools_stay_in_sidebar(
+        cx: &mut gpui::TestAppContext,
+    ) {
         struct Fixture {
             active: Rc<Cell<Zone>>,
+            right_open: Rc<Cell<bool>>,
+            state: Entity<AppState>,
             main: Entity<WorkspaceTabs>,
             right: Entity<RightPanel>,
             focus: FocusHandle,
@@ -72,9 +84,12 @@ mod tests {
                     .h(px(500.))
                     .track_focus(&self.focus)
                     .on_action(cx.listener(|this, _: &crate::NewWorkspaceTab, window, cx| {
-                        this.active
-                            .get()
-                            .new_tab(&this.main, &this.right, window, cx);
+                        this.active.get().active(this.right_open.get()).new_tab(
+                            &this.state,
+                            &this.right,
+                            window,
+                            cx,
+                        );
                     }))
                     .on_action(
                         cx.listener(|this, _: &crate::CloseWorkspaceTab, window, cx| {
@@ -114,10 +129,13 @@ mod tests {
             gpui_kit::init(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-t", crate::NewWorkspaceTab, None),
+                KeyBinding::new("ctrl-t", crate::NewWorkspaceTab, None),
                 KeyBinding::new("cmd-shift-w", crate::CloseWorkspaceTab, None),
                 KeyBinding::new("ctrl-shift-g", crate::OpenChanges, None),
             ]);
         });
+        let state = crate::state::tests::draft(cx);
+        let right_open = Rc::new(Cell::new(true));
         let dir = tempfile::tempdir().unwrap();
         let mut handles = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -130,6 +148,8 @@ mod tests {
             handles = Some((main.clone(), right.clone()));
             Fixture {
                 active: Default::default(),
+                right_open: right_open.clone(),
+                state: state.clone(),
                 main,
                 right,
                 focus,
@@ -170,11 +190,28 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-w");
         cx.run_until_parked();
         assert_eq!(right_blanks(cx), 12);
+        let sessions_before = state.read_with(cx, |state, _| state.tabs.len());
         click_zone(cx, "main-zone");
-        cx.simulate_keystrokes("cmd-t cmd-t cmd-shift-w");
+        cx.simulate_keystrokes("cmd-t ctrl-t");
         cx.run_until_parked();
+        assert_eq!(
+            state.read_with(cx, |state, _| state.tabs.len()),
+            sessions_before + 2
+        );
         assert_eq!(main_tabs(cx), 0);
-        assert_eq!(right_blanks(cx), 13);
+        assert_eq!(right_blanks(cx), 12);
+        // A hidden sidebar must not receive new tabs even if it was used last.
+        click_zone(cx, "right-zone");
+        right_open.set(false);
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+        assert_eq!(
+            state.read_with(cx, |state, _| state.tabs.len()),
+            sessions_before + 3
+        );
+        assert_eq!(right_blanks(cx), 12);
+        right_open.set(true);
+        click_zone(cx, "main-zone");
         cx.simulate_keystrokes("ctrl-shift-g");
         cx.run_until_parked();
         right.read_with(cx, |right, cx| {

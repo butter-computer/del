@@ -1416,6 +1416,11 @@ impl SessionManager {
     }
 
     async fn close_locked(&self, id: &SessionId) -> Result<()> {
+        if self.is_temporary(id)
+            && let Err(error) = self.record_side_chat(id)
+        {
+            eprintln!("Could not update Side chat discovery metadata: {error}");
+        }
         // Detach first so a failing backend lookup or close cannot leak the pump.
         let Some(live) = self.shared.live.lock().unwrap().remove(id) else {
             return Ok(());

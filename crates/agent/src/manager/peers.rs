@@ -122,6 +122,78 @@ If blocked, call session_work with action pause and explain why. Do not start qu
 }
 
 impl SessionManager {
+    pub fn side_chat_record(&self, id: &SessionId) -> Option<crate::peers::SideChatRecord> {
+        let id = self.resolve_peer(id);
+        let mut side = self.shared.peers.lock().unwrap().side_chat(&id)?;
+        if let Ok(record) = self.session_record(&id) {
+            side.title = record.title.or(side.title);
+        }
+        side.parent_session_id = side.parent_session_id.map(|id| self.resolve_peer(&id));
+        Some(side)
+    }
+
+    /// Includes closed Side chats, but never crosses the caller's project boundary.
+    pub fn side_chats(
+        &self,
+        caller: &SessionId,
+        parent: &SessionId,
+    ) -> Result<Vec<crate::peers::SideChatRecord>> {
+        self.authorize_peer(caller, parent)?;
+        let parent = self.resolve_peer(parent);
+        let sides = self.shared.peers.lock().unwrap().side_chats(&parent);
+        Ok(sides
+            .into_iter()
+            .filter_map(|side| self.side_chat_record(&side.session_id))
+            .collect())
+    }
+
+    pub(super) fn record_side_chat(&self, id: &SessionId) -> Result<()> {
+        if self.resolve_peer(id) != *id {
+            return Ok(());
+        }
+        let record = self.session_record(id)?;
+        if !self.is_temporary(id) {
+            return Ok(());
+        }
+        self.shared
+            .peers
+            .lock()
+            .unwrap()
+            .record_side_chat(crate::peers::SideChatRecord {
+                session_id: id.clone(),
+                parent_session_id: record.fork.and_then(|fork| fork.parent),
+                provider: record.provider,
+                cwd: record.cwd,
+                title: record.title,
+                created_at_ms: record.created_at_ms,
+            })
+    }
+
+    /// The UI can attach a draft's Side chat once its main session exists.
+    pub fn link_side_chat_parent(&self, child: &SessionId, parent: &SessionId) -> Result<()> {
+        self.authorize_peer(child, parent)?;
+        let parent = self.resolve_peer(parent);
+        let record = self.session_record(child)?;
+        let fork = record
+            .fork
+            .ok_or_else(|| AgentError::Backend("Not a Side chat".into()))?;
+        if fork
+            .parent
+            .as_ref()
+            .is_some_and(|id| self.resolve_peer(id) != parent)
+        {
+            return Err(AgentError::Backend(
+                "A Side chat already belongs to another parent".into(),
+            ));
+        }
+        self.shared.index.lock().unwrap().update(child, |record| {
+            if let Some(fork) = &mut record.fork {
+                fork.parent = Some(parent.clone());
+            }
+        })?;
+        self.record_side_chat(child)
+    }
+
     /// All registered peers, including durable side chats. No model controls this list.
     pub fn forget_peer_session(&self, session: &SessionId) -> Result<()> {
         self.shared.peers.lock().unwrap().remove_session(session)?;
@@ -244,13 +316,21 @@ impl SessionManager {
     }
 
     pub fn peer_parent(&self, id: &SessionId) -> Option<SessionId> {
-        self.shared
+        let id = self.resolve_peer(id);
+        let parent = self
+            .shared
             .index
             .lock()
             .unwrap()
-            .get(id)
+            .get(&id)
             .and_then(|r| r.fork.as_ref())
-            .and_then(|f| f.parent.clone())
+            .and_then(|f| f.parent.clone());
+        parent
+            .or_else(|| {
+                self.side_chat_record(&id)
+                    .and_then(|side| side.parent_session_id)
+            })
+            .map(|id| self.resolve_peer(&id))
     }
 
     /// User-driven recovery only. Models cannot automatically replay an
@@ -346,6 +426,8 @@ impl SessionManager {
     ) -> Result<PeerMessage> {
         let target_id = self.resolve_peer(target);
         let target = &target_id;
+        self.authorize_peer(caller, target)?;
+        self.require_open_side_chat(target)?;
         let original = matches!(
             self.status(target),
             Some(SessionStatus::Running | SessionStatus::WaitingApproval)
@@ -367,6 +449,15 @@ impl SessionManager {
         key: &str,
         text: &str,
     ) -> Result<PeerMessage> {
+        let target = self
+            .shared
+            .peers
+            .lock()
+            .unwrap()
+            .message(request_id)
+            .ok_or_else(|| AgentError::Backend("Unknown peer request".into()))?
+            .from;
+        self.require_open_side_chat(&target)?;
         let message = {
             let mut peers = self.shared.peers.lock().unwrap();
             let request = peers
@@ -376,6 +467,15 @@ impl SessionManager {
         };
         self.publish_peer(&message);
         Ok(message)
+    }
+
+    fn require_open_side_chat(&self, id: &SessionId) -> Result<()> {
+        if self.side_chat_record(id).is_some() && !self.is_live(&self.resolve_peer(id)) {
+            return Err(AgentError::Backend(
+                "This Side chat is closed. Reopen it in Del before sending a message.".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn control_peer_work(&self, session: &SessionId, action: &str) -> Result<Option<PeerWork>> {

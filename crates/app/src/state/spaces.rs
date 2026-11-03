@@ -221,7 +221,13 @@ impl AppState {
     }
     fn valid_space_tab(&self, tab: &Tab) -> bool {
         match tab {
-            Tab::Draft(k) => self.drafts.contains_key(k),
+            Tab::Draft(k) => self.drafts.get(k).is_some_and(|draft| {
+                !self
+                    .project_preferences
+                    .deleted
+                    .contains(&self.project_root(&draft.cwd))
+                    || self.starting.contains(k)
+            }),
             Tab::Session(id) => self.records.iter().any(|r| &r.id == id),
             Tab::Terminal(id) => self.terminal_rows.iter().any(|r| &r.id == id),
         }
@@ -247,12 +253,17 @@ impl AppState {
                 .current()
                 .projects
                 .iter()
-                .next()
+                .find(|path| {
+                    !self.project_preferences.deleted.contains(*path)
+                        && !self.project_preferences.archived.contains(*path)
+                })
                 .cloned()
                 .or_else(dirs::home_dir)
                 .unwrap_or_else(|| PathBuf::from("/"));
             let provider = self.effective().0;
             self.open_draft(provider, None, cwd, cx);
+            // An empty Space needs a usable composer, not a new project or tab.
+            self.tabs.clear();
         }
     }
     pub fn switch_space(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -692,6 +703,99 @@ mod tests {
     use super::{Spaces, Swipe};
     use crate::state::Tab;
     use del_agent::SessionId;
+
+    #[gpui::test]
+    fn empty_spaces_do_not_create_project_tabs(cx: &mut gpui::TestAppContext) {
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            s.create_space("Empty".into(), cx);
+            let empty = s.spaces.active.clone();
+            for _ in 0..3 {
+                assert!(s.tabs.is_empty());
+                assert!(s.project_paths().is_empty());
+                assert!(s.draft().is_some(), "the composer must remain usable");
+                s.switch_space("default", cx);
+                s.switch_space(&empty, cx);
+            }
+            s.set_global_space_tabs(true, cx);
+            s.set_global_space_tabs(false, cx);
+            assert!(s.tabs.is_empty());
+            assert!(s.project_paths().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn deleted_project_stays_deleted_across_space_switches_and_restore(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            s.create_space("X".into(), cx);
+            let space = s.spaces.active.clone();
+            let home = dirs::home_dir().unwrap();
+            s.new_project_session(home.clone(), cx);
+            s.archive_project(home.clone(), true, cx);
+            assert!(s.project_preferences.deleted.contains(&home));
+            for _ in 0..3 {
+                s.switch_space("default", cx);
+                s.switch_space(&space, cx);
+                assert!(s.project_paths().is_empty());
+                assert!(s.tabs.is_empty());
+                assert!(s.draft().is_some());
+                assert!(s.project_preferences.deleted.contains(&home));
+            }
+            s.checkpoint_space();
+            s.spaces = serde_json::from_slice(&serde_json::to_vec(&s.spaces).unwrap()).unwrap();
+            s.restore_space_deck(s.spaces.current().deck.clone(), cx);
+            assert!(s.project_paths().is_empty());
+            assert!(s.tabs.is_empty());
+            // Explicitly adding the folder again is still supported.
+            s.new_project_session(home.clone(), cx);
+            assert!(!s.project_preferences.deleted.contains(&home));
+            s.switch_space("default", cx);
+            s.switch_space(&space, cx);
+            assert_eq!(s.project_paths(), vec![home]);
+            assert_eq!(s.tabs.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn old_saved_deleted_drafts_do_not_resurrect_projects(cx: &mut gpui::TestAppContext) {
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |s, cx| {
+            s.create_space("X".into(), cx);
+            let home = dirs::home_dir().unwrap();
+            s.new_project_session(home.clone(), cx);
+            s.checkpoint_space();
+            // Earlier versions saved an automatic home draft despite this tombstone.
+            s.project_preferences.deleted.insert(home.clone());
+            let project = home.join("project");
+            s.spaces.current_mut().projects.insert(project.clone());
+            let saved = serde_json::to_vec(&s.spaces).unwrap();
+            for global in [false, true] {
+                s.spaces = serde_json::from_slice(&saved).unwrap();
+                s.spaces.global_tabs = global;
+                s.spaces.global = s.spaces.current().deck.clone();
+                let deck = if global {
+                    s.spaces.global.clone()
+                } else {
+                    s.spaces.current().deck.clone()
+                };
+                s.restore_space_deck(deck, cx);
+                assert!(s.tabs.is_empty());
+                assert_eq!(s.project_paths(), vec![project.clone()]);
+                assert_eq!(s.effective().2, project);
+                s.new_session(cx);
+                assert_eq!(
+                    s.effective().2,
+                    project,
+                    "ignore the deleted remembered folder"
+                );
+                assert_eq!(s.project_paths(), vec![project.clone()]);
+                assert!(s.project_preferences.deleted.contains(&home));
+            }
+        });
+    }
 
     #[gpui::test]
     fn spaces_preserve_drafts_selection_and_project_membership(cx: &mut gpui::TestAppContext) {

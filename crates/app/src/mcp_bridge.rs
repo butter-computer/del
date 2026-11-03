@@ -185,6 +185,7 @@ impl McpBridge {
                             // Terminal agents use their explicit status reports; never
                             // type into a PTY based on a chat provider's turn boundary.
                             let terminal = worker.terminals.lock().unwrap().contains_key(&id);
+                            if !terminal && worker.manager.is_temporary(&id) && !worker.manager.is_live(&id) { continue; }
                             if (!terminal && worker.manager.session_record(&id).is_err()) || worker.manager.peer_work(&id).is_none() { continue; }
                             if !in_flight.insert(id.clone()) { continue; }
                             let host = worker.clone();

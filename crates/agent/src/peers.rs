@@ -1,6 +1,6 @@
 //! Durable peer mailboxes. Identity and project membership come from Del, never
 //! from model-supplied sender fields. A work lease is distinct from a model turn.
-use crate::{AgentError, Result, SessionId};
+use crate::{AgentError, Provider, Result, SessionId};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -48,8 +48,21 @@ pub struct PeerWork {
     pub retains_original_work: bool,
 }
 
+/// Discovery metadata only. Closed Side chats retain no transcript here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideChatRecord {
+    pub session_id: SessionId,
+    pub parent_session_id: Option<SessionId>,
+    pub provider: Provider,
+    pub cwd: PathBuf,
+    pub title: Option<String>,
+    pub created_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    side_chats: BTreeMap<SessionId, SideChatRecord>,
     #[serde(default)]
     aliases: BTreeMap<SessionId, SessionId>,
     projects: BTreeMap<SessionId, PathBuf>,
@@ -176,6 +189,15 @@ impl PeerStore {
             return Err(failure("Cannot replace another peer's mailbox"));
         }
         self.update(|state| {
+            if let Some(mut side) = state.side_chats.remove(&from) {
+                side.session_id = to.clone();
+                state.side_chats.insert(to.clone(), side);
+            }
+            for side in state.side_chats.values_mut() {
+                if side.parent_session_id.as_ref() == Some(&from) {
+                    side.parent_session_id = Some(to.clone());
+                }
+            }
             if let Some(project) = state.projects.remove(&from) {
                 state.projects.insert(to.clone(), project);
             }
@@ -216,6 +238,40 @@ impl PeerStore {
 
     pub fn registered_sessions(&self) -> Vec<SessionId> {
         self.state.projects.keys().cloned().collect()
+    }
+
+    pub fn record_side_chat(&mut self, mut record: SideChatRecord) -> Result<()> {
+        if let Some(old) = self.state.side_chats.get(&record.session_id) {
+            record.created_at_ms = old.created_at_ms;
+            if record.title.is_none() {
+                record.title.clone_from(&old.title);
+            }
+            if old == &record {
+                return Ok(());
+            }
+        }
+        self.update(|state| {
+            state.side_chats.insert(record.session_id.clone(), record);
+            Ok(())
+        })
+    }
+
+    pub fn side_chat(&self, id: &SessionId) -> Option<SideChatRecord> {
+        self.state.side_chats.get(&self.resolve(id)).cloned()
+    }
+
+    pub fn side_chats(&self, parent: &SessionId) -> Vec<SideChatRecord> {
+        let parent = self.resolve(parent);
+        self.state
+            .side_chats
+            .values()
+            .filter(|side| {
+                side.parent_session_id
+                    .as_ref()
+                    .is_some_and(|id| self.resolve(id) == parent)
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn peers(&self, caller: &SessionId) -> Vec<SessionId> {

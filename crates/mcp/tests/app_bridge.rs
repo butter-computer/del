@@ -1059,3 +1059,158 @@ async fn chat_spawn_cross_provider_keeps_permissions_and_project_without_model_l
         Some(request.id.as_str())
     );
 }
+
+#[tokio::test]
+async fn side_chat_discovery_and_bidirectional_mail_use_the_same_bridge_for_all_providers() {
+    use del_agent::{ForkSource, peers::DeliveryState};
+    let dir = tempfile::tempdir().unwrap();
+    let providers = [Provider::Claude, Provider::Codex, Provider::OpenCode];
+    let manager = SessionManager::new(
+        dir.path().join("index"),
+        providers.map(|p| Arc::new(MockBackend::new(p)) as Arc<dyn AgentBackend>),
+    )
+    .unwrap();
+    let (tx, _events) = unbounded_channel();
+    let bridge = McpBridge::start(manager.clone(), tx, dir.path().join("mcp"))
+        .await
+        .unwrap();
+    let tools = bridge.handle().chat_browser_tools().unwrap();
+    let credential = |id: &SessionId| LaunchConfig {
+        args: vec![],
+        files: vec![],
+        env: vec![
+            ("DEL_MCP_URL".into(), tools.url.clone()),
+            ("DEL_MCP_TOKEN".into(), tools.credentials.mint(id).unwrap()),
+        ],
+    };
+    let config = |provider| SessionConfig {
+        cwd: dir.path().into(),
+        provider,
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        permission_mode: Default::default(),
+    };
+    let outsider = manager
+        .start_session(SessionConfig {
+            cwd: dir.path().join("other-project"),
+            ..config(Provider::Claude)
+        })
+        .await
+        .unwrap();
+    let outside = credential(&outsider.id);
+    for parent_provider in providers {
+        for side_provider in providers {
+            let parent = manager
+                .start_session(config(parent_provider))
+                .await
+                .unwrap();
+            let side = manager
+                .fork_with_settings(
+                    ForkSource::Session(parent.id.clone()),
+                    config(side_provider),
+                    None,
+                )
+                .await
+                .unwrap();
+            let main = credential(&parent.id);
+            let child = credential(&side.handle.id);
+            let listing = call(&main, "list_sessions", json!({})).await;
+            let sides = listing["structuredContent"]["side_chats"]
+                .as_array()
+                .unwrap();
+            assert_eq!(sides.len(), 1, "{listing}");
+            assert_eq!(sides[0]["session_id"], side.handle.id.as_str());
+            assert_eq!(sides[0]["can_message"], true);
+            let listing = call(&child, "list_sessions", json!({})).await;
+            assert_eq!(
+                listing["structuredContent"]["parent_session_id"],
+                parent.id.as_str()
+            );
+            for (from, to, target) in [
+                (&main, &child, &side.handle.id),
+                (&child, &main, &parent.id),
+            ] {
+                let sent = call(from, "send_to_session", json!({
+                    "session_id":target, "idempotency_key":"question", "text":"Check this and reply"
+                })).await;
+                assert_eq!(sent["isError"], false, "{sent}");
+                let request = sent["structuredContent"]["receipt"]["id"].as_str().unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if manager
+                            .peer_messages(target)
+                            .iter()
+                            .any(|m| m.id == request && m.state == DeliveryState::Delivered)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let reply = call(
+                    to,
+                    "reply_to_session",
+                    json!({
+                        "request_id": request, "idempotency_key":"answer", "text":"Checked"
+                    }),
+                )
+                .await;
+                assert_eq!(reply["isError"], false, "{reply}");
+                assert_eq!(reply["structuredContent"]["receipt"]["reply_to"], request);
+            }
+            let denied = call(
+                &outside,
+                "send_to_session",
+                json!({
+                    "session_id":side.handle.id, "idempotency_key":"forbidden", "text":"no"
+                }),
+            )
+            .await;
+            assert_eq!(denied["isError"], true);
+            let foreign = call(&outside, "list_sessions", json!({})).await;
+            assert_eq!(foreign["structuredContent"]["side_chats"], json!([]));
+            assert!(
+                !foreign["structuredContent"]["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["id"] == side.handle.id.as_str())
+            );
+            manager.control_peer_work(&parent.id, "pause").unwrap();
+            manager.control_peer_work(&side.handle.id, "pause").unwrap();
+            manager.close(&side.handle.id).await.unwrap();
+            let listing = call(&main, "list_sessions", json!({})).await;
+            assert_eq!(
+                listing["structuredContent"]["side_chats"][0]["is_open"],
+                false
+            );
+            assert_eq!(
+                listing["structuredContent"]["side_chats"][0]["can_message"],
+                false
+            );
+            let closed = call(
+                &main,
+                "send_to_session",
+                json!({
+                    "session_id":side.handle.id, "idempotency_key":"closed", "text":"do not wake"
+                }),
+            )
+            .await;
+            assert_eq!(closed["isError"], true, "{closed}");
+            manager.delete(&side.handle.id).await.unwrap();
+            let listing = call(&main, "list_sessions", json!({})).await;
+            assert_eq!(
+                listing["structuredContent"]["side_chats"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+    bridge.shutdown();
+    manager.shutdown().await;
+}

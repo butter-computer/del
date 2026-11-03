@@ -9,6 +9,17 @@ use std::time::{Duration, Instant};
 pub const ENTER: Duration = Duration::from_millis(220);
 pub const EXIT: Duration = Duration::from_millis(160);
 
+/// Intrinsic width follows animated slots on every frame. A count-based basis
+/// would reserve each closing tab's full width until its ghost is removed.
+pub fn viewport() -> Div {
+    div()
+        .relative()
+        .flex_grow_0()
+        .flex_shrink_1()
+        .min_w_0()
+        .overflow_hidden()
+}
+
 #[derive(Clone)]
 pub struct Visual {
     pub label: String,
@@ -178,6 +189,82 @@ impl<K: Clone + PartialEq> Strip<K> {
 mod tests {
     use super::*;
     use ::core::prelude::v1::test;
+    #[::gpui::test]
+    fn plus_tracks_closing_slot_every_frame_and_stays_reachable_on_overflow(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture {
+            closing: f32,
+            width: f32,
+            count: usize,
+            scroll: ScrollHandle,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                h_flex()
+                    .w(px(self.width))
+                    .h(px(32.))
+                    .child(
+                        viewport().pl(px(8.)).child(
+                            h_flex()
+                                .id("scroll")
+                                .flex_shrink_1()
+                                .min_w_0()
+                                .overflow_x_scroll()
+                                .track_scroll(&self.scroll)
+                                .children(
+                                    (0..self.count)
+                                        .map(|_| div().flex_none().w(px(220.)).h(px(28.))),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "closing-slot".into())
+                                        .flex_none()
+                                        .w(px(220. * self.closing))
+                                        .h(px(28.)),
+                                ),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "plus".into())
+                            .ml(px(8.5))
+                            .flex_none()
+                            .size(px(24.)),
+                    )
+            }
+        }
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture {
+            closing: 1.,
+            width: 900.,
+            count: 2,
+            scroll: ScrollHandle::new(),
+        });
+        for fraction in [1., 0.75, 0.25, 0.] {
+            cx.update(|window, cx| {
+                fixture.update(cx, |f, cx| {
+                    f.closing = fraction;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let plus = cx.debug_bounds("plus").unwrap();
+            let slot = cx.debug_bounds("closing-slot").unwrap();
+            assert!((plus.left() - slot.right() - px(8.5)).abs() < px(0.1));
+            assert!((plus.left() - px(8. + 440. + 220. * fraction + 8.5)).abs() < px(0.1));
+        }
+        cx.update(|window, cx| {
+            fixture.update(cx, |f, cx| {
+                f.width = 400.;
+                f.count = 8;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("plus").unwrap().right() <= px(400.));
+        fixture.read_with(cx, |f, _| assert!(f.scroll.max_offset().x > px(1000.)));
+    }
     #[::gpui::test]
     fn initial_layout_and_transfers_settle_and_reduced_motion_removes_ghosts(
         cx: &mut gpui::TestAppContext,

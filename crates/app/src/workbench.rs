@@ -524,18 +524,13 @@ impl AppShell {
         let branch = if git.current.is_empty() {
             "No repository".into()
         } else {
-            let changes = git
-                .changed_files
-                .map(|n| {
-                    if n == 0 {
-                        "clean".into()
-                    } else {
-                        format!("{n} {}", if n == 1 { "file" } else { "files" })
-                    }
-                })
-                .unwrap_or_else(|| "changes unavailable".into());
+            let changes = match git.changed_files {
+                Some(0) => String::new(),
+                Some(n) => format!(" · {n} {}", if n == 1 { "file" } else { "files" }),
+                None => " · changes unavailable".into(),
+            };
             format!(
-                "{} · {changes}{}{}",
+                "{}{changes}{}{}",
                 git.current,
                 if git.ahead > 0 {
                     format!(" ↑{}", git.ahead)

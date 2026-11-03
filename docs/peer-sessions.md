@@ -65,6 +65,33 @@ Terminal callers retain the existing terminal launch behavior.
 
 ## Recovery and visibility
 
+### Main and Side chat discovery
+
+`list_sessions` includes open Side chats in the ordinary project peer list. Rows
+expose `parent_session_id`, `is_side_chat`, and `is_open`; the response also gives
+the caller's `parent_session_id` and `side_chats`, its current and previous Side
+chats. Each historical entry includes its canonical session ID, provider, folder,
+title, creation time, `is_open`, and `can_message`. This metadata survives app
+restart and closing a Side chat. Closing/deleting a Side chat does not preserve
+its transcript in the discovery catalog. Restoring or changing its provider
+rebinds the existing entry instead of creating duplicate historical children.
+
+Main-to-side and side-to-main requests use `send_to_session`; replies use
+`reply_to_session` with the original request ID. They use the same authenticated,
+project-scoped mailbox, safe turn boundaries, receipts, and work tracking as all
+other peers, across Claude, Codex, and OpenCode. A closed Side chat reports
+`can_message: false` and rejects new sends until reopened. Pending messages are
+preserved on view disposal and resume after restoration; explicitly deleting a
+Side chat cancels its pending exchanges. A Side chat created from a draft is
+linked when the draft becomes a main session.
+
+See the [0.1.27 validation record](releases/0.1.27-validation.md) for workspace
+checks and their results. The HTTP app-bridge test covers all nine
+Claude/Codex/OpenCode parent/Side chat pairings using deterministic mock backends,
+including delivery in both directions, reply routing, project isolation, and
+closed/deleted discovery. Lifecycle tests cover restart, ID rebinding, and draft
+parent linkage. No new live provider inference was used for these checks.
+
 Persist an outbound request before acknowledging it. Idempotency keys are scoped
 to the authenticated sender; reusing a key with different content is an error.
 Save the delivery claim before invoking a provider. If a crash occurs across the

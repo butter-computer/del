@@ -539,6 +539,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Archiving/deleting the final project leaves an empty usable new-session page.
   Do not create a replacement `/` or home project from an automatic fallback draft.
   Only explicit draft tabs and saved sessions determine project visibility.
+  Switching to an empty Space also uses an unlisted composer, skips archived/deleted
+  folders when choosing its directory, and ignores stale deleted-project draft tabs
+  in saved decks. Only explicitly adding a deleted folder may bring it back.
   Startup also uses an unlisted empty composer. It must support provider/model,
   directory, Chat/Terminal selection, and submission without requiring a plus click.
   Submission creates the real session; an explicit plus creates a draft tab.
@@ -632,8 +635,11 @@ This records the final decisions, including corrections to earlier experiments.
 - Command-Left/Right cycle top session tabs. Command-Up/Down cycle visible left-sidebar
   sessions in displayed order (pinned, then project drafts and sessions), skipping collapsed
   groups. These shortcuts work from the composer too; Shift variants retain text selection.
-- Command-T and Control-T always create a right-sidebar tab and open the sidebar if hidden. Reveal the
-  active tab immediately, including repeated opens after horizontal overflow.
+- Command-T and Control-T follow the same active zone as Command-W: create a new
+  session from the main chat/session strip, or a new sidebar tab from the right
+  sidebar/strip. A hidden sidebar never receives these shortcuts. Command-N always
+  creates a session; explicit tool shortcuts and the sidebar plus still open on
+  the right. Reveal the active tab immediately, including opens after overflow.
 - Command-W follows the active zone: close the top-level session from the main
   chat or its session strip, and the active tool tab from the right sidebar or its
   strip. Keyboard focus back to the main composer also selects the main zone.
@@ -785,6 +791,11 @@ the browser's last viewport instead of sampling a nearly zero-width page.
 
 ## Project peer communication
 
+- Main agents and Side chats share the ordinary peer mailbox in both directions.
+  Discovery exposes parent IDs and durable open/closed child history. Preserve
+  one entry across native ID changes; reject sends to closed Side chats instead
+  of silently queuing work that cannot run. Keep project isolation unchanged.
+
 - Chat agents can create actual chat peers through `spawn_session`, inheriting the
   caller’s directory, project, permissions, and same-provider account/model. The
   first task is a durable peer request with a reply route, not an untracked user
@@ -911,3 +922,8 @@ activity bar. It supersedes earlier rules where they conflict.
 
 - Keep allowance account identity/reset information, but omit provider/account actions and all checked/refresh interval rows from status popovers. Composer overflow fades use the theme surface and actual wrapped text geometry without intercepting editing.
 - Estimated costs use a dated, source-linked model rate table and stable message/thread scopes. Reconcile reported/estimated coverage within each native session (each step for OpenCode), then sum across visits without adding overlapping totals; unknown models remain unpriced. Estimates use standard rates, may differ after model/tier changes, and are never subscription bills.
+
+- New session right sidebars start closed. Remember each session's last open/closed
+  state across tab and Space switches and app restarts, including the Changes pane.
+  Explicit tool-opening actions can still reveal the sidebar.
+- Omit the redundant “clean” text from the branch status bar when no files changed.

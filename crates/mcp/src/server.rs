@@ -714,16 +714,49 @@ impl Inner {
                 let _: ListSessionsArgs = parse(args)?;
                 Ok(match host.list_sessions(caller).await {
                     Ok(list) => {
+                        let manager = host.peer_manager();
                         let rows: Vec<Value> = list
                             .iter()
                             .filter(|s| host.authorize_peer(caller, &s.id).is_ok())
                             .map(|s| {
                                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                                 v["is_self"] = json!(&s.id == caller);
+                                if let Some(manager) = &manager {
+                                    v["parent_session_id"] = json!(manager.peer_parent(&s.id));
+                                    v["is_side_chat"] =
+                                        json!(manager.side_chat_record(&s.id).is_some());
+                                    v["is_open"] = json!(
+                                        manager.is_live(&s.id) || s.mode == SessionMode::Terminal
+                                    );
+                                }
                                 v
                             })
                             .collect();
-                        tool_json(json!({"sessions": rows}))
+                        let parent = manager.as_ref().and_then(|m| m.peer_parent(caller));
+                        let sides: Vec<Value> = manager
+                            .as_ref()
+                            .map(|m| {
+                                m.side_chats(caller, caller)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|side| {
+                                        let open = m.is_live(&side.session_id);
+                                        let mut value =
+                                            serde_json::to_value(&side).unwrap_or(Value::Null);
+                                        value["is_open"] = json!(open);
+                                        value["can_message"] = json!(
+                                            open && m
+                                                .authorize_peer(caller, &side.session_id)
+                                                .is_ok()
+                                        );
+                                        value
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        tool_json(
+                            json!({"sessions": rows, "parent_session_id": parent, "side_chats": sides}),
+                        )
                     }
                     Err(e) => tool_err(e.to_string()),
                 })

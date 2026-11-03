@@ -223,7 +223,7 @@ pub struct SavedPanel {
 
 impl SavedPanel {
     pub fn restore_open(&self) -> bool {
-        self.open && (self.active_hosted.is_some() || self.pane != Pane::Changes)
+        self.open
     }
 
     pub(crate) fn split_browser_pages(mut self) -> Vec<Self> {
@@ -251,7 +251,7 @@ impl SavedPanel {
 impl Default for SavedPanel {
     fn default() -> Self {
         Self {
-            open: true,
+            open: false,
             side_chat_id: None,
             pane: Pane::NewTab,
             open_panes: default_panes(),
@@ -1424,10 +1424,6 @@ impl RightPanel {
             self.focus_terminal(window, cx);
         }
         cx.notify();
-    }
-
-    pub fn is_changes(&self) -> bool {
-        self.active_hosted.is_none() && self.pane == Pane::Changes
     }
 
     /// Free everything a panel for a closed tab still holds: shells, web views,
@@ -4662,15 +4658,26 @@ mod tests {
     }
 
     #[test]
-    fn saved_changes_requires_an_explicit_click() {
+    fn saved_sidebar_visibility_is_respected_for_every_pane() {
         let mut saved = SavedPanel {
             open: true,
             pane: Pane::Changes,
             ..Default::default()
         };
-        assert!(!saved.restore_open());
-        saved.pane = Pane::Files;
-        assert!(saved.restore_open());
+        for pane in [
+            Pane::Changes,
+            Pane::Files,
+            Pane::Terminal,
+            Pane::SideChat,
+            Pane::Browser,
+            Pane::NewTab,
+        ] {
+            saved.pane = pane;
+            saved.open = true;
+            assert!(saved.restore_open());
+            saved.open = false;
+            assert!(!saved.restore_open());
+        }
     }
 
     use super::*;
@@ -5292,8 +5299,11 @@ mod tests {
         let restored = PanelStore::load(&path);
         assert!(restored.get("chat:a") == chat_a);
         assert!(restored.get("chat:b") == chat_b);
-        assert!(restored.get("chat:b").open);
-        assert!(restored.get("new-chat").open);
+        assert!(restored.get("chat:a").restore_open());
+        assert!(!restored.get("chat:b").restore_open());
+        assert!(!restored.get("new-chat").restore_open());
+        let legacy: SavedPanel = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.restore_open());
     }
 
     #[::core::prelude::v1::test]
