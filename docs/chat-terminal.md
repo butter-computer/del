@@ -78,8 +78,12 @@ Chat append new terminal events exactly once, and lets Side chats and peer reads
 combine earlier provider segments with the live native transcript. Claude's launch
 reattaches the public context file and handles switching before its first turn.
 
-Codex threads use `thread_unload_delay_secs=0`; Del waits for `thread/closed` after
-unsubscribing before handing over ownership. An unsubscribe acknowledgement alone
+Del passes `thread_unload_delay_secs=0` both when launching its Codex app-server
+and when opening each thread. The server-wide launch option is required for older
+CLIs (verified with 0.159.1) that ignore per-thread unload overrides; newer Codex
+versions honor [per-thread settings](https://github.com/openai/codex/pull/55270).
+This changes only Del's child process, not the user's global Codex configuration.
+Del waits for `thread/closed` after unsubscribing before handing over ownership. An unsubscribe acknowledgement alone
 does not release the native lock when another chat keeps the app-server alive.
 This follows the [Codex app-server lifecycle](https://learn.chatgpt.com/docs/app-server).
 Terminal handoff probes working CLI installations like Chat startup, skipping a
@@ -157,3 +161,25 @@ possible future CLI version, network failure, or external native-editor action.
 
 For subsequent provider-switch compatibility and Side chat queue validation, see
 the [0.1.24 validation record](releases/0.1.24-validation.md).
+
+
+### Codex 0.159.1 release-delay regression (2026-11-03)
+
+A native two-thread test reproduced the failure to release an idle thread within
+five seconds while another thread kept the server alive. With the server-wide
+override, release took about 110 ms. A separate real Del MCP-bridge test completed
+three Claude → Codex → Claude round trips, both with and without another Codex
+chat open. Codex → Claude took 0.25–0.27 seconds; Claude → Codex took 1.75–2.97
+seconds, including native setup and context attachment. These are local observations,
+not performance guarantees. Neither test sent a model prompt.
+
+Reproduce with the opt-in tests `idle_thread_releases_promptly_while_another_chat_stays_open`
+in `del-codex`'s `e2e` target and
+`native_claude_codex_round_trips_with_and_without_another_codex_chat` in `del-app`'s
+`provider_switch` target. The ordinary replay suite checks the launch option and
+still requires the native close notification before handing off a thread.
+
+The rebuilt app also switched the affected existing conversation back from Codex
+to Claude successfully, with its earlier messages and switch markers still visible.
+The locked workspace suite passed 789 tests (48 opt-in tests ignored), and workspace
+Clippy passed with warnings denied. Both new opt-in native tests passed separately.

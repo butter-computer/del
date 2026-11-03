@@ -344,9 +344,15 @@ impl CodexBackend {
             return Ok(c);
         }
         let mut spawn = self.opts.spawn.clone();
-        spawn
-            .global_args
-            .extend(["-c".into(), "features.goals=true".into()]);
+        // Older app-servers ignore the per-thread unload override in open().
+        // Configure Del's own server too, so unsubscribe releases native ownership
+        // promptly even while other Del chats keep this process alive.
+        spawn.global_args.extend([
+            "-c".into(),
+            "features.goals=true".into(),
+            "-c".into(),
+            "thread_unload_delay_secs=0".into(),
+        ]);
         if spawn.program == std::path::Path::new("codex") {
             spawn.program = del_agent::detect::find_working_binary("codex")
                 .await

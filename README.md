@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.27` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.28` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.27 source update notes](docs/releases/0.1.27.md) and
-[validation record](docs/releases/0.1.27-validation.md).
+See the [0.1.28 source update notes](docs/releases/0.1.28.md) and
+[validation record](docs/releases/0.1.28-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.27-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.28-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -1074,7 +1074,8 @@ Light and bright program fills stay opaque so dark text remains readable.
 - **Seafloor** traces a mesh of light rays through a surface made of real gravity waves,
   onto a floor seen at a low angle. Brightness comes from how much each patch of light
   shrinks, so true caustics form: subtle thin lines with pale bands between them, edge to
-  edge, since the water extends past the window on every side.
+  edge, since the water extends past the window on every side. Its opacity is reduced
+  by 40%, including bright highlights, to keep it quieter behind the interface.
 
 **Mouse reactive** is a separate saved switch; it starts off and is unavailable when the
 background is Off. The cursor only affects the background on the new-session page, never
@@ -1089,16 +1090,23 @@ Each style has its own response rather than a shared distortion:
 | Drift | Stirs the air so dust swirls and follows, and holds a small light |
 | Fluted Glass | A light behind the glass, bending through the fixed ribs |
 | Curtains | A hand that presses into the cloth and drags it as it sweeps, up to a firm limit however fast it moves |
-| Window Curtains | The same passing hand; press and hold on a curtain to drag it, as described below |
+| Window Curtains | Follows the current cursor each frame, with bounded cloth forces; press and hold to drag a panel |
 | Rain | An umbrella: drops land on it, and it's dry underneath |
 | Clouds | Clears a trail through the cloud that slowly fills back in |
 | Falling Leaves | Blows leaves aside and sets them spinning |
 | Pudding | Nothing on hover; press and hold on it to stretch and pull it around |
 | Seafloor | Nothing on hover; a click drops a stone, and the caustics follow its rings |
 
+Window Curtains also respond to the window's movement: the fabric lags as the window
+moves, including steady drags, with the rail pinned in place. The effect uses 25% of live
+window displacement for a gentler response without delayed input.
+This works behind chats too and pauses while inactive or when Reduce Motion is enabled.
+
 Each Window Curtains panel can be taken hold of. A soft patch of fabric under the cursor
-follows the hand without being crushed, and the hand closes gently, so taking hold sends no
-shock through the panel. Held near the rail it slides the hooks at once, bunching them ahead of the
+follows the current pointer without cursor smoothing or a hold delay. Picking preserves the
+original press location even during a fast drag. The grabbed vertex tracks the pointer exactly,
+with no grip ramp, held-panel damping, or rail speed cap; spatial travel limits still apply.
+Held near the rail it slides the hooks at once, bunching them ahead of the
 hand; held low it swings first and only pulls the rail once the fabric is tight, and a hand
 can lift it part way. Let go and it floats down and settles with no ripple. Each panel has its
 own travel limit, stays where it is left, and moves without disturbing its neighbours.

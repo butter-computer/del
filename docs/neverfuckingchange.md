@@ -43,7 +43,9 @@ This records the final decisions, including corrections to earlier experiments.
   primary is white. It applies to every style, but only on
   the new-session page: behind a chat or terminal, or under an open dialog, sheet, or
   prompt, the background ignores the cursor.
-  Smooth the cursor response and fade it away on exit. Every style has its own physically
+  Smooth the cursor response and fade it away on exit, except Window Curtains:
+  sample its hover position and force on the current frame without input easing.
+  Bound force rather than delaying the pointer. Every style has its own physically
   motivated response, never a shared warp of the picture; see the README table. Life is
   stirred by a moving cursor, with Conway rules untouched everywhere else. Pudding reacts
   only to a press that starts on it: it stretches when pulled and rebounds when released.
@@ -63,15 +65,21 @@ This records the final decisions, including corrections to earlier experiments.
   and hold on a panel drags it: behaviour depends on where it is held (near the rail it slides
   the hooks, low down it swings until pulled tight), each panel has its own hard limits and
   stays where it is left, neighbours are undisturbed, and presses on the input bar don't count.
-  A hold never crushes the fabric, and taking hold or dragging sends no shock through the
-  panel: the hand closes gradually and moves nothing until dragged, and only fabric near it
-  follows quickly. Letting go, including straight after a drag, settles it with no ripple,
-  then or later:
-  without a hand moving it, no cloth moves faster than wind alone could move it. After a hold,
-  the hover response stays away from a resting cursor until the cursor actually moves.
+  The grabbed vertex follows the current pointer exactly after the solver constraints,
+  without a grip ramp, target easing, held-panel damping, or rail speed cap. Spatial
+  travel limits still apply. Preserve the press location across GPU readback so motion
+  during picking is not lost. Letting go settles the fabric gradually; this release
+  behavior must not delay a new drag. Hover stays away from a resting cursor after release
+  until the cursor moves. Window movement uses the owning window's live WindowServer
+  bounds at GPU submission, including when GPUI reuses the painted surface. Apply 25%
+  of that displacement immediately to free fabric, tapering to zero at the pinned rail.
+  This softens small window movements without input smoothing. Use desktop coordinates,
+  never sidebar/composer layout changes. Reset sampling on inactive/resume so moving
+  an inactive window does not kick the fabric when reactivated.
 - Seafloor caustics come from refracting a mesh of light rays through a wave surface, never
   a scrolling caustic texture. They fill the whole page edge to edge, stay subtle, and have
-  no sand or other visible floor.
+  no sand or other visible floor. Render Seafloor at 60% of its former opacity,
+  including capped highlights, in both themes.
 - Clouds are volume rendered with self-shadowing. Pudding is a soft body on the input bar
   and wobbles when nudged or when the bar moves. Falling Leaves use tapered silhouettes,
   veins, flutter and tumbling motion.

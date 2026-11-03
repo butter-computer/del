@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../crates/app/src/curtain.h"
-struct Params { simd_float4 geometry,pointer,impulse,clock,life,composer,footer,blur,tint,animation,stroke; simd_float4 rain[64]; float lean[64]; simd_float4 rails[3]; simd_float4 footerSide; };
+struct Params { simd_float4 geometry,pointer,impulse,clock,life,composer,footer,blur,tint,animation,stroke; simd_float4 rain[64]; float lean[64]; simd_float4 rails[3]; simd_float4 footerSide,windowMotion; };
 enum { W=360, H=180, ITER=20, PANEL=120 };
 static id<MTLComputePipelineState> pipeline(id<MTLDevice> device,id<MTLLibrary> library,NSString *name) {
     NSError *error=nil;
@@ -38,6 +38,75 @@ int main(int argc,const char **argv) { @autoreleasepool {
     MTLRegion all=MTLRegionMake2D(0,0,W,H);
     [X getBytes:start bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
     u.impulse.w=1.0f/120.0f;
+    // Window inertia affects free fabric immediately while its pinned rail stays fixed.
+    for(int moving=0;moving<2;moving++) {
+        u.windowMotion=(simd_float4){moving?20.0f:0,0,0,0};
+        c=[queue commandBuffer];e=[c computeCommandEncoder];
+        [e setBytes:&u length:sizeof(u) atIndex:0];[e setComputePipelineState:predict];
+        [e setTexture:X atIndex:0];[e setTexture:V[0] atIndex:1];[e setTexture:P[0] atIndex:2];
+        [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];
+        [e endEncoding];[c commit];[c waitUntilCompleted];assert(c.status==MTLCommandBufferStatusCompleted);
+        [P[0] getBytes:moving?v:x bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
+    }
+    for(int k=0;k<W;k++) {
+        assert(fabsf(v[k*4]-x[k*4])<0.001f);
+        assert(v[((H-1)*W+k)*4]<x[((H-1)*W+k)*4]-0.1f);
+    }
+    u.windowMotion=(simd_float4){0,0,0,0};
+    // Compare complete constrained trajectories, not just the prediction that
+    // relaxation can erase. A half-second desktop drag must visibly move the hem.
+    static float stationary[120][W*2];
+    float largestLag=0,largestLift=0;
+    for(int direction=0;direction<3;direction++) {
+        c=[queue commandBuffer];e=[c computeCommandEncoder];
+        u.animation.x=12;u.clock.x=0;
+        [e setComputePipelineState:init];[e setBytes:&u length:sizeof(u) atIndex:0];
+        [e setTexture:X atIndex:0];[e setTexture:V[0] atIndex:1];
+        [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];
+        [e endEncoding];[c commit];[c waitUntilCompleted];
+        [X getBytes:start bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
+
+        for(int tick=0;tick<120;tick++) {
+            u.clock.x=tick/120.0f;
+            simd_float2 delta={0,0};
+            if(tick>=30&&tick<90) {
+                if(direction==1)delta.x=5;
+                if(direction==2)delta.y=5;
+            }
+            u.windowMotion=(simd_float4){delta.x,delta.y,0,0};
+            c=[queue commandBuffer];e=[c computeCommandEncoder];
+            [e setBytes:&u length:sizeof(u) atIndex:0];
+            [e setComputePipelineState:predict];[e setTexture:X atIndex:0];[e setTexture:V[0] atIndex:1];[e setTexture:P[0] atIndex:2];
+            [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+            [e setComputePipelineState:relax];
+            for(int i=0;i<ITER;i++) {
+                [e setTexture:P[i&1] atIndex:0];[e setTexture:P[1-(i&1)] atIndex:1];
+                [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+            }
+            [e setComputePipelineState:commit];[e setTexture:X atIndex:0];[e setTexture:P[0] atIndex:1];[e setTexture:V[1] atIndex:2];
+            [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e endEncoding];
+            [c commit];[c waitUntilCompleted];assert(c.status==MTLCommandBufferStatusCompleted);
+            id<MTLTexture> swap=X;X=P[0];P[0]=swap;swap=V[0];V[0]=V[1];V[1]=swap;
+            [X getBytes:x bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
+            float lag=0,lift=0;
+            for(int k=0;k<W;k++) {
+                for(int axis=0;axis<3;axis++)assert(fabsf(x[k*4+axis]-start[k*4+axis])<0.001f);
+                int hem=((H-1)*W+k)*4;
+                if(direction==0){stationary[tick][k*2]=x[hem];stationary[tick][k*2+1]=x[hem+1];}
+                lag+=stationary[tick][k*2]-x[hem];lift+=stationary[tick][k*2+1]-x[hem+1];
+            }
+            if(direction==1)largestLag=fmaxf(largestLag,lag/W);
+            if(direction==2)largestLift=fmaxf(largestLift,lift/W);
+        }
+    }
+    printf("Window drag after full solver: horizontal lag %.2f px, vertical lift %.2f px\n",largestLag,largestLift);
+    assert(largestLag>15&&largestLift>5);
+    // Reset the original fixture before the existing wind/hand/release checks.
+    u.animation.x=0;u.clock.x=0;u.windowMotion=(simd_float4){0,0,0,0};
+    c=[queue commandBuffer];e=[c computeCommandEncoder];
+    [e setComputePipelineState:init];[e setBytes:&u length:sizeof(u) atIndex:0];[e setTexture:X atIndex:0];[e setTexture:V[0] atIndex:1];
+    [e dispatchThreads:MTLSizeMake(W,H,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e endEncoding];[c commit];[c waitUntilCompleted];
+    [X getBytes:start bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
     double moved=0,worstFold=0,mainLeastDrop=1;
     bool compare=getenv("DEL_CLOTH_WHIP")!=NULL;
     for(int step=0;step<1440;step++) {
@@ -48,7 +117,7 @@ int main(int argc,const char **argv) { @autoreleasepool {
         if(step>=1000&&step<1300) {
             float t=step/120.0f;
             u.animation.z=1;
-            // The renderer caps the hand at 700 per second, so a real flick arrives like this.
+            // The renderer bounds hover force at 700 logical pixels per second.
             // DEL_CLOTH_WHIP scales it, to compare with an uncapped solver.
             float whip=getenv("DEL_CLOTH_WHIP")?atof(getenv("DEL_CLOTH_WHIP")):1;
             float rate=2.0f*whip;
@@ -145,7 +214,7 @@ int main(int argc,const char **argv) { @autoreleasepool {
     u.rails[2]=(simd_float4){rail.left/1100,rail.hook/1100,rail.right/1100,rail.at};
     float *startHeld=start+(heldRow*W+heldColumn)*4;
     simd_float3 hand={rail.hook-60,startHeld[1]-60,34};
-    u.life=(simd_float4){heldColumn,heldRow,1,DEL_CURTAIN_HELD_CALM};u.stroke=(simd_float4){hand.x,hand.y,hand.z,0};
+    u.life=(simd_float4){heldColumn,heldRow,1,0};u.stroke=(simd_float4){hand.x,hand.y,hand.z,0};
     for(int step=0;step<480;step++) {
         u.clock.x=step/120.0f;
         c=[queue commandBuffer];e=[c computeCommandEncoder];
@@ -266,7 +335,7 @@ int main(int argc,const char **argv) { @autoreleasepool {
         if(step>=300){tailMean+=mean;tailSamples++;}
     }
     printf("Letting go (%s): fastest point %.0f, peak panel speed %.0f; after 0.5s fastest %.0f, at most %.0f above an untouched panel\n",snap?"old snap":"eased",peakFastest,peakMean,lateFastest,lateExcess);
-    printf("Under the resting cursor after letting go: fastest %.0f. Once it moves and the hand eases back: %.0f\n",underCursor,underMoved);
+    printf("Under the resting cursor after letting go: fastest %.0f. Once it moves and hover returns: %.0f\n",underCursor,underMoved);
     if(!snap&&!hoverSnap) {
         // Nothing appears under a cursor that's simply resting.
         assert(underCursor<=251);
@@ -315,16 +384,16 @@ int main(int argc,const char **argv) { @autoreleasepool {
             u.life=(simd_float4){heldColumn,heldRow,del_curtain_grip(since),del_curtain_settle(since)};
             u.stroke=(simd_float4){sinking.x,sinking.y,sinking.z,0};
         } else if(step>=120) {
-            simd_float2 at=del_curtain_hold(&grabRail,catchAt,drop,natural,1.0f/120.0f,home);
+            simd_float2 at=del_curtain_hold(&grabRail,catchAt,drop,natural,home);
             if(grabSnap) {
                 grip=fminf(grip+14.0f/120.0f,1);
                 handZ+=(34-handZ)*(1-expf(-8.0f/120.0f));
                 u.life=(simd_float4){heldColumn,heldRow,grip,0};
             } else {
                 handZ+=(catchZ+14-handZ)*(1-expf(-2.0f/120.0f));
-                u.life=(simd_float4){heldColumn,heldRow,del_curtain_grip_in(age),DEL_CURTAIN_HELD_CALM};
+                u.life=(simd_float4){heldColumn,heldRow,1,0};
             }
-            u.stroke=(simd_float4){at.x,at.y,handZ,0};
+            u.stroke=(simd_float4){at.x,at.y,handZ,1};
             u.rails[2]=(simd_float4){grabRail.left/1100,grabRail.hook/1100,grabRail.right/1100,grabRail.at};
         }
         c=[queue commandBuffer];e=[c computeCommandEncoder];
@@ -341,6 +410,12 @@ int main(int argc,const char **argv) { @autoreleasepool {
         [c commit];[c waitUntilCompleted];assert(c.status!=MTLCommandBufferStatusError);
         id<MTLTexture> t=X;X=P[0];P[0]=t;t=V[0];V[0]=V[1];V[1]=t;
         [V[0] getBytes:speed bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
+        [X getBytes:x bytesPerRow:W*16 fromRegion:all mipmapLevel:0];
+        for(int i=0;i<W*H*4;i++)assert(isfinite(x[i])&&isfinite(speed[i]));
+        if(!grabSnap&&age>=0&&age<letGoAge) {
+            int at=(heldRow*W+heldColumn)*4;
+            assert(fabsf(x[at]-u.stroke.x)<0.001f&&fabsf(x[at+1]-u.stroke.y)<0.001f);
+        }
         // The part of the panel far from the hand, and the same area of an untouched panel.
         double far=0,farTotal=0,other=0;int farCount=0;
         for(int r=1;r<H;r++)for(int k=2*PANEL;k<W;k++) {
@@ -375,20 +450,17 @@ int main(int argc,const char **argv) { @autoreleasepool {
             }
         }
     }
-    printf("Taking hold (%s): far fabric fastest %.0f (was %.0f just before), peak speed there %.0f; untouched panel peak %.0f\n",grabSnap?"old snap":"gentle",farFastest,beforeFar,farPeak,controlPeak);
-    printf("Dragging (%s): far fabric fastest %.0f, peak speed there %.0f; untouched panel peak %.0f\n",grabSnap?"old snap":"gentle",dragFastest,dragPeak,dragControl);
+    printf("Taking hold (%s): far fabric fastest %.0f (was %.0f just before), peak speed there %.0f; untouched panel peak %.0f\n",grabSnap?"old snap":"direct",farFastest,beforeFar,farPeak,controlPeak);
+    printf("Dragging (%s): far fabric fastest %.0f, peak speed there %.0f; untouched panel peak %.0f\n",grabSnap?"old snap":"direct",dragFastest,dragPeak,dragControl);
     printf("After letting go of a drag: fastest %.0f once the grip is gone, at most %.0f above an untouched panel, peak speed %.0f\n",afterFastest,afterExcess,afterPeak);
     if(!grabSnap) {
         // Once the grip is gone nothing wakes up, not even when the settling ends: no ripple at
         // any point in the seven seconds after a drag.
         assert(afterFastest<=120);
         assert(afterExcess<10);
-        // Far from the hand, a hold moves the fabric no faster than wind alone can, and the
-        // panel stays calmer than one nobody touched.
-        assert(farFastest<=251);
-        assert(farPeak<=controlPeak+4);
-        // Dragging carries the panel along with its hooks, but never whips the far fabric.
-        assert(dragFastest<=260);
-        puts("Taking hold and dragging send no shock through the panel.");
+        // Direct dragging deliberately has no velocity cap. The exact grabbed
+        // vertex and finite solver state are checked each frame above.
+        assert(controlPeak<50&&dragControl<50); // Other panels remain independent.
+        puts("Direct dragging tracks exactly, stays finite, and releases smoothly.");
     }
 }}

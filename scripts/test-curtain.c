@@ -49,51 +49,48 @@ int main(void) {
     simd_float2 heldHigh={mid+60,DEL_CURTAIN_RAIL_Y+top},heldLow={mid+60,DEL_CURTAIN_RAIL_Y+low};
     simd_float2 a=heldHigh,b=heldLow;
     for(int i=0;i<120;i++) {
-        a=del_curtain_hold(&high,heldHigh,top,(simd_float2){0,DEL_CURTAIN_RAIL_Y+top},1/120.0f,home);
-        b=del_curtain_hold(&under,heldLow,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},1/120.0f,home);
+        a=del_curtain_hold(&high,heldHigh,top,(simd_float2){0,DEL_CURTAIN_RAIL_Y+top},home);
+        b=del_curtain_hold(&under,heldLow,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},home);
     }
     assert(high.hook>mid+30);          // Near the rail, the hook went with the hand.
     assert(fabsf(under.hook-mid)<0.5f); // Low down, it hasn't moved at all.
     assert(fabsf(b.x-(mid+60))<0.5f);   // The fabric itself has reached the hand.
     heldLow.x=mid+500;
-    for(int i=0;i<240;i++)b=del_curtain_hold(&under,heldLow,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},1/120.0f,home);
+    for(int i=0;i<240;i++)b=del_curtain_hold(&under,heldLow,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},home);
     assert(under.hook>mid+40);          // Pulled tight, the rail comes along.
     // Whatever the cursor does: fabric stops at its limit and can never rise past half way.
     DelCurtainRail wild=del_curtain_rest(1,W);
     for(int i=0;i<6000;i++) {
         simd_float2 t={(float)(rand()%6000)-2500,(float)(rand()%4000)-2000};
-        simd_float2 h=del_curtain_hold(&wild,t,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},1/120.0f,home);
+        simd_float2 h=del_curtain_hold(&wild,t,low,(simd_float2){0,DEL_CURTAIN_RAIL_Y+low},home);
         check_limits(wild,home);
         assert(h.y>=DEL_CURTAIN_RAIL_Y+low*0.5f-0.01f&&h.y<=DEL_CURTAIN_RAIL_Y+low+0.01f);
         assert(fabsf(h.x-wild.hook)<=50+low*0.30f+0.01f);
     }
-    // Rail speed is limited, so a flick can't snap the hooks across.
-    DelCurtainRail slow=del_curtain_rest(1,W);
-    del_curtain_hold(&slow,(simd_float2){mid+800,DEL_CURTAIN_RAIL_Y+top},top,(simd_float2){0,DEL_CURTAIN_RAIL_Y+top},1/60.0f,home);
-    assert(slow.hook-mid<=DEL_CURTAIN_RAIL_SPEED/60+0.01f);
+    // A fast drag reaches the hook's spatial limit in this frame, not over time.
+    DelCurtainRail fast=del_curtain_rest(1,W);
+    del_curtain_hold(&fast,(simd_float2){mid+800,DEL_CURTAIN_RAIL_Y+top},top,(simd_float2){0,DEL_CURTAIN_RAIL_Y+top},home);
+    assert(fabsf(fast.right-(home.right+span*DEL_CURTAIN_TRAVEL))<0.01f);
     // Taking hold of fabric hanging well away from its hook, or below where it was expected,
     // moves nothing at all: neither the rail nor the fabric.
     for(float offset=-160;offset<=160;offset+=40)for(float sag=0;sag<=60;sag+=30) {
         DelCurtainRail still=del_curtain_rest(1,W);
         simd_float2 natural={offset,DEL_CURTAIN_RAIL_Y+low+sag};
         simd_float2 hanging={still.hook+offset,natural.y};
-        simd_float2 kept=del_curtain_hold(&still,hanging,low,natural,1/120.0f,home);
+        simd_float2 kept=del_curtain_hold(&still,hanging,low,natural,home);
         assert(still.hook==mid&&still.left==home.left&&still.right==home.right);
         assert(fabsf(kept.x-hanging.x)<0.001f&&fabsf(kept.y-hanging.y)<0.001f);
     }
-    // The hand closes gradually, from nothing, with no step at either end.
-    assert(del_curtain_grip_in(0)==0&&del_curtain_grip_in(DEL_CURTAIN_GRIP_IN_SECONDS)==1);
-    for(float g=0;g<DEL_CURTAIN_GRIP_IN_SECONDS;g+=1/120.0f)assert(del_curtain_grip_in(g+1/120.0f)-del_curtain_grip_in(g)<0.05f);
     // After a hold, the hover hand stays away from a resting cursor however long it waits.
     float hand=1;
     for(int i=0;i<60;i++)hand=del_curtain_hand(hand,true,true,1/120.0f);
     assert(hand==0);
     for(int i=0;i<2400;i++)hand=del_curtain_hand(hand,false,false,1/120.0f);
     assert(hand==0);
-    // Once the cursor moves it eases in over more than half a second, never all at once.
-    int frames=0;
-    while(hand<1){float before=hand;hand=del_curtain_hand(hand,false,true,1/120.0f);assert(hand-before<0.02f);frames++;}
-    assert(frames>=70);
+    // Hover returns on the first movement frame, without a half-second ramp.
+    assert(del_curtain_hand(0,false,true,1/120.0f)==1);
+    // Pointer forces are bounded without delaying the sampled position.
+    assert(simd_length(del_curtain_limit_vector((simd_float2){3000,4000},700))<=700.01f);
     // Picking: the fabric under the cursor; nothing over a gap; nearest layer in an overlap.
     enum{C=4,R=8};
     static float cloth[C*R*4];

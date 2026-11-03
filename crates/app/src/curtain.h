@@ -58,10 +58,8 @@ static inline float del_curtain_play(float drop,float below) {
 // One frame of a held curtain. `target` is where the cursor wants this point of fabric, `drop`
 // how far down the fabric it is, and `natural` where it was hanging when taken hold of: its x
 // relative to its hook, and its y. Limits count from there, so simply taking hold never moves
-// anything. The rail moves only once the fabric pulls tight, gently, like hooks with friction,
-// since every jerk at the rail travels down the whole panel. Returns where the fabric may go.
-#define DEL_CURTAIN_RAIL_SPEED 420.0f
-static inline simd_float2 del_curtain_hold(DelCurtainRail *rail,simd_float2 target,float drop,simd_float2 natural,float dt,DelCurtainHome home) {
+// anything. The rail moves only once the fabric pulls tight, immediately, without a speed cap or easing. Returns where the fabric may go.
+static inline simd_float2 del_curtain_hold(DelCurtainRail *rail,simd_float2 target,float drop,simd_float2 natural,DelCurtainHome home) {
     float top=DEL_CURTAIN_RAIL_Y;
     simd_float2 held=target;
     held.y=del_curtain_clamp(held.y,fminf(top+drop*0.50f,natural.y),fmaxf(top+drop,natural.y));
@@ -70,19 +68,9 @@ static inline simd_float2 del_curtain_hold(DelCurtainRail *rail,simd_float2 targ
     float wanted=rail->hook;
     if(away>rail->hook+play)wanted=away-play;
     if(away<rail->hook-play)wanted=away+play;
-    float move=(wanted-rail->hook)*(1-expf(-dt*10.0f)),most=DEL_CURTAIN_RAIL_SPEED*dt;
-    *rail=del_curtain_move(*rail,rail->hook+del_curtain_clamp(move,-most,most),home);
+    *rail=del_curtain_move(*rail,wanted,home);
     held.x=natural.x+del_curtain_clamp(away,rail->hook-play,rail->hook+play);
     return held;
-}
-// Taking hold is as gradual as letting go. Fabric is moving in the air when it's caught, and
-// stopping it dead sends a shock through the whole panel, so the hand closes over half a second.
-#define DEL_CURTAIN_GRIP_IN_SECONDS 0.5f
-// While held, the panel moves through thick air, so whatever the hand does stays near the hand.
-#define DEL_CURTAIN_HELD_CALM 0.7f
-static inline float del_curtain_grip_in(float age) {
-    float t=fminf(age/DEL_CURTAIN_GRIP_IN_SECONDS,1);
-    return t*t*(3-2*t);
 }
 // Letting go. Stored stretch must not be released all at once, or it whips through the panel
 // as a ripple. The grip eases off while the held point sinks to where it would hang, and air
@@ -104,9 +92,14 @@ static inline simd_float3 del_curtain_sink(simd_float3 point,simd_float3 hanging
 }
 // The passing hand, the hover response, stands down while a curtain is held. It must not come
 // back by itself where the cursor happens to rest, or a dent appears there out of nowhere. It
-// waits until the cursor has actually moved, then eases in.
+// waits until the cursor has actually moved, then responds on that frame.
 static inline float del_curtain_hand(float hand,bool holding,bool moved,float dt) {
-    return holding||!moved?fmaxf(hand-dt*8.0f,0):fminf(hand+dt*1.6f,1);
+    return holding||!moved?fmaxf(hand-dt*8.0f,0):1.0f;
+}
+// Clamp force, never cursor position: fast pointer motion stays responsive without whipping cloth.
+static inline simd_float2 del_curtain_limit_vector(simd_float2 value,float limit) {
+    float speed=simd_length(value);
+    return speed>limit?value*(limit/speed):value;
 }
 // The piece of fabric under the cursor, or false over a gap. Particles are RGBA floats as the
 // cloth solver stores them. Layers can overlap, so the nearest one to the viewer wins ties.

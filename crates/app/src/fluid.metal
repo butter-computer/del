@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; float4 tint; float4 animation; float4 stroke; float4 rain[64]; float lean[64]; float4 rails[3]; float4 footerSide; };
+struct Params { float4 geometry; float4 pointer; float4 impulse; float4 clock; float4 life; float4 composer; float4 footer; float4 blur; float4 tint; float4 animation; float4 stroke; float4 rain[64]; float lean[64]; float4 rails[3]; float4 footerSide; float4 windowMotion; };
 // Stable integer hashes are used only for initial soup / rare localized reseeds.
 // The visible state between those events is determined exclusively by Conway.
 float randomCell(uint2 p,uint seed) {
@@ -322,10 +322,14 @@ kernel void cloth_predict(texture2d<float> position [[texture(0)]],texture2d<flo
     }
     float3 relative=air-v;
     float3 accel=normal*dot(normal,relative)*abs(dot(normal,relative))*0.024f+relative*0.08f+float3(0,1500.0f,0);
+    // Apply a small share of desktop movement immediately, without temporal smoothing.
+    // The rail stays pinned; lower fabric has room to sway.
+    x.xy-=u.windowMotion.xy*0.25f*smoothstep(0.0f,0.7f,float(id.y)/float(CLOTH_ROWS-1));
     v+=accel*dt;
     // life.w: this panel was just let go. Thick air lets it float down instead of whipping.
     float settling=int(id.x)/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS?u.life.w:0.0f;
-    v*=exp(-(0.65f+8.0f*settling)*dt);
+    bool held=u.stroke.w>0.5f&&int(id.x)/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS;
+    if(!held)v*=exp(-(0.65f+8.0f*settling)*dt);
     x+=v*dt;
     predicted.write(float4(x,1),id);
 }
@@ -396,7 +400,7 @@ kernel void cloth_relax(texture2d<float,access::read> input [[texture(0)]],textu
         float2 fabric=float2(p-int2(u.life.xy))*float2(r.restU,r.restV);
         float reachSquared=dot(fabric,fabric);
         float3 carry=u.stroke.xyz-input.read(uint2(u.life.xy)).xyz;
-        x+=carry*exp(-reachSquared/(2.0f*52.0f*52.0f))*0.06f*u.life.z;
+        x+=carry*exp(-reachSquared/(2.0f*52.0f*52.0f))*(u.stroke.w>0.5f?1.0f:0.06f)*u.life.z;
         // The wider limits outlast the grip, so settling fabric is never caught by one.
         drawnOut=exp(-reachSquared/(2.0f*130.0f*130.0f))*max(u.life.z,u.life.w);
     }
@@ -411,6 +415,9 @@ kernel void cloth_relax(texture2d<float,access::read> input [[texture(0)]],textu
     x.z=mix(x.z,clamp(x.z,pin.z-sway,pin.z+sway),limitEase);
     // Fabric bunches a little and never rises by itself; a hand can lift it part way.
     x.y=mix(x.y,max(x.y,pin.y+float(p.y)*r.restV*mix(CLOTH_LEAST_DROP,0.42f,drawnOut)),limitEase);
+    // The grabbed vertex is pinned to the pointer after all other constraints.
+    // Relaxation must not pull it behind the hand on the next iteration.
+    if(u.stroke.w>0.5f&&all(p==int2(u.life.xy)))x=u.stroke.xyz;
     output.write(float4(x,1),id);
 }
 kernel void cloth_commit(texture2d<float> previous [[texture(0)]],texture2d<float> corrected [[texture(1)]],
@@ -428,7 +435,8 @@ kernel void cloth_commit(texture2d<float> previous [[texture(0)]],texture2d<floa
         mean+=(corrected.read(uint2(n)).xyz-previous.read(uint2(n)).xyz)*inverse;count+=1;
     }
     float settling=p.x/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS?u.life.w:0.0f;
-    if(count>0)v=mix(v,mean/count,mix(0.42f,0.85f,settling));
+    bool held=u.stroke.w>0.5f&&p.x/CLOTH_PANEL_COLUMNS==int(u.life.x)/CLOTH_PANEL_COLUMNS;
+    if(count>0&&!held)v=mix(v,mean/count,mix(0.42f,0.85f,settling));
     // Wind alone never moves fabric faster than the calm limit. Anything quicker is a fold
     // snapping through, which whips along the hem as a ripple, so it's held back. The full
     // speed is only for fabric being carried: a held panel, or right around a moving hand.
@@ -442,7 +450,7 @@ kernel void cloth_commit(texture2d<float> previous [[texture(0)]],texture2d<floa
         sweeping=max(sweeping,exp(-dot(fabric,fabric)/(2.0f*90.0f*90.0f))*u.life.z);
     }
     float speed=length(v),top=mix(mix(CLOTH_CALM_SPEED,55.0f,settling),CLOTH_TOP_SPEED,sweeping);
-    if(speed>top)v*=top/speed;
+    if(speed>top&&!held)v*=top/speed;
     velocity.write(float4(id.y==0?float3(0):v,0),id);
 }
 struct ClothVertex { float4 position [[position]]; float3 normal; float3 world; float2 rest; float speed; float edge; float2 shadow; float shadowDepth; };
@@ -1573,7 +1581,9 @@ fragment float4 fluid_fragment(Vertex in [[stage_in]],texture2d<float,access::re
     alpha*=1.0f-smoothstep(-0.5f,0.5f,sdf);
     // Dither before the 8-bit surface: long soft gradients must not show banding.
     alpha+=(interleavedGradient(in.position.xy)-0.5f)/255.0f*step(0.002f,alpha);
-    return float4(u.tint.rgb,clamp(alpha,0.0f,limit));
+    // Keep all Seafloor light, including capped highlights, quieter behind the interface.
+    float opacity=style==13u?0.60f:1.0f;
+    return float4(u.tint.rgb,clamp(alpha,0.0f,limit)*opacity);
 }
 
 constexpr sampler sceneSampler(coord::normalized,address::clamp_to_edge,filter::linear);

@@ -597,3 +597,31 @@ async fn side_chat_model_switch_and_restart_preserve_context() {
     manager.shutdown().await;
     result.expect("bounded side chat probe timed out").unwrap();
 }
+
+/// Exercises native ownership release without sending any model prompt.
+#[tokio::test]
+#[ignore = "requires installed authenticated Codex; starts disposable threads without inference"]
+async fn idle_thread_releases_promptly_while_another_chat_stays_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let first = backend
+        .start_session(config(dir.path(), PermissionMode::Plan))
+        .await
+        .unwrap();
+    let second = backend
+        .start_session(config(dir.path(), PermissionMode::Plan))
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let released = tokio::time::timeout(Duration::from_secs(5), backend.close(&first.id)).await;
+    eprintln!("Native Codex release: {:?}", started.elapsed());
+    let other_usable = backend.agent_goal(&second.id, None).await;
+    backend.shutdown().await.unwrap();
+    released
+        .expect("idle native thread was not released within five seconds")
+        .unwrap();
+    other_usable.unwrap();
+}

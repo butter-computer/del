@@ -176,3 +176,71 @@ async fn native_all_directions_attach_without_inference_and_read_saved_history()
     manager.shutdown().await;
     bridge.shutdown();
 }
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude and Codex; starts disposable chats without model inference"]
+async fn native_claude_codex_round_trips_with_and_without_another_codex_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir.path().join("index.jsonl"), dir.path());
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let bridge = mcp_bridge::McpBridge::start_with_options(
+        manager.clone(),
+        tx,
+        dir.path().join("mcp"),
+        del_mcp::ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    manager.set_browser_tools(bridge.handle().chat_browser_tools().unwrap());
+    let config = |provider| SessionConfig {
+        provider,
+        cwd: dir.path().to_path_buf(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        permission_mode: PermissionMode::Plan,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(90), async {
+        let other = manager.start_session(config(Provider::Codex)).await?.id;
+        let chat = manager.start_session(config(Provider::Claude)).await?.id;
+        for round in 0..3 {
+            if round == 2 {
+                manager.close(&other).await?;
+            }
+            for provider in [Provider::Codex, Provider::Claude] {
+                let from = manager.session_record(&chat)?.provider;
+                let started = std::time::Instant::now();
+                manager.switch_provider(&chat, provider, None).await?;
+                eprintln!(
+                    "Native round {round}: {from:?} → {provider:?} in {:?}",
+                    started.elapsed()
+                );
+                if manager.session_record(&chat)?.provider != provider {
+                    return Err(AgentError::Backend(
+                        "switch did not commit the requested provider".into(),
+                    ));
+                }
+                let history = manager.subscribe_with_history(&chat)?.0;
+                if history.iter().any(|event| {
+                    matches!(
+                        event,
+                        AgentEvent::TurnStarted { .. } | AgentEvent::TokenUsage { .. }
+                    )
+                }) {
+                    return Err(AgentError::Backend(
+                        "switch unexpectedly started inference".into(),
+                    ));
+                }
+                if round < 2 && !manager.is_live(&other) {
+                    return Err(AgentError::Backend(
+                        "switch closed another Codex chat".into(),
+                    ));
+                }
+            }
+        }
+        Ok::<_, AgentError>(())
+    })
+    .await;
+    manager.shutdown().await;
+    result.expect("native switch sequence timed out").unwrap();
+}

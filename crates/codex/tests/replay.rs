@@ -1383,7 +1383,7 @@ async fn noise_partial_writes_and_null_error_fields_are_tolerated() {
 }
 
 #[tokio::test]
-async fn spawned_app_server_gets_goal_feature_flag_and_account_home() {
+async fn spawned_app_server_gets_goal_and_unload_settings_and_account_home() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("codex-fixture");
@@ -1428,7 +1428,15 @@ for line in sys.stdin:
         serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
     assert_eq!(
         launch["argv"],
-        serde_json::json!(["-c", "user=1", "-c", "features.goals=true", "app-server"])
+        serde_json::json!([
+            "-c",
+            "user=1",
+            "-c",
+            "features.goals=true",
+            "-c",
+            "thread_unload_delay_secs=0",
+            "app-server"
+        ])
     );
     assert_eq!(launch["home"], home.display().to_string());
     assert_eq!(launch["profile"], "1");

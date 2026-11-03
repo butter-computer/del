@@ -10,6 +10,7 @@ mod native {
     use super::*;
     use objc2_core_foundation::CFRetained;
     use objc2_core_video::CVPixelBuffer;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::{ffi::c_void, ptr::NonNull};
     unsafe extern "C" {
         fn del_fluid_create(
@@ -20,6 +21,7 @@ mod native {
         ) -> *mut c_void;
         fn del_fluid_release(renderer: *mut c_void);
         fn del_fluid_running(renderer: *mut c_void, running: bool);
+        fn del_fluid_window_view(renderer: *mut c_void, view: *mut c_void);
         fn del_fluid_blurred(renderer: *mut c_void, blurred: bool);
         fn del_fluid_frame(
             renderer: *mut c_void,
@@ -99,7 +101,17 @@ mod native {
         ) -> Option<CFRetained<CVPixelBuffer>> {
             let mouse = window.mouse_position() - bounds.origin;
             let tint = crate::appearance::background_tint();
+            let view = HasWindowHandle::window_handle(window)
+                .ok()
+                .and_then(|handle| {
+                    if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+                        Some(handle.ns_view.as_ptr())
+                    } else {
+                        None
+                    }
+                });
             let pointer = unsafe {
+                del_fluid_window_view(self.0, view.unwrap_or(std::ptr::null_mut()));
                 del_fluid_frame(
                     self.0,
                     bounds.size.width.as_f32() as f64,
