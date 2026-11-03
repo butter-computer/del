@@ -1417,25 +1417,24 @@ impl Render for ChatView {
                                                             {
                                                                 Some(Block::User {
                                                                     text, ..
-                                                                }) => Some(
-                                                                    text.chars()
-                                                                        .take(180)
-                                                                        .collect::<String>(),
-                                                                ),
+                                                                }) => Some(text.clone()),
                                                                 _ => None,
                                                             }
                                                         })
                                                         .unwrap_or_default();
-                                                    let width = zpx(320.).min(
+                                                    let max_width = zpx(320.).min(
                                                         (window.viewport_size().width - zpx(48.))
                                                             .max(zpx(1.)),
                                                     );
                                                     gpui_kit::component::tooltip::Tooltip::element(
                                                         move |_, _| {
                                                             div()
-                                                                .w(width)
+                                                                .max_w(max_width)
+                                                                .max_h(zpx(72.))
+                                                                .line_height(zpx(18.))
                                                                 .whitespace_normal()
-                                                                .overflow_hidden()
+                                                                .text_ellipsis()
+                                                                .line_clamp(4)
                                                                 .child(text.clone())
                                                         },
                                                     )
