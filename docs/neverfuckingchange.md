@@ -193,8 +193,8 @@ This records the final decisions, including corrections to earlier experiments.
 ## Unread conversations
 
 - Saved session rows show a hover card after 120 ms to the right, clamped to the window.
-  Include title, age/activity, project, checkout and Git branch/worktree with existing
-  icons; omit the provider/model line. The row owns the preview even over Archive,
+  Include title, age/activity, project, code folder path and Git branch with existing
+  icons. Omit the redundant worktree-name line (such as `checkout`) and provider/model line. The row owns the preview even over Archive,
   Pin, Restore and Delete: don't attach competing tooltips to those buttons.
   Keep the content width at 300 logical pixels. Animate only fresh appearance with
   a short fade/slide, respecting reduced motion. Switching between sessions is

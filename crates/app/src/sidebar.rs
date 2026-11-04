@@ -635,9 +635,6 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                     "Branch",
                     info.current.clone(),
                 ))
-                .when_some(info.worktree.as_ref(), |card, name| {
-                    card.child(detail("icons/git-fork.svg", "Worktree", name.clone()))
-                })
             },
         )
         .into_any_element()
