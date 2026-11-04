@@ -2726,6 +2726,19 @@ impl Render for AppShell {
                     .bg(appearance::popup_surface())
                     .rounded(zpx(14.))
                     .overflow_hidden()
+                    // Escape and outside clicks ask here first, so they leave through the
+                    // fade with Done instead of the dialog's own instant close.
+                    .on_cancel({
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                if state.panel == Panel::Providers {
+                                    state.toggle_providers(cx);
+                                }
+                            });
+                            false
+                        }
+                    })
                     .on_close(move |_, _, cx| {
                         // Closed some other way during the fade: nothing left to close later.
                         let _ = close_shell.update(cx, |this, _| this.settings_closing = None);
@@ -2784,6 +2797,9 @@ impl Render for AppShell {
             }
         }
         self.settings_focused = settings_open;
+        if self.settings_closing.is_some() {
+            window.request_animation_frame();
+        }
         self.sync_caffeine(cx);
         let terminal_processes = self
             .terminals

@@ -41,12 +41,35 @@ static NSURL *DelBrowserURL(NSString *address) {
 }
 @end
 
+// A toolbar button with the same quiet hover fill and radius as the app's own.
+@interface DelChromeButton : NSButton
+@end
+@implementation DelChromeButton {
+    NSTrackingArea *_tracking;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_tracking) [self removeTrackingArea:_tracking];
+    _tracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+                                               owner:self userInfo:nil];
+    [self addTrackingArea:_tracking];
+}
+- (void)setHoverFill:(BOOL)on {
+    self.wantsLayer = YES;
+    self.layer.cornerRadius = 6;
+    self.layer.backgroundColor = on && self.enabled ? [NSColor.labelColor colorWithAlphaComponent:0.08].CGColor : NULL;
+}
+- (void)mouseEntered:(NSEvent *)event { [self setHoverFill:YES]; }
+- (void)mouseExited:(NSEvent *)event { [self setHoverFill:NO]; }
+@end
+
 static NSColor *DelColor(uint32_t rgb) {
     return [NSColor colorWithSRGBRed:((rgb >> 16) & 0xff) / 255.0 green:((rgb >> 8) & 0xff) / 255.0
                                 blue:(rgb & 0xff) / 255.0 alpha:1];
 }
 
-@interface DelBrowserView : NSView <WKNavigationDelegate, WKUIDelegate>
+@interface DelBrowserView : NSView <WKNavigationDelegate, WKUIDelegate, NSTextFieldDelegate>
 @property(nonatomic, strong) WKWebView *web;
 @property(nonatomic, strong) NSTextField *address;
 @property(nonatomic, strong) NSTextField *status;
@@ -82,7 +105,7 @@ static NSColor *DelColor(uint32_t rgb) {
     return !self.presented || self.mousePassthrough ? nil : [super hitTest:point];
 }
 - (NSButton *)button:(NSString *)symbol label:(NSString *)label action:(SEL)action {
-    NSButton *button = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:label]
+    NSButton *button = [DelChromeButton buttonWithImage:[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:label]
                                         target:self action:action];
     button.bordered = NO;
     button.toolTip = label;
@@ -132,6 +155,7 @@ static NSColor *DelColor(uint32_t rgb) {
     _address.bezeled = NO;
     _address.drawsBackground = NO;
     _address.focusRingType = NSFocusRingTypeNone;
+    _address.delegate = self;
     _address.wantsLayer = YES;
     _address.placeholderString = @"URL or localhost:3000";
     _address.target = self;
@@ -191,6 +215,13 @@ static NSColor *DelColor(uint32_t rgb) {
     }
     self.needsLayout = YES;
 }
+// The system ring is off so the field can follow the theme. Editing firms up a hairline,
+// as focus does on the composer.
+- (void)controlTextDidBeginEditing:(NSNotification *)note {
+    self.address.layer.borderWidth = self.zoom;
+    self.address.layer.borderColor = [NSColor.labelColor colorWithAlphaComponent:0.2].CGColor;
+}
+- (void)controlTextDidEndEditing:(NSNotification *)note { self.address.layer.borderWidth = 0; }
 - (void)showStatus:(NSString *)message {
     self.status.stringValue = message ?: @"";
     self.status.toolTip = message;

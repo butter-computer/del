@@ -1242,14 +1242,17 @@ impl AppShell {
                                 .relative()
                                 .size(crate::icons::size())
                                 .child(
-                                    crate::icons::path("icons/git-unavailable.svg")
-                                        .size(crate::icons::size()),
+                                    // The same branch mark as the status bar and branch picker.
+                                    crate::icons::path("icons/git-branch.svg")
+                                        .size(zpx(crate::icons::MARK_SIZE)),
                                 )
                                 .child(
                                     div().absolute().right_0().bottom_0().size(zpx(7.)).child(
                                         crate::icons::icon(IconName::Close)
                                             .with_size(zpx(7.))
-                                            .text_color(rgb(0xff646b)),
+                                            .text_color(
+                                                crate::appearance::ActionTone::Danger.foreground(),
+                                            ),
                                     ),
                                 ),
                         )
