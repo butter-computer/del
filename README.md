@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.30` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.31` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.30 source update notes](docs/releases/0.1.30.md) and
-[validation record](docs/releases/0.1.30-validation.md).
+See the [0.1.31 source update notes](docs/releases/0.1.31.md) and
+[validation record](docs/releases/0.1.31-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.30-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.31-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -338,9 +338,11 @@ have no status marker. Hide timestamps while unread ticks are visible. Keep-awak
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
 
 Hover a saved session to preview its full title, age and activity, project,
-checkout directory, Git branch/worktree, and provider/model with matching icons.
-The card appears beside the sidebar after a short delay and dismisses on leaving
-or pressing the row. Hovering does not select the chat or clear unread replies.
+checkout directory, and Git branch/worktree with matching icons.
+The card appears beside the sidebar after 120 ms with a brief fade and slide.
+It stays visible over Archive, Pin, and archived-session actions; moving between
+rows updates it immediately. Leaving or pressing the row dismisses it. Hovering
+does not select the chat or clear unread replies.
 Git details come from that session's checkout and refresh in the background.
 
 The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat

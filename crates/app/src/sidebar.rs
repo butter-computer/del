@@ -409,13 +409,13 @@ pub(crate) fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Compact hover actions retain spoken names without visible text labels.
+/// The row owns the hover preview, including over its actions. A child tooltip
+/// would replace it in the shared overlay; keep the buttons' spoken names.
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
         .size(crate::icons::button_size())
         .p_0()
-        .tooltip(if pinned { "Unpin" } else { "Pin" })
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
         .text_color(if pinned { rgb(0xf5f5f5) } else { rgba(MUTED) })
 }
@@ -425,7 +425,6 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .text()
         .size(crate::icons::button_size())
         .p_0()
-        .tooltip("Archive")
         .accessibility_label("Archive")
         .text_color(rgba(MUTED))
 }
@@ -443,7 +442,6 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .text()
                 .size(crate::icons::button_size())
                 .p_0()
-                .tooltip("Restore")
                 .accessibility_label("Restore")
                 .text_color(rgba(MUTED))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -458,7 +456,6 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .ghost()
                 .size(crate::icons::button_size())
                 .p_0()
-                .tooltip("Permanently delete")
                 .accessibility_label("Permanently delete")
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
@@ -561,8 +558,6 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
 /// Read-only session details: use the hovered session's directory, never the
 /// selected chat's branch. Git inspection is cached by AppState off-thread.
 fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
-    let terminal = state.terminal_rows.iter().find(|r| r.id == row.id);
-    let provider = terminal.map(|r| r.provider).unwrap_or(Some(row.provider));
     let root = state.project_root(&row.cwd);
     let info = state.project_info.get(&row.cwd);
     let detail = |icon: &'static str, label: &'static str, value: String| {
@@ -580,10 +575,6 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                     .child(value),
             )
     };
-    let provider_label = provider
-        .map(|p| crate::providers::display_name(p).to_string())
-        .unwrap_or_else(|| "Terminal".into());
-    let model = row.model.as_deref().unwrap_or("Automatic");
     v_flex()
         .id("session-hover-card")
         .debug_selector(|| "session-hover-card".into())
@@ -648,32 +639,6 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                     card.child(detail("icons/git-fork.svg", "Worktree", name.clone()))
                 })
             },
-        )
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(if terminal.is_some() {
-                    crate::mode_ui::terminal_mark(provider)
-                } else {
-                    crate::mode_ui::tab_mark(provider)
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if terminal.is_some() {
-                            if provider.is_some() {
-                                format!("{provider_label} · Terminal")
-                            } else {
-                                "Terminal".into()
-                            }
-                        } else {
-                            format!("{provider_label} · {model}")
-                        }),
-                ),
         )
         .into_any_element()
 }
@@ -909,25 +874,37 @@ fn row_item(
     if !renaming && !cx.has_active_drag() {
         let tooltip_state = state.downgrade();
         let tooltip_row = row.clone();
-        item = item.managed_tooltip_at(Placement::Right, move |window, cx| {
-            let state = tooltip_state.clone();
-            let fallback = tooltip_row.clone();
-            Tooltip::element(move |_, cx| {
-                let Some(state) = state.upgrade() else {
-                    return div().into_any_element();
-                };
-                let state = state.read(cx);
-                let rows = state.unified_rows();
-                let row = rows
-                    .iter()
-                    .find(|r| r.id == fallback.id)
-                    .unwrap_or(&fallback);
-                session_hover_card(row, state, cx)
-            })
-            .p_3()
-            .rounded(zpx(12.))
-            .build(window, cx)
-        });
+        item = item.managed_tooltip_with(
+            Some(Placement::Right),
+            Some(std::time::Duration::from_millis(120)),
+            move |window, cx| {
+                let state = tooltip_state.clone();
+                let fallback = tooltip_row.clone();
+                Tooltip::element(move |_, cx| {
+                    let Some(state) = state.upgrade() else {
+                        return div().into_any_element();
+                    };
+                    let state = state.read(cx);
+                    let rows = state.unified_rows();
+                    let row = rows
+                        .iter()
+                        .find(|r| r.id == fallback.id)
+                        .unwrap_or(&fallback);
+                    session_hover_card(row, state, cx)
+                })
+                .transition(
+                    gpui_kit::component::animation::EffectTransition::new(
+                        std::time::Duration::from_millis(140),
+                    )
+                    .ease(gpui_kit::component::animation::ease_out_cubic)
+                    .slide_x(zpx(-4.), zpx(0.))
+                    .fade(0., 1.),
+                )
+                .p_3()
+                .rounded(zpx(12.))
+                .build(window, cx)
+            },
+        );
     }
 
     moving_row(item, &id, state, cx)
@@ -2297,17 +2274,26 @@ mod session_hover_tests {
 
     impl Render for Fixture {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut next = self.row.clone();
+            next.id = del_agent::SessionId::new("hover-next");
             div()
                 .size_full()
-                .child(div().w(px(264.)).mt(px(100.)).child(super::row_item(
-                    &self.row,
-                    false,
-                    false,
-                    &self.rename,
-                    &self.state,
-                    false,
-                    cx,
-                )))
+                .child(
+                    div()
+                        .w(px(264.))
+                        .mt(px(100.))
+                        .children([&self.row, &next].map(|row| {
+                            super::row_item(
+                                row,
+                                false,
+                                false,
+                                &self.rename,
+                                &self.state,
+                                row.archived,
+                                cx,
+                            )
+                        })),
+                )
         }
     }
 
@@ -2317,14 +2303,16 @@ mod session_hover_tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    #[gpui::test]
-    fn session_hover_is_read_only_and_dismisses_on_leave_and_press(cx: &mut TestAppContext) {
+    fn open(cx: &mut TestAppContext) -> (Entity<AppState>, VisualTestContext) {
+        open_rows(cx, false)
+    }
+
+    fn open_rows(cx: &mut TestAppContext, archived: bool) -> (Entity<AppState>, VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(true);
         });
         let state = crate::state::tests::draft(cx);
-        let before = state.read_with(cx, |s, _| s.selection.clone());
         let row = Row {
             id: del_agent::SessionId::new("hover-test"),
             provider: del_agent::Provider::Codex,
@@ -2333,7 +2321,7 @@ mod session_hover_tests {
             title: "A long session title that remains readable in the session preview".into(),
             status: del_agent::SessionStatus::Idle,
             updated_secs: 1,
-            archived: false,
+            archived,
             pinned: false,
             unread: true,
         };
@@ -2362,6 +2350,13 @@ mod session_hover_tests {
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         settle(&mut cx);
+        (state, cx)
+    }
+
+    #[gpui::test]
+    fn session_hover_is_read_only_and_dismisses_on_leave_and_press(cx: &mut TestAppContext) {
+        let (state, mut cx) = open(cx);
+        let before = state.read_with(&cx, |s, _| s.selection.clone());
         assert!(cx.debug_bounds("session-hover-card").is_none());
         cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
         settle(&mut cx);
@@ -2386,5 +2381,90 @@ mod session_hover_tests {
         );
         settle(&mut cx);
         assert!(cx.debug_bounds("session-hover-card").is_none());
+    }
+    #[gpui::test]
+    fn session_preview_appears_promptly(cx: &mut TestAppContext) {
+        let (_, mut cx) = open(cx);
+        cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("session-hover-card").is_some(),
+            "preview appears within 200ms"
+        );
+    }
+
+    #[gpui::test]
+    fn session_preview_survives_hovering_row_actions(cx: &mut TestAppContext) {
+        let (_, mut cx) = open(cx);
+        // Enter directly over either action, then cross the title and both
+        // actions without ever leaving the row. Child tooltips must not win.
+        for first in [210., 242.] {
+            cx.simulate_mouse_move(point(px(700.), px(500.)), None, Default::default());
+            settle(&mut cx);
+            for x in [first, 80., 210., 242., 80.] {
+                cx.simulate_mouse_move(point(px(x), px(115.)), None, Default::default());
+                settle(&mut cx);
+                assert!(
+                    cx.debug_bounds("session-hover-card").is_some(),
+                    "session preview must stay visible over row x={x}"
+                );
+            }
+        }
+    }
+    #[gpui::test]
+    fn session_preview_switches_rows_without_another_delay(cx: &mut TestAppContext) {
+        let (_, mut cx) = open(cx);
+        cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
+        settle(&mut cx);
+        let first = cx.debug_bounds("session-hover-card").unwrap();
+        cx.simulate_mouse_move(point(px(80.), px(145.)), None, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let next = cx
+            .debug_bounds("session-hover-card")
+            .expect("immediate adjacent preview");
+        assert!(next.origin.y > first.origin.y);
+    }
+
+    #[gpui::test]
+    fn archived_preview_covers_restore_and_delete_buttons(cx: &mut TestAppContext) {
+        let (_, mut cx) = open_rows(cx, true);
+        for x in [210., 242., 80.] {
+            cx.simulate_mouse_move(point(px(x), px(115.)), None, Default::default());
+            settle(&mut cx);
+            assert!(cx.debug_bounds("session-hover-card").is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn session_preview_animation_finishes_without_restarting_on_redraw(cx: &mut TestAppContext) {
+        let (_, mut cx) = open(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
+        cx.executor().advance_clock(Duration::from_millis(130));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let start = cx.debug_bounds("session-hover-card").unwrap();
+        // GPUI's non-synced one-shot animation uses std::time::Instant,
+        // not the test executor's virtual timer clock.
+        std::thread::sleep(Duration::from_millis(180));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+        let end = cx.debug_bounds("session-hover-card").unwrap();
+        assert!(
+            end.origin.x > start.origin.x,
+            "short slide resolves at its final position: start={start:?}, end={end:?}"
+        );
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(cx.debug_bounds("session-hover-card").unwrap(), end);
+        }
     }
 }

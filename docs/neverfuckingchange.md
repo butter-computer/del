@@ -192,9 +192,12 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Unread conversations
 
-- Saved session rows show a delayed hover card to the right, clamped to the window.
-  Include title, age/activity, project, checkout, Git branch/worktree and provider/model
-  with existing icons. Use the hovered row's cached directory metadata, never the
+- Saved session rows show a hover card after 120 ms to the right, clamped to the window.
+  Include title, age/activity, project, checkout and Git branch/worktree with existing
+  icons; omit the provider/model line. The row owns the preview even over Archive,
+  Pin, Restore and Delete: don't attach competing tooltips to those buttons.
+  Use a short fade/slide on entry and row changes, respecting reduced motion.
+  Use the hovered row's cached directory metadata, never the
   selected chat's Git state. Inspect Git off-thread. Suppress during rename/drag;
   leaving or pressing dismisses the card. Hover must not select or mark a chat read.
 - Mark replies completed in chats the user is not viewing as unread. Sidebar
