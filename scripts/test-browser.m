@@ -89,6 +89,9 @@ int main(int argc,char **argv) {
         void *a=del_browser_create((__bridge void *)parent,url.UTF8String,profileA.UTF8String);
         del_browser_frame(a,0,0,420,650,1,false,false);
         DelBrowserView *browser=(__bridge DelBrowserView *)a;
+        del_browser_theme(a,0x212225ff,0x2a2b2fff,0xececeaff,0xa3a39fff);
+        NSCAssert(CGColorEqualToColor(browser.layer.backgroundColor,DelBrowserColor(0x212225ff).CGColor),@"browser chrome uses the exact page theme");
+        NSCAssert(CGColorEqualToColor(browser.address.layer.backgroundColor,DelBrowserColor(0x2a2b2fff).CGColor),@"address surface uses the composer theme");
         Wait(^BOOL { return browser.web.URL && !browser.web.loading && [browser.web.title isEqualToString:@"Browser fixture"]; });
         NSCAssert([JS(browser.web,@"document.querySelector('h1').textContent") isEqual:@"Browser fixture"],@"real HTTP content");
         JS(browser.web,@"document.cookie='del_test=profileA;max-age=3600;path=/';localStorage.setItem('del_test','profileA')");
@@ -123,6 +126,11 @@ int main(int argc,char **argv) {
         NSCAssert([JS(browser.web,@"document.querySelector('input').value") isEqual:@"preview-retains-state"],@"preview preserves live page state");
         del_browser_frame(a,0,0,320,500,1.2,true,false);
         NSCAssert(!browser.hidden && browser.web.pageZoom==1.2,@"resize/reopen/zoom");
+        del_browser_theme(a,0xfbfaf8ff,0xf1efebff,0x2a2926ff,0x625f59ff);
+        [browser layoutSubtreeIfNeeded];
+        NSCAssert(browser.layer.masksToBounds && browser.layer.cornerRadius==12,@"native page corners scale and clip content");
+        NSCAssert(CGColorEqualToColor(browser.layer.backgroundColor,DelBrowserColor(0xfbfaf8ff).CGColor),@"switching to light mode updates the native page");
+        NSCAssert([JS(browser.web,@"document.querySelector('input').value") isEqual:@"preview-retains-state"],@"theme changes preserve the live page");
         del_browser_release(a); browser=nil;
         void *b=del_browser_create((__bridge void *)parent,url.UTF8String,profileB.UTF8String);
         del_browser_frame(b,0,0,420,650,1,false,false);

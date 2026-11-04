@@ -27,6 +27,7 @@ mod native {
             mouse_passthrough: bool,
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
+        fn del_browser_theme(view: *mut c_void, page: u32, field: u32, text: u32, secondary: u32);
         fn del_browser_hide(view: *mut c_void);
         fn del_browser_release(view: *mut c_void);
         fn del_browser_command(
@@ -92,6 +93,13 @@ mod native {
                     ensure_created(&view, window);
                     let bounds = bounds.intersect(&window.content_mask().bounds);
                     unsafe {
+                        del_browser_theme(
+                            view.pointer.get(),
+                            crate::appearance::page_surface().into(),
+                            crate::appearance::composer_surface().into(),
+                            crate::appearance::rgb(0xf5f5f5).into(),
+                            crate::appearance::secondary_text().into(),
+                        );
                         del_browser_frame(
                             view.pointer.get(),
                             bounds.origin.x.as_f32() as f64,

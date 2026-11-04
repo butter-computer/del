@@ -556,6 +556,9 @@ The picker uses provider-advertised choices, not a hardcoded list of model names
 All visible catalog entries remain accessible in a bounded scrolling list, without
 a scrollbar; the bottom fades while more entries are below. Refresh retries
 catalog discovery. Availability depends on the installed CLI, agent, and account.
+Empty, loading, and failed catalogs keep a visible status below the model choices;
+the list cannot clip the explanation or the Refresh control. Model names align
+across selected and unselected rows.
 The picker opens with a **Search models…** field. It fuzzy-filters names and
 provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
 choices. Opening the picker again starts with an empty search. Use **↑/↓** to
@@ -919,7 +922,9 @@ and MCP configuration are kept separate from saved launch history. See
 ### Browser
 
 On macOS 14 or later, the Browser pane embeds WebKit with an address field,
-back/forward navigation, and reload/stop. Each page has its own Browser tab in
+back/forward navigation, and reload/stop. Its toolbar, address field, empty state, and rounded page
+corners follow Del's selected theme and zoom; websites retain their own colors.
+Each page has its own Browser tab in
 the session or sidebar row—there is no nested browser tab strip. Use **+** and
 enter a URL to open another page; closing or moving a tab affects only that page.
 Existing saved browser groups restore as separate tabs, keeping their profiles

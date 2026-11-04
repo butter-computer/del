@@ -488,8 +488,20 @@ impl Render for ModelPanel {
                 .collect();
             let model_count = self.choices.len();
             self.highlighted = self.highlighted.filter(|index| *index < model_count);
+            let catalog_notice = if catalog.loading {
+                Some("Loading available models…")
+            } else if catalog.error.is_some() {
+                Some("Couldn’t load models. Refresh to try again.")
+            } else if catalog.loaded && catalog.models.is_empty() {
+                Some("No models returned. Use Automatic or Refresh to try again.")
+            } else if model_count == 0 {
+                Some("No matching models. Try another search.")
+            } else {
+                None
+            };
+            let notice_height = if catalog_notice.is_some() { 48. } else { 0. };
             let list_height = zpx(model_count.max(1) as f32 * 42.)
-                .min((available_height - zpx(84.)).clamp(zpx(60.), zpx(240.)));
+                .min((available_height - zpx(84. + notice_height)).clamp(zpx(42.), zpx(240.)));
             let scroll = self.model_scroll.clone();
             let mut list = v_flex().gap_0p5().when(show_default, |list| {
                 list.child(
@@ -506,13 +518,13 @@ impl Render for ModelPanel {
                         .flex_none()
                         .px(zpx(8.))
                         .py(zpx(6.))
-                        .text_size(zpx(12.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .justify_start()
                         .disabled(locked)
-                        .when(
+                        .child(div().size(crate::icons::size()).flex_none().when(
                             selected.is_none() || selected.as_deref() == Some("default"),
-                            |b| b.child(crate::icons::icon(IconName::Check)),
-                        )
+                            |slot| slot.child(crate::icons::icon(IconName::Check)),
+                        ))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -522,7 +534,7 @@ impl Render for ModelPanel {
                                 .child(default_label)
                                 .child(
                                     div()
-                                        .text_size(zpx(del_core::typography::TEXT_XS))
+                                        .text_size(zpx(del_core::typography::TEXT_SM))
                                         .text_color(muted)
                                         .child("Automatic · follows provider settings"),
                                 ),
@@ -535,17 +547,6 @@ impl Render for ModelPanel {
                         })),
                 )
             });
-            if catalog.loaded && catalog.models.is_empty() && catalog.error.is_none() {
-                list = list.child(
-                    div()
-                        .p_2()
-                        .text_color(muted)
-                        .child("No models returned by this provider. Try Refresh."),
-                );
-            }
-            if model_count == 0 && !catalog.loading {
-                list = list.child(div().p_2().text_color(muted).child("No matching models"));
-            }
             for (visible_index, (i, model)) in models.into_iter().enumerate() {
                 let choice_index = visible_index + usize::from(show_default);
                 let id = model.id.clone();
@@ -563,12 +564,17 @@ impl Render for ModelPanel {
                         .flex_none()
                         .px(zpx(8.))
                         .py(zpx(6.))
-                        .text_size(zpx(12.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .justify_start()
                         .disabled(locked)
-                        .when(selected.as_deref() == Some(&id), |b| {
-                            b.child(crate::icons::icon(IconName::Check))
-                        })
+                        .child(
+                            div()
+                                .size(crate::icons::size())
+                                .flex_none()
+                                .when(selected.as_deref() == Some(&id), |slot| {
+                                    slot.child(crate::icons::icon(IconName::Check))
+                                }),
+                        )
                         .child(
                             v_flex()
                                 .flex_1()
@@ -579,7 +585,7 @@ impl Render for ModelPanel {
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
                                         div()
-                                            .text_size(zpx(del_core::typography::TEXT_XS))
+                                            .text_size(zpx(del_core::typography::TEXT_SM))
                                             .w_full()
                                             .truncate()
                                             .text_color(muted)
@@ -677,9 +683,6 @@ impl Render for ModelPanel {
                             )
                         }),
                 )
-                .when(catalog.loading, |col| {
-                    col.child(div().text_color(muted).child("Loading available models…"))
-                })
                 .child(
                     div()
                         .relative()
@@ -728,6 +731,19 @@ impl Render for ModelPanel {
                             .h(zpx(18.)),
                         ),
                 )
+                .when_some(catalog_notice, |col, notice| {
+                    col.child(
+                        div()
+                            .id("model-catalog-notice")
+                            .debug_selector(|| "model-catalog-notice".into())
+                            .role(Role::Status)
+                            .px_2()
+                            .text_size(zpx(del_core::typography::TEXT_SM))
+                            .line_height(relative(1.4))
+                            .text_color(crate::appearance::secondary_text())
+                            .child(notice),
+                    )
+                })
                 .into_any_element();
         }
         self.levels = info.as_ref().map(|m| m.efforts.clone()).unwrap_or_default();
