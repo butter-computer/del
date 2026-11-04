@@ -487,7 +487,7 @@ impl SessionManager {
             "complete" => {
                 peers.finish_work(session)?;
             }
-            "pause" => peers.pause(session)?,
+            "pause" => peers.pause_automatic(session)?,
             "wait" => peers.wait(session)?,
             "resume" => peers.resume(session)?,
             _ => return Err(AgentError::Backend("Unknown session_work action".into())),
@@ -496,6 +496,24 @@ impl SessionManager {
         drop(peers);
         self.publish_local(session, AgentEvent::PeerWorkChanged { work: work.clone() });
         Ok(work)
+    }
+
+    pub(super) fn resume_steered_work(
+        &self,
+        session: &SessionId,
+        before: Option<PeerWork>,
+    ) -> Result<()> {
+        let mut peers = self.shared.peers.lock().unwrap();
+        if let Some(before) = before
+            && before.status == WorkStatus::Paused
+            && peers.work(session).as_ref() == Some(&before)
+        {
+            peers.resume(session)?;
+            let work = peers.work(session);
+            drop(peers);
+            self.publish_local(session, AgentEvent::PeerWorkChanged { work });
+        }
+        Ok(())
     }
 
     fn publish_local(&self, session: &SessionId, event: AgentEvent) {
@@ -911,6 +929,68 @@ mod tests {
                     .matches_prompt(&envelope.replace("old-recipient", "outsider"), |id| store
                         .resolve(id))
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_pause_wakes_on_peer_reply_but_user_stop_waits_for_steer() {
+        for provider in [Provider::Codex, Provider::Claude] {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = SessionManager::new(
+                dir.path().join("index"),
+                [Arc::new(crate::MockBackend::new(provider)) as Arc<dyn AgentBackend>],
+            )
+            .unwrap();
+            let parent = manager
+                .start_session(config(provider, dir.path()))
+                .await
+                .unwrap();
+            let child = manager
+                .start_session(config(provider, dir.path()))
+                .await
+                .unwrap();
+            let request = manager
+                .send_to_peer(&parent.id, &child.id, "task", "Check this")
+                .unwrap();
+            manager.control_peer_work(&parent.id, "pause").unwrap();
+            assert!(!manager.dispatch_peer(&parent.id).await.unwrap());
+            assert!(manager.dispatch_peer(&child.id).await.unwrap());
+            idle(&manager, &child.id).await;
+            manager
+                .reply_to_peer(&child.id, &request.id, "answer", "Checked")
+                .unwrap();
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Active,
+                "a peer reply should wake an agent-managed pause without Resume"
+            );
+            assert!(manager.dispatch_peer(&parent.id).await.unwrap());
+            idle(&manager, &parent.id).await;
+            manager.interrupt(&parent.id).await.unwrap();
+            manager
+                .send_to_peer(&child.id, &parent.id, "another", "New detail")
+                .unwrap();
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Paused
+            );
+            assert!(
+                !manager.dispatch_peer(&parent.id).await.unwrap(),
+                "user Stop must stay stopped"
+            );
+            manager
+                .steer_input(&parent.id, UserInput::text("Continue with this amendment"))
+                .await
+                .unwrap();
+            idle(&manager, &parent.id).await;
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Active,
+                "explicit steering resumes work without a separate Resume button"
+            );
+            assert!(manager.peer_blocks_user_queue(&parent.id));
+            assert!(manager.dispatch_peer(&parent.id).await.unwrap());
+            manager.shutdown().await;
         }
     }
 

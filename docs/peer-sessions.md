@@ -132,8 +132,11 @@ No tool accepts a sender identity or project supplied by the model.
 Managed chat delivery is serialized with normal provider sends. The agent marks
 `session_work complete` only after its original work is finished; Del does not
 infer that from prose or `TurnCompleted`. `wait` requires an outstanding reply,
-while `pause` keeps both work and queued user inputs intact. The UI has a resume
-control. Cancelling a failed exchange or deleting its recipient wakes a waiting
+while `pause` keeps both work and queued user inputs intact until new peer input
+or explicit user steering arrives. Agent-managed pauses wake automatically; a
+user Stop is durable and incoming peer traffic does not override it. Successful
+Steer resumes stopped work without a separate Resume action. There is no task
+coordination banner or Pause/Resume control above the transcript. Cancelling a failed exchange or deleting its recipient wakes a waiting
 sender so it can handle the failure.
 
 A terminal CLI has no provider-neutral turn/input-queue API. Terminal agents can

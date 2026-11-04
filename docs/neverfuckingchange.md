@@ -967,3 +967,8 @@ activity bar. It supersedes earlier rules where they conflict.
   current context. Preserve independent settings, draft, queue, history, unread
   state, lifecycle, and persisted identity for all open side chats. Selecting an
   existing tab or opening a peer link reuses that chat rather than creating one.
+
+- Keep peer coordination automatic and out of the transcript header: no task
+  banner or Pause/Resume controls. Incoming peer work wakes agent-managed pauses,
+  but explicit user Stop stays stopped across restarts. Successful user steering
+  resumes stopped work while retaining peer obligations and queued follow-ups.

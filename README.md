@@ -761,8 +761,11 @@ and dismiss actions in the row's context menu.
 Peer messages are durable and run before queued user messages at a safe input
 boundary. **Finishing a turn or replying to a peer does not finish the original
 task.** The agent continues that work and explicitly completes it before Del
-releases queued user messages. Waiting and paused work remain visible. Uncertain
-delivery after a crash requires review before retrying.
+releases queued user messages. Restored side chats wait for Del’s agent tools before launching.
+Coordination runs automatically without a top-of-chat
+Pause/Resume banner. Incoming peer requests and replies wake agent-managed pauses;
+explicit Stop remains stopped until you steer it. Uncertain delivery after a crash
+requires review before retrying.
 
 Chat agents can create new chat peers with `spawn_session`. New peers inherit the
 caller’s working directory, project, and permissions. When using the same provider,

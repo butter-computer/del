@@ -1296,74 +1296,8 @@ impl Render for ChatView {
             .or_else(|| active_prompt(&prompts, top, at_end));
         let hover = self.rail_hover;
         let previous_hover = self.rail_previous_hover;
-        let work = self
-            .session
-            .as_ref()
-            .and_then(|id| self.backend.manager.peer_work(id));
         v_flex()
             .size_full()
-            .when_some(
-                work.filter(|w| w.status != del_agent::peers::WorkStatus::Complete),
-                |column, work| {
-                    let paused = work.status == del_agent::peers::WorkStatus::Paused;
-                    let label = match work.status {
-                        del_agent::peers::WorkStatus::Paused => {
-                            "Current work paused · queued messages are waiting"
-                        }
-                        del_agent::peers::WorkStatus::Waiting => {
-                            "Waiting for a peer · current task stays active"
-                        }
-                        _ => {
-                            "Current task and peer requests · queued messages follow when finished"
-                        }
-                    };
-                    column.child(
-                        h_flex()
-                            .px_3()
-                            .py_2()
-                            .gap_2()
-                            .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(0xffffff8c))
-                            .child(label)
-                            .when(!paused, |row| {
-                                row.child(
-                                    div()
-                                        .id("pause-peer-work")
-                                        .cursor_pointer()
-                                        .child("Pause")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(id) = &this.session {
-                                                let _ = this
-                                                    .backend
-                                                    .manager
-                                                    .control_peer_work(id, "pause");
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(paused, |row| {
-                                row.child(
-                                    div()
-                                        .id("resume-peer-work")
-                                        .cursor_pointer()
-                                        .child("Resume")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(id) = &this.session
-                                                && let Err(error) = this
-                                                    .backend
-                                                    .manager
-                                                    .control_peer_work(id, "resume")
-                                            {
-                                                this.pending_errors.push(error.to_string());
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    )
-                },
-            )
             .child(
                 h_flex()
                     .flex_1()

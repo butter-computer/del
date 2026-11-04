@@ -44,6 +44,9 @@ pub enum WorkStatus {
 pub struct PeerWork {
     pub id: String,
     pub status: WorkStatus,
+    /// Explicit Stop is sticky; an agent-managed pause can wake on new input.
+    #[serde(default)]
+    pub stopped_by_user: bool,
     /// The peer exchange must not replace this session's existing assignment.
     pub retains_original_work: bool,
 }
@@ -483,7 +486,33 @@ impl PeerStore {
             return Ok(());
         }
         self.update(|state| {
-            state.work.get_mut(id).unwrap().status = WorkStatus::Paused;
+            let work = state.work.get_mut(id).unwrap();
+            work.status = WorkStatus::Paused;
+            work.stopped_by_user = true;
+            Ok(())
+        })
+    }
+
+    pub fn pause_automatic(&mut self, id: &SessionId) -> Result<()> {
+        if !self.state.work.contains_key(id) {
+            return Ok(());
+        }
+        let queued = self
+            .pending(id)
+            .is_some_and(|message| message.state == DeliveryState::Queued);
+        self.update(|state| {
+            let work = state.work.get_mut(id).unwrap();
+            // A reply can arrive before the agent's pause call. Keep it eligible
+            // for dispatch, but never let a late agent response undo user Stop.
+            if work.status == WorkStatus::Paused && work.stopped_by_user {
+                return Ok(());
+            }
+            work.stopped_by_user = false;
+            work.status = if queued {
+                WorkStatus::Active
+            } else {
+                WorkStatus::Paused
+            };
             Ok(())
         })
     }
@@ -519,7 +548,9 @@ impl PeerStore {
             return Ok(());
         }
         self.update(|state| {
-            state.work.get_mut(id).unwrap().status = WorkStatus::Active;
+            let work = state.work.get_mut(id).unwrap();
+            work.status = WorkStatus::Active;
+            work.stopped_by_user = false;
             Ok(())
         })
     }
@@ -553,7 +584,9 @@ fn activate(state: &mut State, id: &SessionId, original: bool) {
     match state.work.get_mut(id) {
         Some(work) if work.status != WorkStatus::Complete => {
             work.retains_original_work |= original;
-            if work.status == WorkStatus::Waiting {
+            if work.status == WorkStatus::Waiting
+                || (work.status == WorkStatus::Paused && !work.stopped_by_user)
+            {
                 work.status = WorkStatus::Active;
             }
             // A user stop stays stopped, even when another peer sends a message.
@@ -564,6 +597,7 @@ fn activate(state: &mut State, id: &SessionId, original: bool) {
                 PeerWork {
                     id: uuid::Uuid::new_v4().to_string(),
                     status: WorkStatus::Active,
+                    stopped_by_user: false,
                     retains_original_work: original,
                 },
             );
@@ -701,7 +735,7 @@ mod tests {
         assert!(store.claim(&second.id).is_err());
         store.claim(&first.id).unwrap();
         drop(store);
-        let mut store = PeerStore::open(path).unwrap();
+        let mut store = PeerStore::open(path.clone()).unwrap();
         assert_eq!(
             store.pending(&id("a")).unwrap().state,
             DeliveryState::Uncertain
@@ -713,11 +747,29 @@ mod tests {
         );
         assert!(store.work(&id("a")).unwrap().retains_original_work);
         store.pause(&id("a")).unwrap();
+        drop(store);
+        let mut store = PeerStore::open(path).unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert!(store.work(&id("a")).unwrap().stopped_by_user);
         store
             .send(&id("b"), &id("a"), "third", "three", None, false)
             .unwrap();
         assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Paused);
     }
+    #[test]
+    fn peer_input_arriving_before_agent_pause_does_not_get_stranded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        store
+            .send(&id("b"), &id("a"), "new-task", "Review", None, false)
+            .unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Active);
+        store.pause(&id("a")).unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Paused);
+    }
+
     #[test]
     fn unreadable_mailbox_fails_closed() {
         let dir = tempfile::tempdir().unwrap();

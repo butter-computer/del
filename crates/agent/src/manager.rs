@@ -1336,6 +1336,7 @@ impl SessionManager {
             .or_default()
             .clone();
         let steering = lock.lock().await;
+        let paused_work = self.peer_work(id);
         if !matches!(
             self.status(id),
             Some(SessionStatus::Running | SessionStatus::WaitingApproval)
@@ -1344,9 +1345,10 @@ impl SessionManager {
             // Submit an explicit user amendment without releasing its mailbox or
             // queued follow-ups. The send lock rechecks native turn readiness.
             drop(steering);
-            return self
-                .send_prompt_kind(id, input, peers::SendOrigin::UserSteer)
-                .await;
+            self.send_prompt_kind(id, input, peers::SendOrigin::UserSteer)
+                .await?;
+            self.resume_steered_work(id, paused_work)?;
+            return Ok(());
         }
         if self.pending_fork_context(id).is_some() {
             return Err(AgentError::Busy(
@@ -1374,6 +1376,7 @@ impl SessionManager {
         let text = input.text.clone();
         let attachments = input.attachments.clone();
         backend.steer_input(id, input).await?;
+        self.resume_steered_work(id, paused_work)?;
         if let Some(session) = self.shared.live.lock().unwrap().get_mut(id) {
             let event = AgentEvent::UserMessage { text };
             if let Some(journal) = session.journal.as_mut() {

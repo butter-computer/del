@@ -50,6 +50,7 @@ pub struct SideChat {
     storage_error: bool,
     importing: bool,
     loading: bool,
+    waiting_for_tools: bool,
     closed: bool,
     visible: bool,
     error: Option<String>,
@@ -193,6 +194,9 @@ impl SideChat {
             && let Some(state) = state.upgrade()
         {
             cx.observe(&state, |this, _, cx| {
+                if this.waiting_for_tools {
+                    this.start(cx);
+                }
                 this.link_parent(cx);
                 if this.is_visible(cx) {
                     this.set_unread(false, cx);
@@ -251,6 +255,7 @@ impl SideChat {
             storage_error: false,
             importing: false,
             loading: false,
+            waiting_for_tools: false,
             closed: false,
             visible: false,
             error: None,
@@ -349,6 +354,15 @@ impl SideChat {
 
     fn start(&mut self, cx: &mut gpui::Context<Self>) {
         if self.closed || self.storage_error || self.loading || self.session.is_some() {
+            return;
+        }
+        self.waiting_for_tools = self
+            .context
+            .activity_owner
+            .as_ref()
+            .and_then(|(state, _)| state.upgrade())
+            .is_some_and(|state| !state.read(cx).browser_tools_ready);
+        if self.waiting_for_tools {
             return;
         }
         self.loading = true;
@@ -530,6 +544,7 @@ impl SideChat {
     ) {
         if self.storage_error
             || self.loading
+            || self.waiting_for_tools
             || self.chat.as_ref().is_some_and(|chat| {
                 chat.read(cx).is_loading()
                     || chat.read(cx).is_running()
@@ -978,6 +993,7 @@ impl SideChat {
     fn settings_locked(&self, cx: &App) -> bool {
         self.storage_error
             || self.loading
+            || self.waiting_for_tools
             || self.chat.as_ref().is_some_and(|chat| {
                 let chat = chat.read(cx);
                 chat.is_loading() || chat.is_running() || !chat.queue.items.is_empty()
@@ -1623,7 +1639,7 @@ mod tests {
             "Side queue actions must never deliver to the parent"
         );
         // Click the actual Steer control while native execution is idle but
-        // peer work still blocks automatic follow-ups (the reported failure).
+        // paused peer work still blocks automatic follow-ups (the reported failure).
         let child = side.read_with(cx, |s, _| s.session.clone().unwrap());
         manager
             .send_to_peer(&parent.id, &child, "pending-task", "Inspect the code")
@@ -1640,6 +1656,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             });
         }
+        manager.control_peer_work(&child, "pause").unwrap();
         assert!(manager.peer_blocks_user_queue(&child));
         chat.update(cx, |c, cx| {
             c.enqueue(UserInput::text("Steer while waiting"), cx);
@@ -1665,6 +1682,10 @@ mod tests {
             assert_eq!(c.queue.items[0].input.text, "Keep this followup queued");
         });
         assert!(manager.peer_blocks_user_queue(&child));
+        assert_eq!(
+            manager.peer_work(&child).unwrap().status,
+            del_agent::peers::WorkStatus::Active
+        );
         assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
             matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Steer while waiting")));
         side.update(cx, |side, cx| side.forget(cx));
@@ -1835,6 +1856,7 @@ mod tests {
         let parent_tab = crate::state::Tab::Session(parent.id.clone());
         state.update(cx, |state, cx| state.select(parent.id.clone(), cx));
         let owner = state.read_with(cx, |state, _| state.uid_of(&parent_tab));
+        state.update(cx, |s, _| s.browser_tools_ready = false);
         let context = Context {
             activity_owner: Some((state.downgrade(), owner)),
             backend: Backend {
@@ -1845,6 +1867,15 @@ mod tests {
             accounts: vec![],
         };
         let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        side.read_with(cx, |s, _| {
+            assert!(s.waiting_for_tools);
+            assert!(s.session.is_none());
+            assert!(!s.loading);
+        });
+        state.update(cx, |s, cx| {
+            s.browser_tools_ready = true;
+            cx.notify();
+        });
         for _ in 0..200 {
             cx.run_until_parked();
             if side.read_with(cx, |s, cx| {
