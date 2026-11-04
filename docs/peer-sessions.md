@@ -74,7 +74,7 @@ existing app project module, outside the model and provider adapters.
 
 `session_models` reads the account-specific native catalog without inference.
 `configure_session` uses the existing provider handoff and next-turn model settings.
-`close_session` pauses unfinished peer work, closes the backend, then awaits the UI
+`close_session` holds unfinished peer work stopped, closes the backend, then awaits the UI
 bridge's tab cleanup and optional persisted archive update. It never deletes Git
 work. Configuration/closing require direct-spawn ownership from the authenticated
 server's current-launch relationship map as well as the ordinary project check.
@@ -275,3 +275,24 @@ without retaining the old task, and that current/legacy delivery envelopes survi
 Side chat rebinding while altered payloads, endpoints, or appended instructions
 are rejected. The shared policy applies across providers; this new live run used
 Codex, not live Claude/OpenCode/ACP accounts.
+
+## Recovering stalled requests
+
+`session_work get` returns the caller's delivery receipts (IDs, endpoints, state,
+reply linkage and errors). A successful spawn means the chat and first request
+exist; its queued receipt is not a claim that the provider has processed the task.
+Use `cancel_session_request` with an obsolete queued/failed request ID to withdraw
+it. Only its sender can do so. Cancellation shares the delivery-claim lock, remains
+idempotent across restarts, and does not delete or reopen the recipient. It cannot
+cancel a delivering, delivered or uncertain request. Ask a running recipient to
+stop; uncertain deliveries retain the existing explicit user recovery flow.
+
+Fresh human messages submitted while the native agent is idle are explicit
+amendments even when peer work is outstanding. They do not drain older queued
+follow-ups or mark peer obligations complete. Normal messages during a native
+turn remain queued, with Steer available for an explicit interruption.
+
+Close/archive holds peer work stopped. New peer messages cannot revive that
+worker; explicit human steering can resume it. Background project inspection
+must never replace a spawned child's inherited project with a provisional
+worktree-directory fallback.

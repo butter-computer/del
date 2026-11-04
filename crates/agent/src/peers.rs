@@ -173,6 +173,34 @@ impl PeerStore {
         })
     }
 
+    /// Resolve a provisional cwd identity for every peer that inherited it.
+    /// Host Git inspection supplies both paths; models cannot expand scope.
+    pub fn register_resolved(
+        &mut self,
+        session: &SessionId,
+        cwd: &Path,
+        project: &Path,
+    ) -> Result<()> {
+        if !cwd.is_absolute() || !project.is_absolute() {
+            return Err(failure("Project paths must be absolute"));
+        }
+        let inherited = cwd != project && self.state.projects.values().any(|p| p == cwd);
+        if !inherited && self.project(session) == Some(project) {
+            return Ok(());
+        }
+        self.update(|state| {
+            if cwd != project {
+                for existing in state.projects.values_mut().filter(|p| p.as_path() == cwd) {
+                    *existing = project.to_path_buf();
+                }
+            }
+            state
+                .projects
+                .insert(session.clone(), project.to_path_buf());
+            Ok(())
+        })
+    }
+
     pub fn resolve(&self, id: &SessionId) -> SessionId {
         self.state
             .aliases
@@ -439,6 +467,43 @@ impl PeerStore {
         })
     }
 
+    pub fn cancel_request(&mut self, caller: &SessionId, id: &str) -> Result<PeerMessage> {
+        let caller = self.resolve(caller);
+        let message = self
+            .message(id)
+            .ok_or_else(|| failure("Unknown peer request"))?;
+        if message.from != caller || message.reply_to.is_some() {
+            return Err(failure("Only the sender can withdraw its own request"));
+        }
+        if !matches!(
+            message.state,
+            DeliveryState::Queued | DeliveryState::Failed | DeliveryState::Cancelled
+        ) {
+            return Err(failure(
+                "This request may have started. Ask the recipient to stop; uncertain delivery needs user review",
+            ));
+        }
+        let message = self.set_delivery(
+            id,
+            DeliveryState::Cancelled,
+            Some("Withdrawn by the requesting agent before delivery".into()),
+        )?;
+        // An empty worker whose only assignments were withdrawn has nothing to
+        // continue. Never infer completion for work that reached a provider.
+        let to = &message.to;
+        if self
+            .work(to)
+            .is_some_and(|w| !w.retains_original_work && !w.stopped_by_user)
+            && self
+                .messages(to)
+                .iter()
+                .all(|m| m.state == DeliveryState::Cancelled)
+        {
+            self.finish_work(to)?;
+        }
+        Ok(message)
+    }
+
     pub fn work(&self, id: &SessionId) -> Option<PeerWork> {
         self.state.work.get(id).cloned()
     }
@@ -641,6 +706,87 @@ mod tests {
         assert!(store.wait(&a).is_err());
         store.finish_work(&a).unwrap();
         assert!(!store.user_queue_blocked(&a));
+    }
+
+    #[test]
+    fn resolving_parent_project_keeps_uninspected_spawned_worktrees_in_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        let provisional = Path::new("/project/parent-worktree");
+        store.register(&id("a"), provisional).unwrap();
+        store.register(&id("b"), provisional).unwrap();
+        let request = store
+            .send(&id("a"), &id("b"), "first", "Task", None, false)
+            .unwrap();
+        store
+            .register_resolved(&id("a"), provisional, Path::new("/project"))
+            .unwrap();
+        store.claim(&request.id).unwrap();
+        assert!(store.authorize(&id("a"), &id("outsider")).is_err());
+    }
+
+    #[test]
+    fn withdrawing_undelivered_tasks_unblocks_parent_without_restarting_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.json");
+        let mut store = setup(path.clone());
+        let first = store
+            .send(&id("a"), &id("b"), "spawn", "Old task", None, false)
+            .unwrap();
+        store
+            .set_delivery(
+                &first.id,
+                DeliveryState::Failed,
+                Some("Project mismatch".into()),
+            )
+            .unwrap();
+        let second = store
+            .send(&id("a"), &id("b"), "retry", "Old retry", None, false)
+            .unwrap();
+        store.pause(&id("b")).unwrap();
+        assert!(store.finish_work(&id("a")).is_err());
+        assert!(store.cancel_request(&id("c"), &first.id).is_err());
+        assert!(store.cancel_request(&id("outsider"), &first.id).is_err());
+        store.cancel_request(&id("a"), &first.id).unwrap();
+        assert!(store.finish_work(&id("a")).is_err());
+        store.cancel_request(&id("a"), &second.id).unwrap();
+        store.cancel_request(&id("a"), &second.id).unwrap();
+        store.finish_work(&id("a")).unwrap();
+        assert_eq!(store.work(&id("b")).unwrap().status, WorkStatus::Paused);
+        assert!(store.work(&id("b")).unwrap().stopped_by_user);
+        let store = PeerStore::open(path).unwrap();
+        assert!(!store.user_queue_blocked(&id("a")));
+        assert!(store.pending(&id("b")).is_none());
+        assert_eq!(
+            store.message(&second.id).unwrap().state,
+            DeliveryState::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_cannot_race_a_claim_or_hide_an_uncertain_delivery() {
+        for status in [
+            DeliveryState::Delivering,
+            DeliveryState::Delivered,
+            DeliveryState::Uncertain,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = setup(dir.path().join("peers.json"));
+            let task = store
+                .send(&id("a"), &id("b"), "task", "Run", None, false)
+                .unwrap();
+            store.claim(&task.id).unwrap();
+            store.set_delivery(&task.id, status, None).unwrap();
+            assert!(store.cancel_request(&id("a"), &task.id).is_err());
+            assert_eq!(store.message(&task.id).unwrap().state, status);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        let task = store
+            .send(&id("a"), &id("b"), "task", "Run", None, false)
+            .unwrap();
+        store.cancel_request(&id("a"), &task.id).unwrap();
+        assert!(store.claim(&task.id).is_err());
     }
 
     fn setup(path: PathBuf) -> PeerStore {

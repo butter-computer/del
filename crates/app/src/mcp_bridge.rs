@@ -1077,16 +1077,10 @@ impl McpHost for AppHost {
                 "Only main Chat sessions can be closed through this tool".into(),
             ));
         }
-        // Pausing first prevents the background peer scheduler reopening the worker.
-        if self
-            .manager
-            .peer_work(target)
-            .is_some_and(|w| w.status != del_agent::peers::WorkStatus::Complete)
-        {
-            self.manager
-                .control_peer_work(target, "pause")
-                .map_err(|e| HostError::Failed(e.to_string()))?;
-        }
+        // Explicit close must not be undone by a later peer request.
+        self.manager
+            .stop_peer_work(target)
+            .map_err(|e| HostError::Failed(e.to_string()))?;
         self.manager
             .close(target)
             .await
@@ -1156,6 +1150,11 @@ mod spawn_permission_tests {
                     provider: Provider::Claude,
                     cwd: dir.path().into(),
                     prompt: "Inspect files".into(),
+                    branch: None,
+                    new_worktree: false,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
                 },
             )
             .await

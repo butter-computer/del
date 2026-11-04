@@ -970,7 +970,17 @@ impl AppState {
             .map(|r| (&r.id, &r.cwd))
             .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
         {
-            if let Err(error) = self.manager.set_peer_project(id, &self.project_root(cwd)) {
+            // A newly spawned worktree already inherits its caller's project.
+            // Until Git inspection finishes, cwd is only a display fallback;
+            // registering it would transiently split the peer project.
+            let project = self
+                .project_info
+                .get(cwd)
+                .map(|info| &info.root)
+                .or_else(|| self.project_preferences.directories.get(cwd));
+            if let Some(project) = project
+                && let Err(error) = self.manager.set_resolved_peer_project(id, cwd, project)
+            {
                 self.error = Some(format!("Could not save peer project: {error}"));
             }
         }
@@ -2204,6 +2214,9 @@ impl AppState {
         self.save_overrides();
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         let close_id = id.clone();
+        if let Err(error) = manager.stop_peer_work(&id) {
+            self.error = Some(format!("Could not stop archived work: {error}"));
+        }
         self.rt.spawn(async move {
             let _ = manager.close(&close_id).await;
             let _ = tx.send(Msg::Refresh);
@@ -3501,6 +3514,39 @@ pub(crate) mod tests {
     use crate::providers;
     use gpui::AppContext as _;
     use gpui::Entity;
+
+    #[gpui::test]
+    fn uninspected_worktree_keeps_inherited_peer_project(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = draft(cx);
+        state.update(cx, |s, _| {
+            s.manager = SessionManager::new(dir.path().join("sessions.jsonl"), []).unwrap();
+            let parent = del_agent::SessionId::new("parent");
+            let child = del_agent::SessionId::new("child");
+            let project = dir.path().to_path_buf();
+            let checkout = project.join("new-worktree");
+            s.manager.set_peer_project(&parent, &project).unwrap();
+            s.manager.set_peer_project(&child, &project).unwrap();
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: child.clone(),
+                title: "Child".into(),
+                cwd: checkout.clone(),
+                provider: Some(Provider::Codex),
+                account_id: None,
+                active: false,
+                summary: String::new(),
+                pinned: false,
+            });
+            s.sync_peer_projects();
+            assert!(
+                s.manager.authorize_peer(&parent, &child).is_ok(),
+                "UI refresh must not replace inherited project with an uninspected cwd"
+            );
+            s.project_preferences.directories.insert(checkout, project);
+            s.sync_peer_projects();
+            assert!(s.manager.authorize_peer(&parent, &child).is_ok());
+        });
+    }
 
     #[gpui::test]
     fn draft_permissions_follow_provider_on_new_tabs_and_switches(cx: &mut gpui::TestAppContext) {

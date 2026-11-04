@@ -812,6 +812,14 @@ impl ChatView {
     }
 
     pub fn submit_input(&mut self, input: UserInput, steer: bool, cx: &mut Context<Self>) {
+        // A fresh human message can amend idle peer work. Automatic queue
+        // draining still waits for that work to complete; older follow-ups stay.
+        let steer = steer
+            || (!self.is_running()
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|id| self.backend.manager.peer_blocks_user_queue(id)));
         let id = self.enqueue(input, cx);
         if !self.is_running() || steer {
             self.deliver_queued(id, steer, cx);

@@ -3,6 +3,10 @@
 #[path = "../../app/src/mcp_bridge.rs"]
 mod mcp_bridge;
 
+#[path = "../../app/src/providers.rs"]
+#[allow(dead_code)]
+mod providers;
+
 use del_agent::{AgentBackend, MockBackend, Provider, SessionConfig, SessionId, SessionManager};
 use del_mcp::{ServerOptions, SessionInfo, SessionMode, UserAnswer, launch::LaunchConfig};
 use mcp_bridge::{BridgeEvent, BridgeHandle, McpBridge};
@@ -970,7 +974,7 @@ async fn chat_spawn_creates_four_project_peers_with_tracked_first_requests() {
         assert_eq!(record.account_id.as_deref(), Some("selected"));
         assert_eq!(record.model.as_deref(), Some("chosen-model"));
         assert_eq!(record.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+        assert_eq!(record.permission_mode, del_agent::PermissionMode::FullAuto);
         f.manager.authorize_peer(&parent, &id).unwrap();
         let messages = f.manager.peer_messages(&id);
         assert_eq!(messages.len(), 1);
@@ -1272,7 +1276,7 @@ async fn spawned_chat_model_controls_are_scoped_and_close_pauses_delivery() {
     assert_eq!(record.model.as_deref(), Some("review-model"));
     assert_eq!(record.reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(record.service_tier, None);
-    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::FullAuto);
     for tool in ["configure_session", "close_session"] {
         let denied = call(&config, tool, json!({"session_id":parent})).await;
         assert_eq!(denied["isError"], true, "{denied}");
@@ -1329,6 +1333,10 @@ async fn spawned_chat_model_controls_are_scoped_and_close_pauses_delivery() {
     }
     let closed = pending.await.unwrap();
     assert_eq!(closed["structuredContent"]["archived"], true, "{closed}");
+    assert!(f.manager.peer_work(&child).unwrap().stopped_by_user);
+    f.manager
+        .send_to_peer(&parent, &child, "after-close", "Do not start this old task")
+        .unwrap();
     assert!(!f.manager.dispatch_peer(&child).await.unwrap());
     assert!(f.manager.session_record(&child).unwrap().cwd.exists());
 }
@@ -1377,7 +1385,7 @@ async fn spawned_worktree_uses_host_preparation_and_preserves_project_and_permis
     let child = SessionId::new(result["structuredContent"]["id"].as_str().unwrap());
     let record = f.manager.session_record(&child).unwrap();
     assert_eq!(record.cwd, prepared);
-    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::FullAuto);
     f.manager.authorize_peer(&parent, &child).unwrap();
     assert_eq!(f.manager.peer_messages(&child)[0].from, parent);
     assert_eq!(
@@ -1463,7 +1471,7 @@ async fn spawned_chat_can_switch_provider_and_model_without_losing_history_or_pe
     assert_eq!(record.provider, Provider::Claude);
     assert_eq!(record.model.as_deref(), Some("claude-review-model"));
     assert_eq!(record.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::FullAuto);
     assert_eq!(record.segments.len(), 2);
     assert_eq!(f.manager.peer_messages(&child)[0].text, "Original request");
     f.manager.authorize_peer(&parent, &child).unwrap();
@@ -1513,4 +1521,50 @@ async fn idle_configuration_rejects_an_active_turn_without_changing_settings() {
         Some("original")
     );
     manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn sender_can_inspect_and_withdraw_undelivered_requests_over_mcp() {
+    let f = Fixture::new(Default::default()).await;
+    f.handle
+        .upsert_terminal(terminal("recipient", Some(Provider::Codex)), None);
+    let response = call(
+        &f.config,
+        "send_to_session",
+        json!({"session_id":"recipient","idempotency_key":"cancel-test","text":"Obsolete task"}),
+    )
+    .await;
+    assert_eq!(response["isError"], false, "{response}");
+    let request = response["structuredContent"]["receipt"]["id"]
+        .as_str()
+        .unwrap();
+    let state = call(&f.config, "session_work", json!({"action":"get"})).await;
+    assert_eq!(state["structuredContent"]["receipts"][0]["id"], request);
+    assert_eq!(state["structuredContent"]["receipts"][0]["state"], "queued");
+    let recipient = f
+        .handle
+        .launch_config(&SessionId::new("recipient"), Provider::Codex)
+        .unwrap();
+    let denied = call(
+        &recipient,
+        "cancel_session_request",
+        json!({"request_id":request}),
+    )
+    .await;
+    assert_eq!(denied["isError"], true);
+    for _ in 0..2 {
+        let result = call(
+            &f.config,
+            "cancel_session_request",
+            json!({"request_id":request}),
+        )
+        .await;
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(result["structuredContent"]["receipt"]["state"], "cancelled");
+    }
+    let complete = call(&f.config, "session_work", json!({"action":"complete"})).await;
+    assert_eq!(complete["isError"], false, "{complete}");
+    let received = call(&recipient, "session_work", json!({"action":"receive"})).await;
+    assert!(received["structuredContent"]["message"].is_null());
+    f.bridge.shutdown();
 }

@@ -148,6 +148,7 @@ async fn initialize_and_list_tools() {
             "send_to_session",
             "read_session",
             "reply_to_session",
+            "cancel_session_request",
             "session_work",
             "notify"
         ]
@@ -503,7 +504,7 @@ async fn stdio_proxy_round_trip() {
     assert_eq!(lines.len(), 1);
     let v: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(v["id"], 7);
-    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 15);
 
     // Bad token surfaces as a JSON-RPC error for requests.
     let out = Buf::default();
@@ -918,6 +919,7 @@ async fn chat_credentials_expose_project_peers_and_own_goal() {
             "send_to_session",
             "read_session",
             "reply_to_session",
+            "cancel_session_request",
             "session_work"
         ]
     );

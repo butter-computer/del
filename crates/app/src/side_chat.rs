@@ -1692,6 +1692,28 @@ mod tests {
         );
         assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
             matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Steer while waiting")));
+        // A fresh human Send must also reach this idle chat without draining
+        // the older automatic follow-up or losing the outstanding peer request.
+        manager.control_peer_work(&child, "pause").unwrap();
+        chat.update(cx, |c, cx| {
+            c.submit_input(UserInput::text("Direct human amendment"), false, cx)
+        });
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |c, _| c.queue.items.len() == 1 && !c.is_running()) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        chat.read_with(cx, |c, _| {
+            assert_eq!(c.queue.items.len(), 1);
+            assert_eq!(c.queue.items[0].input.text, "Keep this followup queued");
+        });
+        assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
+            matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Direct human amendment")));
+        assert!(manager.peer_blocks_user_queue(&child));
         side.update(cx, |side, cx| side.forget(cx));
     }
 

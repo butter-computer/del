@@ -183,6 +183,23 @@ pub trait McpHost: Send + Sync + 'static {
             .map_err(|e| HostError::Failed(e.to_string()))
     }
 
+    async fn cancel_peer_request(
+        &self,
+        caller: &SessionId,
+        request: &str,
+    ) -> HostResult<del_agent::peers::PeerMessage> {
+        self.peer_manager()
+            .ok_or_else(|| HostError::Failed("Peer messaging is unavailable".into()))?
+            .cancel_peer_request(caller, request)
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    fn peer_receipts(&self, caller: &SessionId) -> Vec<del_agent::peers::PeerMessage> {
+        self.peer_manager()
+            .map(|manager| manager.peer_messages(&manager.resolve_peer(caller)))
+            .unwrap_or_default()
+    }
+
     async fn peer_work(
         &self,
         caller: &SessionId,

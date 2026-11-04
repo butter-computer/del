@@ -997,3 +997,10 @@ activity bar. It supersedes earlier rules where they conflict.
   banner or Pause/Resume controls. Incoming peer work wakes agent-managed pauses,
   but explicit user Stop stays stopped across restarts. Successful user steering
   resumes stopped work while retaining peer obligations and queued follow-ups.
+
+- Fresh human Send in an idle chat amends blocked peer work immediately, without
+  releasing older follow-ups. Native running turns still queue normal input.
+- Agents can inspect their delivery receipts and withdraw only their own queued
+  or definitely failed requests. Never silently replay ambiguous deliveries.
+- Close/archive holds workers stopped even if new peer messages arrive. Preserve
+  inherited project membership while Git worktree metadata is still loading.

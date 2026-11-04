@@ -950,6 +950,16 @@ impl Inner {
                     },
                 )
             }
+            "cancel_session_request" => {
+                let a: CancelRequestArgs = parse(args)?;
+                Ok(
+                    match host.cancel_peer_request(caller, &a.request_id).await {
+                        Ok(message) => tool_json(json!({"receipt":message,
+                        "instruction":"Request withdrawn without reopening the recipient. Continue remaining work, or complete when all obligations are finished."})),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
+            }
             "session_work" => {
                 let a: WorkArgs = parse(args)?;
                 if a.action == "receive" {
@@ -960,9 +970,17 @@ impl Inner {
                         Err(e) => tool_err(e.to_string()),
                     });
                 }
+                let receipts: Vec<_> = host
+                    .peer_receipts(caller)
+                    .into_iter()
+                    .map(|m| {
+                        json!({"id":m.id,"from":m.from,"to":m.to,"reply_to":m.reply_to,
+                        "state":m.state,"error":m.error})
+                    })
+                    .collect();
                 Ok(match host.peer_work(caller, &a.action).await {
                     Ok(work) => tool_json(
-                        json!({"work":work,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete unfinished work. Do not restart an already completed assignment." }}),
+                        json!({"work":work,"receipts":receipts,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete unfinished work. Do not restart an already completed assignment." }}),
                     ),
                     Err(e) => tool_err(e.to_string()),
                 })

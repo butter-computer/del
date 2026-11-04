@@ -12,7 +12,7 @@ pub(super) enum SendOrigin<'a> {
     Continuation,
 }
 
-pub(super) const CONTINUE_WORK: &str = "<del_work_continuation>Continue unfinished work and current peer obligations from the recorded conversation. A new peer request after a completed task is new work; do not restart the completed task. A turn ending or sending a peer reply does not complete your work. Use reply_to_session for requests. Call session_work complete only when the original task and all peer work are actually finished. If you can do no more until a peer replies, call session_work wait. If blocked for another reason, call session_work pause and explain why. Do not process queued user messages yourself.</del_work_continuation>";
+pub(super) const CONTINUE_WORK: &str = "<del_work_continuation>Continue unfinished work and current peer obligations from the recorded conversation. A new peer request after a completed task is new work; do not restart the completed task. A turn ending or sending a peer reply does not complete your work. Use reply_to_session for requests. Inspect session_work get for delivery errors; use cancel_session_request to withdraw your own obsolete queued or failed requests without reopening a worker. Call session_work complete only when the original task and all peer work are actually finished. If you can do no more until a peer replies, call session_work wait. If blocked for another reason, call session_work pause and explain why. Do not process queued user messages yourself.</del_work_continuation>";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextCursor {
@@ -214,6 +214,19 @@ impl SessionManager {
         self.shared.peers.lock().unwrap().register(session, project)
     }
 
+    pub fn set_resolved_peer_project(
+        &self,
+        session: &SessionId,
+        cwd: &Path,
+        project: &Path,
+    ) -> Result<()> {
+        self.shared
+            .peers
+            .lock()
+            .unwrap()
+            .register_resolved(session, cwd, project)
+    }
+
     /// Create an equal chat peer with a durable first request back to its caller.
     /// Keep the caller's directory/project identity rather than allowing model
     /// input to register a new project or broaden execution permissions.
@@ -274,14 +287,6 @@ impl SessionManager {
     ) -> Result<SessionHandle> {
         let caller = self.resolve_peer(caller);
         let parent = self.session_record(&caller)?;
-        let project = self
-            .shared
-            .peers
-            .lock()
-            .unwrap()
-            .project(&caller)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| AgentError::Backend("Caller has no registered Del project".into()))?;
         config.permission_mode = parent.permission_mode;
         let account = if config.provider == parent.provider {
             parent.account_id
@@ -300,8 +305,26 @@ impl SessionManager {
                 .update(&child.id, |record| {
                     record.title = Some(prompt.trim().chars().take(60).collect());
                 })?;
-            self.set_peer_project(&child.id, &project)?;
-            self.send_to_peer(&caller, &child.id, &format!("spawn:{}", child.id), prompt)?;
+            // Startup awaits the provider. Inherit the caller's current project,
+            // which Git inspection may have resolved while startup was pending.
+            let mut peers = self.shared.peers.lock().unwrap();
+            let project = peers
+                .project(&caller)
+                .map(Path::to_path_buf)
+                .ok_or_else(|| {
+                    AgentError::Backend("Caller has no registered Del project".into())
+                })?;
+            peers.register(&child.id, &project)?;
+            let message = peers.send(
+                &caller,
+                &child.id,
+                &format!("spawn:{}", child.id),
+                prompt,
+                None,
+                false,
+            )?;
+            drop(peers);
+            self.publish_peer(&message);
             Ok(())
         })();
         if let Err(error) = queued {
@@ -309,6 +332,30 @@ impl SessionManager {
             return Err(error);
         }
         Ok(child)
+    }
+
+    /// Stop/close is sticky, unlike a model's cooperative pause.
+    pub fn stop_peer_work(&self, session: &SessionId) -> Result<()> {
+        let session = self.resolve_peer(session);
+        let mut peers = self.shared.peers.lock().unwrap();
+        peers.pause(&session)?;
+        let work = peers.work(&session);
+        drop(peers);
+        self.publish_local(&session, AgentEvent::PeerWorkChanged { work });
+        Ok(())
+    }
+
+    /// The authenticated sender can withdraw only an unstarted request.
+    /// Sharing the mailbox lock with claim() closes the cancellation/send race.
+    pub fn cancel_peer_request(&self, caller: &SessionId, request: &str) -> Result<PeerMessage> {
+        let caller = self.resolve_peer(caller);
+        let mut peers = self.shared.peers.lock().unwrap();
+        let message = peers.cancel_request(&caller, request)?;
+        let work = peers.work(&message.to);
+        drop(peers);
+        self.publish_peer(&message);
+        self.publish_local(&message.to, AgentEvent::PeerWorkChanged { work });
+        Ok(message)
     }
 
     pub fn resolve_peer(&self, id: &SessionId) -> SessionId {

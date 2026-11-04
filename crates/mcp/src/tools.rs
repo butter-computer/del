@@ -156,8 +156,14 @@ pub fn tool_list() -> Value {
             "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
         },
         {
+            "name":"cancel_session_request", "title":"Withdraw an undelivered peer request",
+            "description":"Cancel your own queued or definitely failed request using its request_id. Use session_work get to inspect delivery receipts and errors first. This does not delete or reopen the recipient. A delivering, delivered or uncertain request cannot be withdrawn: ask the recipient to stop; uncertain delivery needs user review. Cancellation is idempotent and never replays old tasks.",
+            "inputSchema":{"type":"object","properties":{"request_id":{"type":"string","minLength":1}},"required":["request_id"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
+        },
+        {
             "name":"session_work", "title":"Control current peer work",
-            "description":"Read or update your own current work. Terminal agents use receive to pull their next peer message at a safe tool boundary; chat delivery is automatic. A model turn ending is not task completion. Use complete only when both your original task and all peer requests/replies are actually finished; this releases queued user messages. Use wait only when you have no independent work left until a peer replies. Use pause if blocked or instructed to stop; resume continues paused work. Never mark work complete merely because you sent a reply.",
+            "description":"Read or update your own current work. Responses include your delivery receipts and errors; withdraw obsolete queued/failed requests with cancel_session_request rather than deleting or reopening chats. Terminal agents use receive to pull their next peer message at a safe tool boundary; chat delivery is automatic. A model turn ending is not task completion. Use complete only when both your original task and all peer requests/replies are actually finished; this releases queued user messages. Use wait only when you have no independent work left until a peer replies. Use pause if blocked or instructed to stop; resume continues paused work. Never mark work complete merely because you sent a reply.",
             "inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["get","receive","complete","wait","pause","resume"]}},"required":["action"],"additionalProperties":false},
             "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
         },
@@ -319,6 +325,11 @@ pub struct ReplyArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CancelRequestArgs {
+    pub request_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkArgs {
     pub action: String,
 }
@@ -335,6 +346,7 @@ pub fn is_peer_tool(name: &str) -> bool {
             | "read_session"
             | "send_to_session"
             | "reply_to_session"
+            | "cancel_session_request"
             | "session_work"
     )
 }
@@ -420,6 +432,7 @@ mod tests {
             "read_session",
             "send_to_session",
             "reply_to_session",
+            "cancel_session_request",
             "session_work",
         ] {
             assert!(is_peer_tool(name), "{name}");

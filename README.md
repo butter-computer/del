@@ -11,6 +11,11 @@ Del does not include model weights or replace their account requirements.
 See the [0.1.35 source update notes](docs/releases/0.1.35.md) and
 [validation record](docs/releases/0.1.35-validation.md).
 
+The 0.1.35 PR integrates the completed UI agent passes, council agent controls,
+and session recovery fixes on `codex/session-controls-fixes`. Fresh messages reach
+idle chats even while peer work is pending; agents can inspect delivery receipts
+and withdraw their own undelivered requests without reopening archived workers.
+
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
 when making future changes.

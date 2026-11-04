@@ -611,12 +611,17 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                         .gap_1()
                         .text_size(zpx(TEXT_SM))
                         .text_color(cx.theme().muted_foreground)
-                        .when_some(relative_time(row.updated_secs).filter(|_| !state.session_working(&row.id)), |d, time| d.child(time))
+                        .when_some(
+                            relative_time(row.updated_secs)
+                                .filter(|_| !state.session_working(&row.id)),
+                            |d, time| d.child(time),
+                        )
                         .when_some(
                             status_glyph(
                                 row,
                                 state.session_working(&row.id),
                                 row.unread || state.terminal_unread(&row.id),
+                                state.failed_turns.contains(&row.id),
                             ),
                             |d, glyph| d.child(glyph),
                         ),
@@ -2323,7 +2328,7 @@ mod session_hover_tests {
     }
 
     impl Render for Fixture {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let mut next = self.row.clone();
             next.id = del_agent::SessionId::new("hover-next");
             div()
@@ -2340,6 +2345,7 @@ mod session_hover_tests {
                                 &self.rename,
                                 &self.state,
                                 row.archived,
+                                window,
                                 cx,
                             )
                         })),
