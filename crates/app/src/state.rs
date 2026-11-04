@@ -279,7 +279,11 @@ impl AppState {
                     Ok(ManagerEvent::TitleLoading { session, loading }) => {
                         let _ = events_tx.send(Msg::TitleLoading(session, loading));
                     }
-                    Ok(ManagerEvent::StatusChanged { .. }) | Err(RecvError::Lagged(_)) => {
+                    Ok(
+                        ManagerEvent::StatusChanged { .. }
+                        | ManagerEvent::ConfigurationChanged { .. },
+                    )
+                    | Err(RecvError::Lagged(_)) => {
                         let _ = events_tx.send(Msg::Refresh);
                     }
                     Ok(ManagerEvent::Event {
@@ -2148,6 +2152,39 @@ impl AppState {
                 }
                 let _ = tx.send(Msg::Unloaded(id));
             });
+        }
+        cx.notify();
+    }
+
+    /// MCP has already closed the backend. Preserve history and Git files while
+    /// acknowledging only after the sidebar archive preference reaches disk.
+    pub fn finish_agent_close(
+        &mut self,
+        id: SessionId,
+        archive: bool,
+        reply: tokio::sync::oneshot::Sender<del_mcp::HostResult<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tab(&Tab::Session(id.clone()), cx);
+        self.unloaded_chats.push(id.clone());
+        if archive {
+            self.overrides_mut().set_archived(&id, true);
+            if let Some(path) = sessions::overrides_path() {
+                let generation = self.overrides_writer.request();
+                let (writer, snapshot) = (self.overrides_writer.clone(), self.overrides.clone());
+                self.rt.spawn_blocking(move || {
+                    let result = writer
+                        .write(generation, &snapshot, &path)
+                        .map_err(|e| del_mcp::HostError::Failed(e.to_string()));
+                    let _ = reply.send(result);
+                });
+            } else {
+                let _ = reply.send(Err(del_mcp::HostError::Failed(
+                    "Sidebar storage unavailable".into(),
+                )));
+            }
+        } else {
+            let _ = reply.send(Ok(()));
         }
         cx.notify();
     }

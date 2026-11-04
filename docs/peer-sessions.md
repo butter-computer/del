@@ -63,6 +63,22 @@ default). Each successful call creates a new session; creation itself is not
 idempotent, so agents must inspect sessions before retrying an unknown outcome.
 Terminal callers retain the existing terminal launch behavior.
 
+### Spawn configuration and lifecycle
+
+See the [README agent controls](../README.md#project-peer-conversations) for the
+agent-facing fields and limitations. `peer_spawn_config` validates the caller's
+source directory and prepares inherited configuration. The app alone supplies a
+prepared workspace to `spawn_prepared_peer_session`; that host-only seam always
+re-reads permissions and project membership from the caller. Git remains in the
+existing app project module, outside the model and provider adapters.
+
+`session_models` reads the account-specific native catalog without inference.
+`configure_session` uses the existing provider handoff and next-turn model settings.
+`close_session` pauses unfinished peer work, closes the backend, then awaits the UI
+bridge's tab cleanup and optional persisted archive update. It never deletes Git
+work. Configuration/closing require direct-spawn ownership from the authenticated
+server's current-launch relationship map as well as the ordinary project check.
+
 ## Recovery and visibility
 
 ### Main and Side chat discovery

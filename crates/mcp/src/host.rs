@@ -78,6 +78,37 @@ pub struct SpawnRequest {
     pub provider: Provider,
     pub cwd: PathBuf,
     pub prompt: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub branch: Option<String>,
+    pub new_worktree: bool,
+}
+
+impl SpawnRequest {
+    pub fn apply_model(&self, config: &mut del_agent::SessionConfig) {
+        if self.model.is_some() {
+            config.model = self.model.clone();
+            config.reasoning_effort = None;
+            config.service_tier = None;
+        }
+        if self.reasoning_effort.is_some() {
+            config.reasoning_effort = self.reasoning_effort.clone();
+        }
+        if self.service_tier.is_some() {
+            config.service_tier = self.service_tier.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureRequest {
+    pub session_id: String,
+    pub provider: Option<Provider>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +252,62 @@ pub trait McpHost: Send + Sync + 'static {
         caller: &SessionId,
         request: SpawnRequest,
     ) -> HostResult<SessionInfo>;
+
+    async fn session_models(
+        &self,
+        caller: &SessionId,
+        provider: Provider,
+    ) -> HostResult<Vec<del_agent::ModelInfo>> {
+        let manager = self
+            .peer_manager()
+            .ok_or_else(|| HostError::Failed("Model discovery unavailable".into()))?;
+        let parent = manager
+            .session_record(&manager.resolve_peer(caller))
+            .map_err(|e| HostError::Failed(e.to_string()))?;
+        let account = if provider == parent.provider {
+            parent.account_id.as_deref()
+        } else {
+            None
+        };
+        manager
+            .account_models(provider, account, &parent.cwd)
+            .await
+            .map_err(|e| HostError::Failed(e.to_string()))
+    }
+
+    async fn configure_session(
+        &self,
+        caller: &SessionId,
+        request: ConfigureRequest,
+    ) -> HostResult<SessionSummary> {
+        let manager = self
+            .peer_manager()
+            .ok_or_else(|| HostError::Failed("Configuration unavailable".into()))?;
+        let target = manager.resolve_peer(&SessionId::new(&request.session_id));
+        self.authorize_peer(caller, &target)?;
+        manager
+            .configure_idle_session(
+                &target,
+                request.provider,
+                request.model,
+                request.reasoning_effort,
+                request.service_tier,
+            )
+            .await
+            .map_err(|e| HostError::Failed(e.to_string()))?;
+        self.session_summary(caller, &target).await
+    }
+
+    async fn close_session(
+        &self,
+        _caller: &SessionId,
+        _target: &SessionId,
+        _archive: bool,
+    ) -> HostResult<()> {
+        Err(HostError::Failed(
+            "Session closing requires the Del app host".into(),
+        ))
+    }
 
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()>;
 }

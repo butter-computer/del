@@ -192,6 +192,16 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Unread conversations
 
+- Saved session rows show a hover card after 120 ms to the right, clamped to the window.
+  Include title, age/activity, project, code folder path and Git branch with existing
+  icons. Omit the redundant worktree-name line (such as `checkout`) and provider/model line. The row owns the preview even over Archive,
+  Pin, Restore and Delete: don't attach competing tooltips to those buttons.
+  Keep the content width at 300 logical pixels. Animate only fresh appearance with
+  a short fade/slide, respecting reduced motion. Switching between sessions is
+  immediate and static: no fade, slide or other animation on row changes.
+  Use the hovered row's cached directory metadata, never the
+  selected chat's Git state. Inspect Git off-thread. Suppress during rename/drag;
+  leaving or pressing dismisses the card. Hover must not select or mark a chat read.
 - Mark replies completed in chats the user is not viewing as unread. Sidebar
   rows show unread as semibold title text and a filled done check; top tabs keep
   the blue dot.
@@ -493,6 +503,11 @@ This records the final decisions, including corrections to earlier experiments.
   "What are we building?" heading.
   Show the starting branch as a muted grey branch icon followed by its name, without a "Branch:" prefix.
   Hide Git controls for non-repositories; disable them while launch is in progress.
+- Selecting another starting branch in a dirty checkout automatically creates a
+  managed worktree at that branch’s latest locally available commit. Preserve the
+  source branch, index, and all files; never stash/reset or copy uncommitted edits.
+  Retry the same prepared worktree even if the source becomes clean. Apply this
+  preparation consistently to Chat, Terminal, and agent-created chats.
 - Create unique owned worktrees and branches asynchronously, retain their directory
   on resume, and reuse the same worktree on a failed-start retry.
 - Never discard Git work when a session closes, unloads, archives, or is deleted.
@@ -820,9 +835,19 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   of silently queuing work that cannot run. Keep project isolation unchanged.
 
 - Chat agents can create actual chat peers through `spawn_session`, inheriting the
-  caller’s directory, project, permissions, and same-provider account/model. The
-  first task is a durable peer request with a reply route, not an untracked user
+  caller’s directory, project, permissions, and same-provider account/model unless
+  an explicit model is selected. Model changes clear inherited effort/tier unless
+  supplied. `session_models` discovers native model choices without inference.
+  Optional starting branches and managed worktrees use the existing Git preparation
+  and preserve the caller's project and permissions; uncommitted edits are not copied.
+  The first task is a durable peer request with a reply route, not an untracked user
   prompt. Unopened worker chats are driven by the same background peer scheduler.
+- Agents may configure idle chats or close/archive chats they directly spawned in
+  the current app launch. Configuration preserves public history and publishes the
+  provider and model together before the next turn. Closing pauses unfinished peer
+  work and preserves conversation history, branches, and worktree files. These
+  controls do not grant authority over arbitrary project peers. Terminal spawns
+  reject chat-only configuration and workspace options explicitly.
 
 - Peers perform delegated tasks within existing permissions and standing user
   constraints, including new requests after an earlier assignment completes.

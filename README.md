@@ -318,9 +318,14 @@ navigate, Return to choose, and Escape to dismiss. Open the branch picker with �
 Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
-the existing checkout only when it is clean; Git also refuses branches checked out
-elsewhere. With New worktree, Del creates a unique `del/session-<UUID>` branch from
-the selected commit without changing the source checkout. Uncommitted source changes
+the existing checkout when it is clean. If it has local changes, Del automatically
+creates a managed worktree at the selected branch’s latest local commit, preserving
+the original checkout and all staged, unstaged, and untracked files. The same
+fallback applies to agent-spawned chats. With New worktree enabled, Del always
+creates a unique `del/session-<UUID>` branch from the selected commit without
+changing the source checkout. Branch tips are resolved at launch from local Git
+refs; Del does not fetch or pull automatically. Git still refuses a clean shared
+checkout switch to a branch already checked out elsewhere. Uncommitted source changes
 are not copied. An unborn repository needs its first commit before worktree creation.
 
 Del-owned worktrees live in `<Del data>/worktrees/<UUID>/checkout`, with an ownership
@@ -344,6 +349,15 @@ wait for approval, without a session count. Each row shows its age and a status 
 for you, failed, or unread (a filled tick with a bold title, cleared when the chat is read). Read, inactive rows
 have no status marker. Hide timestamps while unread ticks are visible. Keep-awake uses a neutral hover-colored background and animated gold
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
+
+Hover a saved session to preview its full title, age and activity, project,
+code folder path, and Git branch with matching icons. Separate worktree-name
+lines (such as `checkout`) are omitted because the path already identifies the folder.
+The compact card appears beside the sidebar after 120 ms with a brief fade and slide.
+It stays visible over Archive, Pin, and archived-session actions; moving between
+rows updates it immediately without animation. Leaving or pressing the row dismisses it. Hovering
+does not select the chat or clear unread replies.
+Git details come from that session's checkout and refresh in the background.
 
 The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat
 page's edge. The 22 px status bar shows session metrics and the Chat/Terminal toggle:
@@ -802,7 +816,32 @@ Creating a worker does not make either chat an orchestrator or change your selec
 conversation. Each spawn call creates a session; inspect the session list before
 retrying a call whose outcome is unknown.
 
-Tools: `spawn_session`, `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
+Chat spawns also accept `model`, `reasoning_effort`, `service_tier`, `branch`, and
+`new_worktree`. `session_models` returns the selected provider's live catalog;
+use its exact model and effort IDs. An explicit model clears inherited effort/tier
+unless supplied. `branch` selects the starting branch; without `new_worktree` it
+switches the shared checkout if clean, or automatically creates an isolated
+checkout from the selected branch’s tip if local changes would block the switch.
+With `new_worktree: true`, Del creates
+an isolated managed checkout and unique branch using the existing worktree rules.
+The requested `cwd` must still be the caller's directory; the app prepares the new
+path and retains the original project boundary. Uncommitted edits are not copied.
+Terminal spawns reject these chat-only options rather than silently ignoring them.
+
+`configure_session` changes an idle spawned chat's provider and model selection for
+subsequent prompts. Provider switching preserves public history and uses the new
+provider's default account; unfinished native goals must be cleared first. Omitted
+model/effort/tier fields reset to defaults. `close_session` unloads a spawned chat;
+`archive: true` also hides it from the ordinary sidebar. Both preserve history,
+branches, and worktree files. Active peer work is paused before closing so it does
+not immediately restart; collect replies before closing workers. These controls
+are restricted to chats directly spawned by the caller during this Del launch,
+not arbitrary project peers or the caller itself. Reopening a paused chat does not
+silently resume its delegated task. Peer discovery reports saved model settings
+and the current-launch `spawned_by` identity.
+
+Tools: `spawn_session`, `session_models`, `configure_session`, `close_session`,
+`list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
 `reply_to_session`, and `session_work`. Context reads are paginated and exclude
 private reasoning. Side chats retain mailbox routing after restoration or provider
 changes. Plain shells are excluded. Terminal agents use a cooperative inbox and
@@ -815,6 +854,13 @@ Main agents and Side chats use these same messaging tools in both directions.
 and previously opened Side chats, including whether they can currently receive
 messages. The list survives restart and provider changes. See
 [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
+
+For council-style reviews, create independent read-only reviewers against the same
+candidate, select their models from `session_models`, and collect their tracked
+replies before closing or archiving them. Reviewers can share a checkout; use
+isolated worktrees for independent edits. Review criteria and iteration belong in
+your skill or prompt. A personal `council` skill is discovered through the normal
+provider skill catalog; it is not bundled with Del.
 
 ## Files, terminals, and browser
 

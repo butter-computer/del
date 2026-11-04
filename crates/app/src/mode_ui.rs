@@ -1102,6 +1102,45 @@ impl AppShell {
                     self.notices.pop_front();
                 }
             }
+            BridgeEvent::PrepareWorkspace {
+                cwd,
+                branch,
+                new_worktree,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let options = crate::projects::LaunchOptions {
+                    branch,
+                    worktree: new_worktree,
+                    token: uuid::Uuid::new_v4().to_string(),
+                };
+                let Some(storage) = del_agent::data_dir() else {
+                    let _ = reply.send(Err(HostError::Failed(
+                        "Del data directory unavailable".into(),
+                    )));
+                    return;
+                };
+                self.state
+                    .read(cx)
+                    .backend()
+                    .runtime
+                    .spawn_blocking(move || {
+                        let result = crate::projects::prepare(&cwd, &options, &storage)
+                            .map_err(HostError::Failed);
+                        let _ = reply.send(result);
+                    });
+            }
+            BridgeEvent::CloseChat {
+                target,
+                archive,
+                reply,
+            } => {
+                self.state.update(cx, |state, cx| {
+                    state.finish_agent_close(target, archive, reply, cx)
+                });
+            }
             BridgeEvent::SpawnTerminal {
                 caller: _,
                 request,

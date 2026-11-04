@@ -98,6 +98,9 @@ retention. Reading does not send a provider prompt or alter the user's read stat
 and permissions. Same-provider children inherit account/model/effort/tier;
 cross-provider children use that provider’s defaults. Directory validation resolves
 symlinks and rejects a different working directory before creating a backend.
+The app may use `peer_spawn_config` and `spawn_prepared_peer_session` to apply
+explicit model settings and a workspace prepared by Del's existing Git machinery;
+permissions and project membership are always taken from the caller.
 The initial prompt is queued through `send_to_peer`, giving it the same durable
 reply routing and work lifecycle as later requests. The app’s existing background
 peer dispatcher runs these chats even when their views have never been opened.

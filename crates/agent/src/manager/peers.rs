@@ -224,16 +224,20 @@ impl SessionManager {
         cwd: &Path,
         prompt: &str,
     ) -> Result<SessionHandle> {
+        let config = self.peer_spawn_config(caller, provider, cwd).await?;
+        self.spawn_prepared_peer_session(caller, config, prompt)
+            .await
+    }
+
+    /// Validate the requested source directory before the host prepares Git work.
+    pub async fn peer_spawn_config(
+        &self,
+        caller: &SessionId,
+        provider: Provider,
+        cwd: &Path,
+    ) -> Result<SessionConfig> {
         let caller = self.resolve_peer(caller);
         let parent = self.session_record(&caller)?;
-        let project = self
-            .shared
-            .peers
-            .lock()
-            .unwrap()
-            .project(&caller)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| AgentError::Backend("Caller has no registered Del project".into()))?;
         let requested = cwd.to_path_buf();
         let inherited = parent.cwd.clone();
         let same_directory = tokio::task::spawn_blocking(move || {
@@ -249,32 +253,42 @@ impl SessionManager {
         if !same_directory {
             return Err(AgentError::Backend("New chat peers must use the caller's working directory; they inherit its Del project".into()));
         }
-        let same_provider = provider == parent.provider;
-        let child = self
-            .start_account_session(
-                SessionConfig {
-                    cwd: parent.cwd.clone(),
-                    provider,
-                    model: if same_provider { parent.model } else { None },
-                    reasoning_effort: if same_provider {
-                        parent.reasoning_effort
-                    } else {
-                        None
-                    },
-                    service_tier: if same_provider {
-                        parent.service_tier
-                    } else {
-                        None
-                    },
-                    permission_mode: parent.permission_mode,
-                },
-                if same_provider {
-                    parent.account_id
-                } else {
-                    None
-                },
-            )
-            .await?;
+        let same = provider == parent.provider;
+        Ok(SessionConfig {
+            cwd: parent.cwd,
+            provider,
+            model: if same { parent.model } else { None },
+            reasoning_effort: if same { parent.reasoning_effort } else { None },
+            service_tier: if same { parent.service_tier } else { None },
+            permission_mode: parent.permission_mode,
+        })
+    }
+
+    /// Host-only seam for workspaces prepared by Del's Git launch machinery.
+    /// Permissions and project membership always come from the authenticated caller.
+    pub async fn spawn_prepared_peer_session(
+        &self,
+        caller: &SessionId,
+        mut config: SessionConfig,
+        prompt: &str,
+    ) -> Result<SessionHandle> {
+        let caller = self.resolve_peer(caller);
+        let parent = self.session_record(&caller)?;
+        let project = self
+            .shared
+            .peers
+            .lock()
+            .unwrap()
+            .project(&caller)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AgentError::Backend("Caller has no registered Del project".into()))?;
+        config.permission_mode = parent.permission_mode;
+        let account = if config.provider == parent.provider {
+            parent.account_id
+        } else {
+            None
+        };
+        let child = self.start_account_session(config, account).await?;
         let queued = (|| {
             // Revalidate after provider startup: a deleted caller must not leave
             // an unowned agent running an instruction with no reply destination.

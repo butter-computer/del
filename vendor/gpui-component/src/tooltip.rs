@@ -41,6 +41,7 @@ pub struct Tooltip {
     content: TooltipContext,
     key_binding: Option<Kbd>,
     action: Option<(Box<dyn Action>, Option<SharedString>)>,
+    transition: Option<EffectTransition>,
 }
 
 impl Tooltip {
@@ -51,6 +52,7 @@ impl Tooltip {
             content: TooltipContext::Text(text.into()),
             key_binding: None,
             action: None,
+            transition: None,
         }
     }
 
@@ -64,10 +66,18 @@ impl Tooltip {
             style: StyleRefinement::default(),
             key_binding: None,
             action: None,
+            transition: None,
             content: TooltipContext::Element(Box::new(move |window, cx| {
                 builder(window, cx).into_any_element()
             })),
         }
+    }
+
+    /// Animate fresh appearance only; switching visible content is immediate.
+    /// The shared overlay supplies a stable epoch, so redraws don't restart it.
+    pub fn enter_transition(mut self, transition: EffectTransition) -> Self {
+        self.transition = Some(transition);
+        self
     }
 
     /// Set Action to display key binding information for the tooltip if it exists.
@@ -158,8 +168,24 @@ pub(crate) fn render_tooltip(
     content_view: AnyView,
     transition: BaseTooltipTransition,
     _: &mut Window,
-    _: &mut App,
+    cx: &mut App,
 ) -> AnyElement {
+    let custom = content_view
+        .clone()
+        .downcast::<Tooltip>()
+        .ok()
+        .and_then(|view| view.read(cx).transition.clone());
+    if let Some(effect) = custom {
+        let BaseTooltipTransition::Enter { epoch } = transition else {
+            return div().child(content_view).into_any_element();
+        };
+        return effect
+            .apply(
+                div().child(content_view),
+                ElementId::NamedInteger("tooltip-reveal".into(), epoch as u64),
+            )
+            .into_any_element();
+    }
     div().child(content_view).map(|element| match transition {
         BaseTooltipTransition::Switch {
             epoch,
@@ -243,9 +269,8 @@ struct TooltipTrigger {
     bounds: Bounds<Pixels>,
 }
 
-pub(crate) trait ManagedTooltipExt:
-    StatefulInteractiveElement + crate::ElementExt + Sized
-{
+/// Attach a custom tooltip through the window's shared hover overlay.
+pub trait ManagedTooltipExt: StatefulInteractiveElement + crate::ElementExt + Sized {
     fn managed_tooltip(
         self,
         build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
