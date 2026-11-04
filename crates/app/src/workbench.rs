@@ -125,6 +125,49 @@ fn status_row(label: impl Into<SharedString>, value: impl Into<SharedString>) ->
     .disabled(true)
 }
 
+/// A row with its fine print underneath, kept together as one item.
+fn status_row_with_note(
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    note: impl Into<SharedString>,
+) -> PopupMenuItem {
+    let (label, value, note) = (label.into(), value.into(), note.into());
+    PopupMenuItem::element(move |_, cx| {
+        v_flex()
+            .w_full()
+            .min_w(zpx(180.))
+            .max_w(zpx(STATUS_POPOVER_WIDTH))
+            .py(zpx(2.))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(zpx(16.))
+                    .justify_between()
+                    .text_size(zpx(TEXT_SM))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(cx.theme().foreground)
+                            .child(label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(crate::appearance::secondary_text())
+                            .child(value.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(zpx(TEXT_XS))
+                    .text_color(crate::appearance::secondary_text())
+                    .child(note.clone()),
+            )
+    })
+    .disabled(true)
+}
+
 fn status_note(text: impl Into<SharedString>) -> PopupMenuItem {
     let text = text.into();
     PopupMenuItem::element(move |_, _| {
@@ -752,13 +795,15 @@ impl AppShell {
                         )));
                         if let Some(limits) = &limits {
                             for window in &limits.windows {
-                                menu = menu.item(status_row(
-                                    window.label.clone(),
-                                    format!("{:.0}% left", window.remaining),
-                                ));
-                                if let Some(reset) = &window.resets_at {
-                                    menu = menu.item(status_note(format!("Resets {reset}")));
-                                }
+                                let left = format!("{:.0}% left", window.remaining);
+                                menu = menu.item(match &window.resets_at {
+                                    Some(reset) => status_row_with_note(
+                                        window.label.clone(),
+                                        left,
+                                        format!("Resets {reset}"),
+                                    ),
+                                    None => status_row(window.label.clone(), left),
+                                });
                             }
                         } else {
                             menu = menu.item(status_note(

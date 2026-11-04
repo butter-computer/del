@@ -483,7 +483,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                     v_flex().rounded(zpx(10.)).bg(crate::appearance::composer_surface()).pb_1()
                         .child(provider_row(provider, s.status_of(provider), state, cx))
                         .when(provider != Provider::Acp, |rows| rows.child(div().h(zpx(1.)).mx_3().mb_1().bg(crate::appearance::separator())).child(
-                            h_flex().pl(zpx(34.)).pr_3().py_1p5().gap_2().items_center()
+                            h_flex().pl(zpx(30.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
@@ -504,7 +504,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             let remove_id = id.clone();
                             let default_id = id.clone();
                             let needs_login = s.account_needs_login(&id);
-                            h_flex().pl(zpx(34.)).pr_3().py_1p5().gap_2().items_center()
+                            h_flex().pl(zpx(30.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))

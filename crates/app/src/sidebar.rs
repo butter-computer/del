@@ -1219,9 +1219,12 @@ fn space_contents(
                             .hover(|row| row.bg(rgba(0xffffff0a)))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
                             .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
-                            .context_menu(move |menu, _, _| {
+                            .context_menu(move |menu, window, cx| {
                                 let state = cleanup_state.clone(); let path = cleanup_path.clone();
-                                menu.item(PopupMenuItem::new("Remove unused clean worktrees").on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))))
+                                // The worktree cleanup only this menu offers, then the row's three-dot actions.
+                                let menu_state = state.clone(); let menu_path = path.clone();
+                                let menu = menu.item(PopupMenuItem::new("Remove unused clean worktrees").icon(crate::icons::path("icons/git-branch.svg")).on_click(move |_, _, cx| state.update(cx, |s, cx| s.cleanup_project_worktrees(path.clone(), cx))));
+                                project_menu(menu.separator(), &menu_state, &menu_path, window, cx)
                             })
                             .child(if project_renaming {
                                 div().flex_1().min_w_0().child(Input::new(rename).appearance(false).bordered(false).text_size(zpx(TEXT_MD))).into_any_element()
