@@ -503,6 +503,11 @@ This records the final decisions, including corrections to earlier experiments.
   "What are we building?" heading.
   Show the starting branch as a muted grey branch icon followed by its name, without a "Branch:" prefix.
   Hide Git controls for non-repositories; disable them while launch is in progress.
+- Selecting another starting branch in a dirty checkout automatically creates a
+  managed worktree at that branch’s latest locally available commit. Preserve the
+  source branch, index, and all files; never stash/reset or copy uncommitted edits.
+  Retry the same prepared worktree even if the source becomes clean. Apply this
+  preparation consistently to Chat, Terminal, and agent-created chats.
 - Create unique owned worktrees and branches asynchronously, retain their directory
   on resume, and reuse the same worktree on a failed-start retry.
 - Never discard Git work when a session closes, unloads, archives, or is deleted.

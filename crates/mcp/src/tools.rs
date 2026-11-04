@@ -101,7 +101,7 @@ pub fn tool_list() -> Value {
                     "model": {"type":"string", "minLength":1, "maxLength":256, "description":"Exact provider model ID from session_models. Omit to inherit for the same provider or use the new provider default."},
                     "reasoning_effort": {"type":"string", "minLength":1, "maxLength":64},
                     "service_tier": {"type":"string", "minLength":1, "maxLength":64},
-                    "branch": {"type":"string", "minLength":1, "maxLength":256, "description":"Starting branch. Without new_worktree, switches the shared checkout only if clean."},
+                    "branch": {"type":"string", "minLength":1, "maxLength":256, "description":"Starting branch. Without new_worktree, switches a clean shared checkout; local changes trigger an isolated managed checkout from the selected branch tip, preserving source edits."},
                     "new_worktree": {"type":"boolean", "default":false, "description":"Create a Del-owned isolated checkout and unique branch from branch or current HEAD. Uncommitted edits are not copied. Chat only."}
                 },
                 "required": ["provider", "cwd", "prompt"],

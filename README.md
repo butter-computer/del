@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.33` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.34` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.33 source update notes](docs/releases/0.1.33.md) and
-[validation record](docs/releases/0.1.33-validation.md).
+See the [0.1.34 source update notes](docs/releases/0.1.34.md) and
+[validation record](docs/releases/0.1.34-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.33-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.34-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -310,9 +310,14 @@ navigate, Return to choose, and Escape to dismiss. Open the branch picker with �
 Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
-the existing checkout only when it is clean; Git also refuses branches checked out
-elsewhere. With New worktree, Del creates a unique `del/session-<UUID>` branch from
-the selected commit without changing the source checkout. Uncommitted source changes
+the existing checkout when it is clean. If it has local changes, Del automatically
+creates a managed worktree at the selected branch’s latest local commit, preserving
+the original checkout and all staged, unstaged, and untracked files. The same
+fallback applies to agent-spawned chats. With New worktree enabled, Del always
+creates a unique `del/session-<UUID>` branch from the selected commit without
+changing the source checkout. Branch tips are resolved at launch from local Git
+refs; Del does not fetch or pull automatically. Git still refuses a clean shared
+checkout switch to a branch already checked out elsewhere. Uncommitted source changes
 are not copied. An unborn repository needs its first commit before worktree creation.
 
 Del-owned worktrees live in `<Del data>/worktrees/<UUID>/checkout`, with an ownership
@@ -776,7 +781,9 @@ Chat spawns also accept `model`, `reasoning_effort`, `service_tier`, `branch`, a
 `new_worktree`. `session_models` returns the selected provider's live catalog;
 use its exact model and effort IDs. An explicit model clears inherited effort/tier
 unless supplied. `branch` selects the starting branch; without `new_worktree` it
-switches the shared checkout only if clean. With `new_worktree: true`, Del creates
+switches the shared checkout if clean, or automatically creates an isolated
+checkout from the selected branch’s tip if local changes would block the switch.
+With `new_worktree: true`, Del creates
 an isolated managed checkout and unique branch using the existing worktree rules.
 The requested `cwd` must still be the caller's directory; the app prepares the new
 path and retains the original project boundary. Uncommitted edits are not copied.
