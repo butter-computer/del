@@ -2924,6 +2924,15 @@ impl Render for AppShell {
                 cx,
             );
         });
+        // A closed popup can leave nothing focused, and app shortcuts dispatch from
+        // the focused element, so hand focus back rather than go deaf to the keyboard.
+        if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
+            cx.defer_in(window, |this, window, cx| {
+                if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
+                    this.shell_focus.focus(window, cx);
+                }
+            });
+        }
         v_flex()
             .relative()
             .size_full()

@@ -44,6 +44,9 @@ enum PaletteAction {
     Files,
     Terminal,
 }
+/// Action icons and provider marks share one column, so their labels line up.
+const PALETTE_MARK_WIDTH: f32 = 16.;
+
 impl PaletteAction {
     const ALL: [Self; 4] = [
         Self::NewConversation,
@@ -54,8 +57,8 @@ impl PaletteAction {
 
     fn label(self) -> &'static str {
         match self {
-            Self::NewConversation => "New conversation",
-            Self::Settings => "Open Settings",
+            Self::NewConversation => "New session",
+            Self::Settings => "Open settings",
             Self::Files => "Toggle files",
             Self::Terminal => "Open terminal",
         }
@@ -270,8 +273,10 @@ impl Palette {
                 this.open(cx);
             }))
             .child(
-                div()
+                h_flex()
+                    .w(zpx(PALETTE_MARK_WIDTH))
                     .flex_none()
+                    .justify_center()
                     .text_color(crate::appearance::secondary_text())
                     .child(crate::icons::path(action.icon())),
             )
@@ -280,7 +285,7 @@ impl Palette {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(zpx(12.))
+                    .text_size(zpx(del_core::typography::TEXT_MD))
                     .child(action.label()),
             )
             .child(key_badge(action.shortcut()))
@@ -413,8 +418,10 @@ impl Palette {
                 this.open(cx);
             }))
             .child(
-                div()
+                h_flex()
+                    .w(zpx(PALETTE_MARK_WIDTH))
                     .flex_none()
+                    .justify_center()
                     .text_color(crate::appearance::secondary_text())
                     .child(if matches!(source.tab, Tab::Terminal(_)) {
                         crate::mode_ui::terminal_mark(source.provider)
@@ -442,7 +449,7 @@ impl Palette {
                                     .flex_shrink_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(zpx(12.))
+                                    .text_size(zpx(del_core::typography::TEXT_MD))
                                     .text_color(rgb(0xeeeeef))
                                     .child(source.title.clone()),
                             )

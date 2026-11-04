@@ -944,7 +944,7 @@ fn project_menu(
                     .bg(crate::appearance::popup_surface())
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                     .footer(gpui_kit::component::dialog::DialogFooter::new()
-                        .child(Button::new("project-cancel").ghost().label("Cancel")
+                        .child(Button::new("project-cancel").ghost().bg(rgba(crate::appearance::QUIET_FILL)).label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)))
                         .child(Button::new("project-confirm").label("Permanently delete").danger()
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::dialog::Confirm { secondary: false }), cx))))
@@ -1778,6 +1778,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
                     .child(
                         Button::new("space-cancel")
                             .ghost()
+                            .bg(rgba(crate::appearance::QUIET_FILL))
                             .label("Cancel")
                             .on_click(|_, w, cx| w.close_dialog(cx)),
                     )

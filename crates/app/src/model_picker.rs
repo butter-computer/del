@@ -524,7 +524,7 @@ impl Render for ModelPanel {
                                     div()
                                         .text_size(zpx(del_core::typography::TEXT_XS))
                                         .text_color(muted)
-                                        .child("Automatic · follows provider settings"),
+                                        .child("Follows provider settings"),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {

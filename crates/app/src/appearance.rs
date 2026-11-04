@@ -48,6 +48,10 @@ pub fn sidebar_surface() -> Rgba {
     shell_surface()
 }
 
+/// The fill behind a secondary action. A literal neutral, so `rgba` maps it to
+/// warm ink in light mode like every other neutral.
+pub const QUIET_FILL: u32 = 0xffffff0f;
+
 pub fn separator() -> Rgba {
     gpui_kit::rgba(if light() {
         0x3c321e14
@@ -291,7 +295,7 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.switch = if light {
             gpui_kit::rgba(palette.neutral[7] << 8 | 0x33).into()
         } else {
-            active
+            gpui_kit::rgba(0xffffff24).into()
         };
         c.switch_thumb = if light {
             gpui_kit::rgb(0xffffff).into()

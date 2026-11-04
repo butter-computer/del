@@ -7,10 +7,10 @@ use crate::state::{AppState, Panel, Selection, Tab};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
 use crate::{AppShell, ResizePreview};
-use del_core::typography::TEXT_SM;
+use del_core::typography::{TEXT_SM, TEXT_XS};
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -20,6 +20,7 @@ use std::path::PathBuf;
 pub const PANEL_DEFAULT_HEIGHT: f32 = 200.0;
 const PANEL_MIN_HEIGHT: f32 = 96.0;
 const PANEL_HEADER_HEIGHT: f32 = 30.0;
+const STATUS_POPOVER_WIDTH: f32 = 340.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Title-bar control size, matching the sidebar's header buttons.
 const NAV_BUTTON: f32 = 28.0;
@@ -78,8 +79,63 @@ fn status_item(id: impl Into<ElementId>) -> Button {
         .py_0()
         .line_height(zpx(16.0))
         .rounded(zpx(4.0))
-        .text_size(zpx(TEXT_SM))
+        .text_size(zpx(TEXT_XS))
         .text_color(crate::appearance::secondary_text())
+}
+
+/// Status popovers state facts, so they read as a heading, label/value rows
+/// and an optional note rather than a stack of same-weight lines.
+fn status_heading(text: impl Into<SharedString>) -> PopupMenuItem {
+    let text = text.into();
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .max_w(zpx(STATUS_POPOVER_WIDTH))
+            .truncate()
+            .text_size(zpx(TEXT_XS))
+            .text_color(crate::appearance::secondary_text())
+            .child(text.clone())
+    })
+    .disabled(true)
+}
+
+fn status_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> PopupMenuItem {
+    let (label, value) = (label.into(), value.into());
+    PopupMenuItem::element(move |_, cx| {
+        h_flex()
+            .w_full()
+            .min_w(zpx(180.))
+            .max_w(zpx(STATUS_POPOVER_WIDTH))
+            .gap(zpx(16.))
+            .justify_between()
+            .text_size(zpx(TEXT_SM))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(cx.theme().foreground)
+                    .child(label.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(crate::appearance::secondary_text())
+                    .child(value.clone()),
+            )
+    })
+    .disabled(true)
+}
+
+fn status_note(text: impl Into<SharedString>) -> PopupMenuItem {
+    let text = text.into();
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .max_w(zpx(STATUS_POPOVER_WIDTH))
+            .truncate()
+            .text_size(zpx(TEXT_XS))
+            .text_color(crate::appearance::secondary_text())
+            .child(text.clone())
+    })
+    .disabled(true)
 }
 
 fn status_icon(path: &'static str) -> Icon {
@@ -520,7 +576,14 @@ impl AppShell {
         } else if self.processes.error.is_some() {
             "Processes —".into()
         } else {
-            format!("{} processes", process_count)
+            format!(
+                "{process_count} {}",
+                if process_count == 1 {
+                    "process"
+                } else {
+                    "processes"
+                }
+            )
         };
         let process_snapshot = self.processes.clone();
         let branch = if git.current.is_empty() {
@@ -573,7 +636,7 @@ impl AppShell {
             .items_center()
             .overflow_hidden()
             .bg(shell_surface())
-            .text_size(zpx(TEXT_SM))
+            .text_size(zpx(TEXT_XS))
             .text_color(crate::appearance::secondary_text())
             .child(
                 status_item("status-branch")
@@ -587,7 +650,7 @@ impl AppShell {
                             .min_w_0()
                             .gap(zpx(6.))
                             .items_center()
-                            .text_size(zpx(TEXT_SM))
+                            .text_size(zpx(TEXT_XS))
                             .line_height(zpx(16.))
                             .child(
                                 h_flex()
@@ -639,26 +702,35 @@ impl AppShell {
                     )
                     .child(context_label)
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                        let menu = menu.label("Context usage");
+                        let menu = menu.item(status_heading("Context usage"));
                         if terminal {
-                            return menu.label("Not reported in Terminal mode");
+                            return menu.item(status_note("Not reported in Terminal mode"));
                         }
                         match (usage.context_tokens, usage.context_window) {
-                            (Some(used), Some(limit)) => menu
-                                .label(format!("{used} / {limit} tokens"))
-                                .label(format!(
-                                    "{:.0}% used · {:.0}% remaining",
-                                    used as f64 / limit as f64 * 100.,
-                                    100. - (used as f64 / limit as f64 * 100.).min(100.)
-                                ))
-                                .label("Includes the conversation carried by the active model")
-                                .label(
-                                    "Older history may be compacted; this is not lifetime tokens",
-                                ),
+                            (Some(used), Some(limit)) => {
+                                let percent = used as f64 / limit as f64 * 100.;
+                                menu.item(status_row("Used", format!("{percent:.0}%")))
+                                    .item(status_row(
+                                        "Remaining",
+                                        format!("{:.0}%", 100. - percent.min(100.)),
+                                    ))
+                                    .item(status_row("Tokens", format!("{used} / {limit}")))
+                                    .separator()
+                                    .item(status_note(
+                                        "Includes the conversation carried by the active model",
+                                    ))
+                                    .item(status_note(
+                                        "Older history may be compacted; this is not lifetime tokens",
+                                    ))
+                            }
                             (Some(used), None) => menu
-                                .label(format!("{used} tokens in the active conversation context"))
-                                .label("This provider has not reported a context capacity"),
-                            _ => menu.label("No context usage reported for this session yet"),
+                                .item(status_row("Tokens", used.to_string()))
+                                .item(status_note(
+                                    "This provider has not reported a context capacity",
+                                )),
+                            _ => menu.item(status_note(
+                                "No context usage reported for this session yet",
+                            )),
                         }
                     }),
             )
@@ -674,22 +746,24 @@ impl AppShell {
                     })
                     .child(limits_label)
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                        let mut menu = menu.label(format!(
+                        let mut menu = menu.item(status_heading(format!(
                             "{} · {account_name}",
                             crate::providers::display_name(provider)
-                        ));
+                        )));
                         if let Some(limits) = &limits {
                             for window in &limits.windows {
-                                menu = menu.label(format!(
-                                    "{}: {:.0}% left",
-                                    window.label, window.remaining
+                                menu = menu.item(status_row(
+                                    window.label.clone(),
+                                    format!("{:.0}% left", window.remaining),
                                 ));
                                 if let Some(reset) = &window.resets_at {
-                                    menu = menu.label(format!("Resets {reset}"));
+                                    menu = menu.item(status_note(format!("Resets {reset}")));
                                 }
                             }
                         } else {
-                            menu = menu.label("No allowance reported by this provider/account");
+                            menu = menu.item(status_note(
+                                "No allowance reported by this provider/account",
+                            ));
                         }
                         menu
                     }),
@@ -700,7 +774,7 @@ impl AppShell {
                     .tooltip(cost_breakdown)
                     .child(cost_label)
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                        let mut menu = menu.label("This conversation · provider costs");
+                        let mut menu = menu.item(status_heading("This conversation"));
                         for (provider, cost) in &cost_rows {
                             let name = match provider.as_str() {
                                 "claude" => "Claude",
@@ -708,17 +782,19 @@ impl AppShell {
                                 "opencode" => "OpenCode",
                                 other => other,
                             };
-                            menu = menu.label(format!(
-                                "{name}  {}",
-                                crate::session_usage::money(Some(*cost))
+                            menu = menu.item(status_row(
+                                name.to_string(),
+                                crate::session_usage::money(Some(*cost)),
                             ));
                         }
                         menu.separator()
-                            .label(format!(
-                                "Total  {}",
-                                crate::session_usage::money(total_cost)
+                            .item(status_row(
+                                "Total",
+                                crate::session_usage::money(total_cost),
                             ))
-                            .label("Estimates may exclude unreported or Terminal usage")
+                            .item(status_note(
+                                "Estimates may exclude unreported or Terminal usage",
+                            ))
                     }),
             )
             .child(
@@ -733,44 +809,41 @@ impl AppShell {
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let mut menu = menu.scrollable(true).max_h(zpx(320.));
                         if let Some(error) = &process_snapshot.error {
-                            return menu.label(error.clone());
+                            return menu.item(status_note(error.clone()));
                         }
-                        let describe = |process: &crate::status_processes::Process| {
+                        let row = |process: &crate::status_processes::Process| {
                             let ports = if process.ports.is_empty() {
                                 String::new()
                             } else {
-                                format!(" · :{}", process.ports.join(", :"))
+                                format!(":{}  ", process.ports.join(", :"))
                             };
-                            format!("{} · PID {}{ports}", process.name, process.pid)
+                            status_row(process.name.clone(), format!("{ports}PID {}", process.pid))
+                        };
+                        let empty = if process_snapshot.ready {
+                            "0 running"
+                        } else {
+                            "Reading processes…"
                         };
                         if let Some(owner) = &process_owner {
-                            menu = menu.label("This session · commands and servers");
+                            menu = menu.item(status_heading("This session"));
                             let current = process_rows
                                 .iter()
                                 .filter(|p| p.owner.as_ref() == Some(owner))
                                 .collect::<Vec<_>>();
                             if current.is_empty() {
-                                menu = menu.label(if process_snapshot.ready {
-                                    "0 running"
-                                } else {
-                                    "Reading processes…"
-                                });
+                                menu = menu.item(status_note(empty));
                             }
                             for process in current {
-                                menu = menu.label(describe(process));
+                                menu = menu.item(row(process));
                             }
                             menu = menu.separator();
                         }
-                        menu = menu.label("All sessions · commands and servers");
+                        menu = menu.item(status_heading("All sessions"));
                         if process_rows.is_empty() {
-                            menu = menu.label(if process_snapshot.ready {
-                                "0 running"
-                            } else {
-                                "Reading processes…"
-                            });
+                            menu = menu.item(status_note(empty));
                         }
                         for process in &process_rows {
-                            menu = menu.label(describe(process));
+                            menu = menu.item(row(process));
                         }
                         menu
                     }),

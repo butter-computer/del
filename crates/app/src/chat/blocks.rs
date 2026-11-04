@@ -107,6 +107,7 @@ impl ChatView {
                     .child(
                         div()
                             .h(zpx(1.))
+                            .mt(zpx(2.))
                             .mx(zpx(TEXT_INSET))
                             .bg(crate::appearance::separator()),
                     ),
@@ -874,6 +875,7 @@ impl ChatView {
                         Button::new("deny")
                             .ghost()
                             .small()
+                            .bg(rgba(crate::appearance::QUIET_FILL))
                             .label("Deny")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(deny_id.clone(), ApprovalResponse::Deny, cx)

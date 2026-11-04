@@ -3733,7 +3733,7 @@ impl RightPanel {
                                 this.refresh_tree(cx);
                                 cx.notify();
                             }))
-                            .child(".files")
+                            .child("Dotfiles")
                             .child(
                                 div()
                                     .relative()

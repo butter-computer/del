@@ -352,7 +352,7 @@ fn appearance_controls() -> impl IntoElement {
                                 .items_center()
                                 .child(theme_swatches(theme, light))
                                 .child(theme.name())
-                                .child(crate::icons::icon(IconName::ChevronDown)),
+                                .child(crate::icons::icon(IconName::ChevronDown).with_size(zpx(11.)).text_color(crate::appearance::secondary_text())),
                         )
                         .dropdown_menu(move |menu, _, _| {
                             ThemePreset::ALL.into_iter().fold(
@@ -401,7 +401,7 @@ fn appearance_controls() -> impl IntoElement {
                                 .gap_2()
                                 .items_center()
                                 .child(appearance::background().name())
-                                .child(crate::icons::icon(IconName::ChevronDown)),
+                                .child(crate::icons::icon(IconName::ChevronDown).with_size(zpx(11.)).text_color(crate::appearance::secondary_text())),
                         )
                         .dropdown_menu(|menu, _, _| {
                             appearance::BackgroundAnimation::ALL.into_iter().fold(
@@ -454,7 +454,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .child(h_flex().w_full().items_center().justify_between().gap_4()
             .child(div().text_size(zpx(del_core::typography::TEXT_XL)).font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
-            .child(Button::new("settings-done").small().label("Done")
+            .child(Button::new("settings-done").ghost().small().bg(rgba(crate::appearance::QUIET_FILL)).label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
         .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_3()
