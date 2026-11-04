@@ -263,7 +263,7 @@ impl Render for ModelPicker {
                             .small()
                             .compact()
                             .rounded_full()
-                            .text_size(zpx(15.))
+                            .text_size(zpx(13.))
                             .disabled(state.locked)
                             .tooltip_with_action("Select model", &crate::SelectModel, None)
                             .accessibility_label(format!(
@@ -455,8 +455,11 @@ impl Render for ModelPanel {
             .w(zpx(278.))
             .p_3()
             .gap_3()
-            .rounded_xl()
+            .rounded(zpx(10.))
             .bg(crate::appearance::popup_surface())
+            .border_1()
+            .border_color(crate::appearance::separator())
+            .shadow_lg()
             .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
@@ -518,7 +521,7 @@ impl Render for ModelPanel {
                                     div()
                                         .text_size(zpx(10.5))
                                         .text_color(muted)
-                                        .child("Automatic · follows provider settings"),
+                                        .child("Follows provider settings"),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {

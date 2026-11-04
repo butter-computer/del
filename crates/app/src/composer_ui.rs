@@ -326,7 +326,7 @@ pub fn provider_logo(provider: Provider) -> Svg {
     let (path, color) = provider_brand(provider);
     svg()
         .path(path)
-        .size(crate::icons::size())
+        .size(zpx(crate::icons::MARK_SIZE))
         .flex_none()
         .text_color(rgb(color))
 }
@@ -357,7 +357,8 @@ pub(crate) fn provider_button(
 }
 
 impl RenderOnce for ComposerCard {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let can_send = self.dictation == crate::dictation::Phase::Idle
             && (self.has_attachments
                 || composer::submission(&self.input.read(cx).value()).is_some());
@@ -396,7 +397,8 @@ impl RenderOnce for ComposerCard {
         let agent = provider_button("agent", provider, provider_ready, starting);
         let agent_el = {
             let current = provider;
-            agent.dropdown_menu(move |menu, window, cx| {
+            // The composer sits low in the window, so its menu opens upward.
+            agent.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
                 providers::VISIBLE
                     .iter()
                     .fold(menu.check_side(Side::Right), |menu, &p| {
@@ -595,6 +597,13 @@ impl RenderOnce for ComposerCard {
             .gap_1()
             .rounded(zpx(8.0))
             .bg(crate::appearance::composer_surface())
+            // A hairline holds the edge over any background; focus firms it up.
+            .border_1()
+            .border_color(if focused {
+                rgba(0xffffff2e)
+            } else {
+                crate::appearance::separator()
+            })
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 div()

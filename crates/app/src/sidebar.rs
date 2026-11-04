@@ -20,7 +20,7 @@ pub const SIDEBAR_WIDTH: f32 = 264.0;
 const ROW_HEIGHT: f32 = 30.0;
 /// Toolbar icon buttons, flush with the session rows.
 const ICON_BUTTON: f32 = 28.0;
-const FOOTER_HEIGHT: f32 = crate::icons::TOOL_TAB_HEIGHT;
+const FOOTER_HEIGHT: f32 = 30.0;
 const FOOTER_BACKGROUND: u8 = 0x0e;
 const FOOTER_HOVER: u8 = 0x1a;
 const FOOTER_PRESSED: u8 = 0x24;
@@ -181,10 +181,12 @@ fn icon_button(id: impl Into<ElementId>) -> Button {
 }
 
 fn footer_tint(alpha: u8) -> Rgba {
-    let tint = if crate::appearance::light() {
-        0x00000000
+    // White reads weaker on dark chrome than black does on light chrome, so the
+    // same step needs a little more of it to look the same in both modes.
+    let (tint, alpha) = if crate::appearance::light() {
+        (0x00000000, alpha)
     } else {
-        0xffffff00
+        (0xffffff00, alpha + 3)
     };
     gpui_kit::rgba(tint | u32::from(alpha))
 }
@@ -484,7 +486,7 @@ fn session_menu_item(
         .aria_label(label)
         .items_center()
         .h(zpx(28.))
-        .gap(zpx(10.))
+        .gap(zpx(8.))
         .relative()
         .px_2()
         .text_size(zpx(TEXT_MD))
@@ -501,7 +503,8 @@ fn session_menu_item(
             },
         ))
         .child(
-            icon.with_size(crate::icons::size())
+            icon.with_size(zpx(crate::icons::MARK_SIZE))
+                .flex_none()
                 .when(destructive, |icon| icon.text_color(rgb(0xff646b))),
         )
         .child(label)
@@ -905,12 +908,16 @@ fn project_menu(
                 .flex_1()
                 .h(zpx(28.))
                 .items_center()
-                .gap(zpx(10.))
+                .gap(zpx(8.))
                 .text_size(zpx(TEXT_MD))
-                .child(crate::icons::icon(IconName::Copy))
+                .child(
+                    crate::icons::icon(IconName::ArrowRight)
+                        .with_size(zpx(crate::icons::MARK_SIZE)),
+                )
                 .child(div().flex_1().child("Move to Space"))
                 .child(
                     crate::icons::icon(IconName::ChevronRight)
+                        .with_size(zpx(11.))
                         .text_color(cx.theme().muted_foreground),
                 )
         })
@@ -937,7 +944,7 @@ fn project_menu(
                     .bg(crate::appearance::popup_surface())
                     .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                     .footer(gpui_kit::component::dialog::DialogFooter::new()
-                        .child(Button::new("project-cancel").label("Cancel")
+                        .child(Button::new("project-cancel").ghost().label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)))
                         .child(Button::new("project-confirm").label("Permanently delete").danger()
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(gpui_kit::component::dialog::Confirm { secondary: false }), cx))))
@@ -1209,7 +1216,7 @@ fn space_contents(
                     gpui_kit::component::collapsible::Collapsible::new()
                         .open(!collapsed).flex_none().gap_0p5()
                         .child(h_flex().id(group.clone()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px_2().gap_1p5().items_center().rounded_md().cursor_pointer()
-                            .text_color(rgba(MUTED)).text_size(zpx(TEXT_MD)).font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgba(MUTED)).text_size(zpx(TEXT_MD)).font_weight(FontWeight::MEDIUM)
                             .hover(|row| row.bg(rgba(0xffffff0a)))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
                             .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
@@ -1663,7 +1670,7 @@ fn space_menu(
                 .child(motion.layer(Some(background), cx.theme().border.into()))
                 .child(session_menu_item(
                     "Create Space",
-                    crate::icons::icon(IconName::Copy),
+                    crate::icons::icon(IconName::Plus),
                     &motion,
                 ))
                 .when(include_project, |menu| {
@@ -1743,7 +1750,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
     let focus = input.clone();
     let state = state.clone();
     let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let input = input.clone();
         let value = input.clone();
         let state = state.clone();
@@ -1756,6 +1763,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
                 "Create Space"
             })
             .w(zpx(320.))
+            .margin_top(window.viewport_size().height * 0.24)
             .close_button(false)
             .p_4()
             .gap_3()
@@ -1775,7 +1783,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
                     )
                     .child(
                         Button::new("space-confirm")
-                            .ghost()
+                            .primary()
                             .label(if rename { "Save" } else { "Create" })
                             .on_click(|_, w, cx| {
                                 w.dispatch_action(

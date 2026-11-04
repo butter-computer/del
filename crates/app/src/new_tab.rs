@@ -10,25 +10,32 @@ use gpui_kit::*;
 
 pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
     h_flex()
-        .h(zpx(48.))
+        .h(zpx(44.))
         .flex_none()
         .px_3()
         .gap_3()
         .child(
             h_flex()
-                .gap_3()
+                .gap_2()
                 .text_color(rgba(0xffffff35))
-                .child("←")
-                .child("→")
-                .child("↻"),
+                .child(
+                    crate::icons::icon(IconName::ArrowLeft).with_size(zpx(crate::icons::MARK_SIZE)),
+                )
+                .child(
+                    crate::icons::icon(IconName::ArrowRight)
+                        .with_size(zpx(crate::icons::MARK_SIZE)),
+                )
+                .child(
+                    crate::icons::path("icons/reload.svg").with_size(zpx(crate::icons::MARK_SIZE)),
+                ),
         )
         .child(
             h_flex()
                 .flex_1()
                 .min_w_0()
-                .px_3()
-                .h(zpx(32.))
-                .rounded_full()
+                .px_2()
+                .h(zpx(28.))
+                .rounded(zpx(8.))
                 .bg(rgba(0xffffff14))
                 .child(
                     Input::new(address)
@@ -58,7 +65,7 @@ pub fn tools<T: 'static>(
             .flex_none()
             .w_full()
             .min_w_0()
-            .h(zpx(44.))
+            .h(zpx(38.))
             .px_3()
             .gap_2()
             .rounded_lg()
@@ -81,7 +88,7 @@ pub fn tools<T: 'static>(
             .child(
                 div()
                     .flex_none()
-                    .rounded_full()
+                    .rounded(zpx(4.))
                     .px_1p5()
                     .text_size(zpx(12.))
                     .text_color(rgba(0xffffff80))

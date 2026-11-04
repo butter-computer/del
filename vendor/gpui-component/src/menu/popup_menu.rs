@@ -1237,7 +1237,7 @@ impl PopupMenu {
         checked: bool,
         icon: Option<Icon>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         if !has_icon {
             return None;
@@ -1251,7 +1251,7 @@ impl PopupMenu {
             Icon::empty()
         };
 
-        Some(icon.xsmall())
+        Some(icon.with_size(cx.theme().font_size * (14. / 13.)))
     }
 
     #[inline]
@@ -1301,12 +1301,13 @@ impl PopupMenu {
 
         let (item_height, radius) = match self.size {
             Size::Small => (px(20.), options.radius.half()),
-            _ => (px(26.), options.radius),
+            // Matches the app's own menu rows: 28 pt at 13 pt text, following zoom.
+            _ => (cx.theme().font_size * (28. / 13.), options.radius),
         };
 
         let this = MenuItemElement::new(ix)
             .relative()
-            .text_sm()
+            .text_size(cx.theme().font_size)
             .py_0()
             .px(INNER_PADDING)
             .rounded(radius)
@@ -1344,7 +1345,7 @@ impl PopupMenu {
                 .p_0()
                 .my_0p5()
                 .mx_neg_1()
-                .border_b(px(2.))
+                .border_b(px(1.))
                 .border_color(cx.theme().border)
                 .disabled(true),
             PopupMenuItem::Label(label) => this.disabled(true).cursor_default().child(

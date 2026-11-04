@@ -3289,7 +3289,12 @@ impl Render for AppShell {
                     .absolute()
                     .inset_0()
                     .child(backdrop::blur_layer())
-                    .bg(gpui_kit::rgba(0x00000066));
+                    // Black at this strength turns a light workspace muddy grey.
+                    .bg(gpui_kit::rgba(if appearance::light() {
+                        0x1c18102e
+                    } else {
+                        0x00000066
+                    }));
                 if let Some(started) = self.search_closing {
                     shell.child(shade.opacity(search_ui::exit_opacity(started)))
                 } else if cx.reduce_motion() {

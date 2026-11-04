@@ -56,6 +56,7 @@ fn action(id: SharedString, label: &'static str) -> Button {
         .flex_none()
         .p_0()
         .ghost()
+        .text_color(rgba(0xffffff8c))
         .tooltip(label)
         .accessibility_label(label)
 }
@@ -529,6 +530,7 @@ pub(crate) fn render_queue(
                                 .small()
                                 .compact()
                                 .flex_none()
+                                .text_color(rgba(0xffffff8c))
                                 .accessibility_label("Steer queued message")
                                 .on_click(move |_, _, cx| {
                                     send_chat.update(cx, |chat, cx| {

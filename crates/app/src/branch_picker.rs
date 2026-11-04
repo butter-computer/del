@@ -128,6 +128,7 @@ impl Render for BranchPicker {
                             .min_w_0()
                             .max_w(zpx(180.))
                             .text_size(zpx(12.))
+                            .text_color(appearance::secondary_text())
                             .tooltip_with_action(
                                 "Select starting branch",
                                 &crate::SelectBranch,
@@ -141,6 +142,7 @@ impl Render for BranchPicker {
                                     .gap_1()
                                     .child(
                                         crate::icons::path("icons/git-branch.svg")
+                                            .with_size(zpx(crate::icons::MARK_SIZE))
                                             .text_color(appearance::rgba(0xffffff8c)),
                                     )
                                     .child(div().min_w_0().truncate().child(selected)),

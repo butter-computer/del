@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub const PANEL_WIDTH: f32 = 340.0;
-const MONO: &str = "Menlo";
+const MONO: &str = del_core::typography::MONO_FONT;
 /// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// Changed files whose diffs a refresh loads; the rest are only counted.
@@ -165,8 +165,11 @@ impl Render for DraggedSidebarTab {
                     .border_1()
                     .border_color(crate::appearance::separator())
                     .text_color(rgb(0xf5f5f5))
-                    .text_size(zpx(14.))
-                    .child(crate::icons::icon(self.pane.icon()).with_size(zpx(15.)))
+                    .text_size(zpx(TEXT_MD))
+                    .child(
+                        crate::icons::icon(self.pane.icon())
+                            .with_size(zpx(crate::icons::MARK_SIZE)),
+                    )
                     .child(self.pane.tab_label().1),
             )
     }
@@ -2374,7 +2377,7 @@ impl RightPanel {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(zpx(14.))
+            .text_size(zpx(TEXT_MD))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
@@ -2422,7 +2425,7 @@ impl RightPanel {
                 div()
                     .mr_1p5()
                     .flex_none()
-                    .child(crate::icons::icon(pane.icon()).with_size(zpx(15.))),
+                    .child(crate::icons::icon(pane.icon()).with_size(zpx(crate::icons::MARK_SIZE))),
             )
             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
             .when(working, |tab| tab.child(crate::icons::working_spinner()))
@@ -2566,7 +2569,7 @@ impl RightPanel {
                                 } else {
                                     IconName::File
                                 })
-                                .with_size(zpx(15.))
+                                .with_size(zpx(crate::icons::MARK_SIZE))
                                 .text_color(if is_dir && open {
                                     rgb(0xf5f5f5)
                                 } else if is_dir {
@@ -3250,12 +3253,12 @@ impl RightPanel {
                                         ))
                                         .child(
                                             div()
-                                                .text_color(rgb(0x5fc27e))
+                                                .text_color(ActionTone::Success.foreground())
                                                 .child(format!("+{commit_added}")),
                                         )
                                         .child(
                                             div()
-                                                .text_color(rgb(0xf0716b))
+                                                .text_color(ActionTone::Danger.foreground())
                                                 .child(format!("−{commit_removed}")),
                                         ),
                                 ),
@@ -3279,31 +3282,22 @@ impl RightPanel {
                                 )
                                 .child(
                                     h_flex()
-                                        .gap_2()
-                                        .items_baseline()
-                                        .text_size(zpx(TEXT_SM))
-                                        .child(
-                                            div()
-                                                .text_color(rgb(0x5fc27e))
-                                                .child(format!("+{}", commit.added)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(rgb(0xf0716b))
-                                                .child(format!("−{}", commit.removed)),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
                                         .min_w_0()
                                         .gap_2()
+                                        .items_baseline()
                                         .text_size(zpx(TEXT_SM))
                                         .text_color(rgba(0xffffff8c))
                                         .child(
                                             div()
-                                                .font_family(MONO)
                                                 .flex_none()
-                                                .child(commit.short_id.clone()),
+                                                .text_color(ActionTone::Success.foreground())
+                                                .child(format!("+{}", commit.added)),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(ActionTone::Danger.foreground())
+                                                .child(format!("−{}", commit.removed)),
                                         )
                                         .child(
                                             div()
@@ -3311,6 +3305,12 @@ impl RightPanel {
                                                 .min_w_0()
                                                 .truncate()
                                                 .child(commit.author.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(MONO)
+                                                .flex_none()
+                                                .child(commit.short_id.clone()),
                                         )
                                         .child(div().flex_none().child(commit.date.clone())),
                                 )
@@ -3333,12 +3333,12 @@ impl RightPanel {
                         ))
                         .child(
                             div()
-                                .text_color(rgb(0x5fc27e))
+                                .text_color(ActionTone::Success.foreground())
                                 .child(format!("+{total_added}")),
                         )
                         .child(
                             div()
-                                .text_color(rgb(0xf0716b))
+                                .text_color(ActionTone::Danger.foreground())
                                 .child(format!("−{total_removed}")),
                         ),
                 )
@@ -3377,7 +3377,8 @@ impl RightPanel {
                                 } else {
                                     IconName::ChevronRight
                                 })
-                                .with_size(zpx(12.)),
+                                .with_size(zpx(11.))
+                                .text_color(rgba(0xffffff66)),
                             )
                             .child(
                                 div()
@@ -3389,13 +3390,13 @@ impl RightPanel {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_color(rgb(0x5fc27e))
+                                    .text_color(ActionTone::Success.foreground())
                                     .child(format!("+{added}")),
                             )
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_color(rgb(0xf0716b))
+                                    .text_color(ActionTone::Danger.foreground())
                                     .child(format!("-{removed}")),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3701,13 +3702,14 @@ impl RightPanel {
                     .debug_selector(|| "new-sidebar-tab".into())
                     .role(gpui::Role::Button)
                     .aria_label("New sidebar tab")
-                    .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .size(zpx(24.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .flex_none()
                     .rounded_md()
                     .cursor_pointer()
+                    .text_color(rgba(0xffffff8c))
                     .hover(|button| button.bg(rgba(0xffffff14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
                     .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),

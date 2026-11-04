@@ -101,12 +101,18 @@ impl ChatView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_work(range.clone(), cx);
                 }));
-            let header = h_flex()
-                .w_full()
-                .justify_center()
-                .px_3()
-                .pb(zpx(4.))
-                .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(header));
+            let header = h_flex().w_full().justify_center().px_3().pb(zpx(8.)).child(
+                v_flex()
+                    .w_full()
+                    .max_w(zpx(COLUMN_MAX_WIDTH))
+                    .child(header)
+                    .child(
+                        div()
+                            .h(zpx(1.))
+                            .mx(zpx(TEXT_INSET))
+                            .bg(crate::appearance::separator()),
+                    ),
+            );
             return v_flex()
                 .w_full()
                 .child(header)

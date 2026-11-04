@@ -860,7 +860,7 @@ impl SideChat {
             !self.loading,
             locked,
         )
-        .dropdown_menu(move |menu, window, cx| {
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
             crate::providers::VISIBLE
                 .iter()
                 .fold(menu, |menu, &provider| {

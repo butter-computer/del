@@ -36,18 +36,20 @@ pub(super) struct PendingQuestion {
 pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
     match provider {
         Some(provider) => composer_ui::provider_logo(provider).into_any_element(),
-        None => crate::icons::path("icons/terminal.svg").into_any_element(),
+        None => crate::icons::path("icons/terminal.svg")
+            .with_size(zpx(crate::icons::MARK_SIZE))
+            .into_any_element(),
     }
 }
 
 pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
     div()
         .relative()
-        .size(zpx(18.))
+        .size(zpx(crate::icons::MARK_SIZE))
         .flex_none()
         .child(
             crate::icons::path("icons/terminal.svg")
-                .size(zpx(16.))
+                .size(zpx(crate::icons::MARK_SIZE))
                 .text_color(rgba(0xffffffcc)),
         )
         .when_some(provider, |icon, provider| {
@@ -56,13 +58,13 @@ pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
                     .absolute()
                     .right(zpx(-2.))
                     .bottom(zpx(-2.))
-                    .size(zpx(11.))
+                    .size(zpx(10.))
                     .rounded(zpx(3.))
                     .bg(crate::appearance::popup_surface())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(composer_ui::provider_logo(provider).size(zpx(9.))),
+                    .child(composer_ui::provider_logo(provider).size(zpx(8.))),
             )
         })
         .into_any_element()
@@ -1200,13 +1202,16 @@ impl AppShell {
                             .px_2()
                             .min_w_0()
                             .max_w(zpx(150.))
-                            .text_size(zpx(13.))
+                            .text_size(zpx(12.))
                             .tooltip(cwd.display().to_string())
                             .child(
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(crate::icons::icon(IconName::Folder))
+                                    .child(
+                                        crate::icons::icon(IconName::Folder)
+                                            .with_size(zpx(crate::icons::MARK_SIZE)),
+                                    )
                                     .child(
                                         div()
                                             .min_w_0()
@@ -1214,7 +1219,7 @@ impl AppShell {
                                             .child(crate::sessions::folder_name(&cwd)),
                                     ),
                             )
-                            .text_color(rgba(0xffffff8c))
+                            .text_color(crate::appearance::secondary_text())
                             .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),
                     )
                     .when(git, |row| row.child(self.branch_picker.clone())),
@@ -1250,6 +1255,7 @@ impl AppShell {
                 row.pr(zpx(6.)).child(
                     gpui_kit::component::checkbox::Checkbox::new("new-worktree")
                         .small()
+                        .text_color(crate::appearance::secondary_text())
                         .focus_ring(false)
                         .label("New worktree")
                         .checked(worktree)
@@ -1307,6 +1313,11 @@ impl AppShell {
                     .justify_center()
                     .text_size(zpx(12.0))
                     .cursor_pointer()
+                    .text_color(if self.state.read(cx).mode() == choice {
+                        rgb(0xf5f5f5)
+                    } else {
+                        crate::appearance::secondary_text()
+                    })
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.state.read(cx).mode() == choice || this.state.read(cx).is_starting()

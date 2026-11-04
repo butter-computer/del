@@ -279,8 +279,18 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.skeleton = hover;
         c.slider_bar = secondary;
         c.slider_thumb = white;
-        c.switch = active;
-        c.switch_thumb = white;
+        // A switch thumb is always the light part of the control, as on macOS.
+        // Ink on a pale track reads as "on" when the switch is off.
+        c.switch = if light {
+            gpui_kit::rgba(palette.neutral[7] << 8 | 0x33).into()
+        } else {
+            active
+        };
+        c.switch_thumb = if light {
+            gpui_kit::rgb(0xffffff).into()
+        } else {
+            white
+        };
         c.scrollbar = gpui_kit::transparent_black();
         c.scrollbar_thumb = active;
         c.scrollbar_thumb_hover = gpui_kit::rgb(palette.neutral[4]).into();

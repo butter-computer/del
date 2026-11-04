@@ -215,13 +215,21 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                 )
                 .children(
                     [
-                        ("Appearance", SettingsSection::Appearance, IconName::Palette),
+                        (
+                            "Appearance",
+                            SettingsSection::Appearance,
+                            crate::icons::icon(IconName::Palette),
+                        ),
                         (
                             "Providers",
                             SettingsSection::Providers,
-                            IconName::CircleUser,
+                            crate::icons::icon(IconName::CircleUser),
                         ),
-                        ("Keybinds", SettingsSection::Keybinds, IconName::Settings),
+                        (
+                            "Keybinds",
+                            SettingsSection::Keybinds,
+                            crate::icons::path("icons/keyboard.svg"),
+                        ),
                     ]
                     .into_iter()
                     .map(|(label, category, icon)| {
@@ -229,14 +237,14 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                         Button::new(label)
                             .ghost()
                             .w_full()
-                            .h(zpx(34.))
+                            .h(zpx(30.))
                             .px_2()
                             .child(
                                 h_flex()
                                     .w_full()
                                     .items_center()
                                     .gap_2()
-                                    .child(crate::icons::icon(icon))
+                                    .child(icon)
                                     .child(label),
                             )
                             .selected(section == category)
@@ -275,7 +283,7 @@ fn appearance_controls() -> impl IntoElement {
         .w_full()
         .gap_4()
         .p_4()
-        .rounded(zpx(14.))
+        .rounded(zpx(10.))
         .bg(appearance::composer_surface())
         .child(
             h_flex()
@@ -303,6 +311,9 @@ fn appearance_controls() -> impl IntoElement {
                                 .ghost()
                                 .small()
                                 .label(label)
+                                .when(light != mode, |button| {
+                                    button.text_color(appearance::secondary_text())
+                                })
                                 .when(light == mode, |button| button.bg(rgba(0xffffff20)))
                                 .on_click(move |_, _, cx| appearance::set(mode, cx))
                         }),
@@ -438,9 +449,9 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let back = state.clone();
     v_flex().id("settings").size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
         .child(h_flex().w_full().items_center().justify_between().gap_4()
-            .child(div().text_size(zpx(24.)).font_weight(FontWeight::MEDIUM)
+            .child(div().text_size(zpx(del_core::typography::TEXT_XL)).font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
-            .child(Button::new("settings-done").ghost().small().label("Done")
+            .child(Button::new("settings-done").small().label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
         .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_4()
