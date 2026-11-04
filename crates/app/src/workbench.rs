@@ -700,7 +700,7 @@ impl AppShell {
                     .tooltip(
                         "Conversation context currently used (history, instructions and tools)",
                     )
-                    .child(context_label)
+                    .child(div().text_size(zpx(TEXT_XS)).child(context_label))
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let menu = menu.item(status_heading("Context usage"));
                         if terminal {
@@ -744,7 +744,7 @@ impl AppShell {
                     .when(remaining.is_some_and(|n| n <= 10.), |b| {
                         b.text_color(ActionTone::Warning.foreground())
                     })
-                    .child(limits_label)
+                    .child(div().text_size(zpx(TEXT_XS)).child(limits_label))
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let mut menu = menu.item(status_heading(format!(
                             "{} · {account_name}",
@@ -772,7 +772,7 @@ impl AppShell {
                 status_item("status-cost")
                     .accessibility_label(cost_label.clone())
                     .tooltip(cost_breakdown)
-                    .child(cost_label)
+                    .child(div().text_size(zpx(TEXT_XS)).child(cost_label))
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let mut menu = menu.item(status_heading("This conversation"));
                         for (provider, cost) in &cost_rows {
@@ -805,7 +805,7 @@ impl AppShell {
                     } else {
                         "Commands and servers · all sessions"
                     })
-                    .child(process_label)
+                    .child(div().text_size(zpx(TEXT_XS)).child(process_label))
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let mut menu = menu.scrollable(true).max_h(zpx(320.));
                         if let Some(error) = &process_snapshot.error {
@@ -860,7 +860,7 @@ impl AppShell {
                     } else {
                         "Switch to Terminal"
                     })
-                    .child(if terminal { "Terminal" } else { "Chat" })
+                    .child(div().text_size(zpx(TEXT_XS)).child(if terminal { "Terminal" } else { "Chat" }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.apply_mode(
                             if terminal {

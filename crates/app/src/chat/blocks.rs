@@ -218,6 +218,7 @@ impl ChatView {
                         .child(
                             TextView::new(&flash.text_view)
                                 .style(style)
+                                .code_block_actions(code_block_actions)
                                 .selectable(true)
                                 .on_link_click({
                                     let chat = cx.entity().downgrade();
@@ -909,6 +910,88 @@ fn disclosure(expanded: bool) -> Icon {
     .text_color(rgba(FAINT_TEXT))
 }
 
+/// A code block's corner: its language and a Copy with the same confirmation
+/// as a reply's. Passing actions also drops the extra top padding the bare
+/// language label needs, so the code sits evenly in its block.
+fn code_block_actions(
+    block: &gpui_kit::base::text::CodeBlock,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    use std::hash::{Hash as _, Hasher as _};
+    let code = block.code();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut hasher);
+    let key = hasher.finish();
+    // Counts clicks, so a repeated click restarts the confirmation; 0 is idle.
+    let copies = window.use_keyed_state(
+        ElementId::NamedInteger("code-copy".into(), key),
+        cx,
+        |_, _| 0u32,
+    );
+    let copied = *copies.read(cx) > 0;
+    h_flex()
+        .h(zpx(24.))
+        .pl(zpx(8.))
+        .gap(zpx(2.))
+        .items_center()
+        .rounded_md()
+        .bg(crate::appearance::code_surface())
+        .font_family(cx.theme().font_family.clone())
+        .text_size(zpx(del_core::typography::TEXT_XS))
+        .text_color(crate::appearance::secondary_text())
+        .when_some(block.lang().filter(|lang| !lang.is_empty()), |row, lang| {
+            row.child(lang)
+        })
+        .child(
+            div()
+                .id(ElementId::NamedInteger("code-copy-button".into(), key))
+                .size(zpx(24.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label(if copied { "Copied" } else { "Copy code" })
+                .hover(|button| button.bg(rgba(CARD_HOVER)))
+                .child(
+                    crate::micro_motion::MorphIcon::new(
+                        ElementId::NamedInteger("code-copy-icon".into(), key),
+                        crate::animated_icons::Morph::CopyCheck,
+                        copied,
+                    )
+                    .with_size(zpx(13.))
+                    .text_color(crate::appearance::secondary_text()),
+                )
+                // Pressing Copy must not start a text selection in the block.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                    let click = copies.update(cx, |count, cx| {
+                        *count = count.wrapping_add(1).max(1);
+                        cx.notify();
+                        *count
+                    });
+                    let copies = copies.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1500))
+                            .await;
+                        copies.update(cx, |count, cx| {
+                            if *count == click {
+                                *count = 0;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }),
+        )
+}
+
 fn prose_style() -> TextViewStyle {
     TextViewStyle::default()
         .heading_font_size(|level, _| {
@@ -1039,6 +1122,7 @@ fn assistant_message(
                     TextView::markdown(("markdown", ix), super::citations::markdown(&text))
                 })
                 .style(style)
+                .code_block_actions(code_block_actions)
                 .stream_fade(false)
                 .selectable(true)
                 .on_link_click(move |url, _, _, cx| {
