@@ -266,7 +266,29 @@ impl ChatView {
                         .highlight_color(rgb(STRONG))
                         .into_any_element()
                 } else {
-                    div().min_w_0().truncate().child(label).into_any_element()
+                    // A failure count is news; the summary before it is not.
+                    let (summary, failures) = match label
+                        .rsplit_once(" · ")
+                        .filter(|(_, tail)| tail.ends_with("failed/declined"))
+                    {
+                        Some((summary, failures)) => {
+                            (summary.to_owned(), Some(failures.to_owned()))
+                        }
+                        None => (label.to_string(), None),
+                    };
+                    h_flex()
+                        .min_w_0()
+                        .gap(zpx(4.))
+                        .child(div().min_w_0().truncate().child(summary))
+                        .when_some(failures, |row, failures| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child(failures),
+                            )
+                        })
+                        .into_any_element()
                 })
                 .child(disclosure(expanded))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -892,6 +914,12 @@ fn prose_style() -> TextViewStyle {
         })
         // The same surface as diffs and tool output.
         .code_block(StyleRefinement::default().bg(crate::appearance::code_surface()))
+        // A column heading is a label to read, not disabled text.
+        .table_head(
+            StyleRefinement::default()
+                .text_color(rgba(MUTED))
+                .font_weight(FontWeight::MEDIUM),
+        )
 }
 
 fn user_message(

@@ -65,7 +65,7 @@ pub fn tools<T: 'static>(
             .flex_none()
             .w_full()
             .min_w_0()
-            .h(zpx(38.))
+            .h(zpx(44.))
             .px_3()
             .gap_2()
             .rounded_lg()
