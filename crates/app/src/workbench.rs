@@ -645,7 +645,10 @@ impl AppShell {
             )
         };
         let process_snapshot = self.processes.clone();
-        let branch_name: String = if git.current.is_empty() {
+        // Not read yet is unknown; only a finished read can say there is no repository.
+        let branch_name: String = if !state.project_info.contains_key(&cwd) {
+            "—".into()
+        } else if git.current.is_empty() {
             "No repository".into()
         } else {
             git.current.clone()
@@ -660,12 +663,16 @@ impl AppShell {
                     Some(n) => format!("{n} {}", if n == 1 { "file" } else { "files" }),
                     None => "changes unavailable".into(),
                 },
-                (git.ahead > 0)
-                    .then(|| format!("↑{}", git.ahead))
-                    .unwrap_or_default(),
-                (git.behind > 0)
-                    .then(|| format!("↓{}", git.behind))
-                    .unwrap_or_default(),
+                if git.ahead > 0 {
+                    format!("↑{}", git.ahead)
+                } else {
+                    String::new()
+                },
+                if git.behind > 0 {
+                    format!("↓{}", git.behind)
+                } else {
+                    String::new()
+                },
             ]
             .into_iter()
             .filter(|part| !part.is_empty())
