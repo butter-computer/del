@@ -578,7 +578,7 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
     v_flex()
         .id("session-hover-card")
         .debug_selector(|| "session-hover-card".into())
-        .w(zpx(360.))
+        .w(zpx(300.))
         .max_w_full()
         .gap_2()
         .text_size(zpx(TEXT_MD))
@@ -892,7 +892,7 @@ fn row_item(
                         .unwrap_or(&fallback);
                     session_hover_card(row, state, cx)
                 })
-                .transition(
+                .enter_transition(
                     gpui_kit::component::animation::EffectTransition::new(
                         std::time::Duration::from_millis(140),
                     )
@@ -2466,5 +2466,19 @@ mod session_hover_tests {
             });
             assert_eq!(cx.debug_bounds("session-hover-card").unwrap(), end);
         }
+        // A visible preview changes rows at its final position, even with
+        // motion enabled. Only the initial appearance gets the reveal effect.
+        cx.simulate_mouse_move(point(px(80.), px(145.)), None, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let switched = cx.debug_bounds("session-hover-card").unwrap();
+        assert_eq!(switched.origin.x, end.origin.x);
+        assert!(switched.origin.y > end.origin.y);
+        std::thread::sleep(Duration::from_millis(180));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(cx.debug_bounds("session-hover-card").unwrap(), switched);
     }
 }

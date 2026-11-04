@@ -73,9 +73,9 @@ impl Tooltip {
         }
     }
 
-    /// Use a scoped reveal effect for both initial entry and content switches.
+    /// Animate fresh appearance only; switching visible content is immediate.
     /// The shared overlay supplies a stable epoch, so redraws don't restart it.
-    pub fn transition(mut self, transition: EffectTransition) -> Self {
+    pub fn enter_transition(mut self, transition: EffectTransition) -> Self {
         self.transition = Some(transition);
         self
     }
@@ -176,9 +176,8 @@ pub(crate) fn render_tooltip(
         .ok()
         .and_then(|view| view.read(cx).transition.clone());
     if let Some(effect) = custom {
-        let epoch = match transition {
-            BaseTooltipTransition::Enter { epoch }
-            | BaseTooltipTransition::Switch { epoch, .. } => epoch,
+        let BaseTooltipTransition::Enter { epoch } = transition else {
+            return div().child(content_view).into_any_element();
         };
         return effect
             .apply(

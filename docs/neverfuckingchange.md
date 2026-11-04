@@ -196,7 +196,9 @@ This records the final decisions, including corrections to earlier experiments.
   Include title, age/activity, project, checkout and Git branch/worktree with existing
   icons; omit the provider/model line. The row owns the preview even over Archive,
   Pin, Restore and Delete: don't attach competing tooltips to those buttons.
-  Use a short fade/slide on entry and row changes, respecting reduced motion.
+  Keep the content width at 300 logical pixels. Animate only fresh appearance with
+  a short fade/slide, respecting reduced motion. Switching between sessions is
+  immediate and static: no fade, slide or other animation on row changes.
   Use the hovered row's cached directory metadata, never the
   selected chat's Git state. Inspect Git off-thread. Suppress during rename/drag;
   leaving or pressing dismisses the card. Hover must not select or mark a chat read.
