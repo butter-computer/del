@@ -1,6 +1,7 @@
 //! Shared new-tab content for session tabs and the right sidebar.
 use crate::animated_icons::Glyph;
 use crate::appearance::rgba;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::right_panel::Pane;
 use crate::zoom::px as zpx;
 use gpui_kit::component::input::{Input, InputState};
@@ -59,6 +60,7 @@ pub fn tools<T: 'static>(
     let tool = |pane: Pane, label: &'static str, cx: &mut Context<T>| {
         let row = h_flex()
             .id(label)
+            .keyboard_control()
             .debug_selector(move || label.into())
             .role(gpui::Role::Button)
             .aria_label(format!("Open {label}"))

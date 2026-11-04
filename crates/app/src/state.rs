@@ -122,6 +122,8 @@ pub struct AppState {
     pub spaces: spaces::Spaces,
     pub space_swipe: spaces::Swipe,
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
+    /// Keyboard focus of rows and tabs, kept across renders.
+    pub control_focus: crate::keyboard_control::FocusHandles,
     project_loading: std::collections::HashSet<PathBuf>,
     pub project_preferences: crate::projects::ProjectPreferences,
     pub launch_options: HashMap<u64, crate::projects::LaunchOptions>,
@@ -364,6 +366,7 @@ impl AppState {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences,
             launch_options: HashMap::new(),
@@ -3444,6 +3447,7 @@ pub(crate) mod tests {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences: Default::default(),
             launch_options: HashMap::new(),
@@ -4861,7 +4865,7 @@ pub(crate) mod tests {
         impl Render for Fixture {
             fn render(
                 &mut self,
-                _: &mut gpui::Window,
+                window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) -> impl IntoElement {
                 gpui::div()
@@ -4872,6 +4876,7 @@ pub(crate) mod tests {
                         &self.rename,
                         &self.usage,
                         &self.updater,
+                        window,
                         cx,
                     ))
             }

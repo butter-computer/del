@@ -3,6 +3,7 @@
 
 use super::model::{Block, Change, ChatModel, Phase};
 use crate::appearance::rgba;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::zoom::px as zpx;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::typography::TEXT_SM;
@@ -1444,6 +1445,7 @@ impl Render for ChatView {
                                                 });
                                             div()
                                                 .id(("message-jump", ix))
+                                                .keyboard_control()
                                                 .role(gpui::Role::Button)
                                                 .aria_label(format!(
                                                     "Jump to message: {}",
@@ -2007,6 +2009,68 @@ mod tests {
             );
             assert!(view.work_elapsed.contains_key(&1));
         });
+    }
+
+    /// The real path: the turn starts on the backend, then the view attaches and
+    /// replays it while loading, so only the live clock can time it.
+    #[gpui::test]
+    fn first_turn_attached_mid_flight_records_its_elapsed_time(cx: &mut gpui::TestAppContext) {
+        use std::{sync::Arc, time::Duration};
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            [Arc::new(
+                del_agent::MockBackend::new(del_agent::Provider::Claude)
+                    .with_delay(Duration::from_millis(40)),
+            ) as Arc<dyn del_agent::AgentBackend>],
+        )
+        .unwrap();
+        let session = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Claude,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: Default::default(),
+            }))
+            .unwrap();
+        runtime
+            .block_on(manager.send_prompt(&session.id, UserInput::text("tool please")))
+            .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager: manager.clone(),
+                },
+                Some(session.id.clone()),
+                None,
+                cx,
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while view.read_with(cx, |view, _| view.completed_turns == 0) {
+            assert!(std::time::Instant::now() < deadline, "turn never completed");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.work_elapsed
+                    .keys()
+                    .any(|ix| matches!(view.model.blocks[*ix], Block::Assistant { .. })),
+                "the first turn lost its elapsed time"
+            );
+        });
+        runtime.block_on(manager.shutdown());
+        runtime.shutdown_background();
     }
 
     #[gpui::test]

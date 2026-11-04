@@ -1,5 +1,6 @@
 //! A dismissible view of agent browser activity. It never owns a browser or
 //! changes its viewport: snapshots come from the existing tab, asynchronously.
+use crate::keyboard_control::KeyboardControl as _;
 use crate::{right_panel::RightPanel, state::Tab, zoom::px as zpx};
 use base64::Engine as _;
 use gpui_kit::component::*;
@@ -483,6 +484,7 @@ impl Render for BrowserPreview {
             .child(
                 div()
                     .id("dismiss-browser-preview")
+                    .keyboard_control()
                     .debug_selector(|| "dismiss-browser-preview".into())
                     .role(Role::Button)
                     .aria_label("Dismiss browser preview")

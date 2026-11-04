@@ -2365,6 +2365,7 @@ impl RightPanel {
         let selector = id.to_string();
         div()
             .id(id.clone())
+            .keyboard_control()
             .debug_selector(move || selector.clone())
             .group(id.clone())
             .role(gpui::Role::Button)
@@ -2436,6 +2437,8 @@ impl RightPanel {
             .child(
                 div()
                     .id(SharedString::from(close_id))
+                    .keyboard_control()
+                    .focus_visible(|button| button.opacity(1.))
                     .debug_selector(move || close_selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(format!("Close {label} sidebar tab"))

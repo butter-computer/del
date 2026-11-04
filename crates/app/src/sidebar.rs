@@ -3,6 +3,7 @@
 
 use crate::animated_icons::Glyph;
 use crate::appearance::{rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::sessions::Row;
 use crate::state::{AppState, Panel, Selection};
@@ -413,8 +414,6 @@ pub(crate) fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
-        // Hover-only and laid over the row's time, so Tab must not land on it unseen.
-        .tab_stop(false)
         .size(crate::icons::button_size())
         .p_0()
         .tooltip(if pinned { "Unpin" } else { "Pin" })
@@ -425,8 +424,6 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
 fn archive_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .text()
-        // Hover-only and laid over the row's time, so Tab must not land on it unseen.
-        .tab_stop(false)
         .size(crate::icons::button_size())
         .p_0()
         .tooltip("Archive")
@@ -570,6 +567,7 @@ fn row_item(
     rename: &Entity<InputState>,
     state: &Entity<AppState>,
     archived: bool,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let terminal = state.read(cx).terminal_rows.iter().find(|r| r.id == row.id);
@@ -585,8 +583,15 @@ fn row_item(
     let motion = state.read(cx).sidebar_hover.clone();
     let hover = motion.clone();
     let hover_key = id.0.clone();
+    let focus = state
+        .read(cx)
+        .control_focus
+        .control(&format!("row-{}", id.0), cx);
+    // Keyboard focus reveals the row's actions through the same path as hover.
+    let focused = crate::keyboard_control::keyboard_within(&focus, window, cx);
     let mut item = h_flex()
         .id(key.clone())
+        .when(!renaming, |row| row.keyboard_control_with(&focus))
         .relative()
         .group(group.clone())
         .h(zpx(ROW_HEIGHT))
@@ -707,7 +712,7 @@ fn row_item(
                 del_agent::SessionStatus::WaitingApproval | del_agent::SessionStatus::Error
             );
         let time = relative_time(row.updated_secs).filter(|_| !unread_tick);
-        item = item.child(if motion.is_hovered(&row.id.0) {
+        item = item.child(if motion.is_hovered(&row.id.0) || focused {
             // The hover actions take the meta slot; reserve their width so the
             // title never runs underneath them.
             div()
@@ -740,7 +745,7 @@ fn row_item(
                 .gap(zpx(4.0))
                 .w(zpx(ROW_ACTIONS_WIDTH))
                 .rounded_sm()
-                .opacity(0.0)
+                .opacity(if focused { 1.0 } else { 0.0 })
                 .group_hover(hover_group, |a| a.opacity(1.0))
                 .when(!archived, |a| {
                     a.child(
@@ -1117,6 +1122,7 @@ fn space_contents(
     state: &Entity<AppState>,
     rename: &Entity<InputState>,
     space: &crate::state::spaces::Space,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
@@ -1184,13 +1190,13 @@ fn space_contents(
                 .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(
                     gpui_kit::component::collapsible::Collapsible::new()
                         .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
-                        .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
+                        .child(div().id("pinned-section-heading").keyboard_control().debug_selector(|| "pinned-heading".into())
                             .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
                             .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).cursor_pointer()
                             .hover(|heading| heading.text_color(crate::appearance::secondary_text())).child("Pinned")
                             .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
                         .content(v_flex().w_full().gap_0p5()
-                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
+                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, window, cx))))))
                 // The Space switcher in the header names the Space, so projects follow
                 // directly; the archive view keeps a plain label.
                 .when(show_archived, |list| list.child(div().px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).child("Archived")))
@@ -1218,7 +1224,7 @@ fn space_contents(
                     // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
                         .open(!collapsed).flex_none().gap_0p5()
-                        .child(h_flex().id(group.clone()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px_2().gap_1p5().items_center().rounded_md().cursor_pointer()
+                        .child(h_flex().id(group.clone()).when(!project_renaming, |row| row.keyboard_control()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px_2().gap_1p5().items_center().rounded_md().cursor_pointer()
                             .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_MD)).font_weight(FontWeight::MEDIUM)
                             .hover(|row| row.bg(rgba(0xffffff0a)))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
@@ -1252,8 +1258,10 @@ fn space_contents(
                                 let state = state.clone();
                                 let close_state = state.clone();
                                 let group = SharedString::from(format!("project-draft-{key}"));
+                                let draft_focus = s.control_focus.control(&format!("draft-{key}"), cx);
+                                let draft_focused = crate::keyboard_control::keyboard_within(&draft_focus, window, cx);
                                 let working = s.tab_working(&crate::state::Tab::Draft(key));
-                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
+                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).keyboard_control_with(&draft_focus).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
                                     .text_size(zpx(TEXT_MD)).text_color(crate::appearance::secondary_text()).cursor_pointer()
                                     .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).gap_1p5()
@@ -1261,10 +1269,10 @@ fn space_contents(
                                     .child(div().flex_1().min_w_0().truncate().child("New session"))
                                     .when(working, |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
                                     .when(!working && s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
-                                    .child(div().id(SharedString::from(format!("close-project-draft-{key}")))
+                                    .child(div().id(SharedString::from(format!("close-project-draft-{key}"))).keyboard_control()
                                         .role(Role::Button).aria_label("Close new session")
                                         .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
-                                        .opacity(0.).group_hover(group, |button| button.opacity(1.))
+                                        .opacity(if draft_focused { 1. } else { 0. }).group_hover(group, |button| button.opacity(1.))
                                         .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
 
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1275,7 +1283,7 @@ fn space_contents(
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
                             .children(visible_rows.iter().map(|row|
-                                div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, cx))))
+                                div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, window, cx))))
                             .when(remaining > 0 || (expanded && project_rows.len() > PROJECT_SESSION_LIMIT), |list| list.child(
                                 Button::new(SharedString::from(format!("project-show-more-{}", path.display())))
                                     .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px_2()
@@ -1303,6 +1311,7 @@ pub fn render(
     rename: &Entity<InputState>,
     usage: &Entity<crate::usage::Usage>,
     updater: &Entity<crate::app_updates::AppUpdater>,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let s = state.read(cx);
@@ -1398,7 +1407,7 @@ pub fn render(
                     },
                 )),
         )
-        .child(space_pages(state, rename, cx))
+        .child(space_pages(state, rename, window, cx))
         .when(s.spaces.items.len() > 1, |sidebar| {
             sidebar.child(
                 h_flex()
@@ -1825,7 +1834,12 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
     });
 }
 
-fn space_pages(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) -> AnyElement {
+fn space_pages(
+    state: &Entity<AppState>,
+    rename: &Entity<InputState>,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let s = state.read(cx);
     let offset = if cx.reduce_motion() {
         0.
@@ -1853,7 +1867,13 @@ fn space_pages(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) 
                 .top_0()
                 .left(gpui::px(offset))
                 .size_full()
-                .child(space_contents(state, rename, s.spaces.current(), cx)),
+                .child(space_contents(
+                    state,
+                    rename,
+                    s.spaces.current(),
+                    window,
+                    cx,
+                )),
         )
         .when(offset != 0., |pages| {
             pages.children(incoming.map(|space| {
@@ -1864,7 +1884,7 @@ fn space_pages(state: &Entity<AppState>, rename: &Entity<InputState>, cx: &App) 
                     .top_0()
                     .left(gpui::px(offset - offset.signum() * s.space_swipe.width))
                     .size_full()
-                    .child(space_contents(state, rename, space, cx))
+                    .child(space_contents(state, rename, space, window, cx))
             }))
         })
         .into_any_element()
@@ -2028,7 +2048,7 @@ mod space_gesture_tests {
         input: Entity<gpui_kit::component::input::InputState>,
     }
     impl Render for PagesFixture {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .relative()
                 .flex()
@@ -2036,7 +2056,7 @@ mod space_gesture_tests {
                 .w(px(220.))
                 .h(px(300.))
                 .child(super::space_swipe_surface(&self.state))
-                .child(super::space_pages(&self.state, &self.input, cx))
+                .child(super::space_pages(&self.state, &self.input, window, cx))
         }
     }
     #[gpui::test]

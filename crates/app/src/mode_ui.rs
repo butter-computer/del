@@ -1,5 +1,6 @@
 //! Main-app session modes and the GPUI end of the MCP command channel.
 use crate::appearance::{rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::mcp_bridge::{BridgeEvent, McpBridge};
 use crate::sessions::TerminalRow;
 use crate::state::Selection;
@@ -1308,6 +1309,7 @@ impl AppShell {
             row = row.child(
                 div()
                     .id(SharedString::from(format!("new-mode-{label}")))
+                    .keyboard_control()
                     .role(gpui::Role::Button)
                     .aria_label(label)
                     .relative()

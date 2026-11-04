@@ -180,6 +180,7 @@ fn tab_action_content(
     shortcut: Option<usize>,
     color: Hsla,
     working: bool,
+    focused: bool,
 ) -> impl IntoElement {
     let glyph_group = group.clone();
     div()
@@ -206,6 +207,7 @@ fn tab_action_content(
                     .flex()
                     .items_center()
                     .justify_center()
+                    .when(focused, |indicator| indicator.opacity(0.))
                     .group_hover(group.clone(), |indicator| indicator.opacity(0.))
                     .child(crate::icons::working_spinner().color(color)),
             )
@@ -218,6 +220,7 @@ fn tab_action_content(
                     .flex()
                     .items_center()
                     .justify_center()
+                    .when(focused, |hint| hint.opacity(0.0))
                     .group_hover(group, |hint| hint.opacity(0.0))
                     .child(
                         div()
@@ -232,7 +235,7 @@ fn tab_action_content(
         .motion_child(true, move |feedback| {
             div()
                 .flex()
-                .opacity(0.0)
+                .opacity(if focused { 1.0 } else { 0.0 })
                 .group_hover(glyph_group, |glyph| glyph.opacity(1.0))
                 .child(
                     feedback
@@ -2165,6 +2168,10 @@ impl AppShell {
                                                 let indicator_id = Some(AppState::tab_unread_id(&select_tab));
                                                 let drag_shell = cx.entity();
                                                 let drop_shell = drag_shell.clone();
+                                                let tab_focus = self.state.read(cx).control_focus.control(&format!("tab-{name}"), cx);
+                                                // Keyboard focus shows the close glyph as hover does.
+                                                let tab_focused = keyboard_control::keyboard_within(&tab_focus, window, cx);
+                                                el = el.keyboard_control_with(&tab_focus);
                                                 let drag = DraggedTab {
                                                     uid,
                                                     title: title.clone(),
@@ -2217,8 +2224,9 @@ impl AppShell {
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
+                                                            .keyboard_control()
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
-                                                            .w(if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
+                                                            .w(if tab_focused { zpx(crate::icons::TAB_CLOSE_SIZE) } else if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
                                                             .overflow_hidden()
                                                             .group_hover(group.clone(), |slot| slot.w(zpx(crate::icons::TAB_CLOSE_SIZE)))
                                                             .flex()
@@ -2242,6 +2250,7 @@ impl AppShell {
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
                                                                     working,
+                                                                    tab_focused,
                                                                 ),
                                                             ),
                                                     );
@@ -2931,15 +2940,7 @@ impl Render for AppShell {
                 cx,
             );
         });
-        // A closed popup can leave nothing focused, and app shortcuts dispatch from
-        // the focused element, so hand focus back rather than go deaf to the keyboard.
-        if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
-            cx.defer_in(window, |this, window, cx| {
-                if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
-                    this.shell_focus.focus(window, cx);
-                }
-            });
-        }
+        keyboard_control::restore_lost_focus(&self.shell_focus, window, cx);
         v_flex()
             .relative()
             .size_full()
@@ -3201,6 +3202,7 @@ impl Render for AppShell {
                                         &self.rename,
                                         &self.usage,
                                         &self.updater,
+                                        window,
                                         cx,
                                     )),
                             );

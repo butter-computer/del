@@ -1,4 +1,5 @@
 use crate::animated_icons::Glyph;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 use crate::{
@@ -242,6 +243,7 @@ impl AppShell {
                         let path = file.path.clone();
                         h_flex()
                             .id(("composer-attachment", index))
+                            .keyboard_control()
                             .role(gpui::Role::Button)
                             .aria_label(format!("Preview {}", crate::attachments::filename(file)))
                             .group(group.clone())

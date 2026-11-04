@@ -392,6 +392,7 @@ mod tests {
                                 Some(1),
                                 gpui::white(),
                                 false,
+                                false,
                             )),
                     )
             }

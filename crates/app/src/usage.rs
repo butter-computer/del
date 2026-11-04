@@ -1,5 +1,6 @@
 //! On-demand process-tree RSS for loaded sessions.
 use crate::animated_icons::Glyph;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::{
     state::{AppState, Tab},
@@ -173,7 +174,7 @@ fn tree_bytes(
     Some(bytes)
 }
 impl Render for Usage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scroll = self.scroll.clone();
         let background: Rgba = cx.theme().popover.into();
         v_flex()
@@ -222,8 +223,17 @@ impl Render for Usage {
                                     .bytes
                                     .map(|n| format!("{:.0} MB", n as f64 / 1_048_576.))
                                     .unwrap_or_else(|| "—".into());
+                                // Keyboard focus reveals the row's actions as hover does.
+                                let row_focus = state
+                                    .control_focus
+                                    .container(&format!("memory-{}", id.0), cx);
+                                let hovered = hovered
+                                    || crate::keyboard_control::keyboard_within(
+                                        &row_focus, window, cx,
+                                    );
                                 h_flex()
                                     .id(SharedString::from(format!("memory-row-{}", id.0)))
+                                    .track_focus(&row_focus)
                                     .debug_selector(|| "memory-row".into())
                                     .on_hover(cx.listener(move |this, entered, _, cx| {
                                         if *entered {
@@ -245,6 +255,7 @@ impl Render for Usage {
                                                 "memory-session-{}",
                                                 id.0
                                             )))
+                                            .keyboard_control()
                                             .role(Role::Button)
                                             .cursor_pointer()
                                             .pl_2()

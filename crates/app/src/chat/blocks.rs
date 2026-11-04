@@ -410,6 +410,7 @@ impl ChatView {
                                     .gap_2()
                                     .items_center()
                                     .id(SharedString::from(format!("peer-current-{}", message.id)))
+                                    .keyboard_control()
                                     .min_w_0()
                                     .max_w(zpx(200.))
                                     .cursor_pointer()
@@ -433,6 +434,7 @@ impl ChatView {
                                     .gap_2()
                                     .items_center()
                                     .id(SharedString::from(format!("peer-other-{}", message.id)))
+                                    .keyboard_control()
                                     .min_w_0()
                                     .max_w(zpx(200.))
                                     .cursor_pointer()
@@ -1178,6 +1180,9 @@ fn assistant_message(
                     .child(
                         div()
                             .id(("copy-response", ix))
+                            .keyboard_control()
+                            // Tab can land here without a hover, so focus must show it.
+                            .focus_visible(|button| button.opacity(1.))
                             .size(zpx(24.))
                             .flex_none()
                             .flex()
@@ -1200,28 +1205,43 @@ fn assistant_message(
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 let _ = copy_chat.update(cx, |chat, cx| chat.copy_response(ix, cx));
-                            }),
+                            })
+                            .with_animation(
+                                SharedString::from(format!("response-copy-{ix}-{hovered:?}")),
+                                Animation::new(std::time::Duration::from_millis(160))
+                                    .with_easing(ease_out_quint()),
+                                move |button, t| {
+                                    button.opacity(footer_opacity(hovered, reduced, t))
+                                },
+                            ),
                     )
                     .when_some(replied_at, |footer, time| {
-                        footer.child(time.format("%H:%M").to_string())
-                    })
-                    .with_animation(
-                        SharedString::from(format!("response-footer-{ix}-{hovered:?}")),
-                        Animation::new(std::time::Duration::from_millis(160))
-                            .with_easing(ease_out_quint()),
-                        move |footer, t| {
-                            let opacity = match hovered {
-                                None => 0.,
-                                Some(true) if reduced => 1.,
-                                Some(false) if reduced => 0.,
-                                Some(true) => t,
-                                Some(false) => 1. - t,
-                            };
-                            footer.opacity(opacity)
-                        },
-                    ),
+                        footer.child(
+                            div()
+                                .child(time.format("%H:%M").to_string())
+                                .with_animation(
+                                    SharedString::from(format!("response-time-{ix}-{hovered:?}")),
+                                    Animation::new(std::time::Duration::from_millis(160))
+                                        .with_easing(ease_out_quint()),
+                                    move |time, t| {
+                                        time.opacity(footer_opacity(hovered, reduced, t))
+                                    },
+                                ),
+                        )
+                    }),
             )
         })
+}
+
+/// The reply footer's 160 ms fade, in both directions.
+fn footer_opacity(hovered: Option<bool>, reduced: bool, t: f32) -> f32 {
+    match hovered {
+        None => 0.,
+        Some(true) if reduced => 1.,
+        Some(false) if reduced => 0.,
+        Some(true) => t,
+        Some(false) => 1. - t,
+    }
 }
 
 fn turn_end(status: TurnStatus, error: Option<String>) -> impl IntoElement {
