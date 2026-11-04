@@ -169,6 +169,7 @@ pub struct AppState {
     pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
     pub sidebar_scroll: ScrollHandle,
+    pub settings_scroll: ScrollHandle,
     pub space_switcher_open: bool,
     pub expanded_sidebar_projects: std::collections::HashSet<(String, PathBuf)>,
     pub providers: Vec<ProviderStatus>,
@@ -410,6 +411,7 @@ impl AppState {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: Provider::ALL
@@ -3506,6 +3508,7 @@ pub(crate) mod tests {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: vec![],

@@ -73,28 +73,45 @@ pub fn keyboard_within(handle: &FocusHandle, window: &Window, cx: &App) -> bool 
     window.last_input_was_keyboard() && handle.contains_focused(window, cx)
 }
 
-/// A closed popup can leave nothing focused, and app shortcuts dispatch from the
-/// focused element, so hand focus back rather than go deaf to the keyboard.
+/// Remembers lost focus between renders; see [`restore_lost_focus`].
+#[derive(Default)]
+pub struct FocusWatch(RefCell<Option<Option<FocusHandle>>>);
+
+/// Focus can end up with nothing, as a closed popup leaves it, or with an element
+/// that is no longer on screen, as a launcher replaced by its tool leaves it. App
+/// shortcuts dispatch from the focused element, so both go deaf to the keyboard.
+/// Acts only when it is still lost on the next render, so focus given to an element
+/// that is about to appear is left alone.
 pub fn restore_lost_focus<T: 'static>(
-    fallback: &FocusHandle,
+    shell: &FocusHandle,
+    watch: &FocusWatch,
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
     use gpui_kit::component::WindowExt as _;
-    if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
-        let fallback = fallback.clone();
-        cx.defer_in(window, move |_, window, cx| {
-            if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
-                fallback.focus(window, cx);
-            }
-        });
+    let lost = !shell.contains_focused(window, cx)
+        && !window.has_active_dialog(cx)
+        && !window.has_active_sheet(cx);
+    if !lost {
+        *watch.0.borrow_mut() = None;
+        return;
+    }
+    let focused = window.focused(cx);
+    let seen_before = watch.0.borrow().as_ref() == Some(&focused);
+    if seen_before {
+        *watch.0.borrow_mut() = None;
+        let shell = shell.clone();
+        cx.defer_in(window, move |_, window, cx| shell.focus(window, cx));
+    } else {
+        *watch.0.borrow_mut() = Some(focused);
+        cx.defer_in(window, |_, _, cx| cx.notify());
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Not a glob of the prelude: its `test` attribute would shadow the built-in one.
-    use super::restore_lost_focus;
+    use super::{FocusWatch, restore_lost_focus};
     use ::gpui::{
         AppContext as _, Context, FocusHandle, InteractiveElement, IntoElement, KeyBinding, Render,
         Styled, Window, div,
@@ -105,12 +122,13 @@ mod tests {
     struct Shell {
         focus: FocusHandle,
         restore: bool,
+        watch: FocusWatch,
         probes: usize,
     }
     impl Render for Shell {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             if self.restore {
-                restore_lost_focus(&self.focus, window, cx);
+                restore_lost_focus(&self.focus, &self.watch, window, cx);
             }
             div()
                 .size_full()
@@ -132,6 +150,7 @@ mod tests {
             let view = cx.new(|cx| Shell {
                 focus: cx.focus_handle(),
                 restore,
+                watch: FocusWatch::default(),
                 probes: 0,
             });
             shell = Some(view.clone());
@@ -146,7 +165,13 @@ mod tests {
         cx.simulate_keystrokes("cmd-,");
         cx.run_until_parked();
         assert_eq!(shell.read_with(cx, |s, _| s.probes), 1, "shortcut before");
-        cx.update(|window, cx| window.open_dialog(cx, |dialog, _, _| dialog.title("Dialog")));
+        // As when a menu opens the dialog: the element focused beforehand is the
+        // menu, which is gone by the time the dialog tries to hand focus back.
+        cx.update(|window, cx| {
+            let menu = cx.focus_handle();
+            menu.focus(window, cx);
+            window.open_dialog(cx, |dialog, _, _| dialog.title("Dialog"));
+        });
         cx.run_until_parked();
         cx.update(|window, cx| window.close_dialog(cx));
         cx.run_until_parked();
@@ -160,6 +185,40 @@ mod tests {
     #[::gpui::test]
     fn shortcuts_keep_working_after_a_dialog_closes(cx: &mut ::gpui::TestAppContext) {
         assert_eq!(probes_after_a_dialog_closes(true, cx), 1);
+    }
+
+    /// A launcher replaced by its tool leaves focus on an element no longer on screen.
+    #[::gpui::test]
+    fn shortcuts_keep_working_after_the_focused_element_leaves(cx: &mut ::gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new("cmd-,", Probe, Some("Shell"))]);
+        });
+        let mut shell = None;
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| Shell {
+                focus: cx.focus_handle(),
+                restore: true,
+                watch: FocusWatch::default(),
+                probes: 0,
+            });
+            shell = Some(view.clone());
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let shell = shell.unwrap();
+        let gone = cx.update(|window, cx| {
+            let gone = cx.focus_handle();
+            gone.focus(window, cx);
+            gone
+        });
+        shell.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.refresh());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-,");
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |s, _| s.probes), 1);
+        drop(gone);
     }
 
     /// The control: this is the failure the fallback exists for.

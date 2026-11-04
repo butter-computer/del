@@ -424,6 +424,7 @@ struct CachedRight {
 struct AppShell {
     updater: Entity<app_updates::AppUpdater>,
     shell_focus: FocusHandle,
+    focus_watch: keyboard_control::FocusWatch,
     settings_focused: bool,
     zoom_percent: u16,
     state: Entity<AppState>,
@@ -900,6 +901,7 @@ impl AppShell {
         let mut shell = Self {
             updater,
             shell_focus: cx.focus_handle(),
+            focus_watch: Default::default(),
             settings_focused: false,
             zoom_percent: del_core::zoom::percent(),
             state,
@@ -2940,7 +2942,7 @@ impl Render for AppShell {
                 cx,
             );
         });
-        keyboard_control::restore_lost_focus(&self.shell_focus, window, cx);
+        keyboard_control::restore_lost_focus(&self.shell_focus, &self.focus_watch, window, cx);
         v_flex()
             .relative()
             .size_full()

@@ -458,7 +458,11 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let section = s.settings_section;
     let preferences = section == SettingsSection::Appearance;
     let back = state.clone();
-    v_flex().id("settings").size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
+    let scroll = s.settings_scroll.clone();
+    let fades =
+        crate::tab_transfer::vertical_edge_fades(&scroll, crate::appearance::popup_surface());
+    div().relative().size_full().min_w_0().overflow_hidden()
+        .child(v_flex().id("settings").track_scroll(&scroll).size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
         .child(h_flex().w_full().items_center().justify_between().gap_4()
             .child(div().text_size(zpx(del_core::typography::TEXT_XL)).font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
@@ -525,7 +529,8 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         }))
                 }))
                 .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
-                    .child("Sign in opens your provider’s login in Terminal. Status updates automatically."))))
+                    .child("Sign in opens your provider’s login in Terminal. Status updates automatically.")))))
+        .children(fades)
 }
 
 #[cfg(test)]
@@ -573,5 +578,75 @@ mod layout_tests {
             assert!(bounds.right() <= zpx(570.));
             assert!(bounds.size.height >= zpx(48.));
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_scroll_tests {
+    use ::core::prelude::v1::test;
+    use ::gpui::{
+        AppContext as _, Context, InteractiveElement, IntoElement, Modifiers, MouseButton,
+        ParentElement, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        StatefulInteractiveElement, Styled, Window, div, point, px,
+    };
+
+    struct Fixture;
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// Settings opens through the dialog's `content`, so its page takes the wheel.
+    #[::gpui::test]
+    fn a_long_settings_page_scrolls_inside_its_dialog(cx: &mut ::gpui::TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
+        let _ = MouseButton::Left;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| Fixture);
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let scroll = ScrollHandle::new();
+        let page = scroll.clone();
+        cx.update(|window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let page = page.clone();
+                dialog
+                    .p_0()
+                    .close_button(false)
+                    .content(move |content, _, _| {
+                        content.child(
+                            div()
+                                .h(px(300.))
+                                .w_full()
+                                .debug_selector(|| "page".into())
+                                .child(
+                                    div()
+                                        .id("settings")
+                                        .track_scroll(&page)
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .child(div().h(px(2000.)).w_full()),
+                                ),
+                        )
+                    })
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("page").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_event(ScrollWheelEvent {
+            position: target,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert_eq!(scroll.offset().y, px(-200.));
     }
 }

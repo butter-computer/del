@@ -19,11 +19,43 @@ static NSURL *DelBrowserURL(NSString *address) {
     return parts.URL;
 }
 
+// Text inset and centred in a borderless field, which AppKit top-aligns by default.
+@interface DelInsetCell : NSTextFieldCell
+@end
+@implementation DelInsetCell
+- (NSRect)titleRectForBounds:(NSRect)bounds {
+    NSRect rect = [super titleRectForBounds:NSInsetRect(bounds, 8, 0)];
+    CGFloat height = [self cellSizeForBounds:rect].height;
+    rect.origin.y = bounds.origin.y + floor((bounds.size.height - height) / 2);
+    rect.size.height = height;
+    return rect;
+}
+- (void)drawInteriorWithFrame:(NSRect)frame inView:(NSView *)view {
+    [super drawInteriorWithFrame:[self titleRectForBounds:frame] inView:view];
+}
+- (void)editWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor delegate:(id)delegate event:(NSEvent *)event {
+    [super editWithFrame:[self titleRectForBounds:frame] inView:view editor:editor delegate:delegate event:event];
+}
+- (void)selectWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length {
+    [super selectWithFrame:[self titleRectForBounds:frame] inView:view editor:editor delegate:delegate start:start length:length];
+}
+@end
+
+static NSColor *DelColor(uint32_t rgb) {
+    return [NSColor colorWithSRGBRed:((rgb >> 16) & 0xff) / 255.0 green:((rgb >> 8) & 0xff) / 255.0
+                                blue:(rgb & 0xff) / 255.0 alpha:1];
+}
+
 @interface DelBrowserView : NSView <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, strong) WKWebView *web;
 @property(nonatomic, strong) NSTextField *address;
 @property(nonatomic, strong) NSTextField *status;
 @property(nonatomic, strong) NSTextField *welcome;
+@property(nonatomic, strong) NSTextField *detail;
+@property(nonatomic, strong) NSImageView *mark;
+@property(nonatomic, strong) NSButton *retry;
+// The address a failed load was for, kept apart from the page still behind it.
+@property(nonatomic, copy) NSString *failedURL;
 @property(nonatomic, strong) NSButton *back;
 @property(nonatomic, strong) NSButton *forward;
 @property(nonatomic, strong) NSButton *reload;
@@ -73,24 +105,46 @@ static NSURL *DelBrowserURL(NSString *address) {
     _web.allowsBackForwardNavigationGestures = YES;
     _web.hidden = YES;
     [self addSubview:_web];
+    _mark = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:nil]];
+    _mark.contentTintColor = NSColor.tertiaryLabelColor;
+    [self addSubview:_mark];
     _welcome = [NSTextField labelWithString:@"Enter a URL to browse"];
     _welcome.alignment = NSTextAlignmentCenter;
-    _welcome.textColor = NSColor.secondaryLabelColor;
+    _welcome.textColor = NSColor.labelColor;
     [self addSubview:_welcome];
+    _detail = [NSTextField wrappingLabelWithString:@"Local servers and websites open here."];
+    _detail.alignment = NSTextAlignmentCenter;
+    _detail.textColor = NSColor.secondaryLabelColor;
+    [self addSubview:_detail];
+    _retry = [NSButton buttonWithTitle:@"Try again" target:self action:@selector(retryLoad:)];
+    _retry.hidden = YES;
+    [self addSubview:_retry];
     _back = [self button:@"chevron.left" label:@"Back" action:@selector(goBack:)];
     _forward = [self button:@"chevron.right" label:@"Forward" action:@selector(goForward:)];
     _reload = [self button:@"arrow.clockwise" label:@"Reload" action:@selector(reloadPage:)];
     _address = [[NSTextField alloc] initWithFrame:NSZeroRect];
     _address.placeholderString = @"URL or localhost:3000";
-    _address.bezelStyle = NSTextFieldRoundedBezel;
+    _address.cell = [DelInsetCell new];
+    _address.editable = YES;
+    _address.selectable = YES;
+    _address.cell.scrollable = YES;
+    _address.bordered = NO;
+    _address.bezeled = NO;
+    _address.drawsBackground = NO;
+    _address.focusRingType = NSFocusRingTypeNone;
+    _address.wantsLayer = YES;
+    _address.placeholderString = @"URL or localhost:3000";
     _address.target = self;
     _address.action = @selector(openAddress:);
     _address.accessibilityLabel = @"Browser address";
     _address.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [self addSubview:_address];
+    // A chip over the page, so loading never resizes the page beneath it.
     _status = [NSTextField labelWithString:@""];
+    _status.cell = [DelInsetCell new];
     _status.textColor = NSColor.secondaryLabelColor;
     _status.lineBreakMode = NSLineBreakByTruncatingTail;
+    _status.wantsLayer = YES;
     _status.hidden = YES;
     [self addSubview:_status];
     [self refreshControls];
@@ -104,13 +158,38 @@ static NSURL *DelBrowserURL(NSString *address) {
     self.forward.frame = NSMakeRect(inset+button, 6*z, button, 26*z);
     self.reload.frame = NSMakeRect(inset+button*2, 6*z, button, 26*z);
     self.address.frame = NSMakeRect(inset+button*3+4*z, 6*z, MAX(0,w-inset*2-button*3-4*z), 26*z);
-    CGFloat footer = self.status.hidden ? 0 : 24*z;
-    self.web.frame = NSMakeRect(0, bar, w, MAX(0,h-bar-footer));
-    self.status.frame = NSMakeRect(inset, MAX(bar,h-footer+3*z), MAX(0,w-inset*2), 18*z);
-    self.welcome.frame = NSMakeRect(inset, MAX(bar,(h-20*z)/2), MAX(0,w-inset*2), 22*z);
+    self.web.frame = NSMakeRect(0, bar, w, MAX(0,h-bar));
     self.address.font = [NSFont systemFontOfSize:12*z];
+    self.address.layer.cornerRadius = 6*z;
     self.status.font = [NSFont systemFontOfSize:11*z];
-    self.welcome.font = [NSFont systemFontOfSize:13*z];
+    CGFloat chip = MIN(ceil(self.status.attributedStringValue.size.width) + 18*z, MAX(0,w-inset*2));
+    self.status.frame = NSMakeRect(inset, MAX(bar,h-inset-22*z), chip, 22*z);
+    self.status.layer.cornerRadius = 6*z;
+    self.welcome.font = [NSFont systemFontOfSize:14*z weight:NSFontWeightMedium];
+    self.detail.font = [NSFont systemFontOfSize:12*z];
+    CGFloat text = MIN(MAX(0,w-inset*4), 300*z);
+    CGFloat detail = [self.detail.cell cellSizeForBounds:NSMakeRect(0,0,text,CGFLOAT_MAX)].height;
+    CGFloat action = self.retry.hidden ? 0 : 36*z;
+    CGFloat stack = 28*z + 12*z + 20*z + 4*z + detail + action;
+    CGFloat top = MAX(bar+inset, bar+(h-bar-stack)/2);
+    self.mark.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:22*z weight:NSFontWeightRegular];
+    self.mark.frame = NSMakeRect((w-28*z)/2, top, 28*z, 28*z);
+    self.welcome.frame = NSMakeRect((w-text)/2, top+40*z, text, 20*z);
+    self.detail.frame = NSMakeRect((w-text)/2, top+64*z, text, detail);
+    [self.retry sizeToFit];
+    self.retry.frame = NSMakeRect((w-NSWidth(self.retry.frame))/2, top+64*z+detail+10*z, NSWidth(self.retry.frame), NSHeight(self.retry.frame));
+}
+/// The message that stands in for a page: nothing loaded yet, or a load that failed.
+- (void)showPlaceholder:(BOOL)visible title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol retry:(BOOL)retry {
+    self.web.hidden = visible;
+    self.mark.hidden = self.welcome.hidden = self.detail.hidden = !visible;
+    self.retry.hidden = !visible || !retry;
+    if (visible) {
+        self.welcome.stringValue = title;
+        self.detail.stringValue = detail;
+        self.mark.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
+    }
+    self.needsLayout = YES;
 }
 - (void)showStatus:(NSString *)message {
     self.status.stringValue = message ?: @"";
@@ -126,6 +205,7 @@ static NSURL *DelBrowserURL(NSString *address) {
                                  accessibilityDescription:self.web.loading ? @"Stop loading" : @"Reload"];
     self.reload.toolTip = self.web.loading ? @"Stop loading" : @"Reload";
     NSString *url = self.web.URL.absoluteString;
+    if (self.failedURL) url = nil;
     if (url.length && ![url isEqualToString:@"about:blank"]) self.savedURL = url;
     if (!self.address.currentEditor) {
         self.address.stringValue = [self.savedURL isEqualToString:@"about:blank"] ? @"" : self.savedURL;
@@ -136,16 +216,25 @@ static NSURL *DelBrowserURL(NSString *address) {
     if (!url) { [self showStatus:@"Enter a valid HTTP or HTTPS address."]; return; }
     self.savedURL = url.absoluteString;
     self.address.stringValue = [self.savedURL isEqualToString:@"about:blank"] ? @"" : self.savedURL;
-    self.welcome.hidden = ![self.savedURL isEqualToString:@"about:blank"];
-    self.web.hidden = !self.welcome.hidden;
-    [self showStatus:self.web.hidden ? nil : @"Loading…"];
+    self.failedURL = nil;
+    BOOL blank = [self.savedURL isEqualToString:@"about:blank"];
+    if (blank) {
+        [self showPlaceholder:YES title:@"Enter a URL to browse" detail:@"Local servers and websites open here." symbol:@"globe" retry:NO];
+    } else {
+        // Whatever is showing stays until the new page commits, so there is no white flash.
+        self.mark.hidden = self.welcome.hidden = self.detail.hidden = self.retry.hidden = YES;
+        self.needsLayout = YES;
+    }
+    [self showStatus:blank ? nil : @"Loading…"];
     [self.web loadRequest:[NSURLRequest requestWithURL:url]];
 }
 - (void)openAddress:(id)sender { [self navigate:self.address.stringValue]; [self.window makeFirstResponder:self.web]; }
+- (void)retryLoad:(id)sender { [self navigate:self.savedURL]; }
 - (void)goBack:(id)sender { [self.web goBack]; }
 - (void)goForward:(id)sender { [self.web goForward]; }
 - (void)reloadPage:(id)sender {
     if (self.web.loading) { [self.web stopLoading]; [self showStatus:nil]; }
+    else if (self.failedURL) [self retryLoad:sender];
     else if (self.web.URL) [self.web reload];
     else [self navigate:self.savedURL];
     [self refreshControls];
@@ -154,6 +243,8 @@ static NSURL *DelBrowserURL(NSString *address) {
     [self showStatus:@"Loading…"]; [self refreshControls];
 }
 - (void)webView:(WKWebView *)web didCommitNavigation:(WKNavigation *)navigation {
+    self.failedURL = nil;
+    [self showPlaceholder:NO title:@"" detail:@"" symbol:@"globe" retry:NO];
     NSString *host = web.URL.host ?: @"";
     if (![host isEqualToString:self.dialogHost ?: @""]) {
         self.dialogHost = host;
@@ -166,12 +257,21 @@ static NSURL *DelBrowserURL(NSString *address) {
 - (void)webView:(WKWebView *)web didFinishNavigation:(WKNavigation *)navigation {
     [self showStatus:nil]; [self refreshControls];
 }
-- (void)failed:(NSError *)error {
-    if (error.code != NSURLErrorCancelled) [self showStatus:[@"Couldn't load page: " stringByAppendingString:error.localizedDescription]];
+- (void)webView:(WKWebView *)web didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    // The page committed, so it stays; the chip says it did not finish.
+    if (error.code != NSURLErrorCancelled) [self showStatus:[@"Couldn't finish loading: " stringByAppendingString:error.localizedDescription]];
     [self refreshControls];
 }
-- (void)webView:(WKWebView *)web didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self failed:error]; }
-- (void)webView:(WKWebView *)web didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self failed:error]; }
+- (void)webView:(WKWebView *)web didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    // 102 is WebKit's "frame load interrupted": a declined navigation, already explained in the chip.
+    BOOL interrupted = [error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102;
+    if (error.code != NSURLErrorCancelled && !interrupted) {
+        self.failedURL = self.savedURL;
+        [self showStatus:nil];
+        [self showPlaceholder:YES title:@"Couldn't load this page" detail:error.localizedDescription symbol:@"exclamationmark.circle" retry:YES];
+    }
+    [self refreshControls];
+}
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)web { [self showStatus:@"Page stopped. Press Reload to try again."]; }
 - (void)webView:(WKWebView *)web decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSString *scheme = action.request.URL.scheme.lowercaseString;
@@ -263,7 +363,7 @@ void *del_browser_create(void *parentPointer, const char *initialURL, const char
     if (url.length && ![url isEqualToString:@"about:blank"]) [browser navigate:url];
     return (__bridge_retained void *)browser;
 }
-void del_browser_frame(void *pointer, double x, double y, double width, double height, double zoom, bool light, uint32_t background, bool mousePassthrough) {
+void del_browser_frame(void *pointer, double x, double y, double width, double height, double zoom, bool light, uint32_t background, uint32_t field, double radius, bool mousePassthrough) {
     if (![NSThread isMainThread] || !pointer) return;
     DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
     NSView *parent = browser.superview;
@@ -278,11 +378,10 @@ void del_browser_frame(void *pointer, double x, double y, double width, double h
     browser.frame = NSMakeRect(x,y,width,height);
     browser.appearance = [NSAppearance appearanceNamed:light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
     // The theme's page surface and corners, so the pane reads as part of the workspace.
-    browser.layer.backgroundColor = [NSColor colorWithSRGBRed:((background >> 16) & 0xff) / 255.0
-                                                        green:((background >> 8) & 0xff) / 255.0
-                                                         blue:(background & 0xff) / 255.0
-                                                        alpha:1].CGColor;
-    browser.layer.cornerRadius = 8 * zoom;
+    browser.layer.backgroundColor = DelColor(background).CGColor;
+    browser.layer.cornerRadius = radius;
+    browser.address.layer.backgroundColor = DelColor(field).CGColor;
+    browser.status.layer.backgroundColor = DelColor(field).CGColor;
     browser.zoom = zoom;
     browser.presented = YES;
     browser.previewRendering = NO;

@@ -10,6 +10,12 @@ mod native {
         rc::Rc,
     };
 
+    /// A surface colour as the 0xRRGGBB the native pane takes.
+    fn rgb_channels(color: Rgba) -> u32 {
+        let channel = |value: f32| (value * 255.).round() as u32;
+        channel(color.r) << 16 | channel(color.g) << 8 | channel(color.b)
+    }
+
     unsafe extern "C" {
         fn del_browser_create(
             parent: *mut c_void,
@@ -25,6 +31,8 @@ mod native {
             zoom: f64,
             light: bool,
             background: u32,
+            field: u32,
+            radius: f64,
             mouse_passthrough: bool,
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
@@ -101,11 +109,10 @@ mod native {
                             bounds.size.height.as_f32() as f64,
                             del_core::zoom::factor() as f64,
                             crate::appearance::light(),
-                            {
-                                let page = crate::appearance::page_surface();
-                                let channel = |value: f32| (value * 255.).round() as u32;
-                                channel(page.r) << 16 | channel(page.g) << 8 | channel(page.b)
-                            },
+                            rgb_channels(crate::appearance::page_surface()),
+                            rgb_channels(crate::appearance::composer_surface()),
+                            (del_core::ShellMetrics::default().page_radius
+                                * del_core::zoom::factor()) as f64,
                             cx.has_active_drag(),
                         )
                     };

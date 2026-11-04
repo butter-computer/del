@@ -46,6 +46,8 @@ enum PaletteAction {
 }
 /// Action icons and provider marks share one column, so their labels line up.
 const PALETTE_MARK_WIDTH: f32 = 16.;
+/// A two-line result, with air between neighbours so they read as separate rows.
+const RESULT_ROW_HEIGHT: f32 = 44.;
 
 impl PaletteAction {
     const ALL: [Self; 4] = [
@@ -236,8 +238,9 @@ impl Palette {
     fn layout_height(&self, window: &Window, cx: &App) -> (Pixels, Pixels) {
         let actions = self.actions(cx).len();
         let groups = usize::from(actions > 0) + usize::from(!self.hits.is_empty());
-        let content =
-            zpx(30. * actions as f32 + 36. * self.hits.len() as f32 + 22. * groups as f32);
+        let content = zpx(30. * actions as f32
+            + RESULT_ROW_HEIGHT * self.hits.len() as f32
+            + 22. * groups as f32);
         let extra = zpx(if self.hits.is_empty() { 24. } else { 0. }
             + if self.errors.is_empty() { 0. } else { 20. });
         let chrome = zpx(42. + 30. + 4.) + extra;
@@ -397,7 +400,7 @@ impl Palette {
                 source.title, source.project_name, hit.snippet
             ))
             .px(zpx(8.))
-            .h(zpx(36.))
+            .h(zpx(RESULT_ROW_HEIGHT))
             .gap(zpx(8.))
             .items_center()
             .overflow_hidden()
@@ -438,7 +441,7 @@ impl Palette {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(zpx(0.))
+                    .gap(zpx(2.))
                     .child(
                         h_flex()
                             .min_w_0()
@@ -506,7 +509,7 @@ impl Render for Palette {
         let actions = self.actions(cx).len();
         let (results_height, panel_height) = self.layout_height(window, cx);
         let content_height = 30. * actions as f32
-            + 36. * self.hits.len() as f32
+            + RESULT_ROW_HEIGHT * self.hits.len() as f32
             + 22. * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
@@ -572,6 +575,7 @@ impl Render for Palette {
                 v_flex()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
                     .px(zpx(4.))
                     .pb(zpx(4.))
@@ -583,6 +587,10 @@ impl Render for Palette {
                             .h(results_height)
                             .w_full(),
                         )
+                        .children(crate::tab_transfer::list_edge_fades(
+                            &self.scroll,
+                            crate::appearance::popup_surface(),
+                        ))
                     })
                     .when(self.hits.is_empty(), |body| {
                         body.child(
