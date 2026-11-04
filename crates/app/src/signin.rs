@@ -61,6 +61,7 @@ fn provider_row(
     cx: &App,
 ) -> impl IntoElement {
     let s = state.read(cx);
+    let reduced = cx.reduce_motion();
     let checking = s.checking.contains(&provider) || status.is_none();
     let signing_in = s.signin == Some(provider);
     let can_sign_in = provider != Provider::Acp
@@ -83,13 +84,15 @@ fn provider_row(
     h_flex()
         .id(SharedString::from(format!("provider-{name}")))
         .w_full()
-        .min_h(zpx(58.))
+        .min_h(zpx(44.))
         .px_3()
-        .gap_3()
+        .gap_2()
         .items_center()
-        .rounded(zpx(14.))
-        .bg(crate::appearance::composer_surface())
-        .child(crate::icons::path(logo).text_color(rgb(color)))
+        .child(
+            crate::icons::path(logo)
+                .with_size(zpx(crate::icons::MARK_SIZE))
+                .text_color(rgb(color)),
+        )
         .child(
             div()
                 .text_size(zpx(TEXT_MD))
@@ -124,7 +127,14 @@ fn provider_row(
                                         "provider-shimmer",
                                         Animation::new(std::time::Duration::from_millis(1100))
                                             .repeat(),
-                                        |strip, t| strip.left(zpx(-30. + 124. * t)),
+                                        move |strip, t| {
+                                            // Reduce Motion keeps a static placeholder.
+                                            strip.left(zpx(if reduced {
+                                                0.
+                                            } else {
+                                                -30. + 124. * t
+                                            }))
+                                        },
                                     ),
                             ),
                     )
@@ -154,9 +164,6 @@ fn provider_row(
                     row.child(
                         Button::new("sign-in")
                             .small()
-                            .h(zpx(28.))
-                            .px_3()
-                            .rounded_full()
                             .primary()
                             .label(if signing_in {
                                 "Signing in…"
@@ -172,9 +179,10 @@ fn provider_row(
                 })
                 .child(
                     Button::new("recheck")
+                        .ghost()
                         .size(crate::icons::button_size())
                         .p_0()
-                        .rounded_full()
+                        .text_color(rgba(0xffffff8c))
                         .child(if checking {
                             crate::icons::spinner().into_any_element()
                         } else {
@@ -454,7 +462,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             .child(Button::new("settings-done").small().label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
-        .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_4()
+        .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_3()
             .when(preferences, |content| content.child(appearance_controls()))
             .when(preferences, |content| {
                 let state = state.clone();
@@ -469,9 +477,10 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
             .when(section == SettingsSection::Providers, |content| content
                 .children(providers::VISIBLE.into_iter().map(|provider| {
-                    v_flex().gap_1().child(provider_row(provider, s.status_of(provider), state, cx))
-                        .when(provider != Provider::Acp, |rows| rows.child(
-                            h_flex().pl(zpx(38.)).pr_3().py_2().gap_2().items_center()
+                    v_flex().rounded(zpx(10.)).bg(crate::appearance::composer_surface()).pb_1()
+                        .child(provider_row(provider, s.status_of(provider), state, cx))
+                        .when(provider != Provider::Acp, |rows| rows.child(div().h(zpx(1.)).mx_3().mb_1().bg(crate::appearance::separator())).child(
+                            h_flex().pl(zpx(34.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
@@ -492,7 +501,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             let remove_id = id.clone();
                             let default_id = id.clone();
                             let needs_login = s.account_needs_login(&id);
-                            h_flex().pl(zpx(38.)).pr_3().py_2().gap_2().items_center()
+                            h_flex().pl(zpx(34.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))

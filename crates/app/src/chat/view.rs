@@ -1265,7 +1265,11 @@ impl Render for ChatView {
         self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
         if let Some(jump) = &self.jump {
-            let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
+            let t = if cx.reduce_motion() {
+                1.0
+            } else {
+                (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0)
+            };
             self.scroller.scroll_to(ListOffset {
                 item_ix: jump.target,
                 offset_in_item: zpx(0.0),
@@ -1297,6 +1301,8 @@ impl Render for ChatView {
             .as_ref()
             .map(|jump| jump.target)
             .or_else(|| active_prompt(&prompts, top, at_end));
+        let rail_motion =
+            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 100 });
         let hover = self.rail_hover;
         let previous_hover = self.rail_previous_hover;
         let work = self
@@ -1518,10 +1524,8 @@ impl Render for ChatView {
                                                         SharedString::from(format!(
                                                             "rail-{ix}-{previous_hover:?}-{hover:?}"
                                                         )),
-                                                        Animation::new(
-                                                            std::time::Duration::from_millis(100),
-                                                        )
-                                                        .with_easing(ease_out_quint()),
+                                                        Animation::new(rail_motion)
+                                                            .with_easing(ease_out_quint()),
                                                         move |tick, t| {
                                                             let weight =
                                                                 previous + (next - previous) * t;

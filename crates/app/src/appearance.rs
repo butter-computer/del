@@ -140,6 +140,13 @@ pub fn shell_surface() -> Rgba {
 pub fn dragged_tab_surface() -> Rgba {
     gpui_kit::rgb(colors().neutral[2])
 }
+/// Code, diffs and tool output: one step below the page in every theme, so text
+/// stays the brightest part and the animated background still reads through.
+pub fn code_surface() -> Rgba {
+    let mut surface = shell_surface();
+    surface.a = 0.82;
+    surface
+}
 pub fn page_surface() -> Rgba {
     gpui_kit::rgb(colors().neutral[0])
 }

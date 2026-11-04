@@ -2298,7 +2298,11 @@ impl AppShell {
                                                     SharedString::from(format!(
                                                         "tab-shift-{uid}-{old_offset}-{new_offset}"
                                                     )),
-                                                    Animation::new(Duration::from_millis(90))
+                                                    Animation::new(Duration::from_millis(if cx.reduce_motion() {
+                                                        0
+                                                    } else {
+                                                        90
+                                                    }))
                                                         .with_easing(ease_out_quint()),
                                                     move |tab, t| {
                                                         tab.relative().left(zpx(old_offset
@@ -2521,8 +2525,10 @@ impl AppShell {
                                     ))
                                     .with_animation(
                                         ("first-prompt", transition_key),
-                                        Animation::new(Duration::from_millis(120))
-                                            .with_easing(ease_out_quint()),
+                                        Animation::new(Duration::from_millis(
+                                            if cx.reduce_motion() { 0 } else { 120 },
+                                        ))
+                                        .with_easing(ease_out_quint()),
                                         |transcript, t| transcript.opacity(t),
                                     ),
                             )

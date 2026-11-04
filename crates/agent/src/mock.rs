@@ -118,6 +118,34 @@ impl MockBackend {
     }
 }
 
+/// Every kind of block a reply can contain, so a UI run can show them all.
+const MARKDOWN_REPLY: &str = "Here is what I found.
+
+## Summary
+
+The composer keeps **one column** with the transcript, and `render_row` owns the inset. See [the guide](https://example.com/guide) for details.
+
+### Next steps
+
+1. Run the checks.
+2. Compare the screenshots.
+   - Dark and light
+   - A narrow window
+
+> Reasoning stays collapsed until it is opened.
+
+```rust
+fn main() {
+    println!(\"hello\");
+}
+```
+
+| Surface | State |
+| --- | --- |
+| Sidebar | Ready |
+| Composer | Ready |
+";
+
 fn emit(state: &SessionState, ev: AgentEvent) {
     let _ = state.tx.send(ev);
 }
@@ -260,6 +288,52 @@ async fn run_turn(
                 full.push_str("Understood, I left it alone.");
             }
         }
+    } else if lower.contains("markdown") {
+        full.push_str(MARKDOWN_REPLY);
+    } else if lower.contains("group") {
+        for (n, (name, input, status, output)) in [
+            (
+                "read_file",
+                "src/main.rs",
+                ToolStatus::Completed,
+                "42 lines read",
+            ),
+            (
+                "shell",
+                "cargo test --workspace",
+                ToolStatus::Failed,
+                "2 tests failed",
+            ),
+            (
+                "shell",
+                "git status --short",
+                ToolStatus::Completed,
+                "M src/main.rs",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call-{turn_id}-{n}");
+            pause().await;
+            emit(
+                &state,
+                AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.into(),
+                    input_summary: input.into(),
+                },
+            );
+            emit(
+                &state,
+                AgentEvent::ToolCallFinished {
+                    id,
+                    status,
+                    output_summary: output.into(),
+                },
+            );
+        }
+        full.push_str("Two tests fail on main.");
     } else if lower.contains("tool") {
         let id = format!("call-{turn_id}");
         pause().await;

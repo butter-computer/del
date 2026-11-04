@@ -1249,7 +1249,7 @@ fn space_contents(
                                 let working = s.tab_working(&crate::state::Tab::Draft(key));
                                 div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
                                     .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
-                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
+                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).gap_1p5()
                                     .child(crate::mode_ui::tab_mark(s.tab_info(&crate::state::Tab::Draft(key)).1))
                                     .child(div().flex_1().min_w_0().truncate().child("New session"))

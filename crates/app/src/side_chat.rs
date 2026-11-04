@@ -1161,7 +1161,7 @@ impl Render for SideChat {
                                 .text_color(rgba(0xffffff80)),
                         ),
                     )
-                    .child("Side chat")
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Side chat"))
                     .child(
                         div()
                             .w_full()

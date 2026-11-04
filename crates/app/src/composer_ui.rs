@@ -137,6 +137,8 @@ pub(crate) fn account_menu_label(
 }
 
 pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
+/// Composer controls stay readable but sit below what is being written.
+pub(crate) const CONTROL_TEXT: u32 = 0xffffffb8;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 type PasteHandler = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
@@ -344,6 +346,7 @@ pub(crate) fn provider_button(
 ) -> Button {
     chip(id)
         .tooltip_with_action("Select provider / account", &crate::SelectProvider, None)
+        .text_color(rgba(CONTROL_TEXT))
         .h(zpx(24.))
         .px(zpx(8.))
         .disabled(locked)
@@ -600,7 +603,7 @@ impl RenderOnce for ComposerCard {
             // A hairline holds the edge over any background; focus firms it up.
             .border_1()
             .border_color(if focused {
-                rgba(0xffffff2e)
+                rgba(0xffffff1f)
             } else {
                 crate::appearance::separator()
             })
@@ -645,6 +648,7 @@ impl RenderOnce for ComposerCard {
                                 true,
                                 move |motion| {
                                     chip("attach-files")
+                                        .text_color(muted)
                                         .size(crate::icons::button_size())
                                         .p_0()
                                         .child(motion.glyph(Glyph::Add))

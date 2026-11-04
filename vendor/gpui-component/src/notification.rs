@@ -49,7 +49,7 @@ impl NotificationType {
             Self::Info => Icon::new(IconName::Info).text_color(cx.theme().info),
             Self::Success => Icon::new(IconName::CircleCheck).text_color(cx.theme().success),
             Self::Warning => Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning),
-            Self::Error => Icon::new(IconName::CircleX).text_color(cx.theme().danger),
+            Self::Error => Icon::new(IconName::CircleAlert).text_color(cx.theme().danger),
         }
     }
 }

@@ -3758,7 +3758,7 @@ impl RightPanel {
                                                     show_hidden
                                                 )),
                                                 Animation::new(std::time::Duration::from_millis(
-                                                    120,
+                                                    if cx.reduce_motion() { 0 } else { 120 },
                                                 ))
                                                 .with_easing(ease_out_quint()),
                                                 move |thumb, t| {

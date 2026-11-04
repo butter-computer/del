@@ -264,6 +264,7 @@ impl Render for ModelPicker {
                             .compact()
                             .rounded_full()
                             .text_size(zpx(13.))
+                            .text_color(rgba(crate::composer_ui::CONTROL_TEXT))
                             .disabled(state.locked)
                             .tooltip_with_action("Select model", &crate::SelectModel, None)
                             .accessibility_label(format!(
@@ -396,6 +397,8 @@ impl ModelPanel {
 
 impl Render for ModelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let effort_motion =
+            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 180 });
         let state = self.state.read(cx);
         let available_height = if state.above {
             self.trigger_bottom.get() - zpx(28.)
@@ -889,8 +892,7 @@ impl Render for ModelPanel {
                                         SharedString::from(format!(
                                             "effort-fill-{old_fill}-{new_fill}"
                                         )),
-                                        Animation::new(std::time::Duration::from_millis(180))
-                                            .with_easing(ease_out_quint()),
+                                        Animation::new(effort_motion).with_easing(ease_out_quint()),
                                         move |fill, t| {
                                             fill.w(zpx(old_fill + (new_fill - old_fill) * t))
                                         },
@@ -925,8 +927,7 @@ impl Render for ModelPanel {
                                 SharedString::from(format!(
                                     "effort-thumb-{old_position}-{new_position}"
                                 )),
-                                Animation::new(std::time::Duration::from_millis(180))
-                                    .with_easing(ease_out_quint()),
+                                Animation::new(effort_motion).with_easing(ease_out_quint()),
                                 move |thumb, t| {
                                     thumb
                                         .left(zpx(old_position + (new_position - old_position) * t))

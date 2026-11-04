@@ -1275,7 +1275,7 @@ impl AppShell {
         } else {
             0.0
         };
-        let Some(started) = self.mode_slide_started else {
+        let Some(started) = self.mode_slide_started.filter(|_| !cx.reduce_motion()) else {
             return target;
         };
         let t = (started.elapsed().as_secs_f32() / 0.18).min(1.0);

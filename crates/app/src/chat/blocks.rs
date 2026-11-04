@@ -23,8 +23,6 @@ const CARD: u32 = 0xffffff0d;
 const CARD_HOVER: u32 = 0xffffff14;
 /// The user's message: one step above the page.
 const USER_CARD: u32 = 0xffffff12;
-/// Code, diffs and tool output: below the page, so text stays the brightest part.
-const CODE_SURFACE: u32 = 0x00000038;
 const HAIRLINE: u32 = 0xffffff0f;
 /// Secondary reading text: code context, tool output, error detail.
 const BODY_MUTED: u32 = 0xffffffb3;
@@ -660,7 +658,7 @@ impl ChatView {
                         .max_h(zpx(260.))
                         .overflow_y_scroll()
                         .rounded_lg()
-                        .bg(rgba(CODE_SURFACE))
+                        .bg(crate::appearance::code_surface())
                         .font_family(MONO)
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
@@ -745,7 +743,7 @@ impl ChatView {
                         .max_h(zpx(260.0))
                         .overflow_y_scroll()
                         .rounded_lg()
-                        .bg(rgba(CODE_SURFACE))
+                        .bg(crate::appearance::code_surface())
                         .children(change.lines.iter().take(MAX_DIFF_LINES).map(|line| {
                             let added = ActionTone::Success.foreground();
                             let removed = ActionTone::Danger.foreground();
@@ -827,7 +825,7 @@ impl ChatView {
                     .px(zpx(10.))
                     .py(zpx(7.))
                     .rounded_md()
-                    .bg(rgba(CODE_SURFACE))
+                    .bg(crate::appearance::code_surface())
                     .font_family(MONO)
                     .text_size(zpx(TEXT_SM))
                     .line_height(relative(1.5))
@@ -884,13 +882,16 @@ fn disclosure(expanded: bool) -> Icon {
 }
 
 fn prose_style() -> TextViewStyle {
-    TextViewStyle::default().heading_font_size(|level, _| {
-        zpx(match level {
-            1 => TEXT_XL,
-            2 => TEXT_LG,
-            _ => TEXT_PROSE,
+    TextViewStyle::default()
+        .heading_font_size(|level, _| {
+            zpx(match level {
+                1 => TEXT_XL,
+                2 => TEXT_LG,
+                _ => TEXT_PROSE,
+            })
         })
-    })
+        // The same surface as diffs and tool output.
+        .code_block(StyleRefinement::default().bg(crate::appearance::code_surface()))
 }
 
 fn user_message(
