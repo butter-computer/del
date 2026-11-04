@@ -4130,7 +4130,7 @@ pub(crate) mod tests {
             cx.update(|window, cx| {
                 state.update(cx, |state, cx| {
                     let (provider, _, cwd) = state.effective();
-                    state.apply(Msg::Models(provider, None, cwd, result), cx);
+                    state.apply(super::Msg::Models(provider, None, cwd, result), cx);
                 });
                 picker.update(cx, |picker, cx| picker.open_picker(false, window, cx));
             });

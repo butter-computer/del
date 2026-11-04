@@ -6,6 +6,7 @@
 //! `tool` → a tool call with a progress update and a file change;
 //! anything else → streamed text with reasoning and token usage.
 
+use crate::ModelInfo;
 use crate::backend::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -47,6 +48,7 @@ pub struct MockBackend {
     provider: Provider,
     delay: Duration,
     completion_delay: Duration,
+    models: Vec<ModelInfo>,
     #[cfg(test)]
     pub title_response: Option<String>,
     /// Provider-owned name and the sessions it was read for.
@@ -75,6 +77,7 @@ impl MockBackend {
             provider,
             delay: Duration::ZERO,
             completion_delay: Duration::ZERO,
+            models: Vec::new(),
             #[cfg(test)]
             title_response: None,
             #[cfg(test)]
@@ -88,6 +91,12 @@ impl MockBackend {
     /// Pause between scripted events; makes streaming visible in a UI.
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Optional synthetic catalog for exercising model and effort controls.
+    pub fn with_models(mut self, models: Vec<ModelInfo>) -> Self {
+        self.models = models;
         self
     }
 
@@ -477,6 +486,13 @@ impl AgentBackend for MockBackend {
             .unwrap()
             .push(session.clone());
         Ok(self.session_title.clone())
+    }
+
+    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(self.models.clone())
     }
 
     async fn start_session(&self, _config: SessionConfig) -> Result<SessionHandle> {

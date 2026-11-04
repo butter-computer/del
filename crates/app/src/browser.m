@@ -19,6 +19,32 @@ static NSURL *DelBrowserURL(NSString *address) {
     return parts.URL;
 }
 
+// NSTextField's borderless cell is top-aligned by default. Keep both its
+// display text and its field editor on the same inset, centered baseline.
+@interface DelBrowserAddressCell : NSTextFieldCell
+@end
+@implementation DelBrowserAddressCell
+- (NSRect)drawingRectForBounds:(NSRect)bounds {
+    NSRect rect = [super drawingRectForBounds:bounds];
+    CGFloat z = self.font.pointSize / 13.0;
+    rect = NSInsetRect(rect, 8*z, 0);
+    CGFloat height = MIN(NSHeight(rect), self.cellSize.height);
+    rect.origin.y += floor((NSHeight(rect)-height)/2);
+    rect.size.height = height;
+    return rect;
+}
+- (void)selectWithFrame:(NSRect)rect inView:(NSView *)view editor:(NSText *)editor
+              delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length {
+    [super selectWithFrame:[self drawingRectForBounds:rect] inView:view editor:editor
+                  delegate:delegate start:start length:length];
+}
+- (void)editWithFrame:(NSRect)rect inView:(NSView *)view editor:(NSText *)editor
+            delegate:(id)delegate event:(NSEvent *)event {
+    [super editWithFrame:[self drawingRectForBounds:rect] inView:view editor:editor
+                delegate:delegate event:event];
+}
+@end
+
 @interface DelBrowserView : NSView <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, strong) WKWebView *web;
 @property(nonatomic, strong) NSTextField *address;
@@ -82,6 +108,9 @@ static NSURL *DelBrowserURL(NSString *address) {
     _forward = [self button:@"chevron.right" label:@"Forward" action:@selector(goForward:)];
     _reload = [self button:@"arrow.clockwise" label:@"Reload" action:@selector(reloadPage:)];
     _address = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    _address.cell = [DelBrowserAddressCell new];
+    _address.usesSingleLineMode = YES;
+    _address.cell.scrollable = YES;
     _address.placeholderString = @"URL or localhost:3000";
     _address.bordered = NO;
     _address.drawsBackground = NO;

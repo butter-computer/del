@@ -241,6 +241,7 @@ impl Render for ModelPicker {
         };
         let trigger_bottom = self.trigger_bottom.clone();
         div()
+            .min_w_0()
             .on_children_prepainted(move |bounds, _, _| {
                 if let Some(bounds) = bounds.first() {
                     trigger_bottom.set(bounds.bottom());
@@ -248,6 +249,8 @@ impl Render for ModelPicker {
             })
             .child(
                 Popover::new("model-picker")
+                    .max_w_full()
+                    .min_w_0()
                     .track_focus(&content_focus)
                     .open(self.open)
                     .appearance(false)
@@ -262,6 +265,9 @@ impl Render for ModelPicker {
                             .ghost()
                             .small()
                             .compact()
+                            .max_w_full()
+                            .min_w_0()
+                            .justify_start()
                             .rounded_full()
                             .text_size(zpx(13.))
                             .text_color(rgba(crate::composer_ui::CONTROL_TEXT))
@@ -274,28 +280,33 @@ impl Render for ModelPicker {
                                     .map(|effort| format!(" · {effort}"))
                                     .unwrap_or_default()
                             ))
-                            .child(h_flex().gap_1().items_center().child(label).when_some(
-                                effort,
-                                |row, effort| {
-                                    row.child(
-                                        div()
-                                            .id("effort-picker-trigger")
-                                            .text_color(crate::appearance::secondary_text())
-                                            .child(effort)
-                                            .tooltip(|window, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new(
-                                                    "Select effort",
-                                                )
-                                                .action(&crate::SelectEffort, None)
-                                                .build(window, cx)
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.open_picker(true, window, cx);
-                                            })),
-                                    )
-                                },
-                            )),
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(div().min_w_0().truncate().child(label))
+                                    .when_some(effort, |row, effort| {
+                                        row.child(
+                                            div()
+                                                .id("effort-picker-trigger")
+                                                .flex_none()
+                                                .text_color(crate::appearance::secondary_text())
+                                                .child(effort)
+                                                .tooltip(|window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        "Select effort",
+                                                    )
+                                                    .action(&crate::SelectEffort, None)
+                                                    .build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.open_picker(true, window, cx);
+                                                })),
+                                        )
+                                    }),
+                            ),
                     )
                     .on_open_change(cx.listener(|this, open: &bool, window, cx| {
                         this.open = *open;
@@ -531,12 +542,14 @@ impl Render for ModelPanel {
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child(default_label)
+                                .child(div().w_full().truncate().child(default_label))
                                 .child(
                                     div()
                                         .text_size(zpx(del_core::typography::TEXT_SM))
                                         .text_color(muted)
-                                        .child("Automatic · follows provider settings"),
+                                        .w_full()
+                                        .truncate()
+                                        .child("Automatic · provider settings"),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -581,7 +594,7 @@ impl Render for ModelPanel {
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child(model.name.clone())
+                                .child(div().w_full().truncate().child(model.name.clone()))
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
                                         div()
@@ -799,17 +812,27 @@ impl Render for ModelPanel {
                         .ghost()
                         .small()
                         .compact()
+                        .flex_1()
+                        .min_w_0()
                         .text_size(zpx(del_core::typography::TEXT_LG))
                         .child(
                             h_flex()
+                                .w_full()
+                                .min_w_0()
                                 .items_center()
                                 .gap_1()
-                                .child(model_name)
+                                .child(div().flex_1().min_w_0().truncate().child(model_name))
                                 .when_some(effort_label, |row, effort| {
-                                    row.child(div().text_color(rgba(0xffffff72)).child(effort))
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(crate::appearance::secondary_text())
+                                            .child(effort),
+                                    )
                                 })
                                 .child(
                                     crate::icons::icon(IconName::ChevronRight)
+                                        .flex_none()
                                         .text_color(rgba(0xffffff62)),
                                 ),
                         )
