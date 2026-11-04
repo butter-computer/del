@@ -698,7 +698,7 @@ impl AppState {
                 }
                 self.replace_space_tab(&Tab::Draft(key), Tab::Session(id.clone()));
                 self.overrides_mut()
-                    .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+                    .move_side_chat_state(&Self::tab_unread_id(&Tab::Draft(key)), &id);
                 self.save_overrides();
                 self.set_records(self.manager.list_sessions());
                 if let Some(record) = self.records.iter().find(|r| r.id == id) {
@@ -1025,6 +1025,33 @@ impl AppState {
             && self
                 .side_chat_owner(uid)
                 .is_some_and(|tab| tab.selection() == self.selection)
+    }
+
+    pub fn conversation_usage(
+        &self,
+        main: &crate::session_usage::SessionUsage,
+    ) -> crate::session_usage::SessionUsage {
+        let id = match &self.selection {
+            Selection::Draft(key) => Self::tab_unread_id(&Tab::Draft(*key)),
+            Selection::Session(id) | Selection::Terminal(id) => id.clone(),
+        };
+        main.with_side_chats(self.overrides.side_chat_costs(&id))
+    }
+
+    pub fn record_side_chat_costs(
+        &mut self,
+        uid: u64,
+        side: &str,
+        costs: &std::collections::BTreeMap<String, f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.side_chat_owner(uid).map(Self::tab_unread_id) else {
+            return;
+        };
+        if self.overrides_mut().merge_side_chat_costs(&id, side, costs) {
+            self.save_overrides();
+            cx.notify();
+        }
     }
 
     pub fn side_chat_unread(&self, uid: u64, side: &str) -> bool {
@@ -1416,7 +1443,7 @@ impl AppState {
         if let Some(title) = self.overrides.title(terminal).map(str::to_owned) {
             self.overrides_mut().rename(chat, &title);
         }
-        self.overrides_mut().move_side_chat_unread(terminal, chat);
+        self.overrides_mut().move_side_chat_state(terminal, chat);
         self.overrides_mut().remove(terminal);
         self.terminal_rows.retain(|row| &row.id != terminal);
         self.save_overrides();
@@ -1447,7 +1474,7 @@ impl AppState {
             }
             self.replace_space_tab(&Tab::Draft(key), Tab::Terminal(id.clone()));
             self.overrides_mut()
-                .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+                .move_side_chat_state(&Self::tab_unread_id(&Tab::Draft(key)), &id);
             self.save_overrides();
             self.drafts.remove(&key);
             self.launch_options.remove(&key);
@@ -3712,7 +3739,7 @@ pub(crate) mod tests {
             let draft_id = super::AppState::tab_unread_id(&Tab::Draft(0));
             s.overrides_mut()
                 .set_side_chat_unread(&draft_id, "draft-side", true);
-            s.overrides_mut().move_side_chat_unread(&draft_id, &id);
+            s.overrides_mut().move_side_chat_state(&draft_id, &id);
             assert!(s.overrides.side_chat_unread(&id, "draft-side"));
             assert!(!s.overrides.unread(&draft_id));
         });

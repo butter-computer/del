@@ -212,7 +212,7 @@ pub struct TurnNotification {
     pub turn: TurnRef,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenBreakdown {
     #[serde(default)]

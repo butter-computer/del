@@ -94,6 +94,36 @@ impl SessionUsage {
         known.retain(|_, cost| cost.0.is_finite());
         known
     }
+    /// Reconcile each conversation separately before adding it to the family.
+    /// Legacy coverage floors and provider-native scopes never overlap siblings.
+    pub fn with_side_chats<'a>(
+        &self,
+        sides: impl Iterator<Item = &'a BTreeMap<String, f64>>,
+    ) -> Self {
+        let mut family = Self {
+            context_tokens: self.context_tokens,
+            context_window: self.context_window,
+            ..Default::default()
+        };
+        for (index, costs) in std::iter::once(self.costs.clone())
+            .chain(sides.cloned())
+            .enumerate()
+        {
+            let usage = Self {
+                costs,
+                ..Default::default()
+            };
+            for (provider, (cost, estimated)) in usage.provider_costs() {
+                let estimate = if estimated { "estimate:" } else { "" };
+                family.costs.insert(
+                    format!("v2:conversation-{index}:{estimate}{provider}:total"),
+                    cost,
+                );
+            }
+        }
+        family
+    }
+    #[cfg(test)]
     pub fn provider_cost(&self, provider: del_agent::Provider) -> Option<(f64, bool)> {
         self.provider_costs().get(provider.binary()).copied()
     }
@@ -107,7 +137,7 @@ impl SessionUsage {
         })
     }
     pub fn cost_breakdown(&self) -> String {
-        let mut lines = vec!["This conversation · all provider switches".into()];
+        let mut lines = vec!["Main + side chats · all provider switches".into()];
         for (provider, cost) in self.provider_costs() {
             let name = match provider.as_str() {
                 "claude" => "Claude",
@@ -153,7 +183,7 @@ pub fn money(cost: Option<(f64, bool)>) -> String {
         None => "—".into(),
     }
 }
-fn merge_cost(costs: &mut BTreeMap<String, f64>, scope: &str, cost: f64) {
+pub(crate) fn merge_cost(costs: &mut BTreeMap<String, f64>, scope: &str, cost: f64) {
     if cost.is_finite() && cost >= 0. {
         costs
             .entry(scope.to_owned())
@@ -209,6 +239,64 @@ fn save_cost_at(path: &std::path::Path, scope: &str, cost: f64) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn family_costs_add_siblings_and_provider_switches_without_cross_chat_floors() {
+        let main = SessionUsage {
+            context_tokens: Some(100),
+            context_window: Some(1000),
+            costs: BTreeMap::from([("claude:legacy".into(), 5.0)]),
+        };
+        let sides = [
+            BTreeMap::from([
+                ("v2:a:claude:run".into(), 2.0),
+                ("v2:a:estimate:claude:run".into(), 1.0),
+                ("v2:b:estimate:codex:thread".into(), 3.0),
+                ("v2:c:claude:run".into(), 4.0),
+            ]),
+            BTreeMap::from([("claude:legacy".into(), 6.0)]),
+        ];
+        let family = main.with_side_chats(sides.iter());
+        assert_eq!(family.provider_costs()["claude"], (17.0, false));
+        assert_eq!(family.provider_costs()["codex"], (3.0, true));
+        assert_eq!(family.cost_summary(), Some((20.0, true)));
+        assert_eq!(family.context_label(), "Context 10% used");
+        assert_eq!(
+            main.with_side_chats(std::iter::empty()).total_cost(),
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn side_costs_survive_replay_provider_changes_closing_and_owner_migration() {
+        let mut saved = crate::sessions::Overrides::default();
+        let draft = SessionId::new("draft:0");
+        let parent = SessionId::new("main");
+        let mut first = BTreeMap::from([("v2:a:claude:run".into(), 2.0)]);
+        assert!(saved.merge_side_chat_costs(&draft, "side-one", &first));
+        assert!(!saved.merge_side_chat_costs(&draft, "side-one", &first));
+        first.insert("v2:b:estimate:codex:run".into(), 3.0);
+        assert!(saved.merge_side_chat_costs(&draft, "side-one", &first));
+        saved.merge_side_chat_costs(
+            &draft,
+            "side-two",
+            &BTreeMap::from([("v2:a:claude:run".into(), 7.0)]),
+        );
+        saved.move_side_chat_state(&draft, &parent);
+        // Closing a tab clears its unread state, not the cost already incurred.
+        saved.set_side_chat_unread(&parent, "side-one", false);
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        let mut restored: crate::sessions::Overrides = serde_json::from_slice(&bytes).unwrap();
+        let stale = BTreeMap::from([("v2:a:claude:run".into(), 1.0)]);
+        assert!(!restored.merge_side_chat_costs(&parent, "side-one", &stale));
+        let family = SessionUsage::default().with_side_chats(restored.side_chat_costs(&parent));
+        assert_eq!(family.cost_summary(), Some((12.0, true)));
+        assert_eq!(restored.side_chat_costs(&draft).count(), 0);
+        assert_eq!(
+            restored.side_chat_costs(&SessionId::new("other")).count(),
+            0
+        );
+    }
+
     #[test]
     fn repeated_provider_visits_reconcile_per_segment_and_survive_reload() {
         let dir = tempfile::tempdir().unwrap();

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// Title shown for a session that has no prompt yet.
 pub const DEFAULT_TITLE: &str = "New session";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Meta {
     #[serde(default)]
     title: Option<String>,
@@ -23,12 +23,14 @@ struct Meta {
     unread: bool,
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     unread_side_chats: std::collections::HashSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    side_chat_costs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f64>>,
     #[serde(default)]
     order: Option<u64>,
 }
 
 /// User-level overrides on top of the manager's index, keyed by session id.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Overrides(HashMap<String, Meta>);
 
 /// One sidebar row.
@@ -143,9 +145,42 @@ impl Overrides {
             self.meta(id).unread_side_chats.remove(side);
         }
     }
-    pub fn move_side_chat_unread(&mut self, from: &SessionId, to: &SessionId) {
+    pub fn side_chat_costs(
+        &self,
+        id: &SessionId,
+    ) -> impl Iterator<Item = &std::collections::BTreeMap<String, f64>> {
+        self.0
+            .get(&id.0)
+            .into_iter()
+            .flat_map(|meta| meta.side_chat_costs.values())
+    }
+    pub fn merge_side_chat_costs(
+        &mut self,
+        id: &SessionId,
+        side: &str,
+        costs: &std::collections::BTreeMap<String, f64>,
+    ) -> bool {
+        if costs.is_empty() {
+            return false;
+        }
+        let saved = self
+            .meta(id)
+            .side_chat_costs
+            .entry(side.to_owned())
+            .or_default();
+        let before = saved.clone();
+        for (scope, cost) in costs {
+            crate::session_usage::merge_cost(saved, scope, *cost);
+        }
+        *saved != before
+    }
+    pub fn move_side_chat_state(&mut self, from: &SessionId, to: &SessionId) {
         if let Some(meta) = self.0.get_mut(&from.0) {
             let unread = std::mem::take(&mut meta.unread_side_chats);
+            let costs = std::mem::take(&mut meta.side_chat_costs);
+            for (side, costs) in costs {
+                self.merge_side_chat_costs(to, &side, &costs);
+            }
             self.meta(to).unread_side_chats.extend(unread);
         }
     }

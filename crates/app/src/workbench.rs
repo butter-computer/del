@@ -477,6 +477,7 @@ impl AppShell {
                 _ => None,
             })
             .unwrap_or_default();
+        let usage = state.conversation_usage(&usage);
         let cost_breakdown = usage.cost_breakdown();
         let cost_rows = usage.provider_costs();
         let total_cost = usage.cost_summary();
@@ -487,10 +488,7 @@ impl AppShell {
         } else {
             usage.context_label()
         };
-        let cost_label = format!(
-            "Cost {}",
-            crate::session_usage::money(usage.provider_cost(provider))
-        );
+        let cost_label = format!("Cost {}", crate::session_usage::money(total_cost));
         let remaining = limits.as_ref().and_then(|limits| limits.remaining());
         let limits_label = remaining
             .map(|n| format!("Limits {n:.0}% left"))
@@ -696,7 +694,7 @@ impl AppShell {
                     .tooltip(cost_breakdown)
                     .child(cost_label)
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                        let mut menu = menu.label("This conversation · provider costs");
+                        let mut menu = menu.label("Main + side chats · all provider switches");
                         for (provider, cost) in &cost_rows {
                             let name = match provider.as_str() {
                                 "claude" => "Claude",

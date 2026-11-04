@@ -136,7 +136,19 @@ impl SideChat {
                 .is_some_and(|chat| chat.read(cx).has_active_work())
     }
 
+    fn report_costs(&self, cx: &mut App) {
+        if let Some(chat) = &self.chat
+            && let Some((state, owner)) = &self.context.activity_owner
+        {
+            let costs = chat.read(cx).usage.costs.clone();
+            let _ = state.update(cx, |state, cx| {
+                state.record_side_chat_costs(*owner, &self.storage_id, &costs, cx);
+            });
+        }
+    }
+
     fn report_activity(&self, submitted: bool, cx: &mut App) {
+        self.report_costs(cx);
         if let Some((state, owner)) = &self.context.activity_owner {
             let working = self.is_working(cx);
             let _ = state.update(cx, |state, cx| {
@@ -297,6 +309,7 @@ impl SideChat {
     }
 
     pub fn save(&mut self, cx: &mut gpui::Context<Self>) {
+        self.report_costs(cx);
         if self.closed || self.storage_error {
             return;
         }
@@ -1850,6 +1863,24 @@ mod tests {
                     .is_empty()
             );
             assert_eq!(s.parent, Some(parent.id.clone()));
+        });
+        // Usage notifications reach the main status bar even while the side
+        // chat is inactive; its context window must remain the main chat's.
+        let side_view = side.read_with(cx, |s, _| s.chat.clone().unwrap());
+        side_view.update(cx, |chat, cx| {
+            chat.usage.apply(&del_agent::AgentEvent::UsageSnapshot {
+                context_tokens: Some(99),
+                context_window: Some(100),
+                cost_scope: Some("v2:side-test:estimate:codex:thread".into()),
+                cost_usd: Some(2.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| {
+            let main = crate::session_usage::SessionUsage::default();
+            assert_eq!(state.conversation_usage(&main).total_cost(), Some(2.0));
+            assert_eq!(state.conversation_usage(&main).context_tokens, None);
         });
         state.update(cx, |state, cx| {
             state

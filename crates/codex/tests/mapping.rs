@@ -513,3 +513,34 @@ fn cumulative_cost_estimate_uses_cached_rates_and_stable_thread_scope() {
         assert!(events.iter().any(|e| matches!(e, E::UsageSnapshot {cost_scope:Some(scope), cost_usd:Some(cost), ..} if scope == &del_agent::pricing::cost_scope(Some("thread-a"), "estimate:codex:thread-a".into()) && (*cost - 15.925).abs() < 1e-9)));
     }
 }
+
+#[test]
+fn native_fork_cost_excludes_inherited_tokens_after_replay_and_reconnect() {
+    use del_codex::protocol::TokenBreakdown;
+    let mut mapper = Mapper::default();
+    mapper.set_fork_baseline(TokenBreakdown {
+        input_tokens: 2_000_000,
+        cached_input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+    });
+    let data = json!({"tokenUsage": {
+        "total": {"inputTokens":2_100_000,"cachedInputTokens":1_050_000,"outputTokens":1_010_000},
+        "last": {"inputTokens":100_000,"outputTokens":10_000}, "modelContextWindow":200_000
+    }});
+    for _ in 0..2 {
+        mapper.set_pricing("child", Some("gpt-5.3-codex"));
+        let events = mapper.notification("thread/tokenUsage/updated", &data);
+        let expected =
+            del_agent::pricing::estimate("gpt-5.3-codex", 50_000, 50_000, 0, 10_000).unwrap();
+        assert!(events.iter().any(|e| matches!(e, E::UsageSnapshot { cost_usd: Some(cost), .. } if (*cost - expected).abs() < 1e-9)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            E::UsageSnapshot {
+                context_tokens: Some(110_000),
+                ..
+            }
+        )));
+        assert_eq!(mapper.latest_tokens().unwrap().input_tokens, 2_100_000);
+        mapper.reset_connection();
+    }
+}

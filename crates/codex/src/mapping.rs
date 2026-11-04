@@ -65,6 +65,8 @@ pub enum RequestAction {
 pub struct Mapper {
     pricing_model: Option<String>,
     pricing_thread: Option<String>,
+    latest_tokens: Option<TokenBreakdown>,
+    fork_baseline: TokenBreakdown,
     turn_id: Option<String>,
     last_completed: Option<String>,
     /// Replaying persisted turns: errors are not re-raised.
@@ -75,6 +77,20 @@ pub struct Mapper {
 }
 
 impl Mapper {
+    pub fn latest_tokens(&self) -> Option<TokenBreakdown> {
+        self.latest_tokens.clone()
+    }
+    pub fn set_fork_baseline(&mut self, baseline: TokenBreakdown) {
+        self.latest_tokens = Some(baseline.clone());
+        self.fork_baseline = baseline;
+    }
+    pub fn reset_connection(&mut self) {
+        let baseline = self.fork_baseline.clone();
+        let latest = self.latest_tokens.clone();
+        *self = Self::default();
+        self.fork_baseline = baseline;
+        self.latest_tokens = latest;
+    }
     pub fn set_pricing(&mut self, thread: &str, model: Option<&str>) {
         self.pricing_thread = Some(thread.to_owned());
         self.pricing_model = model.map(str::to_owned);
@@ -247,6 +263,7 @@ impl Mapper {
             }
             "thread/tokenUsage/updated" => {
                 if let Some(u) = decode::<TokenUsageParams>(params) {
+                    self.latest_tokens = Some(u.token_usage.total.clone());
                     if let Some(last) = &u.token_usage.last {
                         out.push(AgentEvent::UsageSnapshot {
                             context_tokens: Some(
@@ -259,7 +276,24 @@ impl Mapper {
                     }
                     if let (Some(model), Some(thread)) = (&self.pricing_model, &self.pricing_thread)
                     {
-                        let total = &u.token_usage.total;
+                        let inherited = &self.fork_baseline;
+                        let total = TokenBreakdown {
+                            input_tokens: u
+                                .token_usage
+                                .total
+                                .input_tokens
+                                .saturating_sub(inherited.input_tokens),
+                            cached_input_tokens: u
+                                .token_usage
+                                .total
+                                .cached_input_tokens
+                                .saturating_sub(inherited.cached_input_tokens),
+                            output_tokens: u
+                                .token_usage
+                                .total
+                                .output_tokens
+                                .saturating_sub(inherited.output_tokens),
+                        };
                         if let Some(cost) = del_agent::pricing::estimate(
                             model,
                             total.input_tokens.saturating_sub(total.cached_input_tokens),
