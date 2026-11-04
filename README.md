@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.29` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.30` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.29 source update notes](docs/releases/0.1.29.md) and
-[validation record](docs/releases/0.1.29-validation.md).
+See the [0.1.30 source update notes](docs/releases/0.1.30.md) and
+[validation record](docs/releases/0.1.30-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.29-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.30-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -336,6 +336,12 @@ wait for approval, without a session count. Each row shows its age and a status 
 for you, failed, or unread (a filled tick with a bold title, cleared when the chat is read). Read, inactive rows
 have no status marker. Hide timestamps while unread ticks are visible. Keep-awake uses a neutral hover-colored background and animated gold
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
+
+Hover a saved session to preview its full title, age and activity, project,
+checkout directory, Git branch/worktree, and provider/model with matching icons.
+The card appears beside the sidebar after a short delay and dismisses on leaving
+or pressing the row. Hovering does not select the chat or clear unread replies.
+Git details come from that session's checkout and refresh in the background.
 
 The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat
 page's edge. The 22 px status bar shows session metrics and the Chat/Terminal toggle:
@@ -763,7 +769,30 @@ Creating a worker does not make either chat an orchestrator or change your selec
 conversation. Each spawn call creates a session; inspect the session list before
 retrying a call whose outcome is unknown.
 
-Tools: `spawn_session`, `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
+Chat spawns also accept `model`, `reasoning_effort`, `service_tier`, `branch`, and
+`new_worktree`. `session_models` returns the selected provider's live catalog;
+use its exact model and effort IDs. An explicit model clears inherited effort/tier
+unless supplied. `branch` selects the starting branch; without `new_worktree` it
+switches the shared checkout only if clean. With `new_worktree: true`, Del creates
+an isolated managed checkout and unique branch using the existing worktree rules.
+The requested `cwd` must still be the caller's directory; the app prepares the new
+path and retains the original project boundary. Uncommitted edits are not copied.
+Terminal spawns reject these chat-only options rather than silently ignoring them.
+
+`configure_session` changes an idle spawned chat's provider and model selection for
+subsequent prompts. Provider switching preserves public history and uses the new
+provider's default account; unfinished native goals must be cleared first. Omitted
+model/effort/tier fields reset to defaults. `close_session` unloads a spawned chat;
+`archive: true` also hides it from the ordinary sidebar. Both preserve history,
+branches, and worktree files. Active peer work is paused before closing so it does
+not immediately restart; collect replies before closing workers. These controls
+are restricted to chats directly spawned by the caller during this Del launch,
+not arbitrary project peers or the caller itself. Reopening a paused chat does not
+silently resume its delegated task. Peer discovery reports saved model settings
+and the current-launch `spawned_by` identity.
+
+Tools: `spawn_session`, `session_models`, `configure_session`, `close_session`,
+`list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
 `reply_to_session`, and `session_work`. Context reads are paginated and exclude
 private reasoning. Side chats retain mailbox routing after restoration or provider
 changes. Plain shells are excluded. Terminal agents use a cooperative inbox and
@@ -776,6 +805,13 @@ Main agents and Side chats use these same messaging tools in both directions.
 and previously opened Side chats, including whether they can currently receive
 messages. The list survives restart and provider changes. See
 [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
+
+For council-style reviews, create independent read-only reviewers against the same
+candidate, select their models from `session_models`, and collect their tracked
+replies before closing or archiving them. Reviewers can share a checkout; use
+isolated worktrees for independent edits. Review criteria and iteration belong in
+your skill or prompt. A personal `council` skill is discovered through the normal
+provider skill catalog; it is not bundled with Del.
 
 ## Files, terminals, and browser
 

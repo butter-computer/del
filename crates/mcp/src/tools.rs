@@ -91,18 +91,41 @@ pub fn tool_list() -> Value {
         {
             "name": "spawn_session",
             "title": "Spawn a sibling session",
-            "description": "Create a new agent in Del. Chat callers create a chat in their own working directory and project, with inherited permissions; same-provider chats inherit the account and model too. Its first prompt is a tracked peer request: the new chat replies through reply_to_session. Returns the actual session id immediately, not the answer. Use session_work wait when waiting for replies, and complete only after all requested work is finished. Terminal callers create a terminal. Each call creates a new session; do not blindly retry an unknown outcome. Limited in number per session.",
+            "description": "Create a new agent in Del. Chat callers create a chat in their own working directory and project, with inherited permissions; same-provider chats inherit the account and model unless overridden. Optional branch/new_worktree use Del managed Git preparation. Explicit model changes clear inherited effort/tier unless supplied. Model/workspace options require Chat mode. Its first prompt is a tracked peer request: the new chat replies through reply_to_session. Returns the actual session id immediately, not the answer. Use session_work wait when waiting for replies, and complete only after all requested work is finished. Terminal callers create a terminal. Each call creates a new session; do not blindly retry an unknown outcome. Limited in number per session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "provider": {"type": "string", "enum": ["codex", "claude", "opencode", "acp"]},
                     "cwd": {"type": "string", "description": "Absolute path of an existing directory to work in."},
-                    "prompt": {"type": "string", "maxLength": MAX_PROMPT, "description": "First instruction for the new agent."}
+                    "prompt": {"type": "string", "maxLength": MAX_PROMPT, "description": "First instruction for the new agent."},
+                    "model": {"type":"string", "minLength":1, "maxLength":256, "description":"Exact provider model ID from session_models. Omit to inherit for the same provider or use the new provider default."},
+                    "reasoning_effort": {"type":"string", "minLength":1, "maxLength":64},
+                    "service_tier": {"type":"string", "minLength":1, "maxLength":64},
+                    "branch": {"type":"string", "minLength":1, "maxLength":256, "description":"Starting branch. Without new_worktree, switches the shared checkout only if clean."},
+                    "new_worktree": {"type":"boolean", "default":false, "description":"Create a Del-owned isolated checkout and unique branch from branch or current HEAD. Uncommitted edits are not copied. Chat only."}
                 },
                 "required": ["provider", "cwd", "prompt"],
                 "additionalProperties": false
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+        },
+        {
+            "name":"session_models", "title":"List provider models",
+            "description":"Read the live model catalog, effort choices and fast tiers for a provider. Uses your account for the same provider, otherwise its default account. Discovery sends no prompt. Use exact IDs when spawning or configuring chats; an empty catalog is unavailable, not proof of model access.",
+            "inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["codex","claude","opencode","acp"]}},"required":["provider"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":true,"openWorldHint":false}
+        },
+        {
+            "name":"configure_session", "title":"Configure a spawned chat",
+            "description":"Change a chat you spawned during this Del launch. Target must be idle and in Chat mode. Optional provider switches in place with public history preserved and its default account; provider switching requires clearing unfinished native goals. Model, reasoning_effort and service_tier replace the saved selection; omitted fields reset to defaults. Applies to subsequent prompts. Discover exact model IDs with session_models. Cannot configure yourself or unrelated peers.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string"},"provider":{"type":"string","enum":["codex","claude","opencode"]},"model":{"type":"string","minLength":1,"maxLength":256},"reasoning_effort":{"type":"string","minLength":1,"maxLength":64},"service_tier":{"type":"string","minLength":1,"maxLength":64}},"required":["session_id"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
+        },
+        {
+            "name":"close_session", "title":"Close or archive a spawned chat",
+            "description":"Unload a chat you spawned during this Del launch, optionally archive it from the sidebar. Stops its live process and pauses peer work. Preserves conversation history, branches and worktree files. Collect replies before closing a worker; pending messages remain saved. Cannot close yourself or unrelated peers. Chat targets only.",
+            "inputSchema":{"type":"object","properties":{"session_id":{"type":"string"},"archive":{"type":"boolean","default":false}},"required":["session_id"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}
         },
         {
             "name": "send_to_session",
@@ -185,6 +208,24 @@ pub struct SpawnArgs {
     pub provider: del_agent::Provider,
     pub cwd: String,
     pub prompt: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub new_worktree: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsArgs {
+    pub provider: del_agent::Provider,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseArgs {
+    pub session_id: String,
+    #[serde(default)]
+    pub archive: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,6 +247,23 @@ pub fn non_empty_max(name: &str, s: &str, max: usize) -> Result<(), String> {
     }
     if s.chars().count() > max {
         return Err(format!("{name} is longer than {max} characters"));
+    }
+    Ok(())
+}
+
+pub fn validate_model_options(
+    model: Option<&str>,
+    effort: Option<&str>,
+    tier: Option<&str>,
+) -> Result<(), String> {
+    for (name, value, limit) in [
+        ("model", model, 256),
+        ("reasoning_effort", effort, 64),
+        ("service_tier", tier, 64),
+    ] {
+        if let Some(value) = value {
+            non_empty_max(name, value, limit)?;
+        }
     }
     Ok(())
 }
@@ -270,6 +328,9 @@ pub fn is_peer_tool(name: &str) -> bool {
         name,
         "list_sessions"
             | "spawn_session"
+            | "session_models"
+            | "configure_session"
+            | "close_session"
             | "get_session_summary"
             | "read_session"
             | "send_to_session"

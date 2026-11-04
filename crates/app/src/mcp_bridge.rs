@@ -58,6 +58,19 @@ pub enum BridgeEvent {
         request: SpawnRequest,
         reply: oneshot::Sender<HostResult<SessionInfo>>,
     },
+    /// Git preparation uses the same app-owned path as the new-chat composer.
+    PrepareWorkspace {
+        cwd: PathBuf,
+        branch: Option<String>,
+        new_worktree: bool,
+        reply: oneshot::Sender<HostResult<PathBuf>>,
+    },
+    /// The backend is already closed; remove its view and persist archive metadata.
+    CloseChat {
+        target: SessionId,
+        archive: bool,
+        reply: oneshot::Sender<HostResult<()>>,
+    },
     /// Write text to the target terminal, including the Enter/submit action.
     SendTerminal {
         caller: SessionId,
@@ -992,12 +1005,38 @@ impl McpHost for AppHost {
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
         if self.info(caller)?.mode == SessionMode::Chat {
+            let mut config = self
+                .manager
+                .peer_spawn_config(caller, request.provider, &request.cwd)
+                .await
+                .map_err(|e| HostError::Failed(e.to_string()))?;
+            request.apply_model(&mut config);
+            if request.new_worktree || request.branch.is_some() {
+                let (reply, rx) = oneshot::channel();
+                self.emit(BridgeEvent::PrepareWorkspace {
+                    cwd: config.cwd.clone(),
+                    branch: request.branch.clone(),
+                    new_worktree: request.new_worktree,
+                    reply,
+                })?;
+                config.cwd = self.reply(caller, rx).await??;
+            }
             let child = self
                 .manager
-                .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
+                .spawn_prepared_peer_session(caller, config, &request.prompt)
                 .await
                 .map_err(|e| HostError::Failed(e.to_string()))?;
             return self.info(&child.id);
+        }
+        if request.new_worktree
+            || request.branch.is_some()
+            || request.model.is_some()
+            || request.reasoning_effort.is_some()
+            || request.service_tier.is_some()
+        {
+            return Err(HostError::Failed(
+                "Model and workspace spawn options require Chat mode".into(),
+            ));
         }
         let (reply, rx) = oneshot::channel();
         self.emit(BridgeEvent::SpawnTerminal {
@@ -1017,6 +1056,44 @@ impl McpHost for AppHost {
                 last_output: None,
             });
         Ok(info)
+    }
+
+    async fn close_session(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        archive: bool,
+    ) -> HostResult<()> {
+        self.authorize_peer(caller, target)?;
+        if self.info(target)?.mode != SessionMode::Chat
+            || self.manager.is_terminal_owned(target)
+            || self.manager.is_temporary(target)
+        {
+            return Err(HostError::Failed(
+                "Only main Chat sessions can be closed through this tool".into(),
+            ));
+        }
+        // Pausing first prevents the background peer scheduler reopening the worker.
+        if self
+            .manager
+            .peer_work(target)
+            .is_some_and(|w| w.status != del_agent::peers::WorkStatus::Complete)
+        {
+            self.manager
+                .control_peer_work(target, "pause")
+                .map_err(|e| HostError::Failed(e.to_string()))?;
+        }
+        self.manager
+            .close(target)
+            .await
+            .map_err(|e| HostError::Failed(e.to_string()))?;
+        let (reply, rx) = oneshot::channel();
+        self.emit(BridgeEvent::CloseChat {
+            target: target.clone(),
+            archive,
+            reply,
+        })?;
+        self.reply(caller, rx).await?
     }
 
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()> {

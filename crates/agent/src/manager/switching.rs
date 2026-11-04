@@ -24,6 +24,52 @@ impl SessionManager {
         provider: Provider,
         account: Option<String>,
     ) -> Result<()> {
+        self.switch_provider_with_settings(id, provider, account, None, None, None)
+            .await
+    }
+
+    /// Agent controls publish provider and model together before queued work can
+    /// acquire the send lock. Existing UI switches use the target defaults.
+    pub async fn configure_idle_session(
+        &self,
+        id: &SessionId,
+        provider: Option<Provider>,
+        model: Option<String>,
+        effort: Option<String>,
+        tier: Option<String>,
+    ) -> Result<()> {
+        let record = self.session_record(id)?;
+        if let Some(provider) = provider.filter(|p| *p != record.provider) {
+            return self
+                .switch_provider_with_settings(id, provider, None, model, effort, tier)
+                .await;
+        }
+        let lock = self
+            .shared
+            .resume_locks
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _configuring = lock.lock().await;
+        if self.is_terminal_owned(id) || self.status(id).is_some_and(|s| s != SessionStatus::Idle) {
+            return Err(AgentError::Busy(
+                "Finish or stop the response and return to Chat before configuring it".into(),
+            ));
+        }
+        self.set_model_settings(id, model, effort, tier)
+    }
+
+    async fn switch_provider_with_settings(
+        &self,
+        id: &SessionId,
+        provider: Provider,
+        account: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        tier: Option<String>,
+    ) -> Result<()> {
         self.resume(id).await?;
         let lock = self
             .shared
@@ -70,9 +116,9 @@ impl SessionManager {
         let original_config = record.config();
         let config = SessionConfig {
             provider,
-            model: None,
-            reasoning_effort: None,
-            service_tier: None,
+            model,
+            reasoning_effort: effort,
+            service_tier: tier,
             ..original_config.clone()
         };
         if record.segments.is_empty() {
@@ -156,9 +202,9 @@ impl SessionManager {
             });
             record.provider = provider;
             record.account_id = account;
-            record.model = None;
-            record.reasoning_effort = None;
-            record.service_tier = None;
+            record.model = config.model.clone();
+            record.reasoning_effort = config.reasoning_effort.clone();
+            record.service_tier = config.service_tier.clone();
             record.updated_at_ms = now_ms();
             let mut index = self.shared.index.lock().unwrap();
             let current = index
@@ -195,6 +241,9 @@ impl SessionManager {
         let _ = self.shared.all_tx.send(ManagerEvent::Event {
             session: id.clone(),
             event: marker,
+        });
+        let _ = self.shared.all_tx.send(ManagerEvent::ConfigurationChanged {
+            session: id.clone(),
         });
         Ok(())
     }

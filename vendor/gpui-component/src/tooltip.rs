@@ -243,7 +243,8 @@ struct TooltipTrigger {
     bounds: Bounds<Pixels>,
 }
 
-pub(crate) trait ManagedTooltipExt:
+/// Attach a custom tooltip through the window's shared hover overlay.
+pub trait ManagedTooltipExt:
     StatefulInteractiveElement + crate::ElementExt + Sized
 {
     fn managed_tooltip(

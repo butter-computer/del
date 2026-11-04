@@ -52,7 +52,10 @@ be megabytes, are sent once as `content[0].text` JSON.
 | `ask_user` | `question` (≤4000), `options?` (≤8 strings, ≤200 each) | `{answered: true, answer, option_index?}` or `{answered: false, dismissed: true}`; blocks until the user answers in del; error on timeout |
 | `list_sessions` | none | `{sessions: [{id, provider, mode, command, cwd, title, status, reported_state, is_self}]}` |
 | `get_session_summary` | `session_id` | `{info, reported_summary, last_output}` |
-| `spawn_session` | `provider` (`codex\|claude\|opencode\|acp`; ACP is chat-only), `cwd` (absolute, existing dir), `prompt` (≤50000) | the new session's `SessionInfo` |
+| `spawn_session` | `provider` (`codex\|claude\|opencode\|acp`; ACP is chat-only), `cwd` (absolute, existing dir), `prompt` (≤50000), optional `model`, `reasoning_effort`, `service_tier`, `branch`, `new_worktree` (chat-only) | the new session's `SessionInfo` |
+| `session_models` | `provider` | live model/effort/tier catalog for caller's same-provider account or the other provider's default |
+| `configure_session` | `session_id`, optional `provider`, `model`, `reasoning_effort`, `service_tier` | summary plus saved configuration; omitted model settings reset to default; idle Chat only |
+| `close_session` | `session_id`, optional `archive` (default false) | closed/archive acknowledgment after backend closure and sidebar persistence; history and Git retained |
 | `read_session` | `session_id`, `cursor?`, `max_characters?` (1000–64000) | recorded public event chunks, next cursor, retention notice |
 | `send_to_session` | `session_id`, `text` (≤20000), `idempotency_key` | durable queued receipt; does not wait for an answer |
 | `reply_to_session` | `request_id`, `text`, `idempotency_key` | reply receipt, routed to the original sender |
@@ -97,7 +100,15 @@ Chat credentials expose browser, their own goal, and peer tools, including
 `spawn_session`. Chat spawns create actual chats in the caller’s working directory
 and project, inherit its permissions, and queue the first prompt as a peer request
 with a reply route. Same-provider spawns inherit the account/model configuration;
-other providers use their defaults. Terminal callers retain terminal spawning.
+other providers use their defaults. Explicit model/effort/tier override inheritance;
+changing model clears inherited effort/tier unless supplied. App-host chat spawns
+can select a starting branch and create a managed worktree through the same Git
+preparation as the UI. Source-directory checks run before preparation, and the
+prepared path retains the caller's project and permissions. Standalone ManagerHost
+rejects Git options; terminal callers reject all chat-only options.
+Configuration and close/archive controls are restricted to direct children spawned
+in this server lifetime, in addition to project authorization. Close pauses unfinished
+peer work and retains saved history and files. Terminal callers retain terminal spawning.
 The existing per-caller and total spawn quotas apply to both. Spawn is not
 idempotent: inspect existing sessions before retrying an unknown outcome.
 Chats cannot notify as another agent. Website actions remain subject to user

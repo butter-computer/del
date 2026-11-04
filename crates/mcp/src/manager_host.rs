@@ -155,9 +155,20 @@ impl McpHost for ManagerHost {
         caller: &SessionId,
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
+        if request.new_worktree || request.branch.is_some() {
+            return Err(HostError::Failed(
+                "Managed Git workspaces require the Del app".into(),
+            ));
+        }
+        let mut config = self
+            .manager
+            .peer_spawn_config(caller, request.provider, &request.cwd)
+            .await
+            .map_err(fail)?;
+        request.apply_model(&mut config);
         let handle = self
             .manager
-            .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
+            .spawn_prepared_peer_session(caller, config, &request.prompt)
             .await
             .map_err(fail)?;
         // Standalone hosts do not own the app's periodic dispatcher. Start the

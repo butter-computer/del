@@ -12,6 +12,7 @@ use gpui_kit::assets::IconName as ActionIcon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::tooltip::{ManagedTooltipExt as _, Tooltip};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -557,6 +558,126 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
     )
 }
 
+/// Read-only session details: use the hovered session's directory, never the
+/// selected chat's branch. Git inspection is cached by AppState off-thread.
+fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
+    let terminal = state.terminal_rows.iter().find(|r| r.id == row.id);
+    let provider = terminal.map(|r| r.provider).unwrap_or(Some(row.provider));
+    let root = state.project_root(&row.cwd);
+    let info = state.project_info.get(&row.cwd);
+    let detail = |icon: &'static str, label: &'static str, value: String| {
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(crate::icons::path(icon).text_color(cx.theme().muted_foreground))
+            .child(
+                div()
+                    .id(label)
+                    .aria_label(format!("{label}: {value}"))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(value),
+            )
+    };
+    let provider_label = provider
+        .map(|p| crate::providers::display_name(p).to_string())
+        .unwrap_or_else(|| "Terminal".into());
+    let model = row.model.as_deref().unwrap_or("Automatic");
+    v_flex()
+        .id("session-hover-card")
+        .debug_selector(|| "session-hover-card".into())
+        .w(zpx(360.))
+        .max_w_full()
+        .gap_2()
+        .text_size(zpx(TEXT_MD))
+        .text_color(cx.theme().popover_foreground)
+        .child(
+            h_flex()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(row.title.clone()),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .text_size(zpx(TEXT_SM))
+                        .text_color(cx.theme().muted_foreground)
+                        .when_some(relative_time(row.updated_secs), |d, time| d.child(time))
+                        .when_some(
+                            status_glyph(
+                                row,
+                                state.session_working(&row.id),
+                                row.unread || state.terminal_unread(&row.id),
+                            ),
+                            |d, glyph| d.child(glyph),
+                        ),
+                ),
+        )
+        .child(detail(
+            "icons/folder.svg",
+            "Project",
+            state.project_name(&root),
+        ))
+        .child(detail(
+            if info.is_some_and(|info| !info.current.is_empty()) {
+                "icons/folder-git.svg"
+            } else {
+                "icons/folder.svg"
+            },
+            "Directory",
+            row.cwd.to_string_lossy().into_owned(),
+        ))
+        .when_some(
+            info.filter(|info| !info.current.is_empty()),
+            |card, info| {
+                card.child(detail(
+                    "icons/git-branch.svg",
+                    "Branch",
+                    info.current.clone(),
+                ))
+                .when_some(info.worktree.as_ref(), |card, name| {
+                    card.child(detail("icons/git-fork.svg", "Worktree", name.clone()))
+                })
+            },
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(if terminal.is_some() {
+                    crate::mode_ui::terminal_mark(provider)
+                } else {
+                    crate::mode_ui::tab_mark(provider)
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if terminal.is_some() {
+                            if provider.is_some() {
+                                format!("{provider_label} · Terminal")
+                            } else {
+                                "Terminal".into()
+                            }
+                        } else {
+                            format!("{provider_label} · {model}")
+                        }),
+                ),
+        )
+        .into_any_element()
+}
+
 fn row_item(
     row: &Row,
     selected: bool,
@@ -579,6 +700,8 @@ fn row_item(
     let motion = state.read(cx).sidebar_hover.clone();
     let hover = motion.clone();
     let hover_key = id.0.clone();
+    let hover_state = state.downgrade();
+    let hover_cwd = row.cwd.clone();
     let mut item = h_flex()
         .id(key.clone())
         .relative()
@@ -593,7 +716,12 @@ fn row_item(
         .cursor_pointer()
         .text_size(zpx(TEXT_MD))
         .text_color(rgb(TEXT))
-        .on_hover(move |entered, window, cx| hover.hover(&hover_key, *entered, window, cx))
+        .on_hover(move |entered, window, cx| {
+            hover.hover(&hover_key, *entered, window, cx);
+            if *entered && !cx.has_active_drag() {
+                let _ = hover_state.update(cx, |state, _| state.refresh_git(hover_cwd.clone()));
+            }
+        })
         .child(motion.marker_with_opacity(
             id.0.clone(),
             if selected {
@@ -762,21 +890,46 @@ fn row_item(
                 })
                 .when(archived, |a| a.child(archived_actions(&id, state))),
         );
-
-        if !archived {
-            let state = state.clone();
-            let id = id.clone();
-            let pinned = row.pinned;
-            let motion_state = state.clone();
-            let motion_id = id.clone();
-            return moving_row(
-                item.context_menu(move |menu, _, cx| session_menu(menu, &state, &id, pinned, cx)),
-                &motion_id,
-                &motion_state,
-                cx,
-            );
-        }
     }
+    let content = if !archived && !renaming {
+        let menu_state = state.clone();
+        let menu_id = id.clone();
+        let pinned = row.pinned;
+        item.context_menu(move |menu, _, cx| session_menu(menu, &menu_state, &menu_id, pinned, cx))
+            .into_any_element()
+    } else {
+        item.into_any_element()
+    };
+    // GPUI permits one hover listener per element. Keep the shared row motion
+    // on the child and the managed tooltip on this identically sized wrapper.
+    let mut item = div()
+        .id(SharedString::from(format!("session-preview-{}", id.0)))
+        .w_full()
+        .child(content);
+    if !renaming && !cx.has_active_drag() {
+        let tooltip_state = state.downgrade();
+        let tooltip_row = row.clone();
+        item = item.managed_tooltip_at(Placement::Right, move |window, cx| {
+            let state = tooltip_state.clone();
+            let fallback = tooltip_row.clone();
+            Tooltip::element(move |_, cx| {
+                let Some(state) = state.upgrade() else {
+                    return div().into_any_element();
+                };
+                let state = state.read(cx);
+                let rows = state.unified_rows();
+                let row = rows
+                    .iter()
+                    .find(|r| r.id == fallback.id)
+                    .unwrap_or(&fallback);
+                session_hover_card(row, state, cx)
+            })
+            .p_3()
+            .rounded(zpx(12.))
+            .build(window, cx)
+        });
+    }
+
     moving_row(item, &id, state, cx)
 }
 
@@ -2123,5 +2276,115 @@ mod space_gesture_tests {
             assert_eq!(s.spaces.active, id);
             assert_eq!(s.spaces.current().name, "Studio");
         });
+    }
+}
+
+#[cfg(test)]
+mod session_hover_tests {
+    use super::{AppState, InputState, Row};
+    use gpui::{
+        AppContext, Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled,
+        TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use gpui_kit::component::Root;
+    use std::time::Duration;
+
+    struct Fixture {
+        state: Entity<AppState>,
+        row: Row,
+        rename: Entity<InputState>,
+    }
+
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().w(px(264.)).mt(px(100.)).child(super::row_item(
+                    &self.row,
+                    false,
+                    false,
+                    &self.rename,
+                    &self.state,
+                    false,
+                    cx,
+                )))
+        }
+    }
+
+    fn settle(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[gpui::test]
+    fn session_hover_is_read_only_and_dismisses_on_leave_and_press(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = crate::state::tests::draft(cx);
+        let before = state.read_with(cx, |s, _| s.selection.clone());
+        let row = Row {
+            id: del_agent::SessionId::new("hover-test"),
+            provider: del_agent::Provider::Codex,
+            model: Some("review-model".into()),
+            cwd: "/repo/review-worktree".into(),
+            title: "A long session title that remains readable in the session preview".into(),
+            status: del_agent::SessionStatus::Idle,
+            updated_secs: 1,
+            archived: false,
+            pinned: false,
+            unread: true,
+        };
+        state.update(cx, |s, cx| {
+            s.mark_session_unread(&row.id, cx);
+            s.project_info.insert(
+                row.cwd.clone(),
+                crate::projects::GitInfo {
+                    root: "/repo".into(),
+                    current: "review/independent".into(),
+                    worktree: Some("review-worktree".into()),
+                    ..Default::default()
+                },
+            );
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let fixture = cx.new(|cx| Fixture {
+                    state: state.clone(),
+                    row,
+                    rename: cx.new(|cx| InputState::new(window, cx)),
+                });
+                cx.new(|cx| Root::new(fixture, window, cx))
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        settle(&mut cx);
+        assert!(cx.debug_bounds("session-hover-card").is_none());
+        cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
+        settle(&mut cx);
+        let card = cx
+            .debug_bounds("session-hover-card")
+            .expect("delayed hover card");
+        assert!(card.origin.x >= px(264.), "card stays clear of the sidebar");
+        state.read_with(&cx, |s, _| {
+            assert_eq!(s.selection, before);
+            assert!(s.terminal_unread(&del_agent::SessionId::new("hover-test")));
+        });
+        cx.simulate_mouse_move(point(px(700.), px(500.)), None, Default::default());
+        settle(&mut cx);
+        assert!(cx.debug_bounds("session-hover-card").is_none());
+        cx.simulate_mouse_move(point(px(80.), px(115.)), None, Default::default());
+        settle(&mut cx);
+        assert!(cx.debug_bounds("session-hover-card").is_some());
+        cx.simulate_mouse_down(
+            point(px(80.), px(115.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        settle(&mut cx);
+        assert!(cx.debug_bounds("session-hover-card").is_none());
     }
 }

@@ -23,6 +23,10 @@ pub use peers::{ContextChunk, ContextCursor, SessionContext};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManagerEvent {
+    /// Saved provider/model configuration changed, including agent-initiated changes.
+    ConfigurationChanged {
+        session: SessionId,
+    },
     PromptSent {
         session: SessionId,
     },
@@ -1297,7 +1301,11 @@ impl SessionManager {
             record.model = model;
             record.reasoning_effort = effort;
             record.service_tier = tier;
-        })
+        })?;
+        let _ = self.shared.all_tx.send(ManagerEvent::ConfigurationChanged {
+            session: id.clone(),
+        });
+        Ok(())
     }
 
     /// Persist permissions for the next launch or idle-turn reconfiguration.

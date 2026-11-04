@@ -54,12 +54,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new(options: ServerOptions) -> Self {
+        Self::with_backends(options, vec![Arc::new(MockBackend::new(Provider::Codex))]).await
+    }
+
+    async fn with_backends(options: ServerOptions, backends: Vec<Arc<dyn AgentBackend>>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SessionManager::new(
-            dir.path().join("index.jsonl"),
-            [Arc::new(MockBackend::new(Provider::Codex)) as Arc<dyn AgentBackend>],
-        )
-        .unwrap();
+        let manager = SessionManager::new(dir.path().join("index.jsonl"), backends).unwrap();
         let (tx, events) = unbounded_channel();
         let bridge =
             McpBridge::start_with_options(manager.clone(), tx, dir.path().join("mcp"), options)
@@ -1212,5 +1212,305 @@ async fn side_chat_discovery_and_bidirectional_mail_use_the_same_bridge_for_all_
         }
     }
     bridge.shutdown();
+    manager.shutdown().await;
+}
+
+fn chat_credentials(f: &Fixture, id: &SessionId) -> LaunchConfig {
+    let tools = f.handle.chat_browser_tools().unwrap();
+    LaunchConfig {
+        args: vec![],
+        env: vec![
+            ("DEL_MCP_URL".into(), tools.url),
+            ("DEL_MCP_TOKEN".into(), tools.credentials.mint(id).unwrap()),
+        ],
+        files: vec![],
+    }
+}
+
+#[tokio::test]
+async fn spawned_chat_model_controls_are_scoped_and_close_pauses_delivery() {
+    let mut f = Fixture::new(Default::default()).await;
+    let parent = f
+        .manager
+        .start_session(SessionConfig {
+            cwd: f._dir.path().into(),
+            provider: Provider::Codex,
+            model: Some("parent-model".into()),
+            reasoning_effort: Some("high".into()),
+            service_tier: Some("priority".into()),
+            permission_mode: del_agent::PermissionMode::Plan,
+        })
+        .await
+        .unwrap()
+        .id;
+    let config = chat_credentials(&f, &parent);
+    let models = call(&config, "session_models", json!({"provider":"codex"})).await;
+    assert_eq!(models["isError"], false, "{models}");
+    assert_eq!(models["structuredContent"]["models"], json!([])); // mock advertises no models
+    let result = call(
+        &config,
+        "spawn_session",
+        json!({
+            "provider":"codex", "cwd":f._dir.path(), "prompt":"Review the candidate",
+            "model":"review-model", "reasoning_effort":"medium"
+        }),
+    )
+    .await;
+    assert_eq!(result["isError"], false, "{result}");
+    let child = SessionId::new(result["structuredContent"]["id"].as_str().unwrap());
+    // Keep the periodic driver out of the configuration assertions.
+    f.manager.control_peer_work(&child, "pause").unwrap();
+    f.manager.interrupt(&child).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.manager.status(&child) != Some(del_agent::SessionStatus::Idle) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let record = f.manager.session_record(&child).unwrap();
+    assert_eq!(record.model.as_deref(), Some("review-model"));
+    assert_eq!(record.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(record.service_tier, None);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    for tool in ["configure_session", "close_session"] {
+        let denied = call(&config, tool, json!({"session_id":parent})).await;
+        assert_eq!(denied["isError"], true, "{denied}");
+        let child_config = chat_credentials(&f, &child);
+        let denied = call(&child_config, tool, json!({"session_id":parent})).await;
+        assert_eq!(denied["isError"], true, "{denied}");
+    }
+    let mut configuration_events = f.manager.subscribe_all();
+    let updated = call(
+        &config,
+        "configure_session",
+        json!({"session_id":child,"model":"second-model"}),
+    )
+    .await;
+    assert_eq!(updated["isError"], false, "{updated}");
+    assert!(std::iter::from_fn(|| configuration_events.try_recv().ok()).any(|event|
+        matches!(event, del_agent::ManagerEvent::ConfigurationChanged {session} if session == child)
+    ), "model changes must refresh the app's cached session metadata");
+    assert_eq!(
+        updated["structuredContent"]["configuration"]["model"],
+        "second-model"
+    );
+    assert_eq!(
+        f.manager.session_record(&child).unwrap().reasoning_effort,
+        None
+    );
+    let config2 = config.clone();
+    let child2 = child.clone();
+    let pending = tokio::spawn(async move {
+        call(
+            &config2,
+            "close_session",
+            json!({"session_id":child2,"archive":true}),
+        )
+        .await
+    });
+    match f.event().await {
+        BridgeEvent::CloseChat {
+            target,
+            archive,
+            reply,
+        } => {
+            assert_eq!(target, child);
+            assert!(archive);
+            assert!(!f.manager.is_live(&child));
+            assert!(f.manager.session_record(&child).is_ok());
+            assert_eq!(
+                f.manager.peer_work(&child).unwrap().status,
+                del_agent::peers::WorkStatus::Paused
+            );
+            reply.send(Ok(())).unwrap();
+        }
+        _ => panic!("Expected close request"),
+    }
+    let closed = pending.await.unwrap();
+    assert_eq!(closed["structuredContent"]["archived"], true, "{closed}");
+    assert!(!f.manager.dispatch_peer(&child).await.unwrap());
+    assert!(f.manager.session_record(&child).unwrap().cwd.exists());
+}
+
+#[tokio::test]
+async fn spawned_worktree_uses_host_preparation_and_preserves_project_and_permissions() {
+    let mut f = Fixture::new(Default::default()).await;
+    let parent = f
+        .manager
+        .start_session(SessionConfig {
+            cwd: f._dir.path().into(),
+            provider: Provider::Codex,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: del_agent::PermissionMode::Plan,
+        })
+        .await
+        .unwrap()
+        .id;
+    let config = chat_credentials(&f, &parent);
+    let source = f._dir.path().to_path_buf();
+    let prepared = f._dir.path().join("managed-checkout");
+    std::fs::create_dir(&prepared).unwrap();
+    let pending = tokio::spawn(async move {
+        call(&config, "spawn_session", json!({
+        "provider":"codex", "cwd":source, "prompt":"Isolated review", "branch":"feature", "new_worktree":true
+    })).await
+    });
+    match f.event().await {
+        BridgeEvent::PrepareWorkspace {
+            cwd,
+            branch,
+            new_worktree,
+            reply,
+        } => {
+            assert_eq!(cwd, f._dir.path());
+            assert_eq!(branch.as_deref(), Some("feature"));
+            assert!(new_worktree);
+            reply.send(Ok(prepared.clone())).unwrap();
+        }
+        _ => panic!("Expected workspace preparation"),
+    }
+    let result = pending.await.unwrap();
+    assert_eq!(result["isError"], false, "{result}");
+    let child = SessionId::new(result["structuredContent"]["id"].as_str().unwrap());
+    let record = f.manager.session_record(&child).unwrap();
+    assert_eq!(record.cwd, prepared);
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    f.manager.authorize_peer(&parent, &child).unwrap();
+    assert_eq!(f.manager.peer_messages(&child)[0].from, parent);
+    assert_eq!(
+        f.manager.session_record(&parent).unwrap().cwd,
+        f._dir.path()
+    );
+
+    // A failed Git preparation must not launch or queue a new worker.
+    let before = f.manager.list_sessions().len();
+    let config = chat_credentials(&f, &parent);
+    let cwd = f._dir.path().to_path_buf();
+    let pending = tokio::spawn(async move {
+        call(&config, "spawn_session", json!({
+        "provider":"codex", "cwd":cwd, "prompt":"Should fail", "branch":"missing", "new_worktree":true
+    })).await
+    });
+    match f.event().await {
+        BridgeEvent::PrepareWorkspace { reply, .. } => {
+            reply
+                .send(Err(del_mcp::HostError::Failed("Unknown branch".into())))
+                .unwrap();
+        }
+        _ => panic!("Expected workspace preparation"),
+    }
+    assert_eq!(pending.await.unwrap()["isError"], true);
+    assert_eq!(f.manager.list_sessions().len(), before);
+}
+
+#[tokio::test]
+async fn spawned_chat_can_switch_provider_and_model_without_losing_history_or_permissions() {
+    let f = Fixture::with_backends(
+        Default::default(),
+        vec![
+            Arc::new(MockBackend::new(Provider::Codex)),
+            Arc::new(MockBackend::new(Provider::Claude)),
+        ],
+    )
+    .await;
+    let parent = f
+        .manager
+        .start_session(SessionConfig {
+            cwd: f._dir.path().into(),
+            provider: Provider::Codex,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: del_agent::PermissionMode::Plan,
+        })
+        .await
+        .unwrap()
+        .id;
+    let config = chat_credentials(&f, &parent);
+    let spawned = call(
+        &config,
+        "spawn_session",
+        json!({"provider":"codex","cwd":f._dir.path(),"prompt":"Original request"}),
+    )
+    .await;
+    let child = SessionId::new(spawned["structuredContent"]["id"].as_str().unwrap());
+    f.manager.control_peer_work(&child, "pause").unwrap();
+    f.manager.interrupt(&child).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.manager.status(&child) != Some(del_agent::SessionStatus::Idle) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let invalid = call(
+        &config,
+        "configure_session",
+        json!({"session_id":child,"provider":"claude","model":""}),
+    )
+    .await;
+    assert_eq!(invalid["isError"], true);
+    assert_eq!(
+        f.manager.session_record(&child).unwrap().provider,
+        Provider::Codex
+    );
+    let switched = call(&config, "configure_session", json!({"session_id":child,"provider":"claude","model":"claude-review-model","reasoning_effort":"high"})).await;
+    assert_eq!(switched["isError"], false, "{switched}");
+    let record = f.manager.session_record(&child).unwrap();
+    assert_eq!(record.provider, Provider::Claude);
+    assert_eq!(record.model.as_deref(), Some("claude-review-model"));
+    assert_eq!(record.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(record.permission_mode, del_agent::PermissionMode::Plan);
+    assert_eq!(record.segments.len(), 2);
+    assert_eq!(f.manager.peer_messages(&child)[0].text, "Original request");
+    f.manager.authorize_peer(&parent, &child).unwrap();
+    // A paused peer's outstanding request remains queued; configuration must not
+    // pretend that switching providers completed the delegated task.
+    assert_eq!(
+        f.manager.peer_work(&child).unwrap().status,
+        del_agent::peers::WorkStatus::Paused
+    );
+}
+
+#[tokio::test]
+async fn idle_configuration_rejects_an_active_turn_without_changing_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(
+        dir.path().join("index.jsonl"),
+        [
+            Arc::new(MockBackend::new(Provider::Codex).with_delay(Duration::from_millis(50)))
+                as Arc<dyn AgentBackend>,
+        ],
+    )
+    .unwrap();
+    let chat = manager
+        .start_session(SessionConfig {
+            cwd: dir.path().into(),
+            provider: Provider::Codex,
+            model: Some("original".into()),
+            reasoning_effort: None,
+            service_tier: None,
+            permission_mode: Default::default(),
+        })
+        .await
+        .unwrap()
+        .id;
+    manager
+        .send_prompt(&chat, del_agent::UserInput::text("approve"))
+        .await
+        .unwrap();
+    assert!(
+        manager
+            .configure_idle_session(&chat, None, Some("other".into()), None, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        manager.session_record(&chat).unwrap().model.as_deref(),
+        Some("original")
+    );
     manager.shutdown().await;
 }

@@ -24,7 +24,9 @@ gpui_kit::assets::icon_assets!(
         Terminal,
         FileDiff,
         ChevronDown,
-        ChevronUp
+        ChevronUp,
+        FolderGit,
+        GitFork
     ]
 );
 
@@ -125,6 +127,8 @@ mod tests {
             gpui_kit::assets::IconName::Eye,
             gpui_kit::assets::IconName::Trash,
             gpui_kit::assets::IconName::RefreshCw,
+            gpui_kit::assets::IconName::FolderGit,
+            gpui_kit::assets::IconName::GitFork,
         ] {
             let path = icon.path();
             let bytes = AppAssets.load(&path).unwrap().expect("sidebar action SVG");
