@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-pub const PANEL_WIDTH: f32 = 340.0;
+pub const PANEL_MIN_WIDTH: f32 = 360.0;
+pub const PANEL_WIDTH: f32 = PANEL_MIN_WIDTH;
 const MONO: &str = "Menlo";
 /// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -1180,13 +1181,30 @@ impl RightPanel {
     ) {
         // A new tool takes this blank's place. Selecting an already-open
         // singleton tool leaves the blank available to return to.
-        let position = if pane == Pane::Terminal || !self.open_panes.contains(&pane) {
+        let position = if matches!(pane, Pane::Terminal | Pane::SideChat)
+            || !self.open_panes.contains(&pane)
+        {
             self.consume_blank(pane)
         } else {
             None
         };
         if pane == Pane::Terminal {
             self.new_terminal_tab(window, cx);
+        } else if pane == Pane::SideChat {
+            // Each invocation snapshots the current main conversation through
+            // the normal fork path. Existing tabs keep their own live resources.
+            let context = self.side_context.clone();
+            let panel = cx.new(|cx| {
+                let mut panel = RightPanel::new(self.root.clone(), window, cx);
+                if let Some(context) = context {
+                    panel.set_side_context(context);
+                }
+                panel.open_panes = vec![Pane::SideChat];
+                panel.blank_tabs.clear();
+                panel.show_workspace(Pane::SideChat, window, cx);
+                panel
+            });
+            self.accept_tab(panel, window, cx);
         } else {
             self.open_tool(pane, window, cx);
         }
@@ -1197,7 +1215,10 @@ impl RightPanel {
         let Some(position) = position else {
             return;
         };
-        let key = self.tab_key(self.pane, self.pane_instance(self.pane));
+        let key = self.active_hosted.as_ref().map_or_else(
+            || self.tab_key(self.pane, self.pane_instance(self.pane)),
+            |id| SidebarTab::Hosted(id.clone()),
+        );
         let mut order = self.sidebar_keys();
         order.retain(|tab| tab != &key);
         order.insert(position.min(order.len()), key);
@@ -4262,6 +4283,117 @@ mod tests {
         });
         right.update(cx, |right, cx| right.release(cx));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    #[::gpui::test]
+    fn new_side_chats_are_independent_and_capture_latest_parent(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = del_agent::SessionManager::new(
+            dir.path().join("index"),
+            [
+                std::sync::Arc::new(del_agent::MockBackend::new(del_agent::Provider::Claude))
+                    as std::sync::Arc<dyn del_agent::AgentBackend>,
+            ],
+        )
+        .unwrap();
+        let parent = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Claude,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::FullAuto,
+            }))
+            .unwrap();
+        let context = crate::side_chat::Context {
+            activity_owner: None,
+            accounts: vec![],
+            backend: crate::chat::Backend {
+                runtime: runtime.handle().clone(),
+                manager: manager.clone(),
+            },
+            source: del_agent::ForkSource::Session(parent.id.clone()),
+        };
+        let (right, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.set_side_context(context);
+            panel.choose_new_tool(Pane::SideChat, window, cx);
+            panel
+        });
+        let mut ids = Vec::new();
+        for round in 0..2 {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                let ready = right.read_with(cx, |p, cx| {
+                    p.hosted
+                        .last()
+                        .and_then(|t| t.panel.read(cx).side_chat.as_ref())
+                        .or(p.side_chat.as_ref())
+                        .and_then(|s| s.read(cx).session_id())
+                        .cloned()
+                });
+                if let Some(id) = ready {
+                    ids.push(id);
+                    break;
+                }
+                runtime.block_on(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                });
+            }
+            assert_eq!(ids.len(), round + 1, "new side chat must own a new session");
+            if round == 0 {
+                runtime
+                    .block_on(manager.send_prompt(
+                        &parent.id,
+                        del_agent::UserInput::text("LATEST_PARENT_MARKER"),
+                    ))
+                    .unwrap();
+                runtime.block_on(async {
+                    for _ in 0..300 {
+                        if manager.status(&parent.id) == Some(del_agent::SessionStatus::Idle) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                });
+                cx.update(|window, cx| {
+                    right.update(cx, |p, cx| p.choose_new_tool(Pane::SideChat, window, cx))
+                });
+            }
+        }
+        assert_ne!(ids[0], ids[1]);
+        let snapshots: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::to_string(&manager.export_fork(id).unwrap()).unwrap())
+            .collect();
+        assert!(!snapshots[0].contains("LATEST_PARENT_MARKER"));
+        assert!(snapshots[1].contains("LATEST_PARENT_MARKER"));
+        right.read_with(cx, |p, cx| {
+            assert_eq!(p.hosted.len(), 2);
+            let saved = p.snapshot(true, cx);
+            assert_eq!(saved.hosted.len(), 2);
+            assert_ne!(
+                saved.hosted[0].panel.side_chat_id,
+                saved.hosted[1].panel.side_chat_id
+            );
+            let encoded = serde_json::to_vec(&saved).unwrap();
+            let restored: SavedPanel = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored.active_hosted, p.active_hosted);
+            for tab in restored.hosted {
+                assert_eq!(tab.panel.open_panes, vec![Pane::SideChat]);
+            }
+        });
+        cx.update(|window, cx| right.update(cx, |p, cx| p.close_active_tab(window, cx)));
+        assert_eq!(right.read_with(cx, |p, _| p.hosted.len()), 1);
+        assert!(manager.is_live(&ids[0]));
+        right.update(cx, |p, cx| p.release(cx));
+        runtime.block_on(manager.shutdown());
     }
 
     #[::gpui::test]

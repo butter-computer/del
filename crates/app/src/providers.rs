@@ -24,16 +24,14 @@ pub fn prepare_session_permissions(
     manager: &del_agent::SessionManager,
     id: &del_agent::SessionId,
 ) -> del_agent::Result<()> {
-    if let Some(record) = manager
-        .list_sessions()
-        .into_iter()
-        .find(|record| &record.id == id)
+    let id = manager.resolve_peer(id);
+    if let Ok(record) = manager.session_record(&id)
         && matches!(
             record.provider,
             Provider::Codex | Provider::Claude | Provider::OpenCode
         )
     {
-        manager.set_permission_mode(id, permission_mode(record.provider))?;
+        manager.set_permission_mode(&id, permission_mode(record.provider))?;
     }
     Ok(())
 }
@@ -119,6 +117,21 @@ mod tests {
                 permission_mode: PermissionMode::Ask,
             };
             let session = manager.start_session(config).await.unwrap();
+            let fork = manager
+                .fork(
+                    del_agent::ForkSource::Session(session.id.clone()),
+                    del_agent::ForkLifetime::Temporary,
+                )
+                .await
+                .unwrap();
+            prepare_session_permissions(&manager, &fork.handle.id).unwrap();
+            assert_eq!(
+                manager
+                    .session_record(&fork.handle.id)
+                    .unwrap()
+                    .permission_mode,
+                permission_mode(provider)
+            );
             manager.close(&session.id).await.unwrap();
             prepare_session_permissions(&manager, &session.id).unwrap();
             prepare_session_permissions(&manager, &session.id).unwrap();

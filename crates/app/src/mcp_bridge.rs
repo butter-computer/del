@@ -992,6 +992,10 @@ impl McpHost for AppHost {
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
         if self.info(caller)?.mode == SessionMode::Chat {
+            // Apply Del's ordinary built-in provider policy before inheritance,
+            // including imported/background parents that have not been opened.
+            crate::providers::prepare_session_permissions(&self.manager, caller)
+                .map_err(|e| HostError::Failed(e.to_string()))?;
             let child = self
                 .manager
                 .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
@@ -1026,5 +1030,63 @@ impl McpHost for AppHost {
             title: title.into(),
             body: body.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod spawn_permission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_spawn_applies_normal_permissions_before_child_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("index"),
+            [
+                Arc::new(del_agent::MockBackend::new(Provider::Claude))
+                    as Arc<dyn del_agent::AgentBackend>,
+                Arc::new(del_agent::MockBackend::new(Provider::Codex))
+                    as Arc<dyn del_agent::AgentBackend>,
+            ],
+        )
+        .unwrap();
+        let parent = manager
+            .start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Ask,
+            })
+            .await
+            .unwrap();
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop, stopped) = watch::channel(false);
+        let host = AppHost {
+            manager: manager.clone(),
+            events,
+            terminals: Default::default(),
+            reported: Default::default(),
+            revocations: Default::default(),
+            stopped,
+            next_question: AtomicU64::new(1),
+        };
+        let child = host
+            .spawn_session(
+                &parent.id,
+                SpawnRequest {
+                    provider: Provider::Claude,
+                    cwd: dir.path().into(),
+                    prompt: "Inspect files".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.session_record(&child.id).unwrap().permission_mode,
+            del_agent::PermissionMode::FullAuto
+        );
+        manager.shutdown().await;
     }
 }

@@ -6,6 +6,8 @@ use crate::peers::{DeliveryState, PeerMessage, PeerWork, WorkStatus};
 #[derive(Clone, Copy)]
 pub(super) enum SendOrigin<'a> {
     User,
+    // Explicit user steering may amend work while a peer obligation blocks follow-ups.
+    UserSteer,
     Peer(&'a str),
     Continuation,
 }
@@ -973,6 +975,46 @@ mod tests {
             .unwrap();
         assert!(!manager.peer_blocks_user_queue(&recipient.id));
         manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_steer_reaches_idle_peer_wait_without_releasing_followups() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("index"),
+            [Arc::new(crate::MockBackend::new(Provider::Claude)) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let a = manager
+            .start_session(config(Provider::Claude, dir.path()))
+            .await
+            .unwrap();
+        let b = manager
+            .start_session(config(Provider::Claude, dir.path()))
+            .await
+            .unwrap();
+        manager
+            .send_to_peer(&b.id, &a.id, "task", "Review this")
+            .unwrap();
+        manager.dispatch_peer(&a.id).await.unwrap();
+        idle(&manager, &a.id).await;
+        assert!(manager.peer_blocks_user_queue(&a.id));
+        let work = manager.peer_work(&a.id).unwrap();
+        manager
+            .steer_input(&a.id, UserInput::text("Use the new screenshots"))
+            .await
+            .unwrap();
+        idle(&manager, &a.id).await;
+        assert_eq!(manager.peer_work(&a.id).unwrap().status, work.status);
+        assert!(manager.peer_blocks_user_queue(&a.id));
+        assert!(matches!(
+            manager
+                .send_prompt(&a.id, UserInput::text("later followup"))
+                .await,
+            Err(AgentError::Busy(_))
+        ));
+        assert!(manager.subscribe_with_history(&a.id).unwrap().0.iter().any(|event|
+            matches!(event, AgentEvent::UserMessage { text } if text == "Use the new screenshots")));
     }
 
     #[tokio::test]

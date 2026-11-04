@@ -950,3 +950,20 @@ activity bar. It supersedes earlier rules where they conflict.
   state across tab and Space switches and app restarts, including the Changes pane.
   Explicit tool-opening actions can still reveal the sidebar.
 - Omit the redundant “clean” text from the branch status bar when no files changed.
+
+
+## Session controls follow-up
+
+- Hide relative ages while a session’s working spinner is visible, including
+  activity from its Side chats.
+- The right sidebar has a 360-logical-pixel minimum. Keep provider and model on
+  one row in Side chat composers, including Claude / Opus 5.5 High.
+- Steer is explicit user input even between native turns while waiting for peers.
+  Deliver that amendment without completing, pausing, or dropping peer obligations
+  and without releasing later follow-ups. Failed steering remains reviewable.
+- Agent-created chats apply the same built-in provider permissions as ordinary
+  Del chats before launch, including parents with legacy permission metadata.
+- Each new Side chat action creates a separate fork from the main conversation’s
+  current context. Preserve independent settings, draft, queue, history, unread
+  state, lifecycle, and persisted identity for all open side chats. Selecting an
+  existing tab or opening a peer link reuses that chat rather than creating one.

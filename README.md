@@ -6,10 +6,10 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.29` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.35` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.29 source update notes](docs/releases/0.1.29.md) and
-[validation record](docs/releases/0.1.29-validation.md).
+See the [0.1.35 source update notes](docs/releases/0.1.35.md) and
+[validation record](docs/releases/0.1.35-validation.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +39,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.29-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.35-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -518,7 +518,9 @@ conversation. Unloading a running session also stops its current work.
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
   the tick. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
-- Both sidebars resize from their panel boundaries. The right tab row has a thin,
+- Working sessions show the activity spinner without a relative timestamp.
+- Both sidebars resize from their panel boundaries. The right sidebar has a
+  360-logical-pixel minimum so Claude and Opus 5.5 High stay on one composer row. The right tab row has a thin,
   floating divider; the content area stays borderless. The left sidebar only
   resizes between 180 and 320 px at its boundary, with a 16-point hover target
   centered on the gutter.
@@ -657,7 +659,10 @@ the provider releases its send slot, Del retries the undelivered message
 automatically. Stop pauses pending retries too; steering preserves the remaining
 queue and its order.
 
-Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
+Queue rows have **Steer**, **Delete**, and **Edit** actions. Explicit Steer also
+delivers while an agent is waiting for peer work between native turns. It keeps
+peer obligations and later queued follow-ups intact; a rejected steer stays in
+the queue with an error. Edit returns text and
 attachments to the composer; an existing draft is preserved as another queued item.
 Drag the queue icon to reorder, without an extra hover icon. Controls remain
 visible at the sidebar’s minimum width. Rows have subtle
@@ -735,6 +740,12 @@ No Codex, Claude, or third-party transcription API is used.
 
 ## Project peer conversations
 
+Agent-created chats apply Del’s normal built-in provider permission policy before
+inheriting their parent settings, including imported/background parents with
+stale permission metadata. Claude starts with `--dangerously-skip-permissions`
+and Codex with its normal full-access configuration. ACP keeps its own policy.
+
+
 Agents in the same Del project can discover each other, read recorded chat context,
 and exchange requests and replies across providers. Sibling worktrees use their
 parent project. A peer can ask for information or edits without changing the
@@ -795,7 +806,9 @@ tab row. The header and panel open and close together with an interruptible reve
 reduced-motion settings show or hide them immediately. New sessions start with
 the right sidebar closed. Opening it shows one **New tab** chooser and **+**, with
 no Files, Changes, Terminal, or Browser preopened. Each session remembers whether
-its sidebar was open or closed across tab/Space switches and app restarts. Existing tools saved in the former main-area strip migrate into that
+its sidebar was open or closed across tab/Space switches and app restarts. Every **Side chat** action
+creates an independent tab from the main conversation’s latest context. Existing
+side chats keep their own drafts, settings, histories, and saved identities. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.
 
 Project lists initially show five sessions, plus the active session when it sits

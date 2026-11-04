@@ -700,7 +700,7 @@ fn row_item(
                 row.status,
                 del_agent::SessionStatus::WaitingApproval | del_agent::SessionStatus::Error
             );
-        let time = relative_time(row.updated_secs).filter(|_| !unread_tick);
+        let time = relative_time(row.updated_secs).filter(|_| !working && !unread_tick);
         item = item.child(if motion.is_hovered(&row.id.0) {
             // The hover actions take the meta slot; reserve their width so the
             // title never runs underneath them.

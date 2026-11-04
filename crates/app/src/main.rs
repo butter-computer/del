@@ -403,7 +403,11 @@ impl Render for ResizePreview {
 }
 
 fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 {
-    let min = if right { 220.0 } else { LEFT_SIDEBAR_MIN };
+    let min = if right {
+        right_panel::PANEL_MIN_WIDTH
+    } else {
+        LEFT_SIDEBAR_MIN
+    };
     let max = if right { 800.0_f32 } else { LEFT_SIDEBAR_MAX };
     requested.clamp(min, max.min(viewport - other - 260.0 - 20.0).max(min))
 }
@@ -1743,9 +1747,7 @@ impl AppShell {
                     .first()
                     .map(|item| item.id.clone());
                 if let Some(id) = first {
-                    chat.update(cx, |chat, cx| {
-                        chat.deliver_queued(id, chat.is_running(), cx)
-                    });
+                    chat.update(cx, |chat, cx| chat.deliver_queued(id, true, cx));
                 }
             }
             return;
@@ -3453,7 +3455,10 @@ mod sidebar_width_tests {
         assert_eq!(sidebar_width(300., false, 650., 100.), 270.);
         assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 320.);
         assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
-        assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
+        assert_eq!(
+            sidebar_width(20., true, 1600., 180.),
+            super::right_panel::PANEL_MIN_WIDTH
+        );
     }
 
     #[test]

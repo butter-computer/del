@@ -603,9 +603,7 @@ impl SideChat {
                     .first()
                     .map(|item| item.id.clone());
                 if let Some(id) = first {
-                    chat.update(cx, |chat, cx| {
-                        chat.deliver_queued(id, chat.is_running(), cx)
-                    });
+                    chat.update(cx, |chat, cx| chat.deliver_queued(id, true, cx));
                 }
             }
             return;
@@ -942,12 +940,25 @@ impl SideChat {
                 });
             });
         h_flex()
+            .id("side-model-settings")
             .items_center()
-            .flex_wrap()
+            .flex_nowrap()
             .min_w_0()
             .gap_0p5()
-            .child(account)
-            .child(self.model_picker.clone())
+            .child(
+                div()
+                    .id("side-provider-control")
+                    .debug_selector(|| "side-provider-control".into())
+                    .flex_none()
+                    .child(account),
+            )
+            .child(
+                div()
+                    .id("side-model-control")
+                    .debug_selector(|| "side-model-control".into())
+                    .flex_none()
+                    .child(self.model_picker.clone()),
+            )
             .into_any_element()
     }
 
@@ -1351,6 +1362,45 @@ mod tests {
             runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         }
         let chat = side.read_with(cx, |side, _| side.chat.clone().unwrap());
+        if provider == Provider::Claude {
+            side.update(cx, |s, cx| {
+                manager
+                    .set_model_settings(
+                        s.session.as_ref().unwrap(),
+                        Some("opus".into()),
+                        Some("high".into()),
+                        None,
+                    )
+                    .unwrap();
+                s.models = vec![del_agent::ModelInfo {
+                    id: "opus".into(),
+                    name: "Opus 5.5".into(),
+                    description: String::new(),
+                    efforts: vec![del_agent::EffortOption::named("high")],
+                    default_effort: Some("high".into()),
+                    is_default: true,
+                    fast_tier: None,
+                }];
+                cx.notify();
+            });
+            cx.simulate_resize(gpui::size(
+                zpx(crate::right_panel::PANEL_MIN_WIDTH),
+                gpui::px(800.),
+            ));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let provider = cx.debug_bounds("side-provider-control").unwrap();
+            let model = cx.debug_bounds("side-model-control").unwrap();
+            assert!(
+                (provider.center().y - model.center().y).abs() < gpui::px(2.),
+                "provider and model must share one row"
+            );
+            assert!(provider.right() <= model.left());
+            assert!(
+                model.right() <= zpx(crate::right_panel::PANEL_MIN_WIDTH - 40.),
+                "model must leave room for Send"
+            );
+            cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(800.)));
+        }
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "queue attachment").unwrap();
         let attachment = del_agent::Attachment {
@@ -1557,6 +1607,51 @@ mod tests {
             1,
             "Side queue actions must never deliver to the parent"
         );
+        // Click the actual Steer control while native execution is idle but
+        // peer work still blocks automatic follow-ups (the reported failure).
+        let child = side.read_with(cx, |s, _| s.session.clone().unwrap());
+        manager
+            .send_to_peer(&parent.id, &child, "pending-task", "Inspect the code")
+            .unwrap();
+        runtime.block_on(manager.dispatch_peer(&child)).unwrap();
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if manager.status(&child) == Some(del_agent::SessionStatus::Idle)
+                && !chat.read_with(cx, |c, _| c.is_running())
+            {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        assert!(manager.peer_blocks_user_queue(&child));
+        chat.update(cx, |c, cx| {
+            c.enqueue(UserInput::text("Steer while waiting"), cx);
+            c.queue.items[0].id = "peer-wait-steer".into();
+            c.enqueue(UserInput::text("Keep this followup queued"), cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("steer-peer-wait-steer").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |c, _| c.queue.items.len() == 1 && !c.is_running()) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        chat.read_with(cx, |c, _| {
+            assert_eq!(c.queue.items.len(), 1);
+            assert_eq!(c.queue.items[0].input.text, "Keep this followup queued");
+        });
+        assert!(manager.peer_blocks_user_queue(&child));
+        assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
+            matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Steer while waiting")));
         side.update(cx, |side, cx| side.forget(cx));
     }
 

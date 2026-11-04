@@ -807,7 +807,7 @@ impl ChatView {
     pub fn submit_input(&mut self, input: UserInput, steer: bool, cx: &mut Context<Self>) {
         let id = self.enqueue(input, cx);
         if !self.is_running() || steer {
-            self.deliver_queued(id, steer && self.is_running(), cx);
+            self.deliver_queued(id, steer, cx);
         }
     }
 
@@ -855,7 +855,7 @@ impl ChatView {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 let busy = matches!(&result, Err(AgentError::Busy(_)));
-                if busy {
+                if busy && !steer {
                     this.queue.wait(&item_id);
                 } else {
                     if let Err(error) = &result {
@@ -881,7 +881,7 @@ impl ChatView {
                         this.remove_row(row);
                     }
                     this.model.reject_input();
-                    if busy {
+                    if busy && !steer {
                         // Completion can precede provider readiness. A Busy rejection
                         // is undelivered; retry after yielding, without inventing a
                         // running turn that would wait forever for another completion.

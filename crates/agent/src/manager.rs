@@ -1088,10 +1088,10 @@ impl SessionManager {
                 }
                 None
             }
-            peers::SendOrigin::User => {
+            peers::SendOrigin::User | peers::SendOrigin::UserSteer => {
                 // Reconfiguration/command discovery may have awaited while a
                 // peer arrived. Arbitrate again immediately before submission.
-                if self.peer_blocks_user_queue(id) {
+                if matches!(origin, peers::SendOrigin::User) && self.peer_blocks_user_queue(id) {
                     return Err(AgentError::Busy("Current work must finish first".into()));
                 }
                 Some(AgentEvent::UserMessage {
@@ -1335,7 +1335,19 @@ impl SessionManager {
             .entry(id.clone())
             .or_default()
             .clone();
-        let _steering = lock.lock().await;
+        let steering = lock.lock().await;
+        if !matches!(
+            self.status(id),
+            Some(SessionStatus::Running | SessionStatus::WaitingApproval)
+        ) {
+            // A peer-waiting task can be active without a native turn to steer.
+            // Submit an explicit user amendment without releasing its mailbox or
+            // queued follow-ups. The send lock rechecks native turn readiness.
+            drop(steering);
+            return self
+                .send_prompt_kind(id, input, peers::SendOrigin::UserSteer)
+                .await;
+        }
         if self.pending_fork_context(id).is_some() {
             return Err(AgentError::Busy(
                 "updated fork context is waiting; queue a normal message instead of steering"

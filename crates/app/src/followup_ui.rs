@@ -532,7 +532,7 @@ pub(crate) fn render_queue(
                                 .accessibility_label("Steer queued message")
                                 .on_click(move |_, _, cx| {
                                     send_chat.update(cx, |chat, cx| {
-                                        chat.deliver_queued(send.clone(), chat.is_running(), cx)
+                                        chat.deliver_queued(send.clone(), true, cx)
                                     })
                                 })
                                 .motion_child(true, move |feedback| {
