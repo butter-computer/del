@@ -2381,7 +2381,7 @@ impl RightPanel {
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
-                rgba(0xffffff8c)
+                crate::appearance::secondary_text()
             })
             .when(active, |t| t.bg(rgba(0xffffff14)))
             .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
@@ -2542,11 +2542,11 @@ impl RightPanel {
                             .child(self.file_hover.marker(
                                 marker_key,
                                 if is_selected {
-                                    ActionTone::Accent.surface(false)
+                                    rgba(0xffffff14)
                                 } else {
                                     rgba(0)
                                 },
-                                rgba(0xffffff24),
+                                rgba(0xffffff14),
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if is_dir {
@@ -2708,17 +2708,18 @@ impl RightPanel {
                                             .id(label)
                                             .role(gpui::Role::Button)
                                             .aria_label(label)
-                                            .h(zpx(20.0))
-                                            .px_1p5()
+                                            .h(zpx(22.0))
+                                            .px_2()
                                             .flex()
                                             .items_center()
                                             .rounded_md()
                                             .text_size(zpx(TEXT_SM))
                                             .cursor_pointer()
+                                            .text_color(crate::appearance::secondary_text())
                                             .when(self.markdown_preview == preview, |button| {
                                                 button
-                                                    .bg(ActionTone::Accent.surface(false))
-                                                    .text_color(ActionTone::Accent.foreground())
+                                                    .bg(rgba(0xffffff14))
+                                                    .text_color(rgb(0xf5f5f5))
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.markdown_preview = preview;
@@ -2755,6 +2756,9 @@ impl RightPanel {
                 )
             })
             .when(matches!(self.viewer, Viewer::Text { .. }), |preview| {
+                // Save and Revert only have something to do once there are edits, so
+                // they stay quiet until then and colour never decorates a clean file.
+                let dirty = self.selected_dirty();
                 preview.child(
                     h_flex()
                         .flex_none()
@@ -2762,24 +2766,14 @@ impl RightPanel {
                         .px_2()
                         .py_1()
                         .child(
-                            action(
-                                "save-file",
-                                if self.selected_dirty() {
-                                    "Save •"
-                                } else {
-                                    "Save"
-                                },
-                                ActionTone::Success,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
+                            file_action("save-file", "Save", dirty, dirty)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
                         )
+                        .child(file_action("revert-file", "Revert", dirty, false).on_click(
+                            cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
+                        ))
                         .child(
-                            action("revert-file", "Revert", ActionTone::Warning).on_click(
-                                cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
-                            ),
-                        )
-                        .child(
-                            action("reload-file", "Reload", ActionTone::Accent)
+                            file_action("reload-file", "Reload", true, false)
                                 .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
                         ),
                 )
@@ -3867,22 +3861,43 @@ impl Render for RightPanel {
     }
 }
 
-fn action(id: &'static str, label: &'static str, tone: ActionTone) -> Stateful<Div> {
+/// A file action: a quiet neutral button, green only for a Save with work to keep.
+fn file_action(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    primary: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .role(gpui::Role::Button)
         .aria_label(label)
-        .px_1p5()
-        .h(zpx(28.))
+        .px_2()
+        .h(zpx(24.))
         .flex()
         .items_center()
         .flex_none()
         .rounded_md()
         .text_size(zpx(TEXT_SM))
-        .cursor_pointer()
-        .bg(tone.surface(false))
-        .text_color(tone.foreground())
-        .hover(move |button| button.bg(tone.surface(true)))
+        .map(|button| {
+            if primary {
+                button
+                    .bg(ActionTone::Success.surface(false))
+                    .text_color(ActionTone::Success.foreground())
+                    .cursor_pointer()
+                    .hover(|button| button.bg(ActionTone::Success.surface(true)))
+            } else if enabled {
+                button
+                    .bg(rgba(crate::appearance::QUIET_FILL))
+                    .text_color(crate::appearance::secondary_text())
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgba(0xffffff14)))
+            } else {
+                button
+                    .text_color(crate::appearance::faint_text())
+                    .opacity(0.7)
+            }
+        })
         .child(label)
 }
 

@@ -27,7 +27,6 @@ const HAIRLINE: u32 = 0xffffff0f;
 /// Secondary reading text: code context, tool output, error detail.
 const BODY_MUTED: u32 = 0xffffffb3;
 /// Labels that must stay legible but read as secondary to `MUTED`.
-const FAINT_TEXT: u32 = 0xffffff66;
 const ROW_HEIGHT: f32 = 26.;
 const ROW_GAP: f32 = 6.;
 pub(super) const TRANSCRIPT_TOP: f32 = 16.;
@@ -513,7 +512,7 @@ impl ChatView {
                             .h(zpx(ROW_HEIGHT))
                             .items_center()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(rgba(FAINT_TEXT))
+                            .text_color(crate::appearance::faint_text())
                             .child(
                                 gpui_kit::component::shimmer::ShimmerText::new(label)
                                     .id(SharedString::from(format!("working-shimmer-{ix}")))
@@ -779,7 +778,7 @@ impl ChatView {
                                 DiffKind::Added => ("+", Some(added.opacity(0.13)), added),
                                 DiffKind::Removed => ("−", Some(removed.opacity(0.13)), removed),
                                 DiffKind::Context => (" ", None, rgba(BODY_MUTED)),
-                                DiffKind::Hunk => ("", None, rgba(FAINT_TEXT)),
+                                DiffKind::Hunk => ("", None, crate::appearance::faint_text()),
                             };
                             h_flex()
                                 .px(zpx(TEXT_INSET))
@@ -800,7 +799,7 @@ impl ChatView {
                                     .px(zpx(TEXT_INSET))
                                     .pt_1()
                                     .text_size(zpx(TEXT_SM))
-                                    .text_color(rgba(FAINT_TEXT))
+                                    .text_color(crate::appearance::faint_text())
                                     .child(format!(
                                         "{hidden} more {}",
                                         if hidden == 1 { "line" } else { "lines" }
@@ -907,7 +906,7 @@ fn disclosure(expanded: bool) -> Icon {
     })
     .with_size(zpx(11.))
     .flex_none()
-    .text_color(rgba(FAINT_TEXT))
+    .text_color(crate::appearance::faint_text())
 }
 
 /// A code block's corner: its language and a Copy with the same confirmation

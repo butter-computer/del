@@ -352,7 +352,11 @@ fn appearance_controls() -> impl IntoElement {
                                 .items_center()
                                 .child(theme_swatches(theme, light))
                                 .child(theme.name())
-                                .child(crate::icons::icon(IconName::ChevronDown).with_size(zpx(11.)).text_color(crate::appearance::secondary_text())),
+                                .child(
+                                    crate::icons::icon(IconName::ChevronDown)
+                                        .with_size(zpx(11.))
+                                        .text_color(crate::appearance::secondary_text()),
+                                ),
                         )
                         .dropdown_menu(move |menu, _, _| {
                             ThemePreset::ALL.into_iter().fold(
@@ -401,7 +405,11 @@ fn appearance_controls() -> impl IntoElement {
                                 .gap_2()
                                 .items_center()
                                 .child(appearance::background().name())
-                                .child(crate::icons::icon(IconName::ChevronDown).with_size(zpx(11.)).text_color(crate::appearance::secondary_text())),
+                                .child(
+                                    crate::icons::icon(IconName::ChevronDown)
+                                        .with_size(zpx(11.))
+                                        .text_color(crate::appearance::secondary_text()),
+                                ),
                         )
                         .dropdown_menu(|menu, _, _| {
                             appearance::BackgroundAnimation::ALL.into_iter().fold(

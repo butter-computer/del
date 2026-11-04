@@ -247,7 +247,6 @@ fn relative_time(updated_secs: u64) -> Option<String> {
 
 const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0xffffff8c;
-const FAINT: u32 = 0xffffff52;
 
 pub(crate) fn fading_title(text: String) -> impl IntoElement {
     let label = text.clone();
@@ -717,7 +716,7 @@ fn row_item(
                 .gap_1()
                 .items_center()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgba(FAINT))
+                .text_color(crate::appearance::faint_text())
                 .when_some(time, |meta, time| meta.child(time))
                 .when_some(status_glyph(row, working, unread), |meta, glyph| {
                     meta.child(glyph)
@@ -1101,7 +1100,7 @@ fn empty_space(archived: bool) -> impl IntoElement {
             div()
                 .w_full()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgba(FAINT))
+                .text_color(crate::appearance::faint_text())
                 .child(if archived {
                     "Archived sessions will land here."
                 } else {
@@ -1183,14 +1182,14 @@ fn space_contents(
                         .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
                         .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
                             .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
-                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
+                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).cursor_pointer()
                             .hover(|heading| heading.text_color(crate::appearance::secondary_text())).child("Pinned")
                             .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
                         .content(v_flex().w_full().gap_0p5()
                             .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
                 // The Space switcher in the header names the Space, so projects follow
                 // directly; the archive view keeps a plain label.
-                .when(show_archived, |list| list.child(div().px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).child("Archived")))
+                .when(show_archived, |list| list.child(div().px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).child("Archived")))
                 .when(empty, |list| list.child(empty_space(show_archived)))
                 .child(v_flex().debug_selector(|| "projects-list".into()).w_full().flex_none().gap_0p5()
                 .children(paths.into_iter().map(|path| {

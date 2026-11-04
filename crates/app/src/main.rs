@@ -1951,7 +1951,7 @@ impl AppShell {
         right_visible: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let muted = rgba(0xffffff8c);
+        let muted = appearance::secondary_text();
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
             // Live tabs, with just-closed ones (ghosts) kept at their old place

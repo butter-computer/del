@@ -132,6 +132,13 @@ fn colors() -> themes::Palette {
 pub fn secondary_text() -> Rgba {
     gpui_kit::rgb(colors().neutral[5])
 }
+/// Quiet metadata: times, section labels, disclosure arrows. Stays readable on
+/// the selected row in every theme, at about #83837F in Graphite dark.
+pub fn faint_text() -> Rgba {
+    let mut color = secondary_text();
+    color.a = if light() { 0.88 } else { 0.78 };
+    color
+}
 pub fn composer_surface() -> Rgba {
     gpui_kit::rgb(colors().composer)
 }
