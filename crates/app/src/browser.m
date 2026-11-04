@@ -222,6 +222,17 @@ static NSColor *DelColor(uint32_t rgb) {
     self.address.layer.borderColor = [NSColor.labelColor colorWithAlphaComponent:0.2].CGColor;
 }
 - (void)controlTextDidEndEditing:(NSNotification *)note { self.address.layer.borderWidth = 0; }
+// Keyboard users come in through the Browser tab, so these hand focus back to the app
+// rather than trapping it in a native field GPUI's Tab order cannot see.
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)view doCommandBySelector:(SEL)selector {
+    if (selector == @selector(cancelOperation:) || selector == @selector(insertTab:) || selector == @selector(insertBacktab:)) {
+        [self.window makeFirstResponder:self.superview];
+        // Esc abandons the edit, so the field shows the real address again.
+        if (selector == @selector(cancelOperation:)) [self refreshControls];
+        return YES;
+    }
+    return NO;
+}
 - (void)showStatus:(NSString *)message {
     self.status.stringValue = message ?: @"";
     self.status.toolTip = message;
@@ -423,6 +434,11 @@ void del_browser_frame(void *pointer, double x, double y, double width, double h
     if (browser.web.pageZoom != zoom) browser.web.pageZoom = zoom;
     browser.needsLayout = YES;
     browser.hidden = NO;
+}
+void del_browser_focus_address(void *pointer) {
+    if (![NSThread isMainThread] || !pointer) return;
+    DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
+    [browser.window makeFirstResponder:browser.address];
 }
 const char *del_browser_url(void *pointer) {
     if (![NSThread isMainThread] || !pointer) return NULL;

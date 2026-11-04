@@ -36,6 +36,7 @@ mod native {
             mouse_passthrough: bool,
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
+        fn del_browser_focus_address(view: *mut c_void);
         fn del_browser_hide(view: *mut c_void);
         fn del_browser_release(view: *mut c_void);
         fn del_browser_command(
@@ -71,6 +72,9 @@ mod native {
                 profile: CString::new(profile).expect("UUID profile"),
                 pointer: Cell::new(std::ptr::null_mut()),
             }))
+        }
+        pub fn focus_address(&self) {
+            unsafe { del_browser_focus_address(self.0.pointer.get()) };
         }
         pub fn hide(&self) {
             unsafe { del_browser_hide(self.0.pointer.get()) };
@@ -184,6 +188,7 @@ impl Browser {
     pub fn new(url: &str, _: &str) -> Self {
         Self(url.into())
     }
+    pub fn focus_address(&self) {}
     pub fn hide(&self) {}
     pub fn command(&self, _: serde_json::Value, _: &gpui_kit::Window) -> BrowserReply {
         delete_profile("")

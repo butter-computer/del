@@ -306,6 +306,17 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.skeleton = hover;
         c.slider_bar = secondary;
         c.slider_thumb = white;
+        // A destructive button is a solid red in every theme: the default tint put red
+        // text on pale red, which is too faint for the one irreversible action.
+        let (fill, fill_hover) = if light {
+            (0xb83c3c, 0xa33333)
+        } else {
+            (0xb84a4a, 0xc25555)
+        };
+        c.button_danger = gpui_kit::rgb(fill).into();
+        c.button_danger_hover = gpui_kit::rgb(fill_hover).into();
+        c.button_danger_active = gpui_kit::rgb(fill_hover).into();
+        c.button_danger_foreground = gpui_kit::rgb(0xffffff).into();
         // The agreed muted green, for toasts and anything else the theme tints.
         c.success = gpui_kit::rgb(if light { 0x366f49 } else { 0x86b596 }).into();
         // A switch thumb is always the light part of the control, as on macOS.

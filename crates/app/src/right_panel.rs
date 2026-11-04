@@ -2405,7 +2405,22 @@ impl RightPanel {
                 });
                 cx.new(|_| preview)
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                // Enter on a Browser tab continues into its address field, which the
+                // Tab order cannot reach by itself. It needs a frame to be on screen.
+                if pane == Pane::Browser && matches!(event, ClickEvent::Keyboard(_)) {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(50))
+                            .await;
+                        let _ = this.update(cx, |this, _| {
+                            if let Some(browser) = &this.browser {
+                                browser.focus_address();
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 if let Some(id) = &hosted_click {
                     this.select_hosted(id.clone(), window, cx);
                     return;

@@ -2818,9 +2818,10 @@ impl Render for AppShell {
         self.sync_terminal_sidebar_actions(cx);
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
-        if self
-            .mode_slide_started
-            .is_some_and(|started| started.elapsed() < Duration::from_millis(180))
+        if !cx.reduce_motion()
+            && self
+                .mode_slide_started
+                .is_some_and(|started| started.elapsed() < Duration::from_millis(180))
         {
             window.request_animation_frame();
         }
@@ -2969,6 +2970,10 @@ impl Render for AppShell {
                 self.rename.update(cx, |input, cx| {
                     input.set_value(title, window, cx);
                     input.focus(window, cx);
+                });
+                // As in Finder: start with the whole name selected, ready to replace.
+                cx.defer_in(window, |_, window, cx| {
+                    window.dispatch_action(Box::new(gpui_kit::component::input::SelectAll), cx);
                 });
             }
             self.renaming_loaded = renaming;
