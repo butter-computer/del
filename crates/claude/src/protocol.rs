@@ -309,7 +309,7 @@ impl Translator {
             out.push(AgentEvent::ToolCallFinished {
                 id: id.to_owned(),
                 status,
-                output_summary: truncate(&result_text(&block["content"])),
+                output_summary: summarize_output(&result_text(&block["content"])),
             });
             if let (ToolStatus::Completed, Some(info)) = (status, self.tools.get(id)) {
                 out.extend(file_change(info, &v["tool_use_result"]));
@@ -452,6 +452,15 @@ pub fn interrupt_line(request_id: &str) -> String {
 
 fn text(v: &Value) -> Option<String> {
     v.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+fn summarize_output(text: &str) -> String {
+    if text.len() > SUMMARY_LIMIT
+        && let Some(summary) = del_agent::peers::receipt_summary(text)
+    {
+        return summary;
+    }
+    truncate(text)
 }
 
 fn truncate(s: &str) -> String {

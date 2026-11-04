@@ -123,7 +123,151 @@ If blocked, call session_work with action pause and explain why. Do not start qu
     }
 }
 
+#[derive(Clone, Copy)]
+enum PeerTool {
+    Send,
+    Spawn,
+}
+
+fn peer_tool(name: &str) -> Option<PeerTool> {
+    let name = name
+        .strip_prefix("mcp__del__")
+        .or_else(|| name.strip_prefix("del/"))
+        .or_else(|| name.strip_prefix("del_"))
+        .unwrap_or(name);
+    match name {
+        "send_to_session" | "reply_to_session" => Some(PeerTool::Send),
+        "spawn_session" => Some(PeerTool::Spawn),
+        _ => None,
+    }
+}
+
+// Native adapters may store the JSON payload directly or in MCP text blocks.
+fn peer_tool_payload(text: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("receipt").is_some() || value.get("id").is_some() {
+        return Some(value);
+    }
+    let content = value
+        .as_array()
+        .or_else(|| value.get("content")?.as_array())?;
+    content.iter().find_map(|block| {
+        (block.get("type")?.as_str()? == "text").then_some(())?;
+        let payload: serde_json::Value = serde_json::from_str(block.get("text")?.as_str()?).ok()?;
+        (payload.get("receipt").is_some() || payload.get("id").is_some()).then_some(payload)
+    })
+}
+
+fn is_work_continuation(text: &str) -> bool {
+    // Exact historical wording only: never hide user text just for containing a tag.
+    text == CONTINUE_WORK || text == CONTINUE_WORK.replace("Inspect session_work get for delivery errors; use cancel_session_request to withdraw your own obsolete queued or failed requests without reopening a worker. ", "")
+}
+
 impl SessionManager {
+    /// Reconcile native history at recorded exchanges, never manufacture a tail
+    /// of completed mailbox activity after the user's final answer.
+    pub(super) fn restore_peer_history(&self, id: &SessionId, restored: &mut Vec<AgentEvent>) {
+        let messages = self.peer_messages(id);
+        restored.retain(|event| !matches!(event, AgentEvent::UserMessage { text } if is_work_continuation(text)));
+        for event in restored.iter_mut() {
+            if let AgentEvent::PeerMessage { message } = event
+                && let Some(current) = messages.iter().find(|m| m.id == message.id)
+            {
+                *message = current.clone();
+            }
+            if let AgentEvent::UserMessage { text } = event
+                && let Some(message) = messages.iter().find(|m| {
+                    m.to == *id && m.matches_prompt(text, |endpoint| self.resolve_peer(endpoint))
+                })
+            {
+                *event = AgentEvent::PeerMessage {
+                    message: message.clone(),
+                };
+            }
+        }
+        let mut represented: std::collections::HashSet<String> = restored
+            .iter()
+            .filter_map(|event| {
+                if let AgentEvent::PeerMessage { message } = event {
+                    Some(message.id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut tools = std::collections::HashMap::new();
+        let mut placed = std::collections::HashSet::new();
+        let mut history = Vec::with_capacity(restored.len());
+        for event in restored.drain(..) {
+            let mut anchored = None;
+            match &event {
+                AgentEvent::ToolCallStarted { id, name, .. } => {
+                    if let Some(kind) = peer_tool(name) {
+                        tools.insert(id.clone(), kind);
+                    }
+                }
+                AgentEvent::ToolCallFinished {
+                    id: tool_id,
+                    output_summary,
+                    ..
+                } => {
+                    if let Some(kind) = tools.get(tool_id)
+                        && let Some(payload) = peer_tool_payload(output_summary)
+                    {
+                        anchored = messages.iter().find(|message| {
+                            message.from == *id
+                                && match kind {
+                                    PeerTool::Send => {
+                                        payload
+                                            .get("receipt")
+                                            .and_then(|r| r.get("id"))
+                                            .and_then(|v| v.as_str())
+                                            == Some(message.id.as_str())
+                                    }
+                                    PeerTool::Spawn => payload
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .is_some_and(|child| {
+                                            message.idempotency_key == format!("spawn:{child}")
+                                                && self.resolve_peer(&SessionId::new(child))
+                                                    == message.to
+                                        }),
+                                }
+                        });
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(&event, AgentEvent::PeerMessage { message } if placed.contains(&message.id))
+            {
+                history.push(event);
+            }
+            if let Some(message) = anchored
+                && placed.insert(message.id.clone())
+            {
+                // Older Del snapshots may already contain a misplaced receipt.
+                history.retain(|event| !matches!(event, AgentEvent::PeerMessage { message: old } if old.id == message.id));
+                represented.insert(message.id.clone());
+                history.push(AgentEvent::PeerMessage {
+                    message: message.clone(),
+                });
+            }
+        }
+        // Unanchored settled receipts remain in the durable mailbox. Outstanding
+        // deliveries still need their recovery controls, even with no native turn.
+        for message in messages {
+            if !represented.contains(&message.id)
+                && !matches!(
+                    message.state,
+                    DeliveryState::Delivered | DeliveryState::Cancelled
+                )
+            {
+                history.push(AgentEvent::PeerMessage { message });
+            }
+        }
+        *restored = history;
+    }
+
     pub fn side_chat_record(&self, id: &SessionId) -> Option<crate::peers::SideChatRecord> {
         let id = self.resolve_peer(id);
         let mut side = self.shared.peers.lock().unwrap().side_chat(&id)?;
@@ -958,6 +1102,134 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_mail_does_not_create_a_tail_after_the_final_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let manager = SessionManager::new(
+            &path,
+            [Arc::new(crate::MockBackend::new(Provider::Claude)) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let cfg = config(Provider::Claude, dir.path());
+        let a = manager.start_session(cfg.clone()).await.unwrap();
+        let b = manager.start_session(cfg.clone()).await.unwrap();
+        let receipt = manager
+            .send_to_peer(&a.id, &b.id, "request", "Inspect API")
+            .unwrap();
+        manager.dispatch_peer(&b.id).await.unwrap();
+        idle(&manager, &b.id).await;
+        manager.shutdown().await;
+        drop(manager);
+        let manager =
+            SessionManager::new(&path, std::iter::empty::<Arc<dyn AgentBackend>>()).unwrap();
+        let (tx, _) = broadcast::channel(32);
+        let history = vec![
+            AgentEvent::UserMessage { text: "Review".into() },
+            AgentEvent::ToolCallStarted { id: "tool".into(), name: "del/send_to_session".into(), input_summary: serde_json::json!({"idempotency_key":"request","session_id":b.id,"text":"Inspect API"}).to_string() },
+            AgentEvent::ToolCallFinished { id: "tool".into(), status: crate::ToolStatus::Completed, output_summary: serde_json::json!({"receipt":receipt}).to_string() },
+            AgentEvent::AssistantMessage { turn_id: "one".into(), text: "Finished".into() },
+            AgentEvent::TurnCompleted { turn_id: "one".into(), status: crate::TurnStatus::Completed },
+        ];
+        manager
+            .attach(
+                SessionHandle::new(a.id.clone(), Provider::Claude, tx).with_history(history),
+                cfg,
+            )
+            .unwrap();
+        let history = manager.subscribe_with_history(&a.id).unwrap().0;
+        let receipt_ix = history
+            .iter()
+            .position(
+                |e| matches!(e, AgentEvent::PeerMessage {message} if message.id == receipt.id),
+            )
+            .unwrap();
+        let answer_ix = history
+            .iter()
+            .position(|e| matches!(e, AgentEvent::AssistantMessage { .. }))
+            .unwrap();
+        assert!(
+            receipt_ix < answer_ix,
+            "restored coordination must stay at its tool call, not trail the final answer"
+        );
+        let mut restored = history.clone();
+        manager.restore_peer_history(&a.id, &mut restored);
+        assert_eq!(
+            restored, history,
+            "restoring twice must not duplicate receipts"
+        );
+
+        let mut misplaced = history.clone();
+        let old_receipt = misplaced.remove(receipt_ix);
+        misplaced.push(old_receipt);
+        manager.restore_peer_history(&a.id, &mut misplaced);
+        assert_eq!(
+            misplaced, history,
+            "repair a tail already saved by an older Del build"
+        );
+
+        let spawn = manager
+            .send_to_peer(&a.id, &b.id, &format!("spawn:{}", b.id), "Worker task")
+            .unwrap();
+        manager
+            .shared
+            .peers
+            .lock()
+            .unwrap()
+            .set_delivery(&spawn.id, DeliveryState::Delivered, None)
+            .unwrap();
+        let failure = manager
+            .send_to_peer(&a.id, &b.id, "failed", "Retry me")
+            .unwrap();
+        manager
+            .shared
+            .peers
+            .lock()
+            .unwrap()
+            .set_delivery(
+                &failure.id,
+                DeliveryState::Uncertain,
+                Some("Interrupted delivery".into()),
+            )
+            .unwrap();
+        let mut restored = vec![
+            AgentEvent::ToolCallStarted { id: "spawn-tool".into(), name: "mcp__del__spawn_session".into(), input_summary: "{}".into() },
+            AgentEvent::ToolCallFinished { id: "spawn-tool".into(), status: crate::ToolStatus::Completed,
+                output_summary: serde_json::json!({"content":[{"type":"text","text":serde_json::json!({"id":b.id,"provider":"claude"}).to_string()}]}).to_string() },
+            AgentEvent::AssistantMessage { turn_id: "done".into(), text: "Done".into() },
+        ];
+        manager.restore_peer_history(&a.id, &mut restored);
+        assert!(
+            matches!(&restored[2], AgentEvent::PeerMessage { message } if message.id == spawn.id)
+        );
+        assert!(matches!(restored[3], AgentEvent::AssistantMessage { .. }));
+        assert!(
+            matches!(&restored[4], AgentEvent::PeerMessage { message } if message.id == failure.id && message.state == DeliveryState::Uncertain)
+        );
+        assert_eq!(
+            restored.len(),
+            5,
+            "unanchored settled receipts must not appear at the end"
+        );
+        assert_eq!(
+            manager.peer_messages(&a.id).len(),
+            3,
+            "display filtering must preserve the durable mailbox"
+        );
+        manager.shutdown().await;
+    }
+
+    #[test]
+    fn only_exact_internal_continuations_are_hidden() {
+        assert!(is_work_continuation(CONTINUE_WORK));
+        let old = CONTINUE_WORK.replace("Inspect session_work get for delivery errors; use cancel_session_request to withdraw your own obsolete queued or failed requests without reopening a worker. ", "");
+        assert!(is_work_continuation(&old));
+        assert!(!is_work_continuation(
+            "<del_work_continuation>my text</del_work_continuation>"
+        ));
+        assert!(!is_work_continuation(&format!("Explain this: {old}")));
     }
 
     #[test]

@@ -310,6 +310,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn long_peer_tool_results_keep_their_receipt_anchor_on_restore() {
+        let receipt = json!({"id":"receipt", "idempotency_key":"request", "from":"a", "to":"b", "reply_to":null, "text":"long task ".repeat(100), "created_at_ms":1, "state":"delivered", "error":null});
+        let records = [
+            json!({"type":"assistant", "uuid":"a", "sessionId":"s", "message":{"content":[{"type":"tool_use","id":"tool","name":"mcp__del__send_to_session","input":{}}]}}),
+            json!({"type":"user", "uuid":"r", "parentUuid":"a", "sessionId":"s", "message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":json!({"receipt":receipt}).to_string()}]}}),
+        ];
+        let events = read(transcript(&records).as_bytes(), "s").unwrap();
+        let output = events
+            .iter()
+            .find_map(|e| {
+                if let AgentEvent::ToolCallFinished { output_summary, .. } = e {
+                    Some(output_summary)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(output).expect("receipt must remain valid JSON after summarizing");
+        assert_eq!(payload["receipt"]["id"], "receipt");
+        assert!(output.len() < 500);
+    }
+
+    #[test]
     fn native_local_commands_become_activity_without_consuming_real_messages() {
         let command = "<command-name>/terminal-setup</command-name>\n <command-message>terminal-setup</command-message>\n <command-args></command-args>";
         let mut records = [

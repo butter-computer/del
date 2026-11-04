@@ -243,8 +243,15 @@ impl Render for BranchPanel {
         self.highlighted = self.highlighted.min(choices.len().saturating_sub(1));
         let bounds = self.bounds.get();
         let available = window.viewport_size().height - bounds.bottom();
-        let height = zpx(choices.len().max(1) as f32 * 28.)
-            .min((available - zpx(58.)).clamp(zpx(28.), zpx(224.)));
+        let content_height = zpx(choices.len().max(1) as f32 * 28.);
+        let limit = (available - zpx(58.)).clamp(zpx(28.), zpx(224.));
+        // End on a partial row so overflow is visible before the first scroll.
+        let height = if content_height > limit {
+            let rows = ((limit / zpx(28.)) - 0.65).floor().max(0.);
+            zpx((rows + 0.65) * 28.).min(limit)
+        } else {
+            content_height
+        };
         let scroll = self.scroll.clone();
         v_flex()
             .id("branch-panel")
@@ -386,7 +393,7 @@ impl Render for BranchPanel {
                         .bottom_0()
                         .left_0()
                         .right_0()
-                        .h(zpx(16.)),
+                        .h(zpx(40.)),
                     ),
             )
     }

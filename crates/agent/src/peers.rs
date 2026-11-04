@@ -31,6 +31,38 @@ pub struct PeerMessage {
     pub error: Option<String>,
 }
 
+/// Keep a receipt's routing identity valid when adapters shorten tool output.
+/// Cutting raw JSON can remove the only anchor for restoring an outgoing exchange.
+pub fn receipt_summary(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let payload = if value.get("receipt").is_some() {
+        value
+    } else {
+        let blocks = value
+            .as_array()
+            .or_else(|| value.get("content")?.as_array())?;
+        blocks.iter().find_map(|block| {
+            (block.get("type")?.as_str()? == "text").then_some(())?;
+            let payload: serde_json::Value =
+                serde_json::from_str(block.get("text")?.as_str()?).ok()?;
+            payload.get("receipt")?;
+            Some(payload)
+        })?
+    };
+    let receipt: PeerMessage = serde_json::from_value(payload.get("receipt")?.clone()).ok()?;
+    let mut preview: String = receipt.text.chars().take(80).collect();
+    if preview.len() < receipt.text.len() {
+        preview.push('…');
+    }
+    Some(
+        serde_json::json!({"receipt":{
+            "id": receipt.id, "from": receipt.from, "to": receipt.to,
+            "state": receipt.state, "text": preview,
+        }})
+        .to_string(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkStatus {

@@ -105,6 +105,15 @@ pub fn diffs(cwd: &std::path::Path, value: &Value) -> Vec<AgentEvent> {
 /// tool input and output stay in OpenCode's own transcript.
 const SUMMARY_LIMIT: usize = 4096;
 
+fn summarize_output(text: &str) -> String {
+    if text.len() > SUMMARY_LIMIT
+        && let Some(summary) = del_agent::peers::receipt_summary(text)
+    {
+        return summary;
+    }
+    truncate(text)
+}
+
 fn truncate(s: &str) -> String {
     if s.len() <= SUMMARY_LIMIT {
         return s.to_owned();
@@ -257,21 +266,21 @@ impl Stream {
             }],
             Some("session.tool.called") => vec![AgentEvent::ToolCallUpdated {
                 id: string(d, "id"),
-                output_summary: truncate(&d["input"].to_string()),
+                output_summary: summarize_output(&d["input"].to_string()),
             }],
             Some("session.tool.progress") => vec![AgentEvent::ToolCallUpdated {
                 id: string(d, "id"),
-                output_summary: truncate(&d["metadata"].to_string()),
+                output_summary: summarize_output(&d["metadata"].to_string()),
             }],
             Some("session.tool.success") => vec![AgentEvent::ToolCallFinished {
                 id: string(d, "id"),
                 status: ToolStatus::Completed,
-                output_summary: truncate(&content(&d["content"])),
+                output_summary: summarize_output(&content(&d["content"])),
             }],
             Some("session.tool.failed") => vec![AgentEvent::ToolCallFinished {
                 id: string(d, "id"),
                 status: ToolStatus::Failed,
-                output_summary: truncate(&error_message(&d["error"])),
+                output_summary: summarize_output(&error_message(&d["error"])),
             }],
             Some("session.step.ended") => {
                 let mut out = vec![usage(&d["tokens"])];
@@ -327,11 +336,13 @@ impl Stream {
                                     } else {
                                         ToolStatus::Completed
                                     },
-                                    output_summary: truncate(&if state["status"] == "error" {
-                                        error_message(&state["error"])
-                                    } else {
-                                        content(&state["content"])
-                                    }),
+                                    output_summary: summarize_output(
+                                        &if state["status"] == "error" {
+                                            error_message(&state["error"])
+                                        } else {
+                                            content(&state["content"])
+                                        },
+                                    ),
                                 });
                             }
                         }

@@ -86,14 +86,7 @@ pub fn sections(model: &ChatModel, work_pending: bool) -> Vec<Section> {
     for end in 0..=model.blocks.len() {
         let boundary = matches!(
             model.blocks.get(end),
-            Some(
-                Block::ProviderSwitch { .. }
-                    | Block::User {
-                        steer: false,
-                        goal: false,
-                        ..
-                    }
-            )
+            Some(Block::ProviderSwitch { .. } | Block::User { goal: false, .. })
         );
         if end != model.blocks.len() && !boundary {
             continue;
@@ -199,6 +192,28 @@ mod tests {
                 .map(|r| r.answer)
                 .collect::<Vec<_>>(),
             vec![3]
+        );
+    }
+
+    #[test]
+    fn steering_stays_outside_collapsed_work() {
+        let mut m = ChatModel::default();
+        m.push_user("first".into(), false);
+        m.apply(&AgentEvent::TurnStarted {
+            turn_id: "one".into(),
+        });
+        m.apply(&AgentEvent::ReasoningDelta {
+            turn_id: "one".into(),
+            text: "thinking".into(),
+        });
+        let steer = m.blocks.len();
+        m.push_user("correction".into(), true);
+        answer(&mut m, "one", "Final");
+        assert!(
+            sections(&m, false)
+                .iter()
+                .all(|s| !s.range().contains(&steer)),
+            "human steering must never be folded into work"
         );
     }
 

@@ -506,33 +506,7 @@ impl SessionManager {
         let mut rx = handle.subscribe();
         let mut restored = handle.take_history().to_vec();
         restored.retain(|event| !matches!(event, AgentEvent::SessionStarted { .. }));
-        let messages = self.peer_messages(&id);
-        restored.retain(|event| !matches!(event, AgentEvent::UserMessage { text } if text == peers::CONTINUE_WORK));
-        for event in &mut restored {
-            // Snapshots may predate native-ID rebinding or delivery updates.
-            // The durable mailbox owns the canonical endpoints and receipt.
-            if let AgentEvent::PeerMessage { message } = event
-                && let Some(current) = messages.iter().find(|m| m.id == message.id)
-            {
-                *message = current.clone();
-            }
-            if let AgentEvent::UserMessage { text } = event
-                && let Some(message) = messages.iter().find(|m| {
-                    m.to == id && m.matches_prompt(text, |endpoint| self.resolve_peer(endpoint))
-                })
-            {
-                *event = AgentEvent::PeerMessage {
-                    message: message.clone(),
-                };
-            }
-        }
-        for message in messages {
-            if !restored.iter().any(
-                |e| matches!(e, AgentEvent::PeerMessage { message: old } if old.id == message.id),
-            ) {
-                restored.push(AgentEvent::PeerMessage { message });
-            }
-        }
+        self.restore_peer_history(&id, &mut restored);
         // Publish the attachment before the pump can consume its first event.
         let mut live = self.shared.live.lock().unwrap();
         let old = live.remove(&id);

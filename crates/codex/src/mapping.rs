@@ -237,7 +237,7 @@ impl Mapper {
                 if let Some(d) = decode::<DeltaParams>(params) {
                     out.push(AgentEvent::ToolCallUpdated {
                         id: d.item_id,
-                        output_summary: truncate(&d.delta),
+                        output_summary: summarize_output(&d.delta),
                     });
                 }
             }
@@ -247,7 +247,7 @@ impl Mapper {
                 {
                     out.push(AgentEvent::ToolCallUpdated {
                         id: id.to_owned(),
-                        output_summary: truncate(msg),
+                        output_summary: summarize_output(msg),
                     });
                 }
             }
@@ -458,7 +458,7 @@ impl Mapper {
                 out.push(AgentEvent::ToolCallFinished {
                     id,
                     status: tool_status(status),
-                    output_summary: truncate(&summary),
+                    output_summary: summarize_output(&summary),
                 });
             }
             ThreadItem::DynamicToolCall {
@@ -476,7 +476,7 @@ impl Mapper {
                 out.push(AgentEvent::ToolCallFinished {
                     id,
                     status: st,
-                    output_summary: truncate(&summary),
+                    output_summary: summarize_output(&summary),
                 });
             }
             ThreadItem::WebSearch { id, .. } => {
@@ -627,6 +627,15 @@ fn mcp_text(result: &Value) -> String {
     } else {
         texts.join("\n")
     }
+}
+
+fn summarize_output(text: &str) -> String {
+    if text.len() > SUMMARY_LIMIT
+        && let Some(summary) = del_agent::peers::receipt_summary(text)
+    {
+        return summary;
+    }
+    truncate(text)
 }
 
 fn truncate(s: &str) -> String {

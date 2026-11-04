@@ -1004,3 +1004,10 @@ activity bar. It supersedes earlier rules where they conflict.
   or definitely failed requests. Never silently replay ambiguous deliveries.
 - Close/archive holds workers stopped even if new peer messages arrive. Preserve
   inherited project membership while Git worktree metadata is still loading.
+
+## Transcript and overflow refinements (0.1.36)
+
+- Navigation ticks require readable text or attachments. Peer previews use their actual message text; empty rows have no tick.
+- Restored coordination receipts belong at recorded exchanges, never a fabricated tail after a final answer. Preserve the durable mailbox and recovery actions.
+- Steered user messages stay visible outside collapsed work details.
+- Branch and memory menus show a partial next row with a taller edge fade before scrolling. Preserve the original coffee cup asset rather than substituting an SF Symbol.

@@ -194,7 +194,7 @@ impl Render for Usage {
                     .child(
                         v_flex()
                             .id("memory-list")
-                            .max_h(zpx(144.))
+                            .max_h(zpx(166.))
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
                             .when(self.loading, |list| list.child("Reading memory…"))
@@ -374,7 +374,7 @@ impl Render for Usage {
                         .bottom_0()
                         .left_0()
                         .right_0()
-                        .h(zpx(18.)),
+                        .h(zpx(44.)),
                     ),
             )
             .when_some(self.error.clone(), |view, error| view.child(error))

@@ -711,16 +711,21 @@ impl ChatView {
             }
             match change {
                 Change::Pushed(_) => {
-                    if matches!(
-                        self.model.blocks.get(ix),
-                        Some(Block::User { .. } | Block::Peer(_))
-                    ) {
+                    if self.navigation_text(ix).is_some() {
                         self.prompt_rows.push(ix);
                     }
                     let count = self.scroller.item_count();
                     self.scroller.splice(count..count, 1);
                 }
-                Change::Updated(ix) => self.scroller.remeasure_items(ix..ix + 1),
+                Change::Updated(ix) => {
+                    if matches!(
+                        self.model.blocks.get(ix),
+                        Some(Block::User { .. } | Block::Peer(_))
+                    ) {
+                        self.refresh_prompt_rows();
+                    }
+                    self.scroller.remeasure_items(ix..ix + 1);
+                }
             }
             let mut start = ix;
             while start > 0 && matches!(self.model.blocks[start - 1], Block::Tool(_)) {
@@ -967,6 +972,17 @@ impl ChatView {
         self.refresh_prompt_rows();
     }
 
+    fn navigation_text(&self, ix: usize) -> Option<&str> {
+        match self.model.blocks.get(ix) {
+            Some(Block::User { text, .. }) if !text.trim().is_empty() => Some(text),
+            Some(Block::User { attachments, .. }) if attachments.label().is_some() => {
+                Some("Attachments")
+            }
+            Some(Block::Peer(message)) if !message.text.trim().is_empty() => Some(&message.text),
+            _ => None,
+        }
+    }
+
     fn refresh_prompt_rows(&mut self) {
         self.search_messages.get_mut().take();
         self.prompt_rows = self
@@ -974,9 +990,7 @@ impl ChatView {
             .blocks
             .iter()
             .enumerate()
-            .filter_map(|(ix, block)| {
-                matches!(block, Block::User { .. } | Block::Peer(_)).then_some(ix)
-            })
+            .filter_map(|(ix, _)| self.navigation_text(ix).map(|_| ix))
             .collect();
     }
 
@@ -1367,11 +1381,7 @@ impl Render for ChatView {
                                     .overflow_y_scroll()
                                     .children(prompts.into_iter().enumerate().map(
                                         |(position, ix)| {
-                                            let text = match self.model.blocks.get(ix) {
-                                                Some(Block::User { text, .. }) => text.as_str(),
-                                                Some(Block::Peer(message)) => message.text.as_str(),
-                                                _ => "",
-                                            };
+                                            let text = self.navigation_text(ix).unwrap_or_default();
                                             let tooltip_view = view.downgrade();
                                             let strength = |hover: Option<usize>| {
                                                 hover.map_or(0.0, |hover| {
@@ -1398,13 +1408,9 @@ impl Render for ChatView {
                                                     let text = tooltip_view
                                                         .upgrade()
                                                         .and_then(|view| {
-                                                            match view.read(cx).model.blocks.get(ix)
-                                                            {
-                                                                Some(Block::User {
-                                                                    text, ..
-                                                                }) => Some(text.clone()),
-                                                                _ => None,
-                                                            }
+                                                            view.read(cx)
+                                                                .navigation_text(ix)
+                                                                .map(str::to_owned)
                                                         })
                                                         .unwrap_or_default();
                                                     let max_width = zpx(320.).min(
@@ -1776,7 +1782,23 @@ mod tests {
             message.state=del_agent::peers::DeliveryState::Delivered;
             view.on_event(&AgentEvent::PeerMessage { message:message.clone() },cx);
             assert_eq!(view.prompt_rows,vec![0]);
-            assert_eq!(view.model.blocks.len(),1);
+            assert_eq!(view.navigation_text(0), Some("Inspect the API"));
+            view.on_event(&AgentEvent::UserMessage { text: "   ".into() }, cx);
+            assert_eq!(view.prompt_rows, vec![0], "blank messages must not add rail ticks");
+            view.refresh_prompt_rows();
+            assert_eq!(view.prompt_rows, vec![0], "replay must use the same filter");
+            message.id = "empty-receipt".into();
+            message.text = "\n  ".into();
+            view.on_event(&AgentEvent::PeerMessage { message: message.clone() }, cx);
+            assert_eq!(view.prompt_rows, vec![0]);
+            message.text = "Now readable".into();
+            view.on_event(&AgentEvent::PeerMessage { message: message.clone() }, cx);
+            assert_eq!(view.prompt_rows, vec![0, 2]);
+            assert_eq!(view.navigation_text(2), Some("Now readable"));
+            view.on_event(&AgentEvent::UserMessage { text: "[Image]".into() }, cx);
+            assert_eq!(view.prompt_rows, vec![0, 2, 3]);
+            assert_eq!(view.navigation_text(3), Some("Attachments"));
+
             assert!(matches!(&view.model.blocks[0], Block::Peer(m) if m.state == del_agent::peers::DeliveryState::Delivered));
         });
     }
