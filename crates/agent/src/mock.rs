@@ -4,6 +4,7 @@
 //! `error` → streaming text then a recoverable error and a failed turn;
 //! `approve` → a command tool call gated by an approval, then a file change;
 //! `tool` → a tool call with a progress update and a file change;
+//! `slow` → three tools that each run for seconds, to watch live states;
 //! anything else → streamed text with reasoning and token usage.
 
 use crate::backend::*;
@@ -177,6 +178,9 @@ async fn run_turn(
             text: "Thinking it through. ".into(),
         },
     );
+    if lower.contains("slow") {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+    }
 
     let stream = |text: &str| {
         let t = turn_id.clone();
@@ -290,6 +294,36 @@ async fn run_turn(
         }
     } else if lower.contains("markdown") {
         full.push_str(MARKDOWN_REPLY);
+    } else if lower.contains("slow") {
+        // Long enough to watch: live shimmering group headers while tools run.
+        for (n, (name, input)) in [
+            ("read_file", "src/main.rs"),
+            ("shell", "cargo test --workspace"),
+            ("shell", "git status --short"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call-{turn_id}-{n}");
+            emit(
+                &state,
+                AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.into(),
+                    input_summary: input.into(),
+                },
+            );
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            emit(
+                &state,
+                AgentEvent::ToolCallFinished {
+                    id,
+                    status: ToolStatus::Completed,
+                    output_summary: "done".into(),
+                },
+            );
+        }
+        full.push_str("All three steps finished.");
     } else if lower.contains("group") {
         for (n, (name, input, status, output)) in [
             (
@@ -407,6 +441,38 @@ async fn run_turn(
 
 #[async_trait]
 impl AgentBackend for MockBackend {
+    /// Empty unless asked for, so the empty-catalog state stays the default.
+    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<crate::ModelInfo>> {
+        if std::env::var_os("DEL_MOCK_CATALOG").is_none() {
+            return Ok(Vec::new());
+        }
+        let efforts = || {
+            ["low", "medium", "high", "xhigh"]
+                .map(crate::EffortOption::named)
+                .to_vec()
+        };
+        Ok(vec![
+            crate::ModelInfo {
+                id: "mock-large".into(),
+                name: "Mock Large".into(),
+                description: "The most capable mock model".into(),
+                efforts: efforts(),
+                default_effort: Some("medium".into()),
+                fast_tier: Some("fast".into()),
+                is_default: true,
+            },
+            crate::ModelInfo {
+                id: "mock-small".into(),
+                name: "Mock Small".into(),
+                description: "A quicker mock model".into(),
+                efforts: Vec::new(),
+                default_effort: None,
+                fast_tier: None,
+                is_default: false,
+            },
+        ])
+    }
+
     #[cfg(test)]
     async fn read_session_history(
         &self,

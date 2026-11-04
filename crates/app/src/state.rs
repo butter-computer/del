@@ -71,6 +71,8 @@ enum Msg {
     Refresh,
     PanelDeleted(String, u64),
     ReplyFinished(SessionId),
+    TurnFailed(SessionId),
+    TurnBegan(SessionId),
     PeerActivity(SessionId, del_agent::peers::PeerMessage),
     Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
@@ -122,6 +124,9 @@ pub struct AppState {
     pub spaces: spaces::Spaces,
     pub space_swipe: spaces::Swipe,
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
+    /// Sessions whose latest turn failed. The process is still usable, so this is
+    /// apart from its status; a new turn clears it.
+    pub failed_turns: HashSet<SessionId>,
     /// Keyboard focus of rows and tabs, kept across renders.
     pub control_focus: crate::keyboard_control::FocusHandles,
     project_loading: std::collections::HashSet<PathBuf>,
@@ -289,6 +294,22 @@ impl AppState {
                     }
                     Ok(ManagerEvent::Event {
                         session,
+                        event:
+                            del_agent::AgentEvent::TurnCompleted {
+                                status: del_agent::TurnStatus::Failed,
+                                ..
+                            },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnFailed(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
+                        event: del_agent::AgentEvent::TurnStarted { .. },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnBegan(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
                         event: del_agent::AgentEvent::PeerMessage { message },
                     }) => {
                         let _ = events_tx.send(Msg::PeerActivity(session, message));
@@ -367,6 +388,7 @@ impl AppState {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
             control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences,
@@ -622,6 +644,15 @@ impl AppState {
                     self.record_incoming_activity(&owner, cx);
                 }
                 self.set_records(self.manager.list_sessions());
+            }
+            Msg::TurnFailed(id) => {
+                self.failed_turns.insert(id);
+                cx.notify();
+            }
+            Msg::TurnBegan(id) => {
+                if self.failed_turns.remove(&id) {
+                    cx.notify();
+                }
             }
             Msg::ReplyFinished(id) => {
                 if self.backend().manager.is_temporary(&id) {
@@ -3449,6 +3480,7 @@ pub(crate) mod tests {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
             control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences: Default::default(),

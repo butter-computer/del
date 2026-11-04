@@ -167,8 +167,10 @@ DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 
 Mock replies, tool activity, and approvals are simulations; mock providers have
 no model catalog. A prompt's wording picks the scenario: `tool`, `approve`, `error`,
-`group` (several tools, one failing) and `markdown` (every kind of reply block);
-anything else streams plain text. Do not use mock mode when testing real provider behavior.
+`group` (several tools, one failing), `slow` (tools that each run for seconds) and
+`markdown` (every kind of reply block);
+anything else streams plain text. With the mock backend, `DEL_REDUCE_MOTION=1` turns on
+Reduce Motion without changing the system setting. Do not use mock mode when testing real provider behavior.
 
 ### macOS signing and permissions
 
@@ -381,7 +383,7 @@ filter by itself to list its sessions. Tab shortcut badges stay hidden while
 the palette is open. The palette is centered over the conversation pane and
 stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
 entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
-shows and dismisses it immediately. Clicking outside also dismisses the palette.
+shows and dismisses it immediately. Its blur and dim fade with the panel, and Settings leaves the same way. Clicking outside also dismisses the palette.
 Inserted skill tokens use blue text and icons. Command suggestions show
 navigation hints without argument-placeholder text.
 The search footer places navigation, open, and close hints on the left and **/c /t Filter**

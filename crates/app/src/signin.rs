@@ -585,9 +585,9 @@ mod layout_tests {
 mod settings_scroll_tests {
     use ::core::prelude::v1::test;
     use ::gpui::{
-        AppContext as _, Context, InteractiveElement, IntoElement, Modifiers, MouseButton,
-        ParentElement, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-        StatefulInteractiveElement, Styled, Window, div, point, px,
+        AppContext as _, Context, InteractiveElement, IntoElement, Modifiers, ParentElement,
+        Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement, Styled,
+        Window, div, point, px,
     };
 
     struct Fixture;
@@ -597,11 +597,10 @@ mod settings_scroll_tests {
         }
     }
 
-    /// Settings opens through the dialog's `content`, so its page takes the wheel.
+    /// A Settings page is taller than its dialog, so the wheel must reach its own scroller.
     #[::gpui::test]
     fn a_long_settings_page_scrolls_inside_its_dialog(cx: &mut ::gpui::TestAppContext) {
         use gpui_kit::component::WindowExt as _;
-        let _ = MouseButton::Left;
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(true);
@@ -614,26 +613,20 @@ mod settings_scroll_tests {
         let page = scroll.clone();
         cx.update(|window, cx| {
             window.open_dialog(cx, move |dialog, _, _| {
-                let page = page.clone();
-                dialog
-                    .p_0()
-                    .close_button(false)
-                    .content(move |content, _, _| {
-                        content.child(
+                dialog.p_0().close_button(false).child(
+                    div()
+                        .h(px(300.))
+                        .w_full()
+                        .debug_selector(|| "page".into())
+                        .child(
                             div()
-                                .h(px(300.))
-                                .w_full()
-                                .debug_selector(|| "page".into())
-                                .child(
-                                    div()
-                                        .id("settings")
-                                        .track_scroll(&page)
-                                        .size_full()
-                                        .overflow_y_scroll()
-                                        .child(div().h(px(2000.)).w_full()),
-                                ),
-                        )
-                    })
+                                .id("settings")
+                                .track_scroll(&page)
+                                .size_full()
+                                .overflow_y_scroll()
+                                .child(div().h(px(2000.)).w_full()),
+                        ),
+                )
             });
         });
         cx.run_until_parked();

@@ -138,7 +138,6 @@ pub(crate) fn account_menu_label(
         }))
 }
 
-pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
 /// Composer controls stay readable but sit below what is being written.
 pub(crate) const CONTROL_TEXT: u32 = 0xffffffb8;
 

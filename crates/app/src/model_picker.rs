@@ -519,12 +519,18 @@ impl Render for ModelPanel {
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child(default_label)
+                                .child(default_label.clone())
+                                // "Automatic" keeps this distinct from choosing the same model
+                                // explicitly, without repeating itself when nothing resolved.
                                 .child(
                                     div()
                                         .text_size(zpx(del_core::typography::TEXT_XS))
                                         .text_color(muted)
-                                        .child("Follows provider settings"),
+                                        .child(if default_label == "Automatic" {
+                                            "Follows provider settings"
+                                        } else {
+                                            "Automatic · follows provider settings"
+                                        }),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {

@@ -694,7 +694,7 @@ fn key_hint(key: &'static str, label: &'static str) -> impl IntoElement {
         .child(label)
 }
 
-const EXIT_DURATION: std::time::Duration = std::time::Duration::from_millis(140);
+pub(super) const EXIT_DURATION: std::time::Duration = std::time::Duration::from_millis(140);
 
 pub(super) fn exit_opacity(started: std::time::Instant) -> f32 {
     let t = (started.elapsed().as_secs_f32() / EXIT_DURATION.as_secs_f32()).min(1.);

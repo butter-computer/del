@@ -426,6 +426,8 @@ struct AppShell {
     shell_focus: FocusHandle,
     focus_watch: keyboard_control::FocusWatch,
     settings_focused: bool,
+    /// Settings has been dismissed and is fading out, like Cmd-K.
+    settings_closing: Option<std::time::Instant>,
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
@@ -903,6 +905,7 @@ impl AppShell {
             shell_focus: cx.focus_handle(),
             focus_watch: Default::default(),
             settings_focused: false,
+            settings_closing: None,
             zoom_percent: del_core::zoom::percent(),
             state,
             composer,
@@ -2173,7 +2176,9 @@ impl AppShell {
                                                 let tab_focus = self.state.read(cx).control_focus.control(&format!("tab-{name}"), cx);
                                                 // Keyboard focus shows the close glyph as hover does.
                                                 let tab_focused = keyboard_control::keyboard_within(&tab_focus, window, cx);
-                                                el = el.keyboard_control_with(&tab_focus);
+                                                el = el.keyboard_control_with(&tab_focus).when(tab_focused, |tab| {
+                                                    tab.child(keyboard_control::reveal_when_focused(self.tab_scroll.clone(), false))
+                                                });
                                                 let drag = DraggedTab {
                                                     uid,
                                                     title: title.clone(),
@@ -2689,9 +2694,20 @@ impl Render for AppShell {
             self.cancel_dictation(cx);
         }
         let settings_open = self.state.read(cx).panel == Panel::Providers;
-        if settings_open && !self.settings_focused {
+        // Reopened during its fade: keep the same dialog and cancel the exit.
+        let reopened =
+            settings_open && !self.settings_focused && self.settings_closing.take().is_some();
+        if settings_open && !self.settings_focused && !reopened {
             let state = self.state.clone();
+            let shell = cx.weak_entity();
             window.open_dialog(cx, move |dialog, window, cx| {
+                let closing = shell
+                    .upgrade()
+                    .and_then(|shell| shell.read(cx).settings_closing);
+                if closing.is_some() {
+                    window.request_animation_frame();
+                }
+                let close_shell = shell.clone();
                 let close_state = state.clone();
                 let height = zpx(420.).min(window.viewport_size().height - zpx(48.));
                 dialog
@@ -2699,11 +2715,20 @@ impl Render for AppShell {
                     .margin_top(((window.viewport_size().height - height) / 2.).max(zpx(24.)))
                     .p_0()
                     .close_button(false)
-                    .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                    .entrance(if closing.is_some() {
+                        gpui_kit::component::dialog::DialogEntrance::None
+                    } else {
+                        gpui_kit::component::dialog::DialogEntrance::FadeSlide
+                    })
+                    .when_some(closing, |dialog, started| {
+                        dialog.opacity(search_ui::exit_opacity(started))
+                    })
                     .bg(appearance::popup_surface())
                     .rounded(zpx(14.))
                     .overflow_hidden()
                     .on_close(move |_, _, cx| {
+                        // Closed some other way during the fade: nothing left to close later.
+                        let _ = close_shell.update(cx, |this, _| this.settings_closing = None);
                         close_state.update(cx, |state, cx| {
                             if state.panel == Panel::Providers {
                                 state.toggle_providers(cx);
@@ -2736,8 +2761,27 @@ impl Render for AppShell {
             });
         }
         if !settings_open && self.settings_focused {
-            window.close_dialog(cx);
-            self.focus_composer(window, cx);
+            if cx.reduce_motion() {
+                window.close_dialog(cx);
+                self.focus_composer(window, cx);
+            } else {
+                let started = std::time::Instant::now();
+                self.settings_closing = Some(started);
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(search_ui::EXIT_DURATION)
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.settings_closing == Some(started) {
+                            this.settings_closing = None;
+                            window.close_dialog(cx);
+                            this.focus_composer(window, cx);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
         }
         self.settings_focused = settings_open;
         self.sync_caffeine(cx);
@@ -3311,29 +3355,44 @@ impl Render for AppShell {
             )
             .child(self.render_status_bar(cx))
             .child(self.browser_preview.clone())
-            .when(self.search_open || settings_open, |shell| {
-                let shade = div()
-                    .absolute()
-                    .inset_0()
-                    .child(backdrop::blur_layer())
+            .when(
+                self.search_open || settings_open || self.settings_closing.is_some(),
+                |shell| {
                     // Black at this strength turns a light workspace muddy grey.
-                    .bg(gpui_kit::rgba(if appearance::light() {
-                        0x1c18102e
+                    let shade =
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui_kit::rgba(if appearance::light() {
+                                0x1c18102e
+                            } else {
+                                0x00000066
+                            }));
+                    if let Some(started) = self.search_closing.or(self.settings_closing) {
+                        let strength = search_ui::exit_opacity(started);
+                        shell.child(
+                            shade
+                                .opacity(strength)
+                                .child(backdrop::blur_layer(strength)),
+                        )
+                    } else if cx.reduce_motion() {
+                        shell.child(shade.child(backdrop::blur_layer(1.)))
                     } else {
-                        0x00000066
-                    }));
-                if let Some(started) = self.search_closing {
-                    shell.child(shade.opacity(search_ui::exit_opacity(started)))
-                } else if cx.reduce_motion() {
-                    shell.child(shade)
-                } else {
-                    shell.child(shade.with_animation(
-                        "search-background-dim",
-                        Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-                        |shade, progress| shade.opacity(progress),
-                    ))
-                }
-            })
+                        shell.child(
+                            shade.with_animation(
+                                "search-background-dim",
+                                Animation::new(Duration::from_millis(180))
+                                    .with_easing(ease_out_quint()),
+                                |shade, progress| {
+                                    shade
+                                        .opacity(progress)
+                                        .child(backdrop::blur_layer(progress))
+                                },
+                            ),
+                        )
+                    }
+                },
+            )
     }
 }
 
@@ -3400,6 +3459,12 @@ fn main() {
                 KeyBinding::new("cmd-,", ToggleProviders, None),
             ]);
             keybinds::bind_session_navigation(cx);
+            // Lets UI work check Reduce Motion without touching the system setting.
+            if std::env::var("DEL_BACKEND").as_deref() == Ok("mock")
+                && std::env::var_os("DEL_REDUCE_MOTION").is_some()
+            {
+                cx.set_reduce_motion(true);
+            }
             // Quit runs the shutdown hook, which ends every backend process.
             cx.on_action(|_: &Quit, cx| cx.quit());
             // Closing the window quits, which also runs the shutdown hook.

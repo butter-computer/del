@@ -5,7 +5,6 @@ use crate::zoom::px as zpx;
 use crate::{
     AppShell,
     appearance::{rgb, rgba},
-    composer_ui::QUEUE_SURFACE_RGBA,
     state::{Selection, Tab},
 };
 use del_agent::{Attachment, UserInput};
@@ -448,7 +447,7 @@ pub(crate) fn render_queue(
                 .h(zpx(height))
                 .overflow_y_scroll()
                 .rounded_t(zpx(8.))
-                .bg(rgba(QUEUE_SURFACE_RGBA))
+                .bg(crate::appearance::queue_surface())
                 .py_1()
                 .children(items.into_iter().enumerate().map(|(index, item)| {
                     let group: SharedString = format!("followup-{}", item.id).into();
@@ -578,8 +577,8 @@ pub(crate) fn render_queue(
                     .h(zpx(12.))
                     .bg(linear_gradient(
                         0.,
-                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA), 0.),
-                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA & 0xffffff00), 1.),
+                        linear_color_stop(crate::appearance::queue_surface(), 0.),
+                        linear_color_stop(crate::appearance::queue_surface().opacity(0.), 1.),
                     )),
             )
         })

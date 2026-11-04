@@ -142,6 +142,18 @@ pub fn faint_text() -> Rgba {
 pub fn composer_surface() -> Rgba {
     gpui_kit::rgb(colors().composer)
 }
+/// Queued follow-ups: the composer's own tint, one step darker, so the row and the
+/// composer read as one object in every theme.
+pub fn queue_surface() -> Rgba {
+    let composer = composer_surface();
+    let dim = if light() { 0.96 } else { 0.9 };
+    Rgba {
+        r: composer.r * dim,
+        g: composer.g * dim,
+        b: composer.b * dim,
+        a: 1.,
+    }
+}
 pub fn popup_surface() -> Rgba {
     gpui_kit::rgb(colors().popup)
 }
@@ -401,6 +413,62 @@ pub fn rgba(value: u32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blend(top: u32, alpha: f64, under: u32) -> u32 {
+        let channel = |shift: u32| {
+            let (t, u) = (
+                f64::from((top >> shift) & 0xff),
+                f64::from((under >> shift) & 0xff),
+            );
+            ((t * alpha + u * (1. - alpha)).round() as u32) << shift
+        };
+        channel(16) | channel(8) | channel(0)
+    }
+
+    /// Every preset in both modes: body text, secondary text, faint metadata and the
+    /// semantic and focus colours stay readable on every surface they sit on.
+    #[test]
+    fn every_theme_keeps_readable_text_on_every_surface() {
+        let mut failures = Vec::new();
+        for theme in ThemePreset::ALL {
+            for light in [false, true] {
+                let p = theme.palette(light);
+                let surfaces = [
+                    ("page", p.neutral[0]),
+                    ("shell", p.shell),
+                    ("composer", p.composer),
+                    ("popup", p.popup),
+                ];
+                let (danger, success, warning): (u32, u32, u32) = if light {
+                    (0xb83c3c, 0x366f49, 0x87621f)
+                } else {
+                    (0xe58b8b, 0x86b596, 0xd3b07a)
+                };
+                for (surface, under) in surfaces {
+                    let faint = blend(p.neutral[5], if light { 0.88 } else { 0.78 }, under);
+                    for (role, color, minimum) in [
+                        ("text", p.neutral[7], 7.),
+                        ("secondary", p.neutral[5], 4.5),
+                        ("faint", faint, 3.),
+                        ("danger", danger, 3.),
+                        ("success", success, 3.),
+                        ("warning", warning, 3.),
+                        ("focus ring", p.accent, 3.),
+                    ] {
+                        let ratio = contrast(color, under);
+                        if ratio < minimum {
+                            failures.push(format!(
+                                "{} {} {role} on {surface}: {ratio:.2} < {minimum}",
+                                theme.name(),
+                                if light { "light" } else { "dark" },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
     #[test]
     fn saved_theme_tolerates_legacy_unknown_and_corrupt_files() {
         assert!(parse(b"true").light);

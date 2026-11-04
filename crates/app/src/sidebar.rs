@@ -512,7 +512,7 @@ fn session_menu_item(
 
 /// Working spinner, waiting ring, failed mark or unread tick.
 /// Read, inactive sessions have no status marker.
-fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
+fn status_glyph(row: &Row, working: bool, unread: bool, failed: bool) -> Option<AnyElement> {
     let size = zpx(14.);
     let glyph = |path: &'static str| crate::icons::path(path).with_size(size);
     let (label, element) = if working {
@@ -524,6 +524,12 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
         )
     } else {
         match row.status {
+            status if failed && status != del_agent::SessionStatus::WaitingApproval => (
+                "Failed",
+                glyph("icons/error.svg")
+                    .text_color(crate::appearance::ActionTone::Danger.foreground())
+                    .into_any_element(),
+            ),
             del_agent::SessionStatus::WaitingApproval => (
                 "Waiting for you",
                 glyph("icons/waiting-ring.svg")
@@ -533,7 +539,7 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
             del_agent::SessionStatus::Error => (
                 "Failed",
                 glyph("icons/error.svg")
-                    .text_color(rgb(0xff646b))
+                    .text_color(crate::appearance::ActionTone::Danger.foreground())
                     .into_any_element(),
             ),
             _ if unread => (
@@ -560,6 +566,7 @@ fn status_glyph(row: &Row, working: bool, unread: bool) -> Option<AnyElement> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row_item(
     row: &Row,
     selected: bool,
@@ -575,6 +582,7 @@ fn row_item(
     let logo = terminal.map(|r| r.provider).unwrap_or(Some(row.provider));
     let working = state.read(cx).session_working(&row.id);
     let unread = row.unread || state.read(cx).terminal_unread(&row.id);
+    let failed = state.read(cx).failed_turns.contains(&row.id);
     let id = row.id.clone();
     let key = SharedString::from(id.0.clone());
     let group = SharedString::from(format!("row-{}", id.0));
@@ -604,6 +612,12 @@ fn row_item(
         .cursor_pointer()
         .text_size(zpx(TEXT_MD))
         .text_color(rgb(TEXT))
+        .when(focused, |row| {
+            row.child(crate::keyboard_control::reveal_when_focused(
+                state.read(cx).sidebar_scroll.clone(),
+                true,
+            ))
+        })
         .on_hover(move |entered, window, cx| hover.hover(&hover_key, *entered, window, cx))
         .child(motion.marker_with_opacity(
             id.0.clone(),
@@ -727,7 +741,7 @@ fn row_item(
                 .text_size(zpx(TEXT_SM))
                 .text_color(crate::appearance::faint_text())
                 .when_some(time, |meta, time| meta.child(time))
-                .when_some(status_glyph(row, working, unread), |meta, glyph| {
+                .when_some(status_glyph(row, working, unread, failed), |meta, glyph| {
                     meta.child(glyph)
                 })
                 .into_any_element()

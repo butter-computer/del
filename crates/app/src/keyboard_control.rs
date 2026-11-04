@@ -73,6 +73,38 @@ pub fn keyboard_within(handle: &FocusHandle, window: &Window, cx: &App) -> bool 
     window.last_input_was_keyboard() && handle.contains_focused(window, cx)
 }
 
+/// Scrolls the nearest clipped edge of a keyboard-focused control into view. Tab moves
+/// focus but not the list, and a focus ring off screen tells the user nothing.
+pub fn reveal_when_focused(scroll: ScrollHandle, vertical: bool) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            let view = scroll.bounds();
+            let mut offset = scroll.offset();
+            let (before, after) = if vertical {
+                (view.top() - bounds.top(), bounds.bottom() - view.bottom())
+            } else {
+                (view.left() - bounds.left(), bounds.right() - view.right())
+            };
+            let delta = if before > px(0.) {
+                before
+            } else if after > px(0.) {
+                -after
+            } else {
+                return;
+            };
+            if vertical {
+                offset.y += delta;
+            } else {
+                offset.x += delta;
+            }
+            scroll.set_offset(offset);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// Remembers lost focus between renders; see [`restore_lost_focus`].
 #[derive(Default)]
 pub struct FocusWatch(RefCell<Option<Option<FocusHandle>>>);
@@ -213,7 +245,7 @@ mod tests {
         });
         shell.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        cx.update(|window, cx| window.refresh());
+        cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-,");
         cx.run_until_parked();
