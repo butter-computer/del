@@ -82,7 +82,9 @@ pub(crate) fn account_menu_label(
         .child(
             div()
                 .flex_1()
-                .when(selected, |label| label.text_color(rgb(0x4cc38a)))
+                .when(selected, |label| {
+                    label.text_color(crate::appearance::ActionTone::Success.foreground())
+                })
                 .child(name),
         )
         .children(remaining.map(|remaining| {

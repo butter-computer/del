@@ -740,16 +740,20 @@ impl ChatView {
                                 .flex_none()
                                 .gap(zpx(4.))
                                 .text_size(zpx(TEXT_SM))
-                                .child(
-                                    div()
-                                        .text_color(ActionTone::Success.foreground())
-                                        .child(format!("+{}", change.added)),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(ActionTone::Danger.foreground())
-                                        .child(format!("−{}", change.removed)),
-                                ),
+                                .when(change.added > 0, |counts| {
+                                    counts.child(
+                                        div()
+                                            .text_color(ActionTone::Success.foreground())
+                                            .child(format!("+{}", change.added)),
+                                    )
+                                })
+                                .when(change.removed > 0, |counts| {
+                                    counts.child(
+                                        div()
+                                            .text_color(ActionTone::Danger.foreground())
+                                            .child(format!("−{}", change.removed)),
+                                    )
+                                }),
                         )
                     })
                     .when(has_diff, |row| row.child(disclosure(expanded))),
@@ -970,7 +974,7 @@ fn user_message(
                 .when(sent_as_goal, |column| {
                     column.child(
                         div()
-                            .text_size(zpx(11.))
+                            .text_size(zpx(del_core::typography::TEXT_XS))
                             .text_color(rgba(MUTED))
                             .child("◎  Sent as goal"),
                     )
@@ -1049,7 +1053,7 @@ fn assistant_message(
                     .gap(zpx(4.))
                     .items_center()
                     .justify_start()
-                    .text_size(zpx(11.))
+                    .text_size(zpx(del_core::typography::TEXT_XS))
                     .text_color(rgba(MUTED))
                     .child(
                         div()

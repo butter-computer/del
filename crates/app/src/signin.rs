@@ -47,7 +47,7 @@ fn usage_bar(remaining: Option<f64>) -> impl IntoElement {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(zpx(11.))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
                         .text_color(rgba(0xffffff80))
                         .child(format!("{remaining:.0}% left")),
                 )
@@ -77,9 +77,9 @@ fn provider_row(
         status.map(providers::summary).unwrap_or("Checking…")
     };
     let status_color = if status.is_some_and(providers::ready) {
-        0x4cc38a
+        crate::appearance::ActionTone::Success.foreground()
     } else {
-        0x99999f
+        crate::appearance::secondary_text()
     };
     h_flex()
         .id(SharedString::from(format!("provider-{name}")))
@@ -105,7 +105,7 @@ fn provider_row(
                 .flex_1()
                 .min_w_0()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgb(status_color))
+                .text_color(status_color)
                 .when(checking, |el| {
                     el.child(
                         div()
@@ -484,7 +484,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
-                                            .when(s.default_account(provider).is_none(), |label| label.text_color(rgb(0x4cc38a)))
+                                            .when(s.default_account(provider).is_none(), |label| label.text_color(crate::appearance::ActionTone::Success.foreground()))
                                             .child(s.default_account_label(provider))))
                                     .child(usage_bar(s.account_usage_remaining(provider, None))))
                                 .when(s.default_account(provider).is_some(), |row| {
@@ -505,7 +505,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
-                                            .when(account.is_default, |label| label.text_color(rgb(0x4cc38a)))
+                                            .when(account.is_default, |label| label.text_color(crate::appearance::ActionTone::Success.foreground()))
                                             .child(account.display())))
                                     .child(usage_bar(s.account_usage_remaining(provider, Some(&id)))))
                                 .when(needs_login, |row| row.child(Button::new(SharedString::from(format!("account-login-{id}"))).ghost().small().label("Sign in")

@@ -126,7 +126,7 @@ pub fn tools<T: 'static>(
                         .max_w(zpx(320.))
                         .flex_none()
                         .gap_2()
-                        .text_size(zpx(14.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .child(changes)
                         .child(terminal)
                         .child(files)

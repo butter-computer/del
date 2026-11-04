@@ -3,6 +3,8 @@
 //! Every text size in the UI comes from one of these tokens, so there are no
 //! one-off sizes: secondary text, chrome text, reading text, and two headings.
 
+/// Fine print: times, sources, keyboard hints.
+pub const TEXT_XS: f32 = 11.0;
 /// Secondary text: placeholder-adjacent labels, chip values.
 pub const TEXT_SM: f32 = 12.0;
 /// Chrome text: rows, tabs, menus, chip labels.
@@ -19,5 +21,10 @@ pub const PROSE_LEADING: f32 = 1.55;
 pub const MONO_FONT: &str = "Menlo";
 
 // Checked at compile time: the scale must stay strictly increasing.
-const _: () =
-    assert!(TEXT_SM < TEXT_MD && TEXT_MD < TEXT_PROSE && TEXT_PROSE < TEXT_LG && TEXT_LG < TEXT_XL);
+const _: () = assert!(
+    TEXT_XS < TEXT_SM
+        && TEXT_SM < TEXT_MD
+        && TEXT_MD < TEXT_PROSE
+        && TEXT_PROSE < TEXT_LG
+        && TEXT_LG < TEXT_XL
+);

@@ -597,7 +597,7 @@ impl Render for TerminalLauncher {
                     .gap_3()
                     .child(
                         div()
-                            .text_size(zpx(20.))
+                            .text_size(zpx(del_core::typography::TEXT_XL))
                             .text_color(rgb(0xf5f5f5))
                             .child("Open a terminal"),
                     )

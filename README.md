@@ -166,7 +166,9 @@ DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 ```
 
 Mock replies, tool activity, and approvals are simulations; mock providers have
-no model catalog. Do not use mock mode when testing real provider behavior.
+no model catalog. A prompt's wording picks the scenario: `tool`, `approve`, `error`,
+`group` (several tools, one failing) and `markdown` (every kind of reply block);
+anything else streams plain text. Do not use mock mode when testing real provider behavior.
 
 ### macOS signing and permissions
 
@@ -448,6 +450,11 @@ conversation. Unloading a running session also stops its current work.
   tick is highlighted. Moving onto a different tick emits native haptic feedback
   on supported macOS hardware. Ticks use compact 10 px spacing, with 6 px idle
   bars that grow to at most 18 px on hover.
+- The transcript and composer share one column and one text edge; the message rail
+  overlays the margin rather than taking width from them. Messages and the composer
+  input use 14 pt reading text and chrome uses 13 pt. Diffs, tool output and code blocks
+  share one surface below the page. A failed turn reports once in the transcript, with its
+  error beside it, and a clean branch shows no line counts in the status bar.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;

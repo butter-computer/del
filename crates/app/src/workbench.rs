@@ -604,30 +604,26 @@ impl AppShell {
                                     .gap(zpx(6.))
                                     .items_baseline()
                                     .child(div().min_w_0().truncate().child(branch))
-                                    .when_some(git.changed_lines, |row, (added, removed)| {
-                                        // Nothing changed is not good or bad news.
-                                        let tone = |count: u64, tone: ActionTone| {
-                                            if count == 0 {
-                                                rgba(0xffffff4d)
-                                            } else {
-                                                tone.foreground()
-                                            }
-                                        };
-                                        row.child(
-                                            div()
-                                                .flex_none()
-                                                .whitespace_nowrap()
-                                                .text_color(tone(added, ActionTone::Success))
-                                                .child(format!("+{added}")),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .whitespace_nowrap()
-                                                .text_color(tone(removed, ActionTone::Danger))
-                                                .child(format!("−{removed}")),
-                                        )
-                                    }),
+                                    .when_some(
+                                        // A clean tree has nothing to report.
+                                        git.changed_lines.filter(|lines| *lines != (0, 0)),
+                                        |row, (added, removed)| {
+                                            row.child(
+                                                div()
+                                                    .flex_none()
+                                                    .whitespace_nowrap()
+                                                    .text_color(ActionTone::Success.foreground())
+                                                    .child(format!("+{added}")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .whitespace_nowrap()
+                                                    .text_color(ActionTone::Danger.foreground())
+                                                    .child(format!("−{removed}")),
+                                            )
+                                        },
+                                    ),
                             ),
                     )
                     .on_click(|_, window, cx| {

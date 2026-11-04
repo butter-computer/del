@@ -1531,7 +1531,7 @@ impl AppShell {
                     .bg(crate::appearance::popup_surface())
                     .child(
                         div()
-                            .text_size(zpx(14.))
+                            .text_size(zpx(del_core::typography::TEXT_PROSE))
                             .whitespace_normal()
                             .child(question.question.clone()),
                     )

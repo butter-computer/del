@@ -301,6 +301,12 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.scrollbar = gpui_kit::transparent_black();
         c.scrollbar_thumb = active;
         c.scrollbar_thumb_hover = gpui_kit::rgb(palette.neutral[4]).into();
+        // Markdown tables sit on the page, with a header on the code surface.
+        c.table = gpui_kit::transparent_black();
+        c.table_even = gpui_kit::transparent_black();
+        c.table_head = code_surface().into();
+        c.table_head_foreground = secondary;
+        c.table_row_border = border;
         c.tab = surface;
         c.tab_bar = black;
         c.tab_bar_segmented = surface;

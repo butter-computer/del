@@ -449,7 +449,7 @@ impl Palette {
                                         .flex_none()
                                         .max_w(zpx(120.))
                                         .gap(zpx(4.))
-                                        .text_size(zpx(11.))
+                                        .text_size(zpx(del_core::typography::TEXT_XS))
                                         .text_color(rgba(0xffffff88))
                                         .child(
                                             div()
@@ -474,7 +474,7 @@ impl Palette {
                 row.child(
                     div()
                         .flex_none()
-                        .text_size(zpx(10.))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
                         .text_color(rgba(0xffffff70))
                         .child("Archived"),
                 )
@@ -604,7 +604,7 @@ impl Render for Palette {
                     div()
                         .px(zpx(12.))
                         .h(zpx(20.))
-                        .text_size(zpx(10.))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
                         .text_color(rgba(0xe8b04aff))
                         .child(format!(
                             "{} transcript(s) could not be read. Other results are available.",
@@ -663,7 +663,7 @@ fn key_badge(label: &'static str) -> impl IntoElement {
         .justify_center()
         .rounded(zpx(4.))
         .bg(rgba(0xffffff0d))
-        .text_size(zpx(10.))
+        .text_size(zpx(del_core::typography::TEXT_XS))
         .text_color(rgb(0xd4d4d6))
         .child(label)
 }

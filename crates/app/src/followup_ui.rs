@@ -307,7 +307,7 @@ impl AppShell {
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_size(zpx(11.))
+                                                .text_size(zpx(del_core::typography::TEXT_XS))
                                                 .text_color(rgba(0xffffff70))
                                                 .child(crate::attachments::file_type(file)),
                                         ),

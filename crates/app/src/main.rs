@@ -222,7 +222,7 @@ fn tab_action_content(
                             .px_1()
                             .rounded_sm()
                             .bg(rgb(0x303033))
-                            .text_size(zpx(10.))
+                            .text_size(zpx(del_core::typography::TEXT_XS))
                             .child(format!("⌘{number}")),
                     ),
             )

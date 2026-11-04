@@ -180,7 +180,12 @@ impl Render for Usage {
             .w(zpx(240.))
             .whitespace_normal()
             .gap_2()
-            .child(div().text_size(zpx(14.)).child("Memory usage"))
+            .child(
+                div()
+                    .text_size(zpx(del_core::typography::TEXT_MD))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Memory usage"),
+            )
             .child(
                 div()
                     .relative()

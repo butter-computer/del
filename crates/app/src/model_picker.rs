@@ -522,9 +522,9 @@ impl Render for ModelPanel {
                                 .child(default_label)
                                 .child(
                                     div()
-                                        .text_size(zpx(10.5))
+                                        .text_size(zpx(del_core::typography::TEXT_XS))
                                         .text_color(muted)
-                                        .child("Follows provider settings"),
+                                        .child("Automatic · follows provider settings"),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -579,7 +579,7 @@ impl Render for ModelPanel {
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
                                         div()
-                                            .text_size(zpx(10.5))
+                                            .text_size(zpx(del_core::typography::TEXT_XS))
                                             .w_full()
                                             .truncate()
                                             .text_color(muted)
@@ -783,7 +783,7 @@ impl Render for ModelPanel {
                         .ghost()
                         .small()
                         .compact()
-                        .text_size(zpx(16.))
+                        .text_size(zpx(del_core::typography::TEXT_LG))
                         .child(
                             h_flex()
                                 .items_center()
