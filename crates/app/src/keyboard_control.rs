@@ -80,22 +80,40 @@ pub fn reveal_when_focused(scroll: ScrollHandle, vertical: bool) -> impl IntoEle
         move |bounds, _, _| {
             let view = scroll.bounds();
             let mut offset = scroll.offset();
-            let (before, after) = if vertical {
-                (view.top() - bounds.top(), bounds.bottom() - view.bottom())
+            let max = scroll.max_offset();
+            // Clear of the scroll-edge fade too, which would otherwise dim the focused row.
+            let (before, after, current, limit) = if vertical {
+                let clear = zpx(40.);
+                (
+                    view.top() + clear - bounds.top(),
+                    bounds.bottom() - (view.bottom() - clear),
+                    offset.y,
+                    max.y,
+                )
             } else {
-                (view.left() - bounds.left(), bounds.right() - view.right())
+                let clear = zpx(16.);
+                (
+                    view.left() + clear - bounds.left(),
+                    bounds.right() - (view.right() - clear),
+                    offset.x,
+                    max.x,
+                )
             };
-            let delta = if before > px(0.) {
-                before
+            let target = if before > px(0.) {
+                current + before
             } else if after > px(0.) {
-                -after
+                current - after
             } else {
                 return;
-            };
+            }
+            .clamp(-limit, px(0.));
+            if target == current {
+                return;
+            }
             if vertical {
-                offset.y += delta;
+                offset.y = target;
             } else {
-                offset.x += delta;
+                offset.x = target;
             }
             scroll.set_offset(offset);
         },

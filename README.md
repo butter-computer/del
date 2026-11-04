@@ -167,7 +167,7 @@ DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 
 Mock replies, tool activity, and approvals are simulations; mock providers have
 no model catalog. A prompt's wording picks the scenario: `tool`, `approve`, `error`,
-`group` (several tools, one failing), `slow` (tools that each run for seconds) and
+`group` (several tools, one failing), `slow` (tools that each run for seconds), `goal` (an active native goal) and
 `markdown` (every kind of reply block);
 anything else streams plain text. With the mock backend, `DEL_REDUCE_MOTION=1` turns on
 Reduce Motion without changing the system setting. Do not use mock mode when testing real provider behavior.

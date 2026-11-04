@@ -562,13 +562,17 @@ impl AppShell {
                         .min_h_0()
                         .rounded(zpx(self.metrics.page_radius))
                         .overflow_hidden()
-                        .bg(gpui_kit::rgb(crate::appearance::TERMINAL_BACKGROUND))
+                        .bg(crate::appearance::page_surface())
                         .when_some(self.bottom.error.clone(), |body, error| {
                             body.child(div().p_2().text_size(zpx(TEXT_SM)).child(error))
                         })
                         .when_some(
                             self.bottom.terminals.get(&root).cloned(),
-                            |body, terminal| body.child(terminal),
+                            |body, terminal| {
+                                let view = terminal.read(cx).terminal_view();
+                                crate::terminal_host::apply_shell_theme(&view, cx);
+                                body.child(terminal)
+                            },
                         ),
                 )
                 .into_any_element(),

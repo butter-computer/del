@@ -12,9 +12,6 @@ pub use themes::ThemePreset;
 static PRESET: AtomicU8 = AtomicU8::new(0);
 static LIGHT: AtomicBool = AtomicBool::new(false);
 
-/// Terminals stay dark in every theme: graphite rather than pure black.
-pub const TERMINAL_BACKGROUND: u32 = 0x141517;
-
 /// Semantic action colors; neutrals stay neutral and color signals intent.
 #[derive(Clone, Copy)]
 pub enum ActionTone {

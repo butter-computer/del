@@ -186,7 +186,7 @@ static NSColor *DelColor(uint32_t rgb) {
     self.address.font = [NSFont systemFontOfSize:12*z];
     self.address.layer.cornerRadius = 6*z;
     self.status.font = [NSFont systemFontOfSize:11*z];
-    CGFloat chip = MIN(ceil(self.status.attributedStringValue.size.width) + 18*z, MAX(0,w-inset*2));
+    CGFloat chip = MIN(ceil(self.status.attributedStringValue.size.width) + 26*z, MAX(0,w-inset*2));
     self.status.frame = NSMakeRect(inset, MAX(bar,h-inset-22*z), chip, 22*z);
     self.status.layer.cornerRadius = 6*z;
     self.welcome.font = [NSFont systemFontOfSize:14*z weight:NSFontWeightMedium];

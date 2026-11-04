@@ -2232,6 +2232,7 @@ impl AppShell {
                                                                 "close-{name}"
                                                             )))
                                                             .keyboard_control()
+                                                            .rounded_sm()
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
                                                             .w(if tab_focused { zpx(crate::icons::TAB_CLOSE_SIZE) } else if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
                                                             .overflow_hidden()

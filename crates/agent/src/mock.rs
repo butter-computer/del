@@ -5,6 +5,7 @@
 //! `approve` → a command tool call gated by an approval, then a file change;
 //! `tool` → a tool call with a progress update and a file change;
 //! `slow` → three tools that each run for seconds, to watch live states;
+//! `goal` → also reports an active native goal, for the goal bar;
 //! anything else → streamed text with reasoning and token usage.
 
 use crate::backend::*;
@@ -180,6 +181,21 @@ async fn run_turn(
     );
     if lower.contains("slow") {
         tokio::time::sleep(Duration::from_millis(2500)).await;
+    }
+
+    if lower.contains("goal") {
+        emit(
+            &state,
+            AgentEvent::GoalUpdated {
+                goal: Some(crate::Goal {
+                    objective: "Make every status bar popover read as a heading and rows".into(),
+                    status: crate::GoalStatus::Active,
+                    time_used_seconds: 95,
+                    tokens_used: 12_400,
+                    can_pause: true,
+                }),
+            },
+        );
     }
 
     let stream = |text: &str| {

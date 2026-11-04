@@ -3391,18 +3391,23 @@ impl RightPanel {
                                     .truncate()
                                     .child(path.display().to_string()),
                             )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(ActionTone::Success.foreground())
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(ActionTone::Danger.foreground())
-                                    .child(format!("-{removed}")),
-                            )
+                            // A zero side says nothing, as in the status bar and the transcript.
+                            .when(added > 0, |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(ActionTone::Success.foreground())
+                                        .child(format!("+{added}")),
+                                )
+                            })
+                            .when(removed > 0, |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(ActionTone::Danger.foreground())
+                                        .child(format!("−{removed}")),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.change_expanded.remove(&path) {
                                     this.change_expanded.insert(path.clone());
@@ -3506,17 +3511,7 @@ impl RightPanel {
             .get(&self.terminal_tabs[self.terminal_active])
         {
             let view = terminal.read(cx).terminal_view();
-            let theme = del_terminal::TerminalTheme::new(
-                crate::appearance::rgb(0xf5f5f5),
-                crate::appearance::page_surface(),
-            );
-            view.update(cx, |view, cx| {
-                view.set_appearance(
-                    theme,
-                    zpx(del_core::ShellMetrics::default().page_radius),
-                    cx,
-                )
-            });
+            crate::terminal_host::apply_shell_theme(&view, cx);
             return div().size_full().min_h_0().child(view).into_any_element();
         }
         div()
