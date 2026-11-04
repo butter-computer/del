@@ -6,7 +6,7 @@ use super::view::{COLUMN_MAX_WIDTH, ChatView};
 use crate::appearance::{rgb, rgba};
 use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
-use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
+use del_core::typography::{TEXT_BODY, TEXT_LG, TEXT_MD, TEXT_SM};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
@@ -79,7 +79,9 @@ impl ChatView {
                 .items_center()
                 .cursor_pointer()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
+                .rounded_md()
+                .hover(|row| row.bg(rgba(CARD_HOVER)))
                 .child(label)
                 .child(crate::icons::icon(if expanded {
                     IconName::ChevronDown
@@ -201,7 +203,7 @@ impl ChatView {
                         .when(matches!(block, Block::User { .. }), |row| {
                             row.py_2().bg(rgba(CARD))
                         })
-                        .text_size(zpx(TEXT_MD))
+                        .text_size(zpx(TEXT_BODY))
                         .text_color(rgb(TEXT))
                         .child(
                             TextView::new(&flash.text_view)
@@ -245,7 +247,7 @@ impl ChatView {
                 .cursor_pointer()
                 .rounded_md()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
@@ -318,7 +320,7 @@ impl ChatView {
                 .py_2()
                 .gap_2()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .child("Switched from")
                 .child(crate::composer_ui::provider_logo(*from).size(zpx(14.)))
                 .child(crate::providers::display_name(*from))
@@ -366,7 +368,7 @@ impl ChatView {
                     .justify_center()
                     .py_2()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         h_flex()
                             .max_w_full()
@@ -551,7 +553,7 @@ impl ChatView {
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                     .role(Role::Button)
@@ -575,7 +577,7 @@ impl ChatView {
                         .px_2()
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
-                        .text_color(rgba(MUTED))
+                        .text_color(crate::appearance::secondary_text())
                         .child(text.to_owned()),
                 )
             })
@@ -639,7 +641,7 @@ impl ChatView {
                         .font_family(MONO)
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
-                        .text_color(rgba(MUTED))
+                        .text_color(crate::appearance::secondary_text())
                         .whitespace_normal()
                         .child(if details.is_empty() {
                             "No output".to_owned()
@@ -678,11 +680,14 @@ impl ChatView {
                     .when(has_diff, |row| row.cursor_pointer())
                     .hover(|row| row.bg(rgba(CARD_HOVER)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(crate::icons::path("icons/pencil.svg").text_color(rgba(MUTED)))
+                    .child(
+                        crate::icons::path("icons/pencil.svg")
+                            .text_color(crate::appearance::secondary_text()),
+                    )
                     .child(
                         div()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child(kind_label),
                     )
                     .child(
@@ -690,7 +695,7 @@ impl ChatView {
                             .min_w_0()
                             .truncate()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child(
                                 change
                                     .path
@@ -836,7 +841,7 @@ impl ChatView {
 fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
     div()
         .id(id)
-        .h(zpx(24.0))
+        .h(zpx(28.0))
         .px_3()
         .flex()
         .items_center()
@@ -844,7 +849,11 @@ fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
         .cursor_pointer()
         .text_size(zpx(TEXT_MD))
         .font_weight(FontWeight::MEDIUM)
-        .when(primary, |p| p.bg(rgb(0xffffff)).text_color(rgb(0x111113)))
+        .when(primary, |p| {
+            p.bg(rgb(0xffffff))
+                .text_color(rgb(0x111113))
+                .hover(|p| p.opacity(0.88))
+        })
         .when(!primary, |p| {
             p.bg(rgba(0xffffff14))
                 .text_color(rgb(STRONG))
@@ -891,7 +900,7 @@ fn user_message(
                 .when(!text.is_empty(), |column| {
                     column.child(
                         div()
-                            .text_size(zpx(TEXT_MD))
+                            .text_size(zpx(TEXT_BODY))
                             .line_height(relative(1.5))
                             .text_color(rgb(STRONG))
                             .child(text),
@@ -901,7 +910,7 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(11.))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child("◎  Sent as goal"),
                     )
                 })
@@ -909,7 +918,7 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child(label),
                     )
                 }),
@@ -959,7 +968,7 @@ fn assistant_message(
         })
         .group(group.clone())
         .px_2()
-        .text_size(zpx(TEXT_MD))
+        .text_size(zpx(TEXT_BODY))
         .text_color(rgb(TEXT))
         .child(
             state
@@ -985,7 +994,7 @@ fn assistant_message(
                     .items_center()
                     .justify_start()
                     .text_size(zpx(11.))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         div()
                             .id(("copy-response", ix))
@@ -1006,7 +1015,7 @@ fn assistant_message(
                                     copied,
                                 )
                                 .with_size(zpx(13.))
-                                .text_color(rgba(MUTED)),
+                                .text_color(crate::appearance::secondary_text()),
                             )
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
@@ -1091,7 +1100,7 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                     .gap_1p5()
                     .items_center()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .when(!failed, |row| {
                         row.child(crate::icons::spinner()).child("Starting agent…")
                     }),

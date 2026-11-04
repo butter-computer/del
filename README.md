@@ -1034,6 +1034,12 @@ easing. Reduce Motion keeps these transitions instant.
 Del opens as a centered window at roughly 70% of the available display width and
 76% of its height, with a minimum size of **960 × 640 logical pixels**.
 
+Conversation prose and the input use a 14 px reading size, with 13 px controls and
+12 px secondary labels. In a narrow new-session pane, folder and branch controls
+show their icons, with full names in tooltips, so New worktree and Chat/Terminal
+remain on the same row. Secondary labels and diff colors use theme-aware ink in
+both light and dark modes.
+
 Zoom scales the shell, chat, controls, file panels, and embedded terminal together
 in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to the
 session index and restored on launch. Keyboard shortcuts work while the composer

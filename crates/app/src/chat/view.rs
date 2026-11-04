@@ -1366,11 +1366,15 @@ impl Render for ChatView {
             )
             .child(
                 h_flex()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .child(
                         v_flex()
                             .id("message-navigation")
+                            .absolute()
+                            .left_0()
+                            .top_0()
                             .w(zpx(24.0))
                             .h_full()
                             .flex_none()
@@ -1516,7 +1520,6 @@ impl Render for ChatView {
                                 div()
                                     .w_full()
                                     .min_w_0()
-                                    .px_3()
                                     .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
                                     .into_any_element()
                             })

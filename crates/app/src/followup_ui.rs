@@ -46,7 +46,9 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
             )
         })
         .when(!crate::attachments::is_image(attachment), |el| {
-            el.child(crate::icons::icon(IconName::File).text_color(rgba(0xffffff99)))
+            el.child(
+                crate::icons::icon(IconName::File).text_color(crate::appearance::secondary_text()),
+            )
         })
 }
 fn action(id: SharedString, label: &'static str) -> Button {
@@ -282,7 +284,7 @@ impl AppShell {
                                             if let Some(asset) = crate::attachments::file_mark(file)
                                             {
                                                 crate::icons::path(asset)
-                                                    .text_color(rgba(0xffffff99))
+                                                    .text_color(crate::appearance::secondary_text())
                                                     .into_any_element()
                                             } else {
                                                 crate::icons::icon(IconName::File)

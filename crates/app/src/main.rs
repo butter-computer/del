@@ -2568,6 +2568,7 @@ impl AppShell {
                                             .child(
                                                 new_tab_group()
                                                     .relative()
+                                                    .flex_shrink_1()
                                                     .min_w_0()
                                                     .child(self.render_new_session_options(cx))
                                                     .child(

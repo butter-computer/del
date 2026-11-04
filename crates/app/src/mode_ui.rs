@@ -1161,6 +1161,9 @@ impl AppShell {
     }
 
     pub(super) fn render_new_session_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.page_bounds.get().size.width < zpx(540.);
+        self.branch_picker
+            .update(cx, |picker, cx| picker.set_compact(compact, cx));
         let s = self.state.read(cx);
         let cwd = s.effective().2;
         let info = s.project_info.get(&cwd).cloned().unwrap_or_default();
@@ -1185,7 +1188,7 @@ impl AppShell {
         h_flex()
             .h_full()
             .min_w_0()
-            .gap_2()
+            .gap(if compact { zpx(2.) } else { zpx(8.) })
             .items_center()
             .child(
                 h_flex()
@@ -1197,22 +1200,25 @@ impl AppShell {
                             .ghost()
                             .disabled(!enabled)
                             .h(zpx(24.))
-                            .px_2()
+                            .px(if compact { zpx(4.) } else { zpx(8.) })
                             .min_w_0()
                             .max_w(zpx(150.))
                             .text_size(zpx(13.))
                             .tooltip(cwd.display().to_string())
+                            .accessibility_label("Choose project folder")
                             .child(
                                 h_flex()
                                     .gap_1()
                                     .items_center()
                                     .child(crate::icons::icon(IconName::Folder))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(crate::sessions::folder_name(&cwd)),
-                                    ),
+                                    .when(!compact, |row| {
+                                        row.child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(crate::sessions::folder_name(&cwd)),
+                                        )
+                                    }),
                             )
                             .text_color(rgba(0xffffff8c))
                             .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),

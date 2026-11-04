@@ -30,7 +30,7 @@ impl ActionTone {
             (Self::Danger, false) => 0xe58b8b,
             (Self::Danger, true) => 0xb83c3c,
             (Self::Success, false) => 0x86b596,
-            (Self::Success, true) => 0x3f7a54,
+            (Self::Success, true) => 0x366f49,
             (Self::Warning, false) => 0xd3b07a,
             (Self::Warning, true) => 0x87621f,
         };
@@ -330,7 +330,15 @@ fn map_neutral(mut color: Rgba, palette: themes::Palette) -> Rgba {
 
 /// Desaturated replacements for the saturated status literals.
 fn status(rgb: u32) -> u32 {
-    match (rgb, light()) {
+    status_for_mode(rgb, light())
+}
+fn status_for_mode(rgb: u32, light: bool) -> u32 {
+    match (rgb, light) {
+        // Diffs, account status, and success labels need dark ink in light mode.
+        (0x5fc27e | 0x4cc38a, false) => 0x86b596,
+        (0x5fc27e | 0x4cc38a, true) => 0x366f49,
+        (0xf0716b, false) => 0xe58b8b,
+        (0xf0716b, true) => 0xb83c3c,
         // Danger red.
         (0xff646b | 0xff4545, false) => 0xe08e8c,
         (0xff646b | 0xff4545, true) => 0xa94848,
@@ -409,6 +417,18 @@ mod tests {
     fn contrast(a: u32, b: u32) -> f32 {
         let (a, b) = (luminance(a), luminance(b));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn diff_and_success_ink_remain_readable_in_both_graphite_modes() {
+        for light in [false, true] {
+            let p = ThemePreset::Graphite.palette(light);
+            for background in [p.shell, p.composer, p.popup, p.neutral[0]] {
+                for literal in [0x5fc27e, 0x4cc38a, 0xf0716b] {
+                    assert!(contrast(status_for_mode(literal, light), background) >= 4.5);
+                }
+            }
+        }
     }
 
     #[test]

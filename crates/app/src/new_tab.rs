@@ -15,12 +15,15 @@ pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
         .px_3()
         .gap_3()
         .child(
-            h_flex()
-                .gap_3()
-                .text_color(rgba(0xffffff35))
-                .child("←")
-                .child("→")
-                .child("↻"),
+            h_flex().gap_2().text_color(rgba(0xffffff35)).children(
+                [
+                    IconName::ArrowLeft,
+                    IconName::ArrowRight,
+                    IconName::RefreshCw,
+                ]
+                .into_iter()
+                .map(crate::icons::icon),
+            ),
         )
         .child(
             h_flex()
@@ -28,7 +31,7 @@ pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
                 .min_w_0()
                 .px_3()
                 .h(zpx(32.))
-                .rounded_full()
+                .rounded(zpx(8.))
                 .bg(rgba(0xffffff14))
                 .child(
                     Input::new(address)
@@ -81,10 +84,10 @@ pub fn tools<T: 'static>(
             .child(
                 div()
                     .flex_none()
-                    .rounded_full()
+                    .rounded(zpx(4.))
                     .px_1p5()
                     .text_size(zpx(12.))
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .bg(rgba(0xffffff08))
                     .child(match pane {
                         Pane::Changes => "⌃⇧G",

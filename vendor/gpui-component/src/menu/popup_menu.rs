@@ -1251,7 +1251,7 @@ impl PopupMenu {
             Icon::empty()
         };
 
-        Some(icon.xsmall())
+        Some(icon.small())
     }
 
     #[inline]

@@ -177,7 +177,7 @@ fn icon_button(id: impl Into<ElementId>) -> Button {
         .size(zpx(ICON_BUTTON))
         .p_0()
         .rounded(zpx(6.))
-        .text_color(rgba(MUTED))
+        .text_color(crate::appearance::secondary_text())
 }
 
 fn footer_tint(alpha: u8) -> Rgba {
@@ -218,7 +218,7 @@ fn footer_button(id: &'static str, cx: &App) -> Button {
         .flex_1()
         .h(zpx(FOOTER_HEIGHT))
         .p_0()
-        .text_color(rgba(MUTED))
+        .text_color(crate::appearance::secondary_text())
         .rounded(zpx(9.))
 }
 
@@ -426,7 +426,7 @@ fn archive_button(id: impl Into<ElementId>) -> Button {
         .p_0()
         .tooltip("Archive")
         .accessibility_label("Archive")
-        .text_color(rgba(MUTED))
+        .text_color(crate::appearance::secondary_text())
 }
 
 fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div {
@@ -444,7 +444,7 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .p_0()
                 .tooltip("Restore")
                 .accessibility_label("Restore")
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -1077,13 +1077,13 @@ fn empty_space(archived: bool) -> impl IntoElement {
         .child(
             crate::icons::path("icons/empty-space.svg")
                 .with_size(zpx(64.))
-                .text_color(rgba(MUTED)),
+                .text_color(crate::appearance::secondary_text()),
         )
         .child(
             div()
                 .w_full()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .child(if archived {
                     "Nothing in this orbit yet"
                 } else {
@@ -1177,7 +1177,7 @@ fn space_contents(
                         .child(div().id("pinned-section-heading").debug_selector(|| "pinned-heading".into())
                             .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
                             .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(rgba(FAINT)).cursor_pointer()
-                            .hover(|heading| heading.text_color(rgba(MUTED))).child("Pinned")
+                            .hover(|heading| heading.text_color(crate::appearance::secondary_text())).child("Pinned")
                             .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
                         .content(v_flex().w_full().gap_0p5()
                             .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, cx))))))
@@ -1209,7 +1209,7 @@ fn space_contents(
                     gpui_kit::component::collapsible::Collapsible::new()
                         .open(!collapsed).flex_none().gap_0p5()
                         .child(h_flex().id(group.clone()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px_2().gap_1p5().items_center().rounded_md().cursor_pointer()
-                            .text_color(rgba(MUTED)).text_size(zpx(TEXT_MD)).font_weight(FontWeight::SEMIBOLD)
+                            .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_MD)).font_weight(FontWeight::SEMIBOLD)
                             .hover(|row| row.bg(rgba(0xffffff0a)))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
                             .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
@@ -1241,7 +1241,7 @@ fn space_contents(
                                 let group = SharedString::from(format!("project-draft-{key}"));
                                 let working = s.tab_working(&crate::state::Tab::Draft(key));
                                 div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
-                                    .text_size(zpx(TEXT_MD)).text_color(rgba(MUTED)).cursor_pointer()
+                                    .text_size(zpx(TEXT_MD)).text_color(crate::appearance::secondary_text()).cursor_pointer()
                                     .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)))
                                     .hover(|row| row.bg(rgba(0xffffff0a))).gap_1p5()
                                     .child(crate::mode_ui::tab_mark(s.tab_info(&crate::state::Tab::Draft(key)).1))
@@ -1266,7 +1266,7 @@ fn space_contents(
                             .when(remaining > 0 || (expanded && project_rows.len() > PROJECT_SESSION_LIMIT), |list| list.child(
                                 Button::new(SharedString::from(format!("project-show-more-{}", path.display())))
                                     .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px_2()
-                                    .text_color(rgba(MUTED)).text_size(zpx(TEXT_SM))
+                                    .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_SM))
                                     .label(if expanded { "Show less".into() } else { format!("Show more ({remaining})") })
                                     .on_click(move |_, _, cx| expand_state.update(cx, |s, cx| {
                                         if !s.expanded_sidebar_projects.remove(&expand_key) {
@@ -1355,7 +1355,7 @@ pub fn render(
                                         s.space_switcher_open,
                                     )
                                     .with_size(zpx(12.))
-                                    .text_color(rgba(MUTED)),
+                                    .text_color(crate::appearance::secondary_text()),
                                 ),
                         )
                         .dropdown_menu(move |menu, _, cx| {
