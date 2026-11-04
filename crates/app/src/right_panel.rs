@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-pub const PANEL_MIN_WIDTH: f32 = 360.0;
-pub const PANEL_WIDTH: f32 = PANEL_MIN_WIDTH;
+pub const PANEL_MIN_WIDTH: f32 = 320.0;
+pub const PANEL_WIDTH: f32 = 360.0;
 const MONO: &str = "Menlo";
 /// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;

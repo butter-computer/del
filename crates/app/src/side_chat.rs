@@ -1408,10 +1408,12 @@ mod tests {
                 "provider and model must share one row"
             );
             assert!(provider.right() <= model.left());
+            let send = cx.debug_bounds("composer-action").unwrap();
             assert!(
-                model.right() <= zpx(crate::right_panel::PANEL_MIN_WIDTH - 40.),
+                model.right() <= send.left(),
                 "model must leave room for Send"
             );
+            assert!(send.right() <= zpx(crate::right_panel::PANEL_MIN_WIDTH));
             cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(800.)));
         }
         let file = dir.path().join("notes.txt");

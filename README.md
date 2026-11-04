@@ -520,7 +520,7 @@ conversation. Unloading a running session also stops its current work.
   the tick. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
 - Working sessions show the activity spinner without a relative timestamp.
 - Both sidebars resize from their panel boundaries. The right sidebar has a
-  360-logical-pixel minimum so Claude and Opus 5.5 High stay on one composer row. The right tab row has a thin,
+  320-logical-pixel minimum so Claude and Opus 5.5 High stay on one composer row. The right tab row has a thin,
   floating divider; the content area stays borderless. The left sidebar only
   resizes between 180 and 320 px at its boundary, with a 16-point hover target
   centered on the gutter.
