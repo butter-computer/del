@@ -118,6 +118,7 @@ static NSColor *DelColor(uint32_t rgb) {
     _savedURL = @"about:blank";
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
+    self.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
     if (@available(macOS 14.0, *)) {
         configuration.websiteDataStore = [WKWebsiteDataStore dataStoreForIdentifier:profile];
@@ -146,8 +147,8 @@ static NSColor *DelColor(uint32_t rgb) {
     _forward = [self button:@"chevron.right" label:@"Forward" action:@selector(goForward:)];
     _reload = [self button:@"arrow.clockwise" label:@"Reload" action:@selector(reloadPage:)];
     _address = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _address.placeholderString = @"URL or localhost:3000";
     _address.cell = [DelInsetCell new];
+    _address.usesSingleLineMode = YES;
     _address.editable = YES;
     _address.selectable = YES;
     _address.cell.scrollable = YES;
@@ -439,6 +440,30 @@ void del_browser_focus_address(void *pointer) {
     if (![NSThread isMainThread] || !pointer) return;
     DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
     [browser.window makeFirstResponder:browser.address];
+}
+
+// Only the native chrome follows Del's theme; a page keeps its own colors.
+static NSColor *DelBrowserColor(uint32_t rgba) {
+    return [NSColor colorWithSRGBRed:((rgba >> 24) & 255)/255.0
+                              green:((rgba >> 16) & 255)/255.0
+                               blue:((rgba >> 8) & 255)/255.0
+                              alpha:(rgba & 255)/255.0];
+}
+void del_browser_theme(void *pointer, uint32_t page, uint32_t field, uint32_t text, uint32_t secondary) {
+    if (![NSThread isMainThread] || !pointer) return;
+    DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
+    browser.layer.backgroundColor = DelBrowserColor(page).CGColor;
+    browser.address.layer.backgroundColor = DelBrowserColor(field).CGColor;
+    browser.address.textColor = DelBrowserColor(text);
+    browser.address.placeholderAttributedString = [[NSAttributedString alloc]
+        initWithString:@"URL or localhost:3000"
+        attributes:@{NSForegroundColorAttributeName:DelBrowserColor(secondary)}];
+    browser.welcome.textColor = DelBrowserColor(text);
+    browser.detail.textColor = DelBrowserColor(secondary);
+    browser.mark.contentTintColor = DelBrowserColor(secondary);
+    browser.status.textColor = DelBrowserColor(secondary);
+    for (NSButton *button in @[browser.back, browser.forward, browser.reload])
+        button.contentTintColor = DelBrowserColor(secondary);
 }
 const char *del_browser_url(void *pointer) {
     if (![NSThread isMainThread] || !pointer) return NULL;

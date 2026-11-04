@@ -592,9 +592,9 @@ impl RenderOnce for ComposerCard {
                 },
             );
 
-        let custom_settings = settings.is_some();
         // The wrapper owns the tint; the textarea adds no second background.
         v_flex()
+            .debug_selector(|| "composer-card".into())
             .w_full()
             .max_w(zpx(max_width))
             .p_2()
@@ -641,9 +641,10 @@ impl RenderOnce for ComposerCard {
                     .justify_between()
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w_0()
                             .items_center()
                             .gap_0p5()
-                            .when(custom_settings, |row| row.flex_1().min_w_0())
                             .child(crate::micro_motion::control(
                                 "attach-motion",
                                 true,
@@ -660,9 +661,10 @@ impl RenderOnce for ComposerCard {
                             ))
                             .child(settings.unwrap_or_else(|| {
                                 h_flex()
+                                    .min_w_0()
                                     .items_center()
                                     .gap_0p5()
-                                    .child(agent_el)
+                                    .child(div().flex_none().child(agent_el))
                                     .when_some(model_picker, |row, picker| row.child(picker))
                                     .into_any_element()
                             }))
@@ -683,10 +685,13 @@ impl RenderOnce for ComposerCard {
                                         .on_click(move |_, window, cx| on_cancel_goal(window, cx)),
                                 )
                             })
-                            .when(show_folder, |row| row.child(folder_el)),
+                            .when(show_folder, |row| {
+                                row.child(div().flex_none().child(folder_el))
+                            }),
                     )
                     .child(
                         h_flex()
+                            .flex_none()
                             .items_center()
                             .gap_1()
                             .when(show_voice, |row| row.child(voice))
@@ -709,15 +714,16 @@ mod tests {
         running: bool,
         sent: std::rc::Rc<std::cell::Cell<usize>>,
         stopped: std::rc::Rc<std::cell::Cell<usize>>,
+        width: f32,
     }
     impl Render for StopFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let stopped = self.stopped.clone();
             let sent = self.sent.clone();
-            div().w(px(600.)).child(
+            div().w(px(self.width)).child(
                 ComposerCard::new(
                     &self.input,
-                    600.,
+                    self.width,
                     self.provider,
                     true,
                     self.picker.clone(),
@@ -747,6 +753,7 @@ mod tests {
                 running: true,
                 sent: sent.clone(),
                 stopped: stopped.clone(),
+                width: 600.,
             }
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -778,5 +785,35 @@ mod tests {
                 assert_eq!(stopped.get(), index + 1 + usize::from(running));
             }
         }
+    }
+
+    #[gpui::test]
+    fn long_model_name_keeps_send_inside_a_narrow_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |state, cx| {
+            state.set_model(
+                Some("A deliberately long model name that must shrink".into()),
+                cx,
+            );
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            let picker = cx.new(|cx| crate::model_picker::ModelPicker::new(state, window, cx));
+            StopFixture {
+                input,
+                picker,
+                provider: Provider::Claude,
+                running: false,
+                sent: Default::default(),
+                stopped: Default::default(),
+                width: 320.,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx.debug_bounds("composer-card").unwrap();
+        let send = cx.debug_bounds("composer-action").unwrap();
+        assert!(send.right() <= card.right());
+        assert!(send.left() >= card.left());
     }
 }

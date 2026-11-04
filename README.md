@@ -165,12 +165,15 @@ separate data directory so test conversations cannot mix with normal history:
 DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 ```
 
-Mock replies, tool activity, and approvals are simulations; mock providers have
-no model catalog. A prompt's wording picks the scenario: `tool`, `approve`, `error`,
-`group` (several tools, one failing), `slow` (tools that each run for seconds), `goal` (an active native goal) and
-`markdown` (every kind of reply block);
-anything else streams plain text. With the mock backend, `DEL_REDUCE_MOTION=1` turns on
-Reduce Motion without changing the system setting. Do not use mock mode when testing real provider behavior.
+Mock replies, tool activity, and approvals are simulations. The default mock has
+no model catalog. Add `DEL_MOCK_MODELS=1` for twelve clearly labeled synthetic
+models with effort and Fast controls, and `DEL_MOCK_DELAY_MS=350` to inspect
+streaming, loading, and queued follow-ups at a human pace. A prompt's wording
+picks the scenario: `tool`, `approve`, `error`, `group` (several tools, one failing),
+`slow` (tools that each run for seconds), `goal` (an active native goal) and
+`markdown` (every kind of reply block); anything else streams plain text. With the
+mock backend, `DEL_REDUCE_MOTION=1` turns on Reduce Motion without changing the
+system setting. Do not use mock mode when testing real provider behavior.
 
 ### macOS signing and permissions
 
@@ -225,7 +228,8 @@ The sidebar has **Pinned** (hidden when empty) and the **active Space name** (fo
 are persistent collections of projects, with independent pinned chats and tab decks.
 Existing projects and pins start in **Default**. The Space switcher at the top of
 the sidebar lists your Spaces and offers **Create Space** and **Rename Space**,
-each with an icon. Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
+each with an icon. Create and Save stay disabled while a Space name is empty.
+Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
 horizontally with two fingers over the left sidebar, or pick one from the Space
 switcher or the Space dots, to switch Spaces. Swipes slide both lists
@@ -565,6 +569,9 @@ The picker uses provider-advertised choices, not a hardcoded list of model names
 All visible catalog entries remain accessible in a bounded scrolling list, without
 a scrollbar; the bottom fades while more entries are below. Refresh retries
 catalog discovery. Availability depends on the installed CLI, agent, and account.
+Empty, loading, and failed catalogs keep a visible status below the model choices;
+the list cannot clip the explanation or the Refresh control. Model names align
+across selected and unselected rows.
 The picker opens with a **Search models…** field. It fuzzy-filters names and
 provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
 choices. Opening the picker again starts with an empty search. Use **↑/↓** to
@@ -585,7 +592,9 @@ advertised effort levels, and the accent follows the selected provider (includin
 Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning controls to move one
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
-The model pill immediately shows the effective effort, including the catalog
+Long model names truncate within the picker and composer so effort and send
+controls remain reachable in narrow panes. The model pill immediately shows
+the effective effort, including the catalog
 default before any adjustment. Claude model-specific settings and Codex configured
 reasoning effort are resolved before opening the picker. Providers that advertise
 effort choices without a default show **Auto effort** until one is chosen. Side chat
@@ -928,9 +937,13 @@ and MCP configuration are kept separate from saved launch history. See
 ### Browser
 
 On macOS 14 or later, the Browser pane embeds WebKit with an address field,
-back/forward navigation, and reload/stop. Each page has its own Browser tab in
-the session or sidebar row—there is no nested browser tab strip. Use **+** and
+back/forward navigation, and reload/stop. Its toolbar, address field, empty state,
+and rounded page corners follow Del's selected theme and zoom; websites retain
+their own colors. Each page has its own Browser tab in the sidebar row—there is
+no nested browser tab strip. Use **+** and
 enter a URL to open another page; closing or moving a tab affects only that page.
+Native browser content temporarily yields to dialogs and popups so it cannot
+cover their controls; the page stays loaded behind them.
 Existing saved browser groups restore as separate tabs, keeping their profiles
 and page IDs. Agent-created pages also appear as individual sidebar tabs. HTTP(S) and localhost
 pages open inside Del. Browser zoom follows the app's zoom setting. The sidebar

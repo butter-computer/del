@@ -4156,6 +4156,36 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn empty_and_failed_model_catalog_notices_remain_inside_the_picker(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = draft(cx);
+        let picker_state = state.clone();
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            crate::model_picker::ModelPicker::new(picker_state, window, cx)
+        });
+        for result in [Ok(vec![]), Err("fixture catalog unavailable".into())] {
+            cx.update(|window, cx| {
+                state.update(cx, |state, cx| {
+                    let (provider, _, cwd) = state.effective();
+                    state.apply(super::Msg::Models(provider, None, cwd, result), cx);
+                });
+                picker.update(cx, |picker, cx| picker.open_picker(false, window, cx));
+            });
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("model-picker-models").unwrap();
+            let notice = cx.debug_bounds("model-catalog-notice").unwrap();
+            assert!(notice.size.height > gpui::px(0.));
+            assert!(notice.top() >= panel.top());
+            assert!(notice.bottom() <= panel.bottom());
+            assert!(notice.left() >= panel.left() && notice.right() <= panel.right());
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
     fn model_choices_validate_and_reset_effort(cx: &mut gpui::TestAppContext) {
         for provider in [
             del_agent::Provider::Claude,

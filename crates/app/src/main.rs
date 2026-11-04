@@ -313,9 +313,43 @@ actions!(
 /// the real Codex and Claude backends drive the user's installed CLIs.
 pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
     if std::env::var("DEL_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("mock")) {
+        let delay = std::env::var("DEL_MOCK_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_default();
+        let models = if std::env::var("DEL_MOCK_MODELS").is_ok_and(|value| value == "1") {
+            (0..12)
+                .map(|index| del_agent::ModelInfo {
+                    id: format!("mock-model-{index}"),
+                    name: match index {
+                        0 => "Mock Balanced".into(),
+                        1 => "Mock Quick".into(),
+                        2 => "Mock Extended — a deliberately long model name".into(),
+                        _ => format!("Mock model {:02}", index + 1),
+                    },
+                    description: "Synthetic model for UI development".into(),
+                    efforts: ["low", "medium", "high", "xhigh"]
+                        .into_iter()
+                        .map(del_agent::EffortOption::named)
+                        .collect(),
+                    default_effort: Some("medium".into()),
+                    fast_tier: Some("priority".into()),
+                    is_default: index == 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         return Provider::ALL
             .iter()
-            .map(|&p| Arc::new(MockBackend::new(p)) as Arc<dyn AgentBackend>)
+            .map(|&p| {
+                Arc::new(
+                    MockBackend::new(p)
+                        .with_delay(delay)
+                        .with_models(models.clone()),
+                ) as Arc<dyn AgentBackend>
+            })
             .collect();
     }
     vec![

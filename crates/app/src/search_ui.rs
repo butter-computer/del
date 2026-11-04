@@ -21,6 +21,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const ACTION_HEIGHT: f32 = 32.;
+const RESULT_HEIGHT: f32 = 44.;
+const SECTION_HEIGHT: f32 = 26.;
+
 pub struct Palette {
     input: Entity<InputState>,
     documents: Vec<Arc<search::Document>>,
@@ -46,8 +50,6 @@ enum PaletteAction {
 }
 /// Action icons and provider marks share one column, so their labels line up.
 const PALETTE_MARK_WIDTH: f32 = 16.;
-/// A two-line result, with air between neighbours so they read as separate rows.
-const RESULT_ROW_HEIGHT: f32 = 44.;
 
 impl PaletteAction {
     const ALL: [Self; 4] = [
@@ -238,9 +240,9 @@ impl Palette {
     fn layout_height(&self, window: &Window, cx: &App) -> (Pixels, Pixels) {
         let actions = self.actions(cx).len();
         let groups = usize::from(actions > 0) + usize::from(!self.hits.is_empty());
-        let content = zpx(30. * actions as f32
-            + RESULT_ROW_HEIGHT * self.hits.len() as f32
-            + 22. * groups as f32);
+        let content = zpx(ACTION_HEIGHT * actions as f32
+            + RESULT_HEIGHT * self.hits.len() as f32
+            + SECTION_HEIGHT * groups as f32);
         let extra = zpx(if self.hits.is_empty() { 24. } else { 0. }
             + if self.errors.is_empty() { 0. } else { 20. });
         let chrome = zpx(42. + 30. + 4.) + extra;
@@ -255,7 +257,7 @@ impl Palette {
             .role(Role::Button)
             .aria_label(action.label())
             .w_full()
-            .h(zpx(30.))
+            .h(zpx(ACTION_HEIGHT))
             .px(zpx(8.))
             .gap(zpx(8.))
             .items_center()
@@ -400,7 +402,7 @@ impl Palette {
                 source.title, source.project_name, hit.snippet
             ))
             .px(zpx(8.))
-            .h(zpx(RESULT_ROW_HEIGHT))
+            .h(zpx(RESULT_HEIGHT))
             .gap(zpx(8.))
             .items_center()
             .overflow_hidden()
@@ -463,7 +465,7 @@ impl Palette {
                                         .max_w(zpx(120.))
                                         .gap(zpx(4.))
                                         .text_size(zpx(del_core::typography::TEXT_XS))
-                                        .text_color(rgba(0xffffff88))
+                                        .text_color(crate::appearance::secondary_text())
                                         .child(
                                             div()
                                                 .min_w_0()
@@ -478,8 +480,8 @@ impl Palette {
                             .min_w_0()
                             .gap(zpx(4.))
                             .text_size(zpx(12.))
-                            .line_height(relative(1.15))
-                            .text_color(rgba(0xffffff88))
+                            .line_height(relative(1.3))
+                            .text_color(crate::appearance::secondary_text())
                             .child(div().min_w_0().truncate().child(preview)),
                     ),
             )
@@ -488,7 +490,7 @@ impl Palette {
                     div()
                         .flex_none()
                         .text_size(zpx(del_core::typography::TEXT_XS))
-                        .text_color(rgba(0xffffff70))
+                        .text_color(crate::appearance::secondary_text())
                         .child("Archived"),
                 )
             })
@@ -508,9 +510,10 @@ impl Render for Palette {
         let empty = self.input.read(cx).value().trim().is_empty();
         let actions = self.actions(cx).len();
         let (results_height, panel_height) = self.layout_height(window, cx);
-        let content_height = 30. * actions as f32
-            + RESULT_ROW_HEIGHT * self.hits.len() as f32
-            + 22. * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
+        let content_height = ACTION_HEIGHT * actions as f32
+            + RESULT_HEIGHT * self.hits.len() as f32
+            + SECTION_HEIGHT
+                * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
             .rounded(zpx(11.))
@@ -556,7 +559,7 @@ impl Render for Palette {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgba(0xffffff70))
+                            .text_color(crate::appearance::secondary_text())
                             .child(crate::icons::icon(IconName::Search)),
                     )
                     .child(
@@ -600,7 +603,7 @@ impl Render for Palette {
                                 .flex()
                                 .items_center()
                                 .text_size(zpx(12.))
-                                .text_color(rgba(0xffffff70))
+                                .text_color(crate::appearance::secondary_text())
                                 .child(if self.loading {
                                     if empty {
                                         "Loading recent conversations…"
@@ -661,12 +664,12 @@ impl Render for Palette {
 
 fn section_label(label: &'static str) -> impl IntoElement {
     div()
-        .h(zpx(22.))
+        .h(zpx(SECTION_HEIGHT))
         .px(zpx(8.))
         .flex()
         .items_center()
         .text_size(zpx(12.))
-        .text_color(rgba(0xffffff70))
+        .text_color(crate::appearance::secondary_text())
         .child(label)
 }
 

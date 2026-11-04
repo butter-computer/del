@@ -1762,6 +1762,9 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
     cx.subscribe(
         &input,
         move |_, event: &gpui_kit::component::input::InputEvent, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                cx.refresh_windows();
+            }
             if matches!(
                 event,
                 gpui_kit::component::input::InputEvent::PressEnter { .. }
@@ -1779,7 +1782,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
     let focus = input.clone();
     let state = state.clone();
     let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
-    window.open_dialog(cx, move |dialog, window, _| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let input = input.clone();
         let value = input.clone();
         let state = state.clone();
@@ -1814,6 +1817,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
                     .child(
                         Button::new("space-confirm")
                             .primary()
+                            .disabled(input.read(cx).value().trim().is_empty())
                             .label(if rename { "Save" } else { "Create" })
                             .on_click(|_, w, cx| {
                                 w.dispatch_action(

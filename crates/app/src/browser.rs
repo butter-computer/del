@@ -1,6 +1,7 @@
 //! UI-thread-owned native WebKit view. Cached panels explicitly hide their views.
 #[cfg(target_os = "macos")]
 mod native {
+    use gpui_kit::component::{GlobalState, WindowExt};
     use gpui_kit::prelude::*;
     use gpui_kit::*;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -37,6 +38,7 @@ mod native {
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
         fn del_browser_focus_address(view: *mut c_void);
+        fn del_browser_theme(view: *mut c_void, page: u32, field: u32, text: u32, secondary: u32);
         fn del_browser_hide(view: *mut c_void);
         fn del_browser_release(view: *mut c_void);
         fn del_browser_command(
@@ -103,8 +105,28 @@ mod native {
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
                     ensure_created(&view, window);
+                    if view.pointer.get().is_null() {
+                        return;
+                    }
+                    // AppKit subviews paint above GPUI. Yield to overlays so
+                    // their controls cannot be obscured or receive clicks twice.
+                    if window.has_active_dialog(cx)
+                        || window.has_active_sheet(cx)
+                        || window.has_active_prompt()
+                        || GlobalState::is_in_deferred_context(cx)
+                    {
+                        unsafe { del_browser_hide(view.pointer.get()) };
+                        return;
+                    }
                     let bounds = bounds.intersect(&window.content_mask().bounds);
                     unsafe {
+                        del_browser_theme(
+                            view.pointer.get(),
+                            crate::appearance::page_surface().into(),
+                            crate::appearance::composer_surface().into(),
+                            crate::appearance::rgb(0xf5f5f5).into(),
+                            crate::appearance::secondary_text().into(),
+                        );
                         del_browser_frame(
                             view.pointer.get(),
                             bounds.origin.x.as_f32() as f64,
