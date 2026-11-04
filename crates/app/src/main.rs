@@ -2407,6 +2407,9 @@ impl AppShell {
                             .id("toggle-right")
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar (⌘\\)").build(window, cx)
+                            })
                             .flex_none()
                             .size(crate::icons::button_size())
                             .mr_2()

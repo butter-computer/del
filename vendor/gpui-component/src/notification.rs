@@ -436,7 +436,7 @@ impl Render for Notification {
             .gap_3()
             .refine_style(&self.style)
             .when_some(icon, |this, icon| {
-                this.child(div().absolute().top(px(18.)).left_4().child(icon))
+                this.child(div().absolute().top(px(16.)).left_4().child(icon))
             })
             .child(
                 v_flex()

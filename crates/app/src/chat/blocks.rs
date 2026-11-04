@@ -637,6 +637,10 @@ impl ChatView {
 
     fn tool_card(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
         let (_, label) = super::activity::describe(tool);
+        let failed = matches!(
+            tool.state,
+            super::model::ToolState::Error | super::model::ToolState::Declined
+        );
         let color = rgba(MUTED);
         let file = match self.model.blocks.get(ix + 1) {
             Some(Block::FileChange(file))
@@ -659,6 +663,11 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("tool", ix))
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{} {label}",
+                        if tool.expanded { "Collapse" } else { "Expand" }
+                    ))
                     .h(zpx(ROW_HEIGHT))
                     .px(zpx(TEXT_INSET))
                     .gap(zpx(ROW_GAP))
@@ -669,7 +678,25 @@ impl ChatView {
                     .text_color(color)
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(match label.split_once(' ').filter(|_| failed) {
+                        // The verb says which row in the group went wrong.
+                        Some((verb, rest)) => h_flex()
+                            .min_w_0()
+                            .gap(zpx(4.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child(verb.to_owned()),
+                            )
+                            .child(div().min_w_0().truncate().child(rest.to_owned()))
+                            .into_any_element(),
+                        None => div()
+                            .min_w_0()
+                            .truncate()
+                            .child(label.clone())
+                            .into_any_element(),
+                    })
                     .child(disclosure(tool.expanded)),
             )
             .when_some(details, |card, details| {

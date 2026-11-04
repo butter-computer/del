@@ -2735,6 +2735,10 @@ impl RightPanel {
                                 .id("close-file-preview")
                                 .role(gpui::Role::Button)
                                 .aria_label("Close file preview")
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Close file preview")
+                                        .build(window, cx)
+                                })
                                 .size(crate::icons::button_size())
                                 .flex_none()
                                 .flex()

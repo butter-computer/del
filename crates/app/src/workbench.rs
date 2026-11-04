@@ -344,6 +344,10 @@ impl AppShell {
             .pr(zpx(8.0))
             .child(
                 chrome_button("toggle-sidebar", "Toggle left sidebar", true)
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Toggle left sidebar (⌘B)")
+                            .build(window, cx)
+                    })
                     .when(settings, |button| button.invisible())
                     .on_click(
                         cx.listener(|this, _, _, cx| this.set_sidebar(!this.sidebar_open, cx)),
@@ -518,6 +522,14 @@ impl AppShell {
                                 },
                                 true,
                             )
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(if maximized {
+                                    "Restore panel size"
+                                } else {
+                                    "Maximize panel"
+                                })
+                                .build(window, cx)
+                            })
                             .size(zpx(24.0))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.bottom.maximized = !this.bottom.maximized;
@@ -531,6 +543,10 @@ impl AppShell {
                         )
                         .child(
                             chrome_button("bottom-close", "Close panel", true)
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Close panel (⌘J)")
+                                        .build(window, cx)
+                                })
                                 .size(zpx(24.0))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_bottom_panel(window, cx)
@@ -629,28 +645,37 @@ impl AppShell {
             )
         };
         let process_snapshot = self.processes.clone();
-        let branch = if git.current.is_empty() {
+        let branch_name: String = if git.current.is_empty() {
             "No repository".into()
         } else {
-            let changes = match git.changed_files {
-                Some(0) => String::new(),
-                Some(n) => format!(" · {n} {}", if n == 1 { "file" } else { "files" }),
-                None => " · changes unavailable".into(),
-            };
-            format!(
-                "{}{changes}{}{}",
-                git.current,
-                if git.ahead > 0 {
-                    format!(" ↑{}", git.ahead)
-                } else {
-                    String::new()
+            git.current.clone()
+        };
+        // Kept apart from the name, so a long branch truncates without hiding these.
+        let branch_meta = if git.current.is_empty() {
+            String::new()
+        } else {
+            [
+                match git.changed_files {
+                    Some(0) => String::new(),
+                    Some(n) => format!("{n} {}", if n == 1 { "file" } else { "files" }),
+                    None => "changes unavailable".into(),
                 },
-                if git.behind > 0 {
-                    format!(" ↓{}", git.behind)
-                } else {
-                    String::new()
-                }
-            )
+                (git.ahead > 0)
+                    .then(|| format!("↑{}", git.ahead))
+                    .unwrap_or_default(),
+                (git.behind > 0)
+                    .then(|| format!("↓{}", git.behind))
+                    .unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+        };
+        let branch = if branch_meta.is_empty() {
+            branch_name.clone()
+        } else {
+            format!("{branch_name} · {branch_meta}")
         };
         let branch_tooltip = format!(
             "{}\n{branch}{}",
@@ -709,25 +734,40 @@ impl AppShell {
                                     .min_w_0()
                                     .gap(zpx(6.))
                                     .items_baseline()
-                                    .child(div().min_w_0().truncate().child(branch))
+                                    .child(div().min_w_0().truncate().child(branch_name))
+                                    .when(!branch_meta.is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .whitespace_nowrap()
+                                                .child(branch_meta),
+                                        )
+                                    })
                                     .when_some(
                                         // A clean tree has nothing to report.
                                         git.changed_lines.filter(|lines| *lines != (0, 0)),
                                         |row, (added, removed)| {
-                                            row.child(
-                                                div()
-                                                    .flex_none()
-                                                    .whitespace_nowrap()
-                                                    .text_color(ActionTone::Success.foreground())
-                                                    .child(format!("+{added}")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .whitespace_nowrap()
-                                                    .text_color(ActionTone::Danger.foreground())
-                                                    .child(format!("−{removed}")),
-                                            )
+                                            // A zero side has nothing to report either.
+                                            row.when(added > 0, |row| {
+                                                row.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .whitespace_nowrap()
+                                                        .text_color(
+                                                            ActionTone::Success.foreground(),
+                                                        )
+                                                        .child(format!("+{added}")),
+                                                )
+                                            })
+                                            .when(removed > 0, |row| {
+                                                row.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .whitespace_nowrap()
+                                                        .text_color(ActionTone::Danger.foreground())
+                                                        .child(format!("−{removed}")),
+                                                )
+                                            })
                                         },
                                     ),
                             ),
