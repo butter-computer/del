@@ -1026,8 +1026,10 @@ fn user_message(
     });
     let sent_as_goal = goal || objective.is_some();
     let text = objective.unwrap_or(text);
+    // The card hugs its text, up to the column; a short prompt is not a full-width band.
     h_flex()
-        .w_full()
+        .max_w_full()
+        .self_start()
         .items_start()
         .gap_2()
         .px(zpx(TEXT_INSET))
@@ -1044,7 +1046,7 @@ fn user_message(
         })
         .child(
             v_flex()
-                .flex_1()
+                .flex_shrink_1()
                 .min_w_0()
                 .gap_1()
                 .when(!text.is_empty(), |column| {

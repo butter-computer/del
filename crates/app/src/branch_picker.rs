@@ -334,22 +334,25 @@ impl Render for BranchPanel {
                                     .flex_none()
                                     .px_2()
                                     .justify_start()
-                                    .text_size(zpx(12.))
+                                    .text_size(zpx(del_core::typography::TEXT_MD))
                                     .accessibility_label(branch.clone())
                                     .when(index == self.highlighted, |button| {
                                         button.bg(appearance::rgba(0xffffff14))
                                     })
-                                    .child(div().w(zpx(14.)).flex_none().when(checked, |slot| {
-                                        slot.child(
-                                            crate::icons::icon(IconName::Check).with_size(zpx(12.)),
-                                        )
-                                    }))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .child(crate::sidebar::fading_title(branch.clone())),
                                     )
+                                    // Trailing, so names line up with the search text.
+                                    .when(checked, |row| {
+                                        row.child(
+                                            crate::icons::icon(IconName::Check)
+                                                .with_size(zpx(12.))
+                                                .flex_none(),
+                                        )
+                                    })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(BranchChosen(Some(branch.clone())))
                                     }))

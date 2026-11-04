@@ -586,7 +586,7 @@ impl Render for CommandMenu {
                     .py_1()
                     .text_size(zpx(del_core::typography::TEXT_XS))
                     .text_color(rgba(0xffffff66))
-                    .child("↑ ↓ Navigate   ↵ Select   esc Close"),
+                    .child("↑ ↓ Navigate   ↵ Select   Esc Close"),
             )
             .into_any_element()
     }
