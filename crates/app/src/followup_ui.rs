@@ -1,10 +1,10 @@
 use crate::animated_icons::Glyph;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 use crate::{
     AppShell,
     appearance::{rgb, rgba},
-    composer_ui::QUEUE_SURFACE_RGBA,
     state::{Selection, Tab},
 };
 use del_agent::{Attachment, UserInput};
@@ -46,7 +46,9 @@ fn thumbnail(attachment: &Attachment) -> impl IntoElement {
             )
         })
         .when(!crate::attachments::is_image(attachment), |el| {
-            el.child(crate::icons::icon(IconName::File).text_color(rgba(0xffffff99)))
+            el.child(
+                crate::icons::icon(IconName::File).text_color(crate::appearance::secondary_text()),
+            )
         })
 }
 fn action(id: SharedString, label: &'static str) -> Button {
@@ -56,6 +58,7 @@ fn action(id: SharedString, label: &'static str) -> Button {
         .flex_none()
         .p_0()
         .ghost()
+        .text_color(rgba(0xffffff8c))
         .tooltip(label)
         .accessibility_label(label)
 }
@@ -239,6 +242,7 @@ impl AppShell {
                         let path = file.path.clone();
                         h_flex()
                             .id(("composer-attachment", index))
+                            .keyboard_control()
                             .role(gpui::Role::Button)
                             .aria_label(format!("Preview {}", crate::attachments::filename(file)))
                             .group(group.clone())
@@ -282,7 +286,7 @@ impl AppShell {
                                             if let Some(asset) = crate::attachments::file_mark(file)
                                             {
                                                 crate::icons::path(asset)
-                                                    .text_color(rgba(0xffffff99))
+                                                    .text_color(crate::appearance::secondary_text())
                                                     .into_any_element()
                                             } else {
                                                 crate::icons::icon(IconName::File)
@@ -306,7 +310,7 @@ impl AppShell {
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_size(zpx(11.))
+                                                .text_size(zpx(del_core::typography::TEXT_XS))
                                                 .text_color(rgba(0xffffff70))
                                                 .child(crate::attachments::file_type(file)),
                                         ),
@@ -435,15 +439,15 @@ pub(crate) fn render_queue(
     div()
         .relative()
         .w_full()
-        .px_3()
+        .px(zpx(8.))
         .child(
             v_flex()
                 .id("followup-queue")
                 .debug_selector(|| "followup-queue".into())
                 .h(zpx(height))
                 .overflow_y_scroll()
-                .rounded_t(zpx(14.))
-                .bg(rgba(QUEUE_SURFACE_RGBA))
+                .rounded_t(zpx(8.))
+                .bg(crate::appearance::queue_surface())
                 .py_1()
                 .children(items.into_iter().enumerate().map(|(index, item)| {
                     let group: SharedString = format!("followup-{}", item.id).into();
@@ -529,6 +533,7 @@ pub(crate) fn render_queue(
                                 .small()
                                 .compact()
                                 .flex_none()
+                                .text_color(rgba(0xffffff8c))
                                 .accessibility_label("Steer queued message")
                                 .on_click(move |_, _, cx| {
                                     send_chat.update(cx, |chat, cx| {
@@ -566,14 +571,14 @@ pub(crate) fn render_queue(
             queue.child(
                 div()
                     .absolute()
-                    .left(zpx(12.))
-                    .right(zpx(12.))
+                    .left(zpx(8.))
+                    .right(zpx(8.))
                     .bottom_0()
                     .h(zpx(12.))
                     .bg(linear_gradient(
                         0.,
-                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA), 0.),
-                        linear_color_stop(rgba(QUEUE_SURFACE_RGBA & 0xffffff00), 1.),
+                        linear_color_stop(crate::appearance::queue_surface(), 0.),
+                        linear_color_stop(crate::appearance::queue_surface().opacity(0.), 1.),
                     )),
             )
         })

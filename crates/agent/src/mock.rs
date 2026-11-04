@@ -4,8 +4,11 @@
 //! `error` → streaming text then a recoverable error and a failed turn;
 //! `approve` → a command tool call gated by an approval, then a file change;
 //! `tool` → a tool call with a progress update and a file change;
+//! `slow` → three tools that each run for seconds, to watch live states;
+//! `goal` → also reports an active native goal, for the goal bar;
 //! anything else → streamed text with reasoning and token usage.
 
+use crate::ModelInfo;
 use crate::backend::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -47,6 +50,7 @@ pub struct MockBackend {
     provider: Provider,
     delay: Duration,
     completion_delay: Duration,
+    models: Vec<ModelInfo>,
     #[cfg(test)]
     pub title_response: Option<String>,
     /// Provider-owned name and the sessions it was read for.
@@ -75,6 +79,7 @@ impl MockBackend {
             provider,
             delay: Duration::ZERO,
             completion_delay: Duration::ZERO,
+            models: Vec::new(),
             #[cfg(test)]
             title_response: None,
             #[cfg(test)]
@@ -88,6 +93,12 @@ impl MockBackend {
     /// Pause between scripted events; makes streaming visible in a UI.
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Optional synthetic catalog for exercising model and effort controls.
+    pub fn with_models(mut self, models: Vec<ModelInfo>) -> Self {
+        self.models = models;
         self
     }
 
@@ -117,6 +128,34 @@ impl MockBackend {
         SessionHandle::new(id, self.provider, tx)
     }
 }
+
+/// Every kind of block a reply can contain, so a UI run can show them all.
+const MARKDOWN_REPLY: &str = "Here is what I found.
+
+## Summary
+
+The composer keeps **one column** with the transcript, and `render_row` owns the inset. See [the guide](https://example.com/guide) for details.
+
+### Next steps
+
+1. Run the checks.
+2. Compare the screenshots.
+   - Dark and light
+   - A narrow window
+
+> Reasoning stays collapsed until it is opened.
+
+```rust
+fn main() {
+    println!(\"hello\");
+}
+```
+
+| Surface | State |
+| --- | --- |
+| Sidebar | Ready |
+| Composer | Ready |
+";
 
 fn emit(state: &SessionState, ev: AgentEvent) {
     let _ = state.tx.send(ev);
@@ -149,6 +188,24 @@ async fn run_turn(
             text: "Thinking it through. ".into(),
         },
     );
+    if lower.contains("slow") {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+    }
+
+    if lower.contains("goal") {
+        emit(
+            &state,
+            AgentEvent::GoalUpdated {
+                goal: Some(crate::Goal {
+                    objective: "Make every status bar popover read as a heading and rows".into(),
+                    status: crate::GoalStatus::Active,
+                    time_used_seconds: 95,
+                    tokens_used: 12_400,
+                    can_pause: true,
+                }),
+            },
+        );
+    }
 
     let stream = |text: &str| {
         let t = turn_id.clone();
@@ -260,6 +317,82 @@ async fn run_turn(
                 full.push_str("Understood, I left it alone.");
             }
         }
+    } else if lower.contains("markdown") {
+        full.push_str(MARKDOWN_REPLY);
+    } else if lower.contains("slow") {
+        // Long enough to watch: live shimmering group headers while tools run.
+        for (n, (name, input)) in [
+            ("read_file", "src/main.rs"),
+            ("shell", "cargo test --workspace"),
+            ("shell", "git status --short"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call-{turn_id}-{n}");
+            emit(
+                &state,
+                AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.into(),
+                    input_summary: input.into(),
+                },
+            );
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            emit(
+                &state,
+                AgentEvent::ToolCallFinished {
+                    id,
+                    status: ToolStatus::Completed,
+                    output_summary: "done".into(),
+                },
+            );
+        }
+        full.push_str("All three steps finished.");
+    } else if lower.contains("group") {
+        for (n, (name, input, status, output)) in [
+            (
+                "read_file",
+                "src/main.rs",
+                ToolStatus::Completed,
+                "42 lines read",
+            ),
+            (
+                "shell",
+                "cargo test --workspace",
+                ToolStatus::Failed,
+                "2 tests failed",
+            ),
+            (
+                "shell",
+                "git status --short",
+                ToolStatus::Completed,
+                "M src/main.rs",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call-{turn_id}-{n}");
+            pause().await;
+            emit(
+                &state,
+                AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.into(),
+                    input_summary: input.into(),
+                },
+            );
+            emit(
+                &state,
+                AgentEvent::ToolCallFinished {
+                    id,
+                    status,
+                    output_summary: output.into(),
+                },
+            );
+        }
+        full.push_str("Two tests fail on main.");
     } else if lower.contains("tool") {
         let id = format!("call-{turn_id}");
         pause().await;
@@ -403,6 +536,13 @@ impl AgentBackend for MockBackend {
             .unwrap()
             .push(session.clone());
         Ok(self.session_title.clone())
+    }
+
+    async fn list_models(&self, _cwd: &std::path::Path) -> Result<Vec<ModelInfo>> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(self.models.clone())
     }
 
     async fn start_session(&self, _config: SessionConfig) -> Result<SessionHandle> {

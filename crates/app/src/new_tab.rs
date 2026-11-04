@@ -1,6 +1,7 @@
 //! Shared new-tab content for session tabs and the right sidebar.
 use crate::animated_icons::Glyph;
 use crate::appearance::rgba;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::right_panel::Pane;
 use crate::zoom::px as zpx;
 use gpui_kit::component::input::{Input, InputState};
@@ -10,25 +11,32 @@ use gpui_kit::*;
 
 pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
     h_flex()
-        .h(zpx(48.))
+        .h(zpx(44.))
         .flex_none()
         .px_3()
         .gap_3()
         .child(
             h_flex()
-                .gap_3()
+                .gap_2()
                 .text_color(rgba(0xffffff35))
-                .child("←")
-                .child("→")
-                .child("↻"),
+                .child(
+                    crate::icons::icon(IconName::ArrowLeft).with_size(zpx(crate::icons::MARK_SIZE)),
+                )
+                .child(
+                    crate::icons::icon(IconName::ArrowRight)
+                        .with_size(zpx(crate::icons::MARK_SIZE)),
+                )
+                .child(
+                    crate::icons::path("icons/reload.svg").with_size(zpx(crate::icons::MARK_SIZE)),
+                ),
         )
         .child(
             h_flex()
                 .flex_1()
                 .min_w_0()
-                .px_3()
-                .h(zpx(32.))
-                .rounded_full()
+                .px_2()
+                .h(zpx(28.))
+                .rounded(zpx(8.))
                 .bg(rgba(0xffffff14))
                 .child(
                     Input::new(address)
@@ -52,6 +60,7 @@ pub fn tools<T: 'static>(
     let tool = |pane: Pane, label: &'static str, cx: &mut Context<T>| {
         let row = h_flex()
             .id(label)
+            .keyboard_control()
             .debug_selector(move || label.into())
             .role(gpui::Role::Button)
             .aria_label(format!("Open {label}"))
@@ -81,10 +90,10 @@ pub fn tools<T: 'static>(
             .child(
                 div()
                     .flex_none()
-                    .rounded_full()
+                    .rounded(zpx(4.))
                     .px_1p5()
                     .text_size(zpx(12.))
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .bg(rgba(0xffffff08))
                     .child(match pane {
                         Pane::Changes => "⌃⇧G",
@@ -119,7 +128,7 @@ pub fn tools<T: 'static>(
                         .max_w(zpx(320.))
                         .flex_none()
                         .gap_2()
-                        .text_size(zpx(14.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .child(changes)
                         .child(terminal)
                         .child(files)

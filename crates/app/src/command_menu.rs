@@ -451,14 +451,14 @@ impl CommandMenu {
                             )
                             .child(
                                 div()
-                                    .text_size(zpx(10.))
+                                    .text_size(zpx(del_core::typography::TEXT_XS))
                                     .text_color(rgba(0xffffff66))
                                     .child(command.source.clone()),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(zpx(11.))
+                            .text_size(zpx(del_core::typography::TEXT_XS))
                             .text_color(rgba(0xffffff88))
                             .truncate()
                             .child(command.description.clone()),
@@ -584,9 +584,9 @@ impl Render for CommandMenu {
                     .justify_end()
                     .px_2()
                     .py_1()
-                    .text_size(zpx(10.))
+                    .text_size(zpx(del_core::typography::TEXT_XS))
                     .text_color(rgba(0xffffff66))
-                    .child("↑ ↓ Navigate   ↵ Select   esc Close"),
+                    .child("↑ ↓ Navigate   ↵ Select   Esc Close"),
             )
             .into_any_element()
     }

@@ -165,8 +165,15 @@ separate data directory so test conversations cannot mix with normal history:
 DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 ```
 
-Mock replies, tool activity, and approvals are simulations; mock providers have
-no model catalog. Do not use mock mode when testing real provider behavior.
+Mock replies, tool activity, and approvals are simulations. The default mock has
+no model catalog. Add `DEL_MOCK_MODELS=1` for twelve clearly labeled synthetic
+models with effort and Fast controls, and `DEL_MOCK_DELAY_MS=350` to inspect
+streaming, loading, and queued follow-ups at a human pace. A prompt's wording
+picks the scenario: `tool`, `approve`, `error`, `group` (several tools, one failing),
+`slow` (tools that each run for seconds), `goal` (an active native goal) and
+`markdown` (every kind of reply block); anything else streams plain text. With the
+mock backend, `DEL_REDUCE_MOTION=1` turns on Reduce Motion without changing the
+system setting. Do not use mock mode when testing real provider behavior.
 
 ### macOS signing and permissions
 
@@ -221,7 +228,8 @@ The sidebar has **Pinned** (hidden when empty) and the **active Space name** (fo
 are persistent collections of projects, with independent pinned chats and tab decks.
 Existing projects and pins start in **Default**. The Space switcher at the top of
 the sidebar lists your Spaces and offers **Create Space** and **Rename Space**,
-each with an icon. Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
+each with an icon. Create and Save stay disabled while a Space name is empty.
+Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
 horizontally with two fingers over the left sidebar, or pick one from the Space
 switcher or the Space dots, to switch Spaces. Swipes slide both lists
@@ -379,7 +387,7 @@ filter by itself to list its sessions. Tab shortcut badges stay hidden while
 the palette is open. The palette is centered over the conversation pane and
 stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
 entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
-shows and dismisses it immediately. Clicking outside also dismisses the palette.
+shows and dismisses it immediately. Its blur and dim fade with the panel, and Settings leaves the same way. Clicking outside also dismisses the palette.
 Inserted skill tokens use blue text and icons. Command suggestions show
 navigation hints without argument-placeholder text.
 The search footer places navigation, open, and close hints on the left and **/c /t Filter**
@@ -448,6 +456,11 @@ conversation. Unloading a running session also stops its current work.
   tick is highlighted. Moving onto a different tick emits native haptic feedback
   on supported macOS hardware. Ticks use compact 10 px spacing, with 6 px idle
   bars that grow to at most 18 px on hover.
+- The transcript and composer share one column and one text edge; the message rail
+  overlays the margin rather than taking width from them. Messages and the composer
+  input use 14 pt reading text and chrome uses 13 pt. Diffs, tool output and code blocks
+  share one surface below the page. A failed turn reports once in the transcript, with its
+  error beside it, and a clean branch shows no line counts in the status bar.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
@@ -478,6 +491,13 @@ conversation. Unloading a running session also stops its current work.
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
   the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
   again restarts that confirmation.
+- Tab reaches disclosure rows, Copy, title-bar buttons, project-row actions and
+  file actions, with a ring for keyboard focus only; Enter or Space activates them. Clicking one
+  leaves focus in the composer. Session rows, tabs and their hover actions are Tab stops too: focus reveals
+  the actions and scrolls the row or tab into view. Enter on a Browser tab moves to its address field; Esc or
+  Tab returns to the app.
+- Fenced code blocks show their language and a Copy button in the corner, with the same
+  1.5 second checkmark as a reply's Copy.
 - Codex file citations render as clickable filenames in live and saved replies,
   including Side chats. Code examples remain literal.
 - Local file links in replies open in Del’s file viewer; relative links resolve
@@ -551,6 +571,9 @@ The picker uses provider-advertised choices, not a hardcoded list of model names
 All visible catalog entries remain accessible in a bounded scrolling list, without
 a scrollbar; the bottom fades while more entries are below. Refresh retries
 catalog discovery. Availability depends on the installed CLI, agent, and account.
+Empty, loading, and failed catalogs keep a visible status below the model choices;
+the list cannot clip the explanation or the Refresh control. Model names align
+across selected and unselected rows.
 The picker opens with a **Search models…** field. It fuzzy-filters names and
 provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
 choices. Opening the picker again starts with an empty search. Use **↑/↓** to
@@ -571,7 +594,9 @@ advertised effort levels, and the accent follows the selected provider (includin
 Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning controls to move one
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
-The model pill immediately shows the effective effort, including the catalog
+Long model names truncate within the picker and composer so effort and send
+controls remain reachable in narrow panes. The model pill immediately shows
+the effective effort, including the catalog
 default before any adjustment. Claude model-specific settings and Codex configured
 reasoning effort are resolved before opening the picker. Providers that advertise
 effort choices without a default show **Auto effort** until one is chosen. Side chat
@@ -928,9 +953,13 @@ and MCP configuration are kept separate from saved launch history. See
 ### Browser
 
 On macOS 14 or later, the Browser pane embeds WebKit with an address field,
-back/forward navigation, and reload/stop. Each page has its own Browser tab in
-the session or sidebar row—there is no nested browser tab strip. Use **+** and
+back/forward navigation, and reload/stop. Its toolbar, address field, empty state,
+and rounded page corners follow Del's selected theme and zoom; websites retain
+their own colors. Each page has its own Browser tab in the sidebar row—there is
+no nested browser tab strip. Use **+** and
 enter a URL to open another page; closing or moving a tab affects only that page.
+Native browser content temporarily yields to dialogs and popups so it cannot
+cover their controls; the page stays loaded behind them.
 Existing saved browser groups restore as separate tabs, keeping their profiles
 and page IDs. Agent-created pages also appear as individual sidebar tabs. HTTP(S) and localhost
 pages open inside Del. Browser zoom follows the app's zoom setting. The sidebar
@@ -1049,6 +1078,12 @@ easing. Reduce Motion keeps these transitions instant.
 
 Del opens as a centered window at roughly 70% of the available display width and
 76% of its height, with a minimum size of **960 × 640 logical pixels**.
+
+Conversation prose and the input use a 14 px reading size, with 13 px controls and
+12 px secondary labels. In a narrow new-session pane, folder and branch controls
+show their icons, with full names in tooltips, so New worktree and Chat/Terminal
+remain on the same row. Secondary labels and diff colors use theme-aware ink in
+both light and dark modes.
 
 Zoom scales the shell, chat, controls, file panels, and embedded terminal together
 in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to the

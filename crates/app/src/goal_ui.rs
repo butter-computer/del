@@ -37,7 +37,7 @@ impl AppShell {
         let placeholder = if self.goal_modes.contains_key(&self.composer_owner(cx)) {
             "Describe your goal, define measurable outcomes for best results"
         } else {
-            "Ask anything..."
+            "Ask anything…"
         };
         self.composer.update(cx, |input, cx| {
             input.set_placeholder(placeholder, window, cx)
@@ -117,7 +117,7 @@ impl AppShell {
                     .when(goal.time_used_seconds > 0, |row| {
                         row.child(
                             div()
-                                .text_size(zpx(11.))
+                                .text_size(zpx(del_core::typography::TEXT_XS))
                                 .text_color(rgba(0xffffff77))
                                 .child(format!("{}s", goal.time_used_seconds)),
                         )
@@ -199,7 +199,7 @@ impl AppShell {
                         .when(goal.tokens_used > 0, |column| {
                             column.child(
                                 div()
-                                    .text_size(zpx(11.))
+                                    .text_size(zpx(del_core::typography::TEXT_XS))
                                     .text_color(rgba(0xffffff88))
                                     .child(format!("{} tokens used", goal.tokens_used)),
                             )

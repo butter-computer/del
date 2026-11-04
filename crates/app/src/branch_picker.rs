@@ -16,8 +16,15 @@ pub struct BranchPicker {
     open: bool,
     root: Option<PathBuf>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    compact: bool,
 }
 impl BranchPicker {
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact != compact {
+            self.compact = compact;
+            cx.notify();
+        }
+    }
     pub fn close_picker(&mut self, cx: &mut Context<Self>) {
         if self.open {
             self.open = false;
@@ -90,6 +97,7 @@ impl BranchPicker {
         })
         .detach();
         Self {
+            compact: false,
             state,
             panel,
             open: false,
@@ -107,7 +115,9 @@ impl Render for BranchPicker {
         let disabled = state.is_starting();
         let panel = self.panel.clone();
         let bounds = self.bounds.clone();
+        let compact = self.compact;
         div()
+            .min_w_0()
             .on_children_prepainted(move |rects, _, _| {
                 if let Some(rect) = rects.first() {
                     bounds.set(*rect);
@@ -124,12 +134,13 @@ impl Render for BranchPicker {
                             .ghost()
                             .disabled(disabled)
                             .h(zpx(24.))
-                            .px_2()
+                            .px(if compact { zpx(4.) } else { zpx(8.) })
                             .min_w_0()
                             .max_w(zpx(180.))
                             .text_size(zpx(12.))
+                            .text_color(appearance::secondary_text())
                             .tooltip_with_action(
-                                "Select starting branch",
+                                format!("Select starting branch: {selected}"),
                                 &crate::SelectBranch,
                                 None,
                             )
@@ -141,9 +152,12 @@ impl Render for BranchPicker {
                                     .gap_1()
                                     .child(
                                         crate::icons::path("icons/git-branch.svg")
+                                            .with_size(zpx(crate::icons::MARK_SIZE))
                                             .text_color(appearance::rgba(0xffffff8c)),
                                     )
-                                    .child(div().min_w_0().truncate().child(selected)),
+                                    .when(!compact, |row| {
+                                        row.child(div().min_w_0().truncate().child(selected))
+                                    }),
                             ),
                     )
                     .on_open_change(cx.listener(|this, open: &bool, window, cx| {
@@ -320,22 +334,25 @@ impl Render for BranchPanel {
                                     .flex_none()
                                     .px_2()
                                     .justify_start()
-                                    .text_size(zpx(12.))
+                                    .text_size(zpx(del_core::typography::TEXT_MD))
                                     .accessibility_label(branch.clone())
                                     .when(index == self.highlighted, |button| {
                                         button.bg(appearance::rgba(0xffffff14))
                                     })
-                                    .child(div().w(zpx(14.)).flex_none().when(checked, |slot| {
-                                        slot.child(
-                                            crate::icons::icon(IconName::Check).with_size(zpx(12.)),
-                                        )
-                                    }))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .child(crate::sidebar::fading_title(branch.clone())),
                                     )
+                                    // Trailing, so names line up with the search text.
+                                    .when(checked, |row| {
+                                        row.child(
+                                            crate::icons::icon(IconName::Check)
+                                                .with_size(zpx(12.))
+                                                .flex_none(),
+                                        )
+                                    })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(BranchChosen(Some(branch.clone())))
                                     }))

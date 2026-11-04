@@ -30,7 +30,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Sessions and tabs",
         &[
             ("New session", "⌘N"),
-            ("New right-sidebar tab", "⌘T / ⌃T"),
+            ("New tab in the focused zone", "⌘T / ⌃T"),
             ("Close active tab in the focused zone", "⌘W"),
             ("Close active right-sidebar tab", "⌘⇧W"),
             ("Select top-level session by position", "⌘1–9"),
@@ -129,7 +129,7 @@ pub fn render() -> impl IntoElement {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(zpx(14.))
+                        .text_size(zpx(13.))
                         .font_weight(FontWeight::MEDIUM)
                         .child(*title),
                 )
@@ -144,7 +144,7 @@ pub fn render() -> impl IntoElement {
                                 .w_full()
                                 .min_w_0()
                                 .px_3()
-                                .py_2()
+                                .py(zpx(6.))
                                 .gap_3()
                                 .items_center()
                                 .child(
@@ -158,10 +158,10 @@ pub fn render() -> impl IntoElement {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .rounded_md()
-                                        .px_2()
-                                        .py_1()
-                                        .bg(rgba(0xffffff08))
+                                        .rounded(zpx(4.))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .bg(rgba(0xffffff0d))
                                         .text_size(zpx(12.))
                                         .text_color(rgba(0xffffffb3))
                                         .child(*shortcut),

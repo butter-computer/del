@@ -47,8 +47,8 @@ fn usage_bar(remaining: Option<f64>) -> impl IntoElement {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(zpx(11.))
-                        .text_color(rgba(0xffffff80))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!("{remaining:.0}% left")),
                 )
         }))
@@ -61,6 +61,7 @@ fn provider_row(
     cx: &App,
 ) -> impl IntoElement {
     let s = state.read(cx);
+    let reduced = cx.reduce_motion();
     let checking = s.checking.contains(&provider) || status.is_none();
     let signing_in = s.signin == Some(provider);
     let can_sign_in = provider != Provider::Acp
@@ -76,20 +77,23 @@ fn provider_row(
         status.map(providers::summary).unwrap_or("Checking…")
     };
     let status_color = if status.is_some_and(providers::ready) {
-        0x4cc38a
+        crate::appearance::ActionTone::Success.foreground()
     } else {
-        0x99999f
+        crate::appearance::secondary_text()
     };
     h_flex()
         .id(SharedString::from(format!("provider-{name}")))
+        .debug_selector(move || format!("provider-{name}"))
         .w_full()
-        .min_h(zpx(58.))
+        .min_h(zpx(48.))
         .px_3()
-        .gap_3()
+        .gap_2()
         .items_center()
-        .rounded(zpx(14.))
-        .bg(crate::appearance::composer_surface())
-        .child(crate::icons::path(logo).text_color(rgb(color)))
+        .child(
+            crate::icons::path(logo)
+                .with_size(zpx(crate::icons::MARK_SIZE))
+                .text_color(rgb(color)),
+        )
         .child(
             div()
                 .text_size(zpx(TEXT_MD))
@@ -102,7 +106,7 @@ fn provider_row(
                 .flex_1()
                 .min_w_0()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgb(status_color))
+                .text_color(status_color)
                 .when(checking, |el| {
                     el.child(
                         div()
@@ -124,7 +128,14 @@ fn provider_row(
                                         "provider-shimmer",
                                         Animation::new(std::time::Duration::from_millis(1100))
                                             .repeat(),
-                                        |strip, t| strip.left(zpx(-30. + 124. * t)),
+                                        move |strip, t| {
+                                            // Reduce Motion keeps a static placeholder.
+                                            strip.left(zpx(if reduced {
+                                                0.
+                                            } else {
+                                                -30. + 124. * t
+                                            }))
+                                        },
                                     ),
                             ),
                     )
@@ -154,9 +165,6 @@ fn provider_row(
                     row.child(
                         Button::new("sign-in")
                             .small()
-                            .h(zpx(28.))
-                            .px_3()
-                            .rounded_full()
                             .primary()
                             .label(if signing_in {
                                 "Signing in…"
@@ -172,9 +180,10 @@ fn provider_row(
                 })
                 .child(
                     Button::new("recheck")
+                        .ghost()
                         .size(crate::icons::button_size())
                         .p_0()
-                        .rounded_full()
+                        .text_color(rgba(0xffffff8c))
                         .child(if checking {
                             crate::icons::spinner().into_any_element()
                         } else {
@@ -210,18 +219,26 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                         .px_2()
                         .pb_2()
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff80))
+                        .text_color(crate::appearance::secondary_text())
                         .child("Settings"),
                 )
                 .children(
                     [
-                        ("Appearance", SettingsSection::Appearance, IconName::Palette),
+                        (
+                            "Appearance",
+                            SettingsSection::Appearance,
+                            crate::icons::icon(IconName::Palette),
+                        ),
                         (
                             "Providers",
                             SettingsSection::Providers,
-                            IconName::CircleUser,
+                            crate::icons::icon(IconName::CircleUser),
                         ),
-                        ("Keybinds", SettingsSection::Keybinds, IconName::Settings),
+                        (
+                            "Keybinds",
+                            SettingsSection::Keybinds,
+                            crate::icons::path("icons/keyboard.svg"),
+                        ),
                     ]
                     .into_iter()
                     .map(|(label, category, icon)| {
@@ -229,14 +246,14 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                         Button::new(label)
                             .ghost()
                             .w_full()
-                            .h(zpx(34.))
+                            .h(zpx(30.))
                             .px_2()
                             .child(
                                 h_flex()
                                     .w_full()
                                     .items_center()
                                     .gap_2()
-                                    .child(crate::icons::icon(icon))
+                                    .child(icon)
                                     .child(label),
                             )
                             .selected(section == category)
@@ -273,9 +290,9 @@ fn appearance_controls() -> impl IntoElement {
     let animated = appearance::background() != appearance::BackgroundAnimation::Off;
     v_flex()
         .w_full()
-        .gap_4()
+        .gap_3()
         .p_4()
-        .rounded(zpx(14.))
+        .rounded(zpx(10.))
         .bg(appearance::composer_surface())
         .child(
             h_flex()
@@ -287,13 +304,7 @@ fn appearance_controls() -> impl IntoElement {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(div().child("Color mode"))
-                        .child(
-                            div()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(appearance::secondary_text())
-                                .child("Every theme comes in light and dark."),
-                        ),
+                        .child(div().child("Color mode")),
                 )
                 .children(
                     [("Light", true), ("Dark", false)]
@@ -303,6 +314,9 @@ fn appearance_controls() -> impl IntoElement {
                                 .ghost()
                                 .small()
                                 .label(label)
+                                .when(light != mode, |button| {
+                                    button.text_color(appearance::secondary_text())
+                                })
                                 .when(light == mode, |button| button.bg(rgba(0xffffff20)))
                                 .on_click(move |_, _, cx| appearance::set(mode, cx))
                         }),
@@ -338,7 +352,11 @@ fn appearance_controls() -> impl IntoElement {
                                 .items_center()
                                 .child(theme_swatches(theme, light))
                                 .child(theme.name())
-                                .child(crate::icons::icon(IconName::ChevronDown)),
+                                .child(
+                                    crate::icons::icon(IconName::ChevronDown)
+                                        .with_size(zpx(11.))
+                                        .text_color(crate::appearance::secondary_text()),
+                                ),
                         )
                         .dropdown_menu(move |menu, _, _| {
                             ThemePreset::ALL.into_iter().fold(
@@ -387,7 +405,11 @@ fn appearance_controls() -> impl IntoElement {
                                 .gap_2()
                                 .items_center()
                                 .child(appearance::background().name())
-                                .child(crate::icons::icon(IconName::ChevronDown)),
+                                .child(
+                                    crate::icons::icon(IconName::ChevronDown)
+                                        .with_size(zpx(11.))
+                                        .text_color(crate::appearance::secondary_text()),
+                                ),
                         )
                         .dropdown_menu(|menu, _, _| {
                             appearance::BackgroundAnimation::ALL.into_iter().fold(
@@ -436,21 +458,25 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let section = s.settings_section;
     let preferences = section == SettingsSection::Appearance;
     let back = state.clone();
-    v_flex().id("settings").size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
+    let scroll = s.settings_scroll.clone();
+    let fades =
+        crate::tab_transfer::vertical_edge_fades(&scroll, crate::appearance::popup_surface());
+    div().relative().size_full().min_w_0().overflow_hidden()
+        .child(v_flex().id("settings").track_scroll(&scroll).size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
         .child(h_flex().w_full().items_center().justify_between().gap_4()
-            .child(div().text_size(zpx(24.)).font_weight(FontWeight::MEDIUM)
+            .child(div().text_size(zpx(del_core::typography::TEXT_XL)).font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
-            .child(Button::new("settings-done").ghost().small().label("Done")
+            .child(Button::new("settings-done").ghost().small().bg(rgba(crate::appearance::QUIET_FILL)).label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
-        .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_4()
+        .child(v_flex().w_full().min_w_0().max_w(zpx(640.)).gap_3()
             .when(preferences, |content| content.child(appearance_controls()))
             .when(preferences, |content| {
                 let state = state.clone();
                 content.child(h_flex().w_full().p_4().gap_4().items_center()
                     .child(v_flex().flex_1().min_w_0().gap_1()
                         .child(div().child("Global session tabs"))
-                        .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c)).child("Keep the same top tabs when switching Spaces.")))
+                        .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text()).child("Keep the same top tabs when switching Spaces.")))
                     .child(gpui_kit::component::switch::Switch::new("global-space-tabs")
                         .checked(s.spaces.global_tabs).accessibility_label("Global session tabs")
                         .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_global_space_tabs(*checked, cx)))))
@@ -458,13 +484,14 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
             .when(section == SettingsSection::Providers, |content| content
                 .children(providers::VISIBLE.into_iter().map(|provider| {
-                    v_flex().gap_1().child(provider_row(provider, s.status_of(provider), state, cx))
-                        .when(provider != Provider::Acp, |rows| rows.child(
-                            h_flex().pl(zpx(38.)).pr_3().py_2().gap_2().items_center()
+                    v_flex().rounded(zpx(10.)).bg(crate::appearance::composer_surface()).pb_1()
+                        .child(provider_row(provider, s.status_of(provider), state, cx))
+                        .when(provider != Provider::Acp, |rows| rows.child(div().h(zpx(1.)).mx_3().mb_1().bg(crate::appearance::separator())).child(
+                            h_flex().pl(zpx(30.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
-                                            .when(s.default_account(provider).is_none(), |label| label.text_color(rgb(0x4cc38a)))
+                                            .when(s.default_account(provider).is_none(), |label| label.text_color(crate::appearance::ActionTone::Success.foreground()))
                                             .child(s.default_account_label(provider))))
                                     .child(usage_bar(s.account_usage_remaining(provider, None))))
                                 .when(s.default_account(provider).is_some(), |row| {
@@ -481,11 +508,11 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             let remove_id = id.clone();
                             let default_id = id.clone();
                             let needs_login = s.account_needs_login(&id);
-                            h_flex().pl(zpx(38.)).pr_3().py_2().gap_2().items_center()
+                            h_flex().pl(zpx(30.)).pr_3().py_1p5().gap_2().items_center()
                                 .child(v_flex().flex_1().min_w_0().gap_1()
                                     .child(h_flex().gap_2().items_center()
                                         .child(div().min_w_0().truncate().text_size(zpx(TEXT_SM))
-                                            .when(account.is_default, |label| label.text_color(rgb(0x4cc38a)))
+                                            .when(account.is_default, |label| label.text_color(crate::appearance::ActionTone::Success.foreground()))
                                             .child(account.display())))
                                     .child(usage_bar(s.account_usage_remaining(provider, Some(&id)))))
                                 .when(needs_login, |row| row.child(Button::new(SharedString::from(format!("account-login-{id}"))).ghost().small().label("Sign in")
@@ -501,6 +528,118 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     .on_click(move |_, _, cx| remove.update(cx, |s, cx| s.delete_account(&remove_id, cx))))
                         }))
                 }))
-                .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c))
-                    .child("Sign in opens your provider’s login in Terminal. Status updates automatically."))))
+                .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
+                    .child("Sign in opens your provider’s login in Terminal. Status updates automatically.")))))
+        .children(fades)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    struct Fixture(Entity<AppState>);
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(zpx(570.)).h(zpx(420.)).child(render(&self.0, cx))
+        }
+    }
+
+    #[::gpui::test]
+    fn provider_settings_keep_controls_inside_the_modal_with_long_account_names(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |state, _| {
+            state.settings_section = SettingsSection::Providers;
+            state.providers = providers::VISIBLE
+                .into_iter()
+                .map(|provider| del_agent::ProviderStatus {
+                    provider,
+                    installed: true,
+                    login: LoginState::LoggedIn,
+                    path: None,
+                    version: None,
+                })
+                .collect();
+            for provider in providers::VISIBLE {
+                state.default_identities.insert(
+                    provider,
+                    format!("{}@example.test", "long-account-".repeat(20)),
+                );
+            }
+        });
+        let (_root, cx) = cx.add_window_view(|_, _| Fixture(state));
+        cx.run_until_parked();
+        for selector in ["provider-Codex", "provider-Claude", "provider-OpenCode"] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.left() >= zpx(0.));
+            assert!(bounds.right() <= zpx(570.));
+            assert!(bounds.size.height >= zpx(48.));
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_scroll_tests {
+    use ::core::prelude::v1::test;
+    use ::gpui::{
+        AppContext as _, Context, InteractiveElement, IntoElement, Modifiers, ParentElement,
+        Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement, Styled,
+        Window, div, point, px,
+    };
+
+    struct Fixture;
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// A Settings page is taller than its dialog, so the wheel must reach its own scroller.
+    #[::gpui::test]
+    fn a_long_settings_page_scrolls_inside_its_dialog(cx: &mut ::gpui::TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| Fixture);
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let scroll = ScrollHandle::new();
+        let page = scroll.clone();
+        cx.update(|window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                dialog.p_0().close_button(false).child(
+                    div()
+                        .h(px(300.))
+                        .w_full()
+                        .debug_selector(|| "page".into())
+                        .child(
+                            div()
+                                .id("settings")
+                                .track_scroll(&page)
+                                .size_full()
+                                .overflow_y_scroll()
+                                .child(div().h(px(2000.)).w_full()),
+                        ),
+                )
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("page").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_event(ScrollWheelEvent {
+            position: target,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert_eq!(scroll.offset().y, px(-200.));
+    }
 }

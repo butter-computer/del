@@ -21,6 +21,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const ACTION_HEIGHT: f32 = 32.;
+const RESULT_HEIGHT: f32 = 44.;
+const SECTION_HEIGHT: f32 = 26.;
+
 pub struct Palette {
     input: Entity<InputState>,
     documents: Vec<Arc<search::Document>>,
@@ -44,6 +48,9 @@ enum PaletteAction {
     Files,
     Terminal,
 }
+/// Action icons and provider marks share one column, so their labels line up.
+const PALETTE_MARK_WIDTH: f32 = 16.;
+
 impl PaletteAction {
     const ALL: [Self; 4] = [
         Self::NewConversation,
@@ -54,8 +61,8 @@ impl PaletteAction {
 
     fn label(self) -> &'static str {
         match self {
-            Self::NewConversation => "New conversation",
-            Self::Settings => "Open Settings",
+            Self::NewConversation => "New session",
+            Self::Settings => "Open settings",
             Self::Files => "Toggle files",
             Self::Terminal => "Open terminal",
         }
@@ -233,8 +240,9 @@ impl Palette {
     fn layout_height(&self, window: &Window, cx: &App) -> (Pixels, Pixels) {
         let actions = self.actions(cx).len();
         let groups = usize::from(actions > 0) + usize::from(!self.hits.is_empty());
-        let content =
-            zpx(30. * actions as f32 + 36. * self.hits.len() as f32 + 22. * groups as f32);
+        let content = zpx(ACTION_HEIGHT * actions as f32
+            + RESULT_HEIGHT * self.hits.len() as f32
+            + SECTION_HEIGHT * groups as f32);
         let extra = zpx(if self.hits.is_empty() { 24. } else { 0. }
             + if self.errors.is_empty() { 0. } else { 20. });
         let chrome = zpx(42. + 30. + 4.) + extra;
@@ -249,7 +257,7 @@ impl Palette {
             .role(Role::Button)
             .aria_label(action.label())
             .w_full()
-            .h(zpx(30.))
+            .h(zpx(ACTION_HEIGHT))
             .px(zpx(8.))
             .gap(zpx(8.))
             .items_center()
@@ -270,9 +278,11 @@ impl Palette {
                 this.open(cx);
             }))
             .child(
-                div()
+                h_flex()
+                    .w(zpx(PALETTE_MARK_WIDTH))
                     .flex_none()
-                    .text_color(rgba(0xffffff80))
+                    .justify_center()
+                    .text_color(crate::appearance::secondary_text())
                     .child(crate::icons::path(action.icon())),
             )
             .child(
@@ -280,7 +290,7 @@ impl Palette {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(zpx(12.))
+                    .text_size(zpx(del_core::typography::TEXT_MD))
                     .child(action.label()),
             )
             .child(key_badge(action.shortcut()))
@@ -392,7 +402,7 @@ impl Palette {
                 source.title, source.project_name, hit.snippet
             ))
             .px(zpx(8.))
-            .h(zpx(36.))
+            .h(zpx(RESULT_HEIGHT))
             .gap(zpx(8.))
             .items_center()
             .overflow_hidden()
@@ -412,23 +422,28 @@ impl Palette {
                 this.selected = this.actions(cx).len() + ix;
                 this.open(cx);
             }))
-            .child(div().flex_none().text_color(rgba(0xffffff80)).child(
-                if matches!(source.tab, Tab::Terminal(_)) {
-                    crate::mode_ui::terminal_mark(source.provider)
-                } else {
-                    match source.provider {
-                        Some(provider) => {
-                            crate::composer_ui::provider_logo(provider).into_any_element()
+            .child(
+                h_flex()
+                    .w(zpx(PALETTE_MARK_WIDTH))
+                    .flex_none()
+                    .justify_center()
+                    .text_color(crate::appearance::secondary_text())
+                    .child(if matches!(source.tab, Tab::Terminal(_)) {
+                        crate::mode_ui::terminal_mark(source.provider)
+                    } else {
+                        match source.provider {
+                            Some(provider) => {
+                                crate::composer_ui::provider_logo(provider).into_any_element()
+                            }
+                            None => crate::icons::path("icons/file-text.svg").into_any_element(),
                         }
-                        None => crate::icons::path("icons/file-text.svg").into_any_element(),
-                    }
-                },
-            ))
+                    }),
+            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(zpx(0.))
+                    .gap(zpx(2.))
                     .child(
                         h_flex()
                             .min_w_0()
@@ -439,7 +454,7 @@ impl Palette {
                                     .flex_shrink_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(zpx(12.))
+                                    .text_size(zpx(del_core::typography::TEXT_MD))
                                     .text_color(rgb(0xeeeeef))
                                     .child(source.title.clone()),
                             )
@@ -449,8 +464,8 @@ impl Palette {
                                         .flex_none()
                                         .max_w(zpx(120.))
                                         .gap(zpx(4.))
-                                        .text_size(zpx(11.))
-                                        .text_color(rgba(0xffffff88))
+                                        .text_size(zpx(del_core::typography::TEXT_XS))
+                                        .text_color(crate::appearance::secondary_text())
                                         .child(
                                             div()
                                                 .min_w_0()
@@ -465,8 +480,8 @@ impl Palette {
                             .min_w_0()
                             .gap(zpx(4.))
                             .text_size(zpx(12.))
-                            .line_height(relative(1.15))
-                            .text_color(rgba(0xffffff88))
+                            .line_height(relative(1.3))
+                            .text_color(crate::appearance::secondary_text())
                             .child(div().min_w_0().truncate().child(preview)),
                     ),
             )
@@ -474,8 +489,8 @@ impl Palette {
                 row.child(
                     div()
                         .flex_none()
-                        .text_size(zpx(10.))
-                        .text_color(rgba(0xffffff70))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
+                        .text_color(crate::appearance::secondary_text())
                         .child("Archived"),
                 )
             })
@@ -495,9 +510,10 @@ impl Render for Palette {
         let empty = self.input.read(cx).value().trim().is_empty();
         let actions = self.actions(cx).len();
         let (results_height, panel_height) = self.layout_height(window, cx);
-        let content_height = 30. * actions as f32
-            + 36. * self.hits.len() as f32
-            + 22. * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
+        let content_height = ACTION_HEIGHT * actions as f32
+            + RESULT_HEIGHT * self.hits.len() as f32
+            + SECTION_HEIGHT
+                * (usize::from(actions > 0) + usize::from(!self.hits.is_empty())) as f32;
         v_flex()
             .id("conversation-search")
             .rounded(zpx(11.))
@@ -543,7 +559,7 @@ impl Render for Palette {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgba(0xffffff70))
+                            .text_color(crate::appearance::secondary_text())
                             .child(crate::icons::icon(IconName::Search)),
                     )
                     .child(
@@ -562,6 +578,7 @@ impl Render for Palette {
                 v_flex()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
                     .px(zpx(4.))
                     .pb(zpx(4.))
@@ -573,6 +590,10 @@ impl Render for Palette {
                             .h(results_height)
                             .w_full(),
                         )
+                        .children(crate::tab_transfer::list_edge_fades(
+                            &self.scroll,
+                            crate::appearance::popup_surface(),
+                        ))
                     })
                     .when(self.hits.is_empty(), |body| {
                         body.child(
@@ -582,7 +603,7 @@ impl Render for Palette {
                                 .flex()
                                 .items_center()
                                 .text_size(zpx(12.))
-                                .text_color(rgba(0xffffff70))
+                                .text_color(crate::appearance::secondary_text())
                                 .child(if self.loading {
                                     if empty {
                                         "Loading recent conversations…"
@@ -604,7 +625,7 @@ impl Render for Palette {
                     div()
                         .px(zpx(12.))
                         .h(zpx(20.))
-                        .text_size(zpx(10.))
+                        .text_size(zpx(del_core::typography::TEXT_XS))
                         .text_color(rgba(0xe8b04aff))
                         .child(format!(
                             "{} transcript(s) could not be read. Other results are available.",
@@ -624,7 +645,7 @@ impl Render for Palette {
                     .bg(crate::appearance::popup_surface())
                     .rounded_b(zpx(11.))
                     .text_size(zpx(12.))
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         h_flex()
                             .items_center()
@@ -643,12 +664,12 @@ impl Render for Palette {
 
 fn section_label(label: &'static str) -> impl IntoElement {
     div()
-        .h(zpx(22.))
+        .h(zpx(SECTION_HEIGHT))
         .px(zpx(8.))
         .flex()
         .items_center()
         .text_size(zpx(12.))
-        .text_color(rgba(0xffffff70))
+        .text_color(crate::appearance::secondary_text())
         .child(label)
 }
 
@@ -663,7 +684,7 @@ fn key_badge(label: &'static str) -> impl IntoElement {
         .justify_center()
         .rounded(zpx(4.))
         .bg(rgba(0xffffff0d))
-        .text_size(zpx(10.))
+        .text_size(zpx(del_core::typography::TEXT_XS))
         .text_color(rgb(0xd4d4d6))
         .child(label)
 }
@@ -676,7 +697,7 @@ fn key_hint(key: &'static str, label: &'static str) -> impl IntoElement {
         .child(label)
 }
 
-const EXIT_DURATION: std::time::Duration = std::time::Duration::from_millis(140);
+pub(super) const EXIT_DURATION: std::time::Duration = std::time::Duration::from_millis(140);
 
 pub(super) fn exit_opacity(started: std::time::Instant) -> f32 {
     let t = (started.elapsed().as_secs_f32() / EXIT_DURATION.as_secs_f32()).min(1.);

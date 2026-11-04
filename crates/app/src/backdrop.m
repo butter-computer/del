@@ -20,6 +20,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
 @property(nonatomic,strong) id<MTLRenderPipelineState> compositeState;
 @property(nonatomic,strong) MTLRenderPassDescriptor *pass;
 @property(nonatomic) float scaleZoom;
+@property(nonatomic) float strength;
 - (CVPixelBufferRef)marker;
 - (void)encode:(id<MTLCommandBuffer>)command scene:(id<MTLTexture>)scene;
 @end
@@ -46,17 +47,24 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     descriptor.vertexFunction=[library newFunctionWithName:@"fluid_vertex"];
     descriptor.fragmentFunction=[library newFunctionWithName:@"backdrop_composite"];
     descriptor.colorAttachments[0].pixelFormat=format;
-    // Replace the accumulated scene with its blurred premultiplied version.
-    // Subsequent GPUI primitives (including the modal) render normally above it.
+    // Cross-fade the accumulated scene towards its blurred premultiplied version, so
+    // the blur can enter and leave with the dim above it. At rest this replaces the
+    // scene. Subsequent GPUI primitives (including the modal) render normally above it.
+    descriptor.colorAttachments[0].blendingEnabled=YES;
+    descriptor.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorBlendColor;
+    descriptor.colorAttachments[0].sourceAlphaBlendFactor=MTLBlendFactorBlendAlpha;
+    descriptor.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorOneMinusBlendColor;
+    descriptor.colorAttachments[0].destinationAlphaBlendFactor=MTLBlendFactorOneMinusBlendAlpha;
     self.compositeState=[device newRenderPipelineStateWithDescriptor:descriptor error:&error];
     if(!self.horizontalState||!self.verticalState||!self.compositeState){NSLog(@"Del backdrop pipeline: %@",error);return NO;}
     self.pass=[MTLRenderPassDescriptor renderPassDescriptor];
-    self.pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;
+    self.pass.colorAttachments[0].loadAction=MTLLoadActionLoad;
     self.pass.colorAttachments[0].storeAction=MTLStoreActionStore;
     _horizontal=nil;_vertical=nil;
     return YES;
 }
 - (void)encode:(id<MTLCommandBuffer>)command scene:(id<MTLTexture>)scene {
+    if(self.strength<=0.001f)return;
     if(![self prepare:command.commandQueue.device format:scene.pixelFormat])return;
     NSUInteger width=(scene.width+3)/4,height=(scene.height+3)/4;
     if(!_horizontal||_horizontal.width!=width||_horizontal.height!=height){
@@ -80,6 +88,7 @@ id<MTLLibrary> del_metal_library(id<MTLDevice> device,NSData *libraryBytes,NSStr
     self.pass.colorAttachments[0].texture=scene;
     id<MTLRenderCommandEncoder> render=[command renderCommandEncoderWithDescriptor:self.pass];
     [render setRenderPipelineState:self.compositeState];
+    [render setBlendColorRed:self.strength green:self.strength blue:self.strength alpha:self.strength];
     [render setFragmentTexture:_vertical atIndex:0];
     [render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [render endEncoding];
@@ -92,9 +101,9 @@ void *del_backdrop_create(const unsigned char *bytes,size_t length,const char *s
     return (__bridge_retained void *)renderer;
 }
 void del_backdrop_release(void *pointer){if(pointer){DelBackdrop *renderer=(__bridge_transfer DelBackdrop *)pointer;(void)renderer;}}
-void *del_backdrop_marker(void *pointer,double scale,double zoom){
+void *del_backdrop_marker(void *pointer,double scale,double zoom,double strength){
     if(!pointer)return NULL;
-    DelBackdrop *renderer=(__bridge DelBackdrop *)pointer;renderer.scaleZoom=scale*zoom;
+    DelBackdrop *renderer=(__bridge DelBackdrop *)pointer;renderer.scaleZoom=scale*zoom;renderer.strength=strength;
     CVPixelBufferRef marker=[renderer marker];return marker?(void *)CFRetain(marker):NULL;
 }
 bool del_backdrop_encode(const void *buffer,void *command,void *texture){

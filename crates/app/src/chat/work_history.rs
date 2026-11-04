@@ -30,7 +30,8 @@ impl Reveal {
 }
 
 pub fn duration_label(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
+    // A real turn that took under a second did not take no time.
+    let seconds = elapsed.as_secs().max(1);
     if seconds >= 3600 {
         format!(
             "Worked for {}h {}m {}s",
@@ -141,6 +142,7 @@ mod tests {
     fn elapsed_labels_keep_minutes_seconds_and_hours() {
         assert_eq!(duration_label(Duration::from_secs(69)), "Worked for 1m 9s");
         assert_eq!(duration_label(Duration::from_secs(7)), "Worked for 7s");
+        assert_eq!(duration_label(Duration::from_millis(300)), "Worked for 1s");
         assert_eq!(
             duration_label(Duration::from_secs(3602)),
             "Worked for 1h 0m 2s"

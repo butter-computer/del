@@ -7,8 +7,10 @@ use gpui_kit::{Pixels, SharedString};
 
 pub const GLYPH_SIZE: f32 = 16.0;
 pub const BUTTON_SIZE: f32 = 28.0;
+/// Provider marks and file icons that sit beside a line of chrome text.
+pub const MARK_SIZE: f32 = 14.0;
 /// Shared geometry for top-level session tabs, inner tabs, and drag previews.
-pub const TOOL_TAB_HEIGHT: f32 = 30.0;
+pub const TOOL_TAB_HEIGHT: f32 = 26.0;
 pub const TOOL_TAB_WIDTH: f32 = 112.0;
 pub const TAB_CLOSE_SIZE: f32 = 16.0;
 pub const TAB_CLOSE_GLYPH: f32 = 11.0;
@@ -51,6 +53,8 @@ pub fn working_spinner() -> gpui_kit::component::spinner::Spinner {
 // controls (menus, carets, inputs, loading states), not just the toolbar.
 pub const SYMBOLS: &[(&str, &str)] = &[
     ("activity", "waveform.path.ecg"),
+    ("keyboard", "keyboard"),
+    ("reload", "arrow.clockwise"),
     ("file-pdf", "doc.richtext"),
     ("file-doc", "doc.text"),
     ("file-xls", "tablecells"),
@@ -164,7 +168,7 @@ pub const SYMBOLS: &[(&str, &str)] = &[
     ("archive", "archivebox"),
     ("pin", "pin"),
     ("pin-off", "pin.slash"),
-    ("coffee", "cup.and.saucer"),
+    ("coffee", "mug"),
     ("trash", "trash"),
     ("target", "scope"),
     ("messages-square", "bubble.left.and.bubble.right"),
@@ -173,7 +177,7 @@ pub const SYMBOLS: &[(&str, &str)] = &[
     ("zap", "bolt"),
     ("pin-outline", "pin"),
     ("pin-filled", "pin.fill"),
-    ("coffee-cup", "cup.and.saucer"),
+    ("coffee-cup", "mug"),
     ("steer", "arrow.turn.up.right"),
     ("grip", "line.3.horizontal"),
     ("queue", "list.bullet"),
@@ -387,6 +391,7 @@ mod tests {
                                 "tab-fixture".into(),
                                 Some(1),
                                 gpui::white(),
+                                false,
                                 false,
                             )),
                     )

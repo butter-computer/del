@@ -71,6 +71,8 @@ enum Msg {
     Refresh,
     PanelDeleted(String, u64),
     ReplyFinished(SessionId),
+    TurnFailed(SessionId),
+    TurnBegan(SessionId),
     PeerActivity(SessionId, del_agent::peers::PeerMessage),
     Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
@@ -122,6 +124,11 @@ pub struct AppState {
     pub spaces: spaces::Spaces,
     pub space_swipe: spaces::Swipe,
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
+    /// Sessions whose latest turn failed. The process is still usable, so this is
+    /// apart from its status; a new turn clears it.
+    pub failed_turns: HashSet<SessionId>,
+    /// Keyboard focus of rows and tabs, kept across renders.
+    pub control_focus: crate::keyboard_control::FocusHandles,
     project_loading: std::collections::HashSet<PathBuf>,
     pub project_preferences: crate::projects::ProjectPreferences,
     pub launch_options: HashMap<u64, crate::projects::LaunchOptions>,
@@ -167,6 +174,7 @@ pub struct AppState {
     pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
     pub sidebar_scroll: ScrollHandle,
+    pub settings_scroll: ScrollHandle,
     pub space_switcher_open: bool,
     pub expanded_sidebar_projects: std::collections::HashSet<(String, PathBuf)>,
     pub providers: Vec<ProviderStatus>,
@@ -286,6 +294,22 @@ impl AppState {
                     }
                     Ok(ManagerEvent::Event {
                         session,
+                        event:
+                            del_agent::AgentEvent::TurnCompleted {
+                                status: del_agent::TurnStatus::Failed,
+                                ..
+                            },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnFailed(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
+                        event: del_agent::AgentEvent::TurnStarted { .. },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnBegan(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
                         event: del_agent::AgentEvent::PeerMessage { message },
                     }) => {
                         let _ = events_tx.send(Msg::PeerActivity(session, message));
@@ -364,6 +388,8 @@ impl AppState {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences,
             launch_options: HashMap::new(),
@@ -407,6 +433,7 @@ impl AppState {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: Provider::ALL
@@ -617,6 +644,15 @@ impl AppState {
                     self.record_incoming_activity(&owner, cx);
                 }
                 self.set_records(self.manager.list_sessions());
+            }
+            Msg::TurnFailed(id) => {
+                self.failed_turns.insert(id);
+                cx.notify();
+            }
+            Msg::TurnBegan(id) => {
+                if self.failed_turns.remove(&id) {
+                    cx.notify();
+                }
             }
             Msg::ReplyFinished(id) => {
                 if self.backend().manager.is_temporary(&id) {
@@ -3471,6 +3507,8 @@ pub(crate) mod tests {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences: Default::default(),
             launch_options: HashMap::new(),
@@ -3529,6 +3567,7 @@ pub(crate) mod tests {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: vec![],
@@ -4141,6 +4180,36 @@ pub(crate) mod tests {
             assert!(s.account_is_selected(provider, None));
             assert!(!s.model_catalog().loaded);
         });
+    }
+
+    #[gpui::test]
+    fn empty_and_failed_model_catalog_notices_remain_inside_the_picker(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = draft(cx);
+        let picker_state = state.clone();
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            crate::model_picker::ModelPicker::new(picker_state, window, cx)
+        });
+        for result in [Ok(vec![]), Err("fixture catalog unavailable".into())] {
+            cx.update(|window, cx| {
+                state.update(cx, |state, cx| {
+                    let (provider, _, cwd) = state.effective();
+                    state.apply(super::Msg::Models(provider, None, cwd, result), cx);
+                });
+                picker.update(cx, |picker, cx| picker.open_picker(false, window, cx));
+            });
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("model-picker-models").unwrap();
+            let notice = cx.debug_bounds("model-catalog-notice").unwrap();
+            assert!(notice.size.height > gpui::px(0.));
+            assert!(notice.top() >= panel.top());
+            assert!(notice.bottom() <= panel.bottom());
+            assert!(notice.left() >= panel.left() && notice.right() <= panel.right());
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
@@ -4888,7 +4957,7 @@ pub(crate) mod tests {
         impl Render for Fixture {
             fn render(
                 &mut self,
-                _: &mut gpui::Window,
+                window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) -> impl IntoElement {
                 gpui::div()
@@ -4899,6 +4968,7 @@ pub(crate) mod tests {
                         &self.rename,
                         &self.usage,
                         &self.updater,
+                        window,
                         cx,
                     ))
             }

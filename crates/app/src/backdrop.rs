@@ -15,7 +15,12 @@ mod native {
             source_length: usize,
         ) -> *mut c_void;
         fn del_backdrop_release(context: *mut c_void);
-        fn del_backdrop_marker(context: *mut c_void, scale: f64, zoom: f64) -> *mut c_void;
+        fn del_backdrop_marker(
+            context: *mut c_void,
+            scale: f64,
+            zoom: f64,
+            strength: f64,
+        ) -> *mut c_void;
         fn del_backdrop_encode(
             buffer: *const c_void,
             command: *mut c_void,
@@ -33,12 +38,13 @@ mod native {
                 del_backdrop_create(bytes.as_ptr(), bytes.len(), source.as_ptr(), source.len())
             })
         }
-        fn marker(&self, window: &Window) -> Option<CFRetained<CVPixelBuffer>> {
+        fn marker(&self, window: &Window, strength: f32) -> Option<CFRetained<CVPixelBuffer>> {
             let pointer = unsafe {
                 del_backdrop_marker(
                     self.0,
                     window.scale_factor() as f64,
                     del_core::zoom::factor() as f64,
+                    strength.clamp(0., 1.) as f64,
                 )
             };
             NonNull::new(pointer.cast::<CVPixelBuffer>())
@@ -51,12 +57,12 @@ mod native {
         }
     }
     thread_local! {static BACKDROP:Backdrop=Backdrop::new();}
-    pub fn layer() -> AnyElement {
+    pub fn layer(strength: f32) -> AnyElement {
         canvas(
             |_, _, _| (),
-            |bounds, _, window, _| {
+            move |bounds, _, window, _| {
                 BACKDROP.with(|backdrop| {
-                    if let Some(marker) = backdrop.marker(window) {
+                    if let Some(marker) = backdrop.marker(window, strength) {
                         window.paint_surface(bounds, marker)
                     }
                 });
@@ -68,13 +74,16 @@ mod native {
         .into_any_element()
     }
 }
-pub fn blur_layer() -> AnyElement {
+/// The modal backdrop blur. `strength` runs from the sharp scene at 0 to fully
+/// blurred at 1, so it can fade with the dim painted above it.
+pub fn blur_layer(strength: f32) -> AnyElement {
     #[cfg(target_os = "macos")]
     {
-        native::layer()
+        native::layer(strength)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = strength;
         div().absolute().inset_0().into_any_element()
     }
 }
