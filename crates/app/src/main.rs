@@ -730,7 +730,7 @@ impl AppShell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
-                .placeholder("Ask anything...")
+                .placeholder("Ask anything…")
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             state.set_submit_on_enter(true, cx);

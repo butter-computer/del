@@ -435,14 +435,14 @@ pub(crate) fn render_queue(
     div()
         .relative()
         .w_full()
-        .px_3()
+        .px(zpx(8.))
         .child(
             v_flex()
                 .id("followup-queue")
                 .debug_selector(|| "followup-queue".into())
                 .h(zpx(height))
                 .overflow_y_scroll()
-                .rounded_t(zpx(14.))
+                .rounded_t(zpx(8.))
                 .bg(rgba(QUEUE_SURFACE_RGBA))
                 .py_1()
                 .children(items.into_iter().enumerate().map(|(index, item)| {
@@ -566,8 +566,8 @@ pub(crate) fn render_queue(
             queue.child(
                 div()
                     .absolute()
-                    .left(zpx(12.))
-                    .right(zpx(12.))
+                    .left(zpx(8.))
+                    .right(zpx(8.))
                     .bottom_0()
                     .h(zpx(12.))
                     .bg(linear_gradient(

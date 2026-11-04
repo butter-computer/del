@@ -191,7 +191,7 @@ impl SideChat {
         }
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
-                .placeholder("Ask anything...")
+                .placeholder("Ask anything…")
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             input.set_submit_on_enter(true, cx);

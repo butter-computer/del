@@ -1214,10 +1214,8 @@ impl ChatView {
             (Phase::Running, _) if self.interrupt_requested => "Stopping…",
             (Phase::Running, _) if waiting => "Waiting for your approval",
             (Phase::Running, _) => "",
-            (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => "",
-            (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => "Stopped",
-            (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => "Turn failed",
-            (Phase::Idle, None) => "",
+            // Finished turns report themselves in the transcript, once.
+            (Phase::Idle, _) => "",
         };
         if label.is_empty() {
             return div().into_any_element();
@@ -1231,12 +1229,17 @@ impl ChatView {
             .px(if self.model.goal.is_some() {
                 zpx(crate::goal_ui::GOAL_INSET + 10.)
             } else {
-                zpx(8.)
+                zpx(12.)
             })
+            .mb(zpx(4.))
             .items_center()
             .justify_between()
             .text_size(zpx(TEXT_SM))
-            .text_color(muted)
+            .text_color(if waiting {
+                crate::appearance::ActionTone::Warning.foreground()
+            } else {
+                muted
+            })
             .child(label)
             .into_any_element()
     }
@@ -1365,14 +1368,40 @@ impl Render for ChatView {
                 },
             )
             .child(
-                h_flex()
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .child(
+                        v_flex().size_full().min_w_0().child(
+                            list(self.scroller.clone(), {
+                                let view = view.clone();
+                                move |ix, _, cx| {
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .when(ix == 0, |row| {
+                                            row.pt(zpx(super::blocks::TRANSCRIPT_TOP))
+                                        })
+                                        .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
+                                        .into_any_element()
+                                }
+                            })
+                            .w_full()
+                            .flex_1()
+                            .min_h_0()
+                            .pb_2(),
+                        ),
+                    )
+                    // Overlaid so the transcript and the composer share one column.
+                    .child(
                         v_flex()
                             .id("message-navigation")
-                            .w(zpx(24.0))
-                            .h_full()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(zpx(if prompts.len() >= 6 { 24.0 } else { 0.0 }))
                             .flex_none()
                             .justify_center()
                             .py_3()
@@ -1509,22 +1538,6 @@ impl Render for ChatView {
                                         },
                                     ))
                             })),
-                    )
-                    .child(
-                        v_flex().flex_1().min_w_0().h_full().child(
-                            list(self.scroller.clone(), move |ix, _, cx| {
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .px_3()
-                                    .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
-                                    .into_any_element()
-                            })
-                            .w_full()
-                            .flex_1()
-                            .min_h_0()
-                            .py_2(),
-                        ),
                     ),
             )
             .child(

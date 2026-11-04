@@ -37,7 +37,7 @@ impl AppShell {
         let placeholder = if self.goal_modes.contains_key(&self.composer_owner(cx)) {
             "Describe your goal, define measurable outcomes for best results"
         } else {
-            "Ask anything..."
+            "Ask anything…"
         };
         self.composer.update(cx, |input, cx| {
             input.set_placeholder(placeholder, window, cx)

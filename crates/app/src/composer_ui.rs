@@ -14,7 +14,7 @@ use crate::providers;
 use crate::zoom::px as zpx;
 use del_agent::Provider;
 use del_core::composer;
-use del_core::typography::TEXT_MD;
+use del_core::typography::TEXT_PROSE;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -599,14 +599,14 @@ impl RenderOnce for ComposerCard {
             .child(
                 div()
                     .relative()
-                    .w_full()
+                    .mx(-zpx(4.))
                     .child(
                         Textarea::new(&input)
                             .token(|token, _, _| {
                                 h_flex()
                                     .items_center()
                                     .gap_1()
-                                    .text_size(zpx(TEXT_MD))
+                                    .text_size(zpx(TEXT_PROSE))
                                     .text_color(rgb(0x579fff))
                                     .child(
                                         crate::icons::path("icons/skill.svg")
@@ -618,7 +618,7 @@ impl RenderOnce for ComposerCard {
                             .on_paste(move |item, window, cx| on_paste(item, window, cx))
                             .appearance(false)
                             .bordered(false)
-                            .text_size(zpx(TEXT_MD)),
+                            .text_size(zpx(TEXT_PROSE)),
                     )
                     .children(input_edge_fades(&input)),
             )
