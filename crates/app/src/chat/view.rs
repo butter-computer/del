@@ -1262,7 +1262,11 @@ impl Render for ChatView {
         self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
         if let Some(jump) = &self.jump {
-            let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
+            let t = if cx.reduce_motion() {
+                1.0
+            } else {
+                (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0)
+            };
             self.scroller.scroll_to(ListOffset {
                 item_ix: jump.target,
                 offset_in_item: zpx(0.0),
@@ -2634,6 +2638,39 @@ mod search_tests {
             window.set_rem_size(px(14.));
             div().w(px(650.)).h(px(350.)).child(self.0.clone())
         }
+    }
+    #[gpui::test]
+    fn message_jump_settles_in_one_frame_with_reduce_motion(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_dir, _runtime, backend) = backend();
+        let messages = (0..12)
+            .map(|i| search::Message {
+                role: "You",
+                text: format!("Message {i}"),
+            })
+            .collect::<Vec<_>>();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Fixture(cx.new(|cx| ChatView::saved_transcript(backend, search::model(&messages), cx)))
+        });
+        cx.run_until_parked();
+        let chat = root.read_with(cx, |root, _| root.0.clone());
+        chat.update(cx, |chat, cx| {
+            chat.jump = Some(MessageJump {
+                target: 0,
+                from: -400.,
+                started: std::time::Instant::now(),
+            });
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.jump.is_none());
+            assert_eq!(chat.scroller.logical_scroll_top().item_ix, 0);
+            assert_eq!(chat.scroller.logical_scroll_top().offset_in_item, px(0.));
+        });
     }
     #[gpui::test]
     fn search_reveals_deep_markdown_match_and_clears_highlight(cx: &mut gpui::TestAppContext) {

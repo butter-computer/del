@@ -82,6 +82,7 @@ fn provider_row(
     };
     h_flex()
         .id(SharedString::from(format!("provider-{name}")))
+        .debug_selector(move || format!("provider-{name}"))
         .w_full()
         .min_h(zpx(48.))
         .px_3()
@@ -497,4 +498,52 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 }))
                 .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
                     .child("Sign in opens your provider’s login in Terminal. Status updates automatically."))))
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    struct Fixture(Entity<AppState>);
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(zpx(570.)).h(zpx(420.)).child(render(&self.0, cx))
+        }
+    }
+
+    #[::gpui::test]
+    fn provider_settings_keep_controls_inside_the_modal_with_long_account_names(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |state, _| {
+            state.settings_section = SettingsSection::Providers;
+            state.providers = providers::VISIBLE
+                .into_iter()
+                .map(|provider| del_agent::ProviderStatus {
+                    provider,
+                    installed: true,
+                    login: LoginState::LoggedIn,
+                    path: None,
+                    version: None,
+                })
+                .collect();
+            for provider in providers::VISIBLE {
+                state.default_identities.insert(
+                    provider,
+                    format!("{}@example.test", "long-account-".repeat(20)),
+                );
+            }
+        });
+        let (_root, cx) = cx.add_window_view(|_, _| Fixture(state));
+        cx.run_until_parked();
+        for selector in ["provider-Codex", "provider-Claude", "provider-OpenCode"] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.left() >= zpx(0.));
+            assert!(bounds.right() <= zpx(570.));
+            assert!(bounds.size.height >= zpx(48.));
+        }
+    }
 }
