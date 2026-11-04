@@ -1,5 +1,4 @@
 //! Independent side conversations with durable local context and scoped settings.
-use crate::appearance::rgba;
 use crate::chat::{Backend, ChatView};
 use crate::zoom::px as zpx;
 use del_agent::{ForkLifetime, ForkSource, Provider, SessionConfig, SessionId, UserInput};
@@ -1158,17 +1157,22 @@ impl Render for SideChat {
                         div().mb_2().child(
                             crate::icons::path("icons/side-chat.svg")
                                 .with_size(zpx(28.))
-                                .text_color(rgba(0xffffff80)),
+                                .text_color(crate::appearance::secondary_text()),
                         ),
                     )
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Side chat"))
+                    .child(
+                        div()
+                            .text_size(zpx(del_core::typography::TEXT_LG))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Side chat"),
+                    )
                     .child(
                         div()
                             .w_full()
                             .max_w(zpx(320.))
                             .min_w_0()
                             .whitespace_normal()
-                            .text_color(rgba(0xffffff80))
+                            .text_color(crate::appearance::secondary_text())
                             .text_center()
                             .child("Explore a side question with the main chat’s context."),
                     )

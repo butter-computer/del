@@ -91,7 +91,7 @@ pub fn tools<T: 'static>(
                     .rounded(zpx(4.))
                     .px_1p5()
                     .text_size(zpx(12.))
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .bg(rgba(0xffffff08))
                     .child(match pane {
                         Pane::Changes => "⌃⇧G",

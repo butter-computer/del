@@ -48,7 +48,7 @@ fn usage_bar(remaining: Option<f64>) -> impl IntoElement {
                     div()
                         .flex_shrink_0()
                         .text_size(zpx(del_core::typography::TEXT_XS))
-                        .text_color(rgba(0xffffff80))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!("{remaining:.0}% left")),
                 )
         }))
@@ -83,8 +83,9 @@ fn provider_row(
     };
     h_flex()
         .id(SharedString::from(format!("provider-{name}")))
+        .debug_selector(move || format!("provider-{name}"))
         .w_full()
-        .min_h(zpx(44.))
+        .min_h(zpx(48.))
         .px_3()
         .gap_2()
         .items_center()
@@ -218,7 +219,7 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                         .px_2()
                         .pb_2()
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff80))
+                        .text_color(crate::appearance::secondary_text())
                         .child("Settings"),
                 )
                 .children(
@@ -289,7 +290,7 @@ fn appearance_controls() -> impl IntoElement {
     let animated = appearance::background() != appearance::BackgroundAnimation::Off;
     v_flex()
         .w_full()
-        .gap_4()
+        .gap_3()
         .p_4()
         .rounded(zpx(10.))
         .bg(appearance::composer_surface())
@@ -303,13 +304,7 @@ fn appearance_controls() -> impl IntoElement {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(div().child("Color mode"))
-                        .child(
-                            div()
-                                .text_size(zpx(TEXT_SM))
-                                .text_color(appearance::secondary_text())
-                                .child("Every theme comes in light and dark."),
-                        ),
+                        .child(div().child("Color mode")),
                 )
                 .children(
                     [("Light", true), ("Dark", false)]
@@ -469,7 +464,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 content.child(h_flex().w_full().p_4().gap_4().items_center()
                     .child(v_flex().flex_1().min_w_0().gap_1()
                         .child(div().child("Global session tabs"))
-                        .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c)).child("Keep the same top tabs when switching Spaces.")))
+                        .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text()).child("Keep the same top tabs when switching Spaces.")))
                     .child(gpui_kit::component::switch::Switch::new("global-space-tabs")
                         .checked(s.spaces.global_tabs).accessibility_label("Global session tabs")
                         .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_global_space_tabs(*checked, cx)))))
@@ -521,6 +516,54 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     .on_click(move |_, _, cx| remove.update(cx, |s, cx| s.delete_account(&remove_id, cx))))
                         }))
                 }))
-                .child(div().text_size(zpx(TEXT_SM)).text_color(rgba(0xffffff8c))
+                .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
                     .child("Sign in opens your provider’s login in Terminal. Status updates automatically."))))
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    struct Fixture(Entity<AppState>);
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(zpx(570.)).h(zpx(420.)).child(render(&self.0, cx))
+        }
+    }
+
+    #[::gpui::test]
+    fn provider_settings_keep_controls_inside_the_modal_with_long_account_names(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |state, _| {
+            state.settings_section = SettingsSection::Providers;
+            state.providers = providers::VISIBLE
+                .into_iter()
+                .map(|provider| del_agent::ProviderStatus {
+                    provider,
+                    installed: true,
+                    login: LoginState::LoggedIn,
+                    path: None,
+                    version: None,
+                })
+                .collect();
+            for provider in providers::VISIBLE {
+                state.default_identities.insert(
+                    provider,
+                    format!("{}@example.test", "long-account-".repeat(20)),
+                );
+            }
+        });
+        let (_root, cx) = cx.add_window_view(|_, _| Fixture(state));
+        cx.run_until_parked();
+        for selector in ["provider-Codex", "provider-Claude", "provider-OpenCode"] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.left() >= zpx(0.));
+            assert!(bounds.right() <= zpx(570.));
+            assert!(bounds.size.height >= zpx(48.));
+        }
+    }
 }

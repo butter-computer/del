@@ -61,7 +61,7 @@ pub fn chrome_button(
         .items_center()
         .justify_center()
         .rounded(zpx(6.0))
-        .text_color(rgba(0xffffff8c))
+        .text_color(crate::appearance::secondary_text())
         .when(enabled, |b| {
             b.cursor_pointer().hover(|b| b.bg(rgba(0xffffff0a)))
         })
@@ -79,7 +79,7 @@ fn status_item(id: impl Into<ElementId>) -> Button {
         .line_height(zpx(16.0))
         .rounded(zpx(4.0))
         .text_size(zpx(TEXT_SM))
-        .text_color(rgba(0xffffff8c))
+        .text_color(crate::appearance::secondary_text())
 }
 
 fn status_icon(path: &'static str) -> Icon {
@@ -574,7 +574,7 @@ impl AppShell {
             .overflow_hidden()
             .bg(shell_surface())
             .text_size(zpx(TEXT_SM))
-            .text_color(rgba(0xffffff8c))
+            .text_color(crate::appearance::secondary_text())
             .child(
                 status_item("status-branch")
                     .min_w_0()

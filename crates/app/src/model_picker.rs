@@ -280,7 +280,7 @@ impl Render for ModelPicker {
                                     row.child(
                                         div()
                                             .id("effort-picker-trigger")
-                                            .text_color(rgba(0xffffff80))
+                                            .text_color(crate::appearance::secondary_text())
                                             .child(effort)
                                             .tooltip(|window, cx| {
                                                 gpui_kit::component::tooltip::Tooltip::new(

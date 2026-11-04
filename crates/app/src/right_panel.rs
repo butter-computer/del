@@ -2445,7 +2445,7 @@ impl RightPanel {
                     .items_center()
                     .justify_center()
                     .rounded_sm()
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .opacity(0.)
                     .group_hover(id, |button| button.opacity(1.))
                     .hover(|b| b.bg(rgba(0xffffff14)))
@@ -3241,7 +3241,7 @@ impl RightPanel {
                                 .py_2()
                                 .gap_1()
                                 .text_size(zpx(TEXT_SM))
-                                .text_color(rgba(0xffffff8c))
+                                .text_color(crate::appearance::secondary_text())
                                 .child("Recent commits")
                                 .child(
                                     h_flex()
@@ -3286,7 +3286,7 @@ impl RightPanel {
                                         .gap_2()
                                         .items_baseline()
                                         .text_size(zpx(TEXT_SM))
-                                        .text_color(rgba(0xffffff8c))
+                                        .text_color(crate::appearance::secondary_text())
                                         .child(
                                             div()
                                                 .flex_none()
@@ -3325,7 +3325,7 @@ impl RightPanel {
                         .py_2()
                         .gap_2()
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff8c))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!(
                             "{} {}",
                             total_files,
@@ -3463,7 +3463,7 @@ impl RightPanel {
                                             .py_1()
                                             .flex_none()
                                             .text_size(zpx(TEXT_SM))
-                                            .text_color(rgba(0xffffff8c))
+                                            .text_color(crate::appearance::secondary_text())
                                             .child(format!(
                                                 "{hidden} more {} not shown",
                                                 if hidden == 1 { "line" } else { "lines" }
@@ -3481,7 +3481,7 @@ impl RightPanel {
                         .border_t_1()
                         .border_color(rgba(0xffffff14))
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff8c))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!(
                             "{} more changed {} not shown",
                             self.change_omitted,
@@ -3518,7 +3518,7 @@ impl RightPanel {
         div()
             .p_3()
             .text_size(zpx(TEXT_MD))
-            .text_color(rgba(0xffffff8c))
+            .text_color(crate::appearance::secondary_text())
             .child(if self.terminal_error.is_some() {
                 "Terminal unavailable. Switch back to Terminal to retry."
             } else {
@@ -3726,7 +3726,7 @@ impl RightPanel {
                             .cursor_pointer()
                             .hover(|control| control.opacity(0.85))
                             .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(0xffffff8c))
+                            .text_color(crate::appearance::secondary_text())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_hidden = !this.show_hidden;
                                 this.directory_entries.clear();

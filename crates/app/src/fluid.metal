@@ -1602,7 +1602,7 @@ kernel void cell_blur_horizontal(texture2d<float,access::sample> source [[textur
     }
     output.write(sum/total,id);
 }
-// A wide blur for behind a chat or terminal: separable, sampling every fourth logical pixel.
+// A wide blur for behind a chat or terminal: separable, sampling at a fixed logical-pixel interval.
 kernel void strong_blur(texture2d<float,access::sample> source [[texture(0)]],texture2d<float,access::write> output [[texture(1)]],
  constant float2 &direction [[buffer(1)]],uint2 id [[thread_position_in_grid]]) {
     float2 uv=(float2(id)+0.5f)/float2(output.get_width(),output.get_height());
@@ -1646,7 +1646,7 @@ fragment float4 cell_composite(Vertex in [[stage_in]],texture2d<float> scene [[t
     // Behind a conversation or terminal the whole scene melts into soft, dimmer light.
     // A little of the sharp picture stays in the mix, so fine shapes such as glass ribs still read.
     if(u.blur.w>0.0f) {
-        float4 frosted=mix(strong.sample(sceneSampler,in.uv),float4(sharp.rgb*sharp.a,sharp.a),0.34f)*0.90f;
+        float4 frosted=mix(strong.sample(sceneSampler,in.uv),float4(sharp.rgb*sharp.a,sharp.a),0.10f)*0.90f;
         result=mix(result,frosted,u.blur.w);
     }
     return float4(result.rgb/max(result.a,0.00001f),result.a);

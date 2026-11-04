@@ -92,7 +92,7 @@ impl ChatView {
                 .cursor_pointer()
                 .rounded_md()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(label)
                 .child(disclosure(expanded))
@@ -256,7 +256,7 @@ impl ChatView {
                 .cursor_pointer()
                 .rounded_md()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
@@ -347,7 +347,7 @@ impl ChatView {
                 .py_2()
                 .gap_2()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .child("Switched from")
                 .child(crate::composer_ui::provider_logo(*from).size(zpx(14.)))
                 .child(crate::providers::display_name(*from))
@@ -395,7 +395,7 @@ impl ChatView {
                     .justify_center()
                     .py_2()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         h_flex()
                             .max_w_full()
@@ -602,7 +602,7 @@ impl ChatView {
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(zpx(TEXT_MD))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                     .role(Role::Button)
@@ -628,7 +628,7 @@ impl ChatView {
                         .pb(zpx(4.))
                         .text_size(zpx(TEXT_MD))
                         .line_height(relative(1.5))
-                        .text_color(rgba(MUTED))
+                        .text_color(crate::appearance::secondary_text())
                         .child(text.to_owned()),
                 )
             })
@@ -721,7 +721,7 @@ impl ChatView {
                     .items_center()
                     .rounded_md()
                     .text_size(zpx(TEXT_MD))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .when(has_diff, |row| {
                         row.cursor_pointer().hover(|row| row.bg(rgba(CARD)))
                     })
@@ -921,7 +921,7 @@ fn prose_style() -> TextViewStyle {
         // A column heading is a label to read, not disabled text.
         .table_head(
             StyleRefinement::default()
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .font_weight(FontWeight::MEDIUM),
         )
 }
@@ -975,7 +975,7 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(del_core::typography::TEXT_XS))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child("◎  Sent as goal"),
                     )
                 })
@@ -983,7 +983,7 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child(label),
                     )
                 }),
@@ -1054,7 +1054,7 @@ fn assistant_message(
                     .items_center()
                     .justify_start()
                     .text_size(zpx(del_core::typography::TEXT_XS))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         div()
                             .id(("copy-response", ix))
@@ -1075,7 +1075,7 @@ fn assistant_message(
                                     copied,
                                 )
                                 .with_size(zpx(13.))
-                                .text_color(rgba(MUTED)),
+                                .text_color(crate::appearance::secondary_text()),
                             )
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
@@ -1185,7 +1185,7 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                     .gap_1p5()
                     .items_center()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .when(!failed, |row| {
                         row.child(crate::icons::spinner()).child("Starting agent…")
                     }),

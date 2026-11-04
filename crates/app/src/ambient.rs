@@ -232,6 +232,7 @@ impl LifeBackground {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let changed = self.surface != surface;
         self.visible = surface != AmbientSurface::Hidden;
         self.surface = surface;
         #[cfg(target_os = "macos")]
@@ -250,6 +251,11 @@ impl LifeBackground {
             }
         }
         self.sync(window, cx);
+        // Inactive windows do not schedule animation frames. Still invalidate
+        // their retained surface once when chat/landing changes its blur state.
+        if changed {
+            cx.notify();
+        }
     }
 }
 impl Render for LifeBackground {
