@@ -30,7 +30,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Sessions and tabs",
         &[
             ("New session", "⌘N"),
-            ("New right-sidebar tab", "⌘T / ⌃T"),
+            ("New tab in the focused zone", "⌘T / ⌃T"),
             ("Close active tab in the focused zone", "⌘W"),
             ("Close active right-sidebar tab", "⌘⇧W"),
             ("Select top-level session by position", "⌘1–9"),

@@ -6,6 +6,7 @@
 //! them.
 
 use crate::animated_icons::Glyph;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 // The wallpaper background is switched off for now; the loader stays so it can
@@ -39,6 +40,7 @@ mod haptics;
 mod hover_motion;
 mod icons;
 mod keybinds;
+mod keyboard_control;
 #[allow(dead_code)]
 mod mcp_bridge;
 mod micro_motion;
@@ -2336,6 +2338,7 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
+                                    .keyboard_control()
                                     .debug_selector(|| "new-main-tab".into())
                                     .ml(zpx(8.5))
                                     .role(gpui::Role::Button)
@@ -2405,6 +2408,7 @@ impl AppShell {
                             .child(
                         div()
                             .id("toggle-right")
+                            .keyboard_control()
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
                             .tooltip(|window, cx| {

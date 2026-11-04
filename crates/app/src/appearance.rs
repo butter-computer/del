@@ -297,6 +297,8 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.skeleton = hover;
         c.slider_bar = secondary;
         c.slider_thumb = white;
+        // The agreed muted green, for toasts and anything else the theme tints.
+        c.success = gpui_kit::rgb(if light { 0x366f49 } else { 0x86b596 }).into();
         // A switch thumb is always the light part of the control, as on macOS.
         // Ink on a pale track reads as "on" when the switch is off.
         c.switch = if light {

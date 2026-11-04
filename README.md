@@ -485,6 +485,9 @@ conversation. Unloading a running session also stops its current work.
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
   the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
   again restarts that confirmation.
+- Tab reaches disclosure rows, a code block's Copy, title-bar buttons, project-row actions and
+  file actions, with a ring for keyboard focus only; Enter or Space activates them. Clicking one
+  leaves focus in the composer. A reply's hover Copy and a session row's hover actions are not Tab stops.
 - Fenced code blocks show their language and a Copy button in the corner, with the same
   1.5 second checkmark as a reply's Copy.
 - Codex file citations render as clickable filenames in live and saved replies,

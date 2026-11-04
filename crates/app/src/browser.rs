@@ -24,6 +24,7 @@ mod native {
             height: f64,
             zoom: f64,
             light: bool,
+            background: u32,
             mouse_passthrough: bool,
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
@@ -100,6 +101,11 @@ mod native {
                             bounds.size.height.as_f32() as f64,
                             del_core::zoom::factor() as f64,
                             crate::appearance::light(),
+                            {
+                                let page = crate::appearance::page_surface();
+                                let channel = |value: f32| (value * 255.).round() as u32;
+                                channel(page.r) << 16 | channel(page.g) << 8 | channel(page.b)
+                            },
                             cx.has_active_drag(),
                         )
                     };

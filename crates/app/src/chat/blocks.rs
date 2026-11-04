@@ -5,6 +5,7 @@ use super::model::{ApprovalBlock, ApprovalState, Block, DiffKind, FileChangeBloc
 use super::view::{COLUMN_MAX_WIDTH, ChatView};
 use crate::appearance::ActionTone;
 use crate::appearance::{rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
 use del_core::typography::{PROSE_LEADING, TEXT_LG, TEXT_MD, TEXT_PROSE, TEXT_SM, TEXT_XL};
@@ -77,6 +78,7 @@ impl ChatView {
             let range = section.range();
             let header = h_flex()
                 .id(("work-history", section.start))
+                .keyboard_control()
                 .role(Role::Button)
                 .aria_label(if expanded {
                     "Collapse work details"
@@ -250,6 +252,7 @@ impl ChatView {
             let range = group.clone();
             let header = h_flex()
                 .id(("activity-group", ix))
+                .keyboard_control()
                 .h(zpx(ROW_HEIGHT))
                 .px(zpx(TEXT_INSET))
                 .gap(zpx(ROW_GAP))
@@ -596,6 +599,7 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("reasoning", ix))
+                    .keyboard_control()
                     .px(zpx(TEXT_INSET))
                     .h(zpx(ROW_HEIGHT))
                     .items_center()
@@ -663,6 +667,7 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("tool", ix))
+                    .keyboard_control()
                     .role(Role::Button)
                     .aria_label(format!(
                         "{} {label}",
@@ -972,6 +977,7 @@ fn code_block_actions(
         .child(
             div()
                 .id(ElementId::NamedInteger("code-copy-button".into(), key))
+                .keyboard_control()
                 .size(zpx(24.))
                 .flex()
                 .flex_none()

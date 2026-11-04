@@ -2,6 +2,7 @@
 
 use crate::animated_icons::Glyph;
 use crate::appearance::{ActionTone, rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
@@ -2706,6 +2707,7 @@ impl RightPanel {
                                     |(preview, label)| {
                                         div()
                                             .id(label)
+                                            .keyboard_control()
                                             .role(gpui::Role::Button)
                                             .aria_label(label)
                                             .h(zpx(22.0))
@@ -2733,6 +2735,7 @@ impl RightPanel {
                         .child(
                             div()
                                 .id("close-file-preview")
+                                .keyboard_control()
                                 .role(gpui::Role::Button)
                                 .aria_label("Close file preview")
                                 .tooltip(|window, cx| {
@@ -3696,6 +3699,7 @@ impl RightPanel {
             .child(
                 div()
                     .id("new-sidebar-tab")
+                    .keyboard_control()
                     .ml_2()
                     .debug_selector(|| "new-sidebar-tab".into())
                     .role(gpui::Role::Button)
@@ -3874,6 +3878,7 @@ fn file_action(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .when(enabled, |button| button.keyboard_control())
         .role(gpui::Role::Button)
         .aria_label(label)
         .px_2()

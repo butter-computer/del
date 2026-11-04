@@ -2,6 +2,7 @@
 //! title bar, the bottom terminal panel (⌘J) and the status bar.
 use crate::animated_icons::Glyph;
 use crate::appearance::{ActionTone, rgb, rgba, shell_surface};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::state::{AppState, Panel, Selection, Tab};
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
@@ -68,6 +69,7 @@ pub fn chrome_button(
         })
         .when(!enabled, |b| b.opacity(0.35))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .when(enabled, |b| b.keyboard_control())
 }
 
 /// A small, flat status-bar item.
@@ -709,7 +711,8 @@ impl AppShell {
             .px(zpx(8.))
             .gap(zpx(2.))
             .items_center()
-            .overflow_hidden()
+            // Horizontal only, so a focused item's ring is not cut by the bar's height.
+            .overflow_x_hidden()
             .bg(shell_surface())
             .text_size(zpx(TEXT_XS))
             .text_color(crate::appearance::secondary_text())
@@ -717,12 +720,13 @@ impl AppShell {
                 status_item("status-branch")
                     .min_w_0()
                     .max_w(zpx(390.))
-                    .overflow_hidden()
                     .accessibility_label(format!("Git: {branch}"))
                     .tooltip(branch_tooltip)
                     .child(
+                        // The clip lives here, not on the button, so its focus ring stays whole.
                         h_flex()
                             .min_w_0()
+                            .overflow_x_hidden()
                             .gap(zpx(6.))
                             .items_center()
                             .text_size(zpx(TEXT_XS))

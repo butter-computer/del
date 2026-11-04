@@ -454,7 +454,13 @@ impl ChatView {
                 let time = chrono::Local::now();
                 self.response_times.insert(ix, time);
                 let start = super::work_history::request_start(&self.model, ix);
-                let elapsed = self.work_started.get(&start).map(|at| at.elapsed());
+                // A chat opened with its session is still loading when the first turn
+                // starts, so that turn is timed only by the live "Working for" clock.
+                let elapsed = self
+                    .work_started
+                    .get(&start)
+                    .or(self.working_since.as_ref())
+                    .map(|at| at.elapsed());
                 if let Some(elapsed) = elapsed {
                     self.work_elapsed.insert(ix, elapsed);
                 }
@@ -1948,6 +1954,58 @@ mod tests {
             view.model.phase = Phase::Idle;
             view.sync(None, cx);
             assert!(view.working_label(1).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn first_turn_started_while_loading_still_records_its_elapsed_time(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager,
+                },
+                None,
+                None,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            let change = view.model.push_user("first".into(), false);
+            view.sync(Some(change), cx);
+            // TurnStarted landed during loading, so nothing recorded a start.
+            assert!(view.work_started.is_empty());
+            let started = AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            };
+            let change = view.model.apply(&started);
+            view.sync(change, cx);
+            let reply = AgentEvent::AssistantTextDelta {
+                turn_id: "t1".into(),
+                text: "done".into(),
+            };
+            let change = view.model.apply(&reply);
+            view.sync(change, cx);
+            view.on_event(
+                &AgentEvent::TurnCompleted {
+                    turn_id: "t1".into(),
+                    status: del_agent::TurnStatus::Completed,
+                },
+                cx,
+            );
+            assert!(view.work_elapsed.contains_key(&1));
         });
     }
 

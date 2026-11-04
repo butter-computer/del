@@ -263,7 +263,7 @@ void *del_browser_create(void *parentPointer, const char *initialURL, const char
     if (url.length && ![url isEqualToString:@"about:blank"]) [browser navigate:url];
     return (__bridge_retained void *)browser;
 }
-void del_browser_frame(void *pointer, double x, double y, double width, double height, double zoom, bool light, bool mousePassthrough) {
+void del_browser_frame(void *pointer, double x, double y, double width, double height, double zoom, bool light, uint32_t background, bool mousePassthrough) {
     if (![NSThread isMainThread] || !pointer) return;
     DelBrowserView *browser = (__bridge DelBrowserView *)pointer;
     NSView *parent = browser.superview;
@@ -277,7 +277,12 @@ void del_browser_frame(void *pointer, double x, double y, double width, double h
     if (!parent.isFlipped) y = NSHeight(parent.bounds) - y - height;
     browser.frame = NSMakeRect(x,y,width,height);
     browser.appearance = [NSAppearance appearanceNamed:light ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
-    browser.layer.backgroundColor = (light ? [NSColor colorWithWhite:0.98 alpha:1] : [NSColor colorWithWhite:0.047 alpha:1]).CGColor;
+    // The theme's page surface and corners, so the pane reads as part of the workspace.
+    browser.layer.backgroundColor = [NSColor colorWithSRGBRed:((background >> 16) & 0xff) / 255.0
+                                                        green:((background >> 8) & 0xff) / 255.0
+                                                         blue:(background & 0xff) / 255.0
+                                                        alpha:1].CGColor;
+    browser.layer.cornerRadius = 8 * zoom;
     browser.zoom = zoom;
     browser.presented = YES;
     browser.previewRendering = NO;

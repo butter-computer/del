@@ -413,6 +413,8 @@ pub(crate) fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
 fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
     Button::new(id)
         .text()
+        // Hover-only and laid over the row's time, so Tab must not land on it unseen.
+        .tab_stop(false)
         .size(crate::icons::button_size())
         .p_0()
         .tooltip(if pinned { "Unpin" } else { "Pin" })
@@ -423,6 +425,8 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
 fn archive_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .text()
+        // Hover-only and laid over the row's time, so Tab must not land on it unseen.
+        .tab_stop(false)
         .size(crate::icons::button_size())
         .p_0()
         .tooltip("Archive")
@@ -1236,10 +1240,10 @@ fn space_contents(
                                 .child(format!("{needs} needs you"))))
                             .child(h_flex().absolute().right(zpx(4.)).top_0().h_full().items_center().gap_0p5()
                                 .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
-                                    .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                    .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.)).focus_visible(|button| button.opacity(1.))
                                     .dropdown_menu(move |menu, window, cx| project_menu(menu, &menu_state, &menu_path, window, cx)))
                                 .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact()
-                                    .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.))
+                                    .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.)).focus_visible(|button| button.opacity(1.))
                                     .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                     .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }).motion_child(true, move |feedback| feedback.glyph(Glyph::Add))))))
