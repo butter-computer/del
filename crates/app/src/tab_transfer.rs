@@ -10,6 +10,43 @@ pub(crate) fn vertical_edge_fades(scroll: &ScrollHandle, surface: Rgba) -> Vec<A
     scroll_edge_fades(scroll, surface, true)
 }
 
+/// The same fades for a virtual list, which measures its own offset.
+pub(crate) fn list_edge_fades(list: &ListState, surface: Rgba) -> Vec<AnyElement> {
+    let extent = zpx(20.);
+    [true, false]
+        .into_iter()
+        .map(|top| {
+            let list = list.clone();
+            canvas(
+                |bounds, _, _| bounds,
+                move |_, bounds, window, _| {
+                    let offset = list.scroll_px_offset_for_scrollbar().y;
+                    let max = list.max_offset_for_scrollbar().y;
+                    let distance = if top { -offset } else { max + offset };
+                    let alpha = (distance / extent).clamp(0., 1.);
+                    if alpha > 0. {
+                        window.paint_quad(fill(
+                            bounds,
+                            linear_gradient(
+                                if top { 180. } else { 0. },
+                                linear_color_stop(surface.opacity(alpha), 0.),
+                                linear_color_stop(surface.opacity(0.), 1.),
+                            ),
+                        ));
+                    }
+                },
+            )
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(extent)
+            .when(top, |fade| fade.top_0())
+            .when(!top, |fade| fade.bottom_0())
+            .into_any_element()
+        })
+        .collect()
+}
+
 fn scroll_edge_fades(scroll: &ScrollHandle, surface: Rgba, vertical: bool) -> Vec<AnyElement> {
     let extent = zpx(if vertical { 40. } else { 16. });
     [true, false]

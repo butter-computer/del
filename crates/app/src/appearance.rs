@@ -12,9 +12,6 @@ pub use themes::ThemePreset;
 static PRESET: AtomicU8 = AtomicU8::new(0);
 static LIGHT: AtomicBool = AtomicBool::new(false);
 
-/// Terminals stay dark in every theme: graphite rather than pure black.
-pub const TERMINAL_BACKGROUND: u32 = 0x141517;
-
 /// Semantic action colors; neutrals stay neutral and color signals intent.
 #[derive(Clone, Copy)]
 pub enum ActionTone {
@@ -30,7 +27,7 @@ impl ActionTone {
             (Self::Danger, false) => 0xe58b8b,
             (Self::Danger, true) => 0xb83c3c,
             (Self::Success, false) => 0x86b596,
-            (Self::Success, true) => 0x3f7a54,
+            (Self::Success, true) => 0x366f49,
             (Self::Warning, false) => 0xd3b07a,
             (Self::Warning, true) => 0x87621f,
         };
@@ -47,6 +44,10 @@ impl ActionTone {
 pub fn sidebar_surface() -> Rgba {
     shell_surface()
 }
+
+/// The fill behind a secondary action. A literal neutral, so `rgba` maps it to
+/// warm ink in light mode like every other neutral.
+pub const QUIET_FILL: u32 = 0xffffff0f;
 
 pub fn separator() -> Rgba {
     gpui_kit::rgba(if light() {
@@ -128,8 +129,27 @@ fn colors() -> themes::Palette {
 pub fn secondary_text() -> Rgba {
     gpui_kit::rgb(colors().neutral[5])
 }
+/// Quiet metadata: times, section labels, disclosure arrows. Stays readable on
+/// the selected row in every theme, at about #83837F in Graphite dark.
+pub fn faint_text() -> Rgba {
+    let mut color = secondary_text();
+    color.a = if light() { 0.88 } else { 0.78 };
+    color
+}
 pub fn composer_surface() -> Rgba {
     gpui_kit::rgb(colors().composer)
+}
+/// Queued follow-ups: the composer's own tint, one step darker, so the row and the
+/// composer read as one object in every theme.
+pub fn queue_surface() -> Rgba {
+    let composer = composer_surface();
+    let dim = if light() { 0.96 } else { 0.9 };
+    Rgba {
+        r: composer.r * dim,
+        g: composer.g * dim,
+        b: composer.b * dim,
+        a: 1.,
+    }
 }
 pub fn popup_surface() -> Rgba {
     gpui_kit::rgb(colors().popup)
@@ -139,6 +159,13 @@ pub fn shell_surface() -> Rgba {
 }
 pub fn dragged_tab_surface() -> Rgba {
     gpui_kit::rgb(colors().neutral[2])
+}
+/// Code, diffs and tool output: one step below the page in every theme, so text
+/// stays the brightest part and the animated background still reads through.
+pub fn code_surface() -> Rgba {
+    let mut surface = shell_surface();
+    surface.a = 0.82;
+    surface
 }
 pub fn page_surface() -> Rgba {
     gpui_kit::rgb(colors().neutral[0])
@@ -279,11 +306,40 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.skeleton = hover;
         c.slider_bar = secondary;
         c.slider_thumb = white;
-        c.switch = active;
-        c.switch_thumb = white;
+        // A destructive button is a solid red in every theme: the default tint put red
+        // text on pale red, which is too faint for the one irreversible action.
+        let (fill, fill_hover) = if light {
+            (0xb83c3c, 0xa33333)
+        } else {
+            (0xb84a4a, 0xc25555)
+        };
+        c.button_danger = gpui_kit::rgb(fill).into();
+        c.button_danger_hover = gpui_kit::rgb(fill_hover).into();
+        c.button_danger_active = gpui_kit::rgb(fill_hover).into();
+        c.button_danger_foreground = gpui_kit::rgb(0xffffff).into();
+        // The agreed muted green, for toasts and anything else the theme tints.
+        c.success = gpui_kit::rgb(if light { 0x366f49 } else { 0x86b596 }).into();
+        // A switch thumb is always the light part of the control, as on macOS.
+        // Ink on a pale track reads as "on" when the switch is off.
+        c.switch = if light {
+            gpui_kit::rgba(palette.neutral[7] << 8 | 0x33).into()
+        } else {
+            gpui_kit::rgba(0xffffff24).into()
+        };
+        c.switch_thumb = if light {
+            gpui_kit::rgb(0xffffff).into()
+        } else {
+            white
+        };
         c.scrollbar = gpui_kit::transparent_black();
         c.scrollbar_thumb = active;
         c.scrollbar_thumb_hover = gpui_kit::rgb(palette.neutral[4]).into();
+        // Markdown tables sit on the page, with a header on the code surface.
+        c.table = gpui_kit::transparent_black();
+        c.table_even = gpui_kit::transparent_black();
+        c.table_head = code_surface().into();
+        c.table_head_foreground = secondary;
+        c.table_row_border = border;
         c.tab = surface;
         c.tab_bar = black;
         c.tab_bar_segmented = surface;
@@ -330,7 +386,15 @@ fn map_neutral(mut color: Rgba, palette: themes::Palette) -> Rgba {
 
 /// Desaturated replacements for the saturated status literals.
 fn status(rgb: u32) -> u32 {
-    match (rgb, light()) {
+    status_for_mode(rgb, light())
+}
+fn status_for_mode(rgb: u32, light: bool) -> u32 {
+    match (rgb, light) {
+        // Diffs, account status, and success labels need dark ink in light mode.
+        (0x5fc27e | 0x4cc38a, false) => 0x86b596,
+        (0x5fc27e | 0x4cc38a, true) => 0x366f49,
+        (0xf0716b, false) => 0xe58b8b,
+        (0xf0716b, true) => 0xb83c3c,
         // Danger red.
         (0xff646b | 0xff4545, false) => 0xe08e8c,
         (0xff646b | 0xff4545, true) => 0xa94848,
@@ -357,6 +421,62 @@ pub fn rgba(value: u32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blend(top: u32, alpha: f64, under: u32) -> u32 {
+        let channel = |shift: u32| {
+            let (t, u) = (
+                f64::from((top >> shift) & 0xff),
+                f64::from((under >> shift) & 0xff),
+            );
+            ((t * alpha + u * (1. - alpha)).round() as u32) << shift
+        };
+        channel(16) | channel(8) | channel(0)
+    }
+
+    /// Every preset in both modes: body text, secondary text, faint metadata and the
+    /// semantic and focus colours stay readable on every surface they sit on.
+    #[test]
+    fn every_theme_keeps_readable_text_on_every_surface() {
+        let mut failures = Vec::new();
+        for theme in ThemePreset::ALL {
+            for light in [false, true] {
+                let p = theme.palette(light);
+                let surfaces = [
+                    ("page", p.neutral[0]),
+                    ("shell", p.shell),
+                    ("composer", p.composer),
+                    ("popup", p.popup),
+                ];
+                let (danger, success, warning): (u32, u32, u32) = if light {
+                    (0xb83c3c, 0x366f49, 0x87621f)
+                } else {
+                    (0xe58b8b, 0x86b596, 0xd3b07a)
+                };
+                for (surface, under) in surfaces {
+                    let faint = blend(p.neutral[5], if light { 0.88 } else { 0.78 }, under);
+                    for (role, color, minimum) in [
+                        ("text", p.neutral[7], 7.),
+                        ("secondary", p.neutral[5], 4.5),
+                        ("faint", faint, 3.),
+                        ("danger", danger, 3.),
+                        ("success", success, 3.),
+                        ("warning", warning, 3.),
+                        ("focus ring", p.accent, 3.),
+                    ] {
+                        let ratio = contrast(color, under);
+                        if ratio < minimum {
+                            failures.push(format!(
+                                "{} {} {role} on {surface}: {ratio:.2} < {minimum}",
+                                theme.name(),
+                                if light { "light" } else { "dark" },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
     #[test]
     fn saved_theme_tolerates_legacy_unknown_and_corrupt_files() {
         assert!(parse(b"true").light);
@@ -409,6 +529,18 @@ mod tests {
     fn contrast(a: u32, b: u32) -> f32 {
         let (a, b) = (luminance(a), luminance(b));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn diff_and_success_ink_remain_readable_in_both_graphite_modes() {
+        for light in [false, true] {
+            let p = ThemePreset::Graphite.palette(light);
+            for background in [p.shell, p.composer, p.popup, p.neutral[0]] {
+                for literal in [0x5fc27e, 0x4cc38a, 0xf0716b] {
+                    assert!(contrast(status_for_mode(literal, light), background) >= 4.5);
+                }
+            }
+        }
     }
 
     #[test]

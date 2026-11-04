@@ -241,6 +241,7 @@ impl Render for ModelPicker {
         };
         let trigger_bottom = self.trigger_bottom.clone();
         div()
+            .min_w_0()
             .on_children_prepainted(move |bounds, _, _| {
                 if let Some(bounds) = bounds.first() {
                     trigger_bottom.set(bounds.bottom());
@@ -248,6 +249,8 @@ impl Render for ModelPicker {
             })
             .child(
                 Popover::new("model-picker")
+                    .max_w_full()
+                    .min_w_0()
                     .track_focus(&content_focus)
                     .open(self.open)
                     .appearance(false)
@@ -262,8 +265,12 @@ impl Render for ModelPicker {
                             .ghost()
                             .small()
                             .compact()
+                            .max_w_full()
+                            .min_w_0()
+                            .justify_start()
                             .rounded_full()
-                            .text_size(zpx(15.))
+                            .text_size(zpx(13.))
+                            .text_color(rgba(crate::composer_ui::CONTROL_TEXT))
                             .disabled(state.locked)
                             .tooltip_with_action("Select model", &crate::SelectModel, None)
                             .accessibility_label(format!(
@@ -273,28 +280,33 @@ impl Render for ModelPicker {
                                     .map(|effort| format!(" · {effort}"))
                                     .unwrap_or_default()
                             ))
-                            .child(h_flex().gap_1().items_center().child(label).when_some(
-                                effort,
-                                |row, effort| {
-                                    row.child(
-                                        div()
-                                            .id("effort-picker-trigger")
-                                            .text_color(rgba(0xffffff80))
-                                            .child(effort)
-                                            .tooltip(|window, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new(
-                                                    "Select effort",
-                                                )
-                                                .action(&crate::SelectEffort, None)
-                                                .build(window, cx)
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.open_picker(true, window, cx);
-                                            })),
-                                    )
-                                },
-                            )),
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(div().min_w_0().truncate().child(label))
+                                    .when_some(effort, |row, effort| {
+                                        row.child(
+                                            div()
+                                                .id("effort-picker-trigger")
+                                                .flex_none()
+                                                .text_color(crate::appearance::secondary_text())
+                                                .child(effort)
+                                                .tooltip(|window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        "Select effort",
+                                                    )
+                                                    .action(&crate::SelectEffort, None)
+                                                    .build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.open_picker(true, window, cx);
+                                                })),
+                                        )
+                                    }),
+                            ),
                     )
                     .on_open_change(cx.listener(|this, open: &bool, window, cx| {
                         this.open = *open;
@@ -396,6 +408,8 @@ impl ModelPanel {
 
 impl Render for ModelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let effort_motion =
+            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 180 });
         let state = self.state.read(cx);
         let available_height = if state.above {
             self.trigger_bottom.get() - zpx(28.)
@@ -455,8 +469,11 @@ impl Render for ModelPanel {
             .w(zpx(278.))
             .p_3()
             .gap_3()
-            .rounded_xl()
+            .rounded(zpx(10.))
             .bg(crate::appearance::popup_surface())
+            .border_1()
+            .border_color(crate::appearance::separator())
+            .shadow_lg()
             .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
@@ -482,8 +499,20 @@ impl Render for ModelPanel {
                 .collect();
             let model_count = self.choices.len();
             self.highlighted = self.highlighted.filter(|index| *index < model_count);
+            let catalog_notice = if catalog.loading {
+                Some("Loading available models…")
+            } else if catalog.error.is_some() {
+                Some("Couldn’t load models. Refresh to try again.")
+            } else if catalog.loaded && catalog.models.is_empty() {
+                Some("No models returned. Use Automatic or Refresh to try again.")
+            } else if model_count == 0 {
+                Some("No matching models. Try another search.")
+            } else {
+                None
+            };
+            let notice_height = if catalog_notice.is_some() { 48. } else { 0. };
             let list_height = zpx(model_count.max(1) as f32 * 42.)
-                .min((available_height - zpx(84.)).clamp(zpx(60.), zpx(240.)));
+                .min((available_height - zpx(84. + notice_height)).clamp(zpx(42.), zpx(240.)));
             let scroll = self.model_scroll.clone();
             let mut list = v_flex().gap_0p5().when(show_default, |list| {
                 list.child(
@@ -500,25 +529,33 @@ impl Render for ModelPanel {
                         .flex_none()
                         .px(zpx(8.))
                         .py(zpx(6.))
-                        .text_size(zpx(12.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .justify_start()
                         .disabled(locked)
-                        .when(
+                        .child(div().size(crate::icons::size()).flex_none().when(
                             selected.is_none() || selected.as_deref() == Some("default"),
-                            |b| b.child(crate::icons::icon(IconName::Check)),
-                        )
+                            |slot| slot.child(crate::icons::icon(IconName::Check)),
+                        ))
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child(default_label)
+                                .child(div().w_full().truncate().child(default_label.clone()))
+                                // "Automatic" keeps this distinct from choosing the same model
+                                // explicitly, without repeating itself when nothing resolved.
                                 .child(
                                     div()
-                                        .text_size(zpx(10.5))
+                                        .text_size(zpx(del_core::typography::TEXT_SM))
                                         .text_color(muted)
-                                        .child("Automatic · follows provider settings"),
+                                        .w_full()
+                                        .truncate()
+                                        .child(if default_label == "Automatic" {
+                                            "Follows provider settings"
+                                        } else {
+                                            "Automatic · follows provider settings"
+                                        }),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -529,17 +566,6 @@ impl Render for ModelPanel {
                         })),
                 )
             });
-            if catalog.loaded && catalog.models.is_empty() && catalog.error.is_none() {
-                list = list.child(
-                    div()
-                        .p_2()
-                        .text_color(muted)
-                        .child("No models returned by this provider. Try Refresh."),
-                );
-            }
-            if model_count == 0 && !catalog.loading {
-                list = list.child(div().p_2().text_color(muted).child("No matching models"));
-            }
             for (visible_index, (i, model)) in models.into_iter().enumerate() {
                 let choice_index = visible_index + usize::from(show_default);
                 let id = model.id.clone();
@@ -557,23 +583,28 @@ impl Render for ModelPanel {
                         .flex_none()
                         .px(zpx(8.))
                         .py(zpx(6.))
-                        .text_size(zpx(12.))
+                        .text_size(zpx(del_core::typography::TEXT_MD))
                         .justify_start()
                         .disabled(locked)
-                        .when(selected.as_deref() == Some(&id), |b| {
-                            b.child(crate::icons::icon(IconName::Check))
-                        })
+                        .child(
+                            div()
+                                .size(crate::icons::size())
+                                .flex_none()
+                                .when(selected.as_deref() == Some(&id), |slot| {
+                                    slot.child(crate::icons::icon(IconName::Check))
+                                }),
+                        )
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
                                 .gap_0p5()
-                                .child(model.name.clone())
+                                .child(div().w_full().truncate().child(model.name.clone()))
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
                                         div()
-                                            .text_size(zpx(10.5))
+                                            .text_size(zpx(del_core::typography::TEXT_SM))
                                             .w_full()
                                             .truncate()
                                             .text_color(muted)
@@ -671,9 +702,6 @@ impl Render for ModelPanel {
                             )
                         }),
                 )
-                .when(catalog.loading, |col| {
-                    col.child(div().text_color(muted).child("Loading available models…"))
-                })
                 .child(
                     div()
                         .relative()
@@ -722,6 +750,19 @@ impl Render for ModelPanel {
                             .h(zpx(18.)),
                         ),
                 )
+                .when_some(catalog_notice, |col, notice| {
+                    col.child(
+                        div()
+                            .id("model-catalog-notice")
+                            .debug_selector(|| "model-catalog-notice".into())
+                            .role(Role::Status)
+                            .px_2()
+                            .text_size(zpx(del_core::typography::TEXT_SM))
+                            .line_height(relative(1.4))
+                            .text_color(crate::appearance::secondary_text())
+                            .child(notice),
+                    )
+                })
                 .into_any_element();
         }
         self.levels = info.as_ref().map(|m| m.efforts.clone()).unwrap_or_default();
@@ -777,17 +818,27 @@ impl Render for ModelPanel {
                         .ghost()
                         .small()
                         .compact()
-                        .text_size(zpx(16.))
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(zpx(del_core::typography::TEXT_LG))
                         .child(
                             h_flex()
+                                .w_full()
+                                .min_w_0()
                                 .items_center()
                                 .gap_1()
-                                .child(model_name)
+                                .child(div().flex_1().min_w_0().truncate().child(model_name))
                                 .when_some(effort_label, |row, effort| {
-                                    row.child(div().text_color(rgba(0xffffff72)).child(effort))
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(crate::appearance::secondary_text())
+                                            .child(effort),
+                                    )
                                 })
                                 .child(
                                     crate::icons::icon(IconName::ChevronRight)
+                                        .flex_none()
                                         .text_color(rgba(0xffffff62)),
                                 ),
                         )
@@ -886,8 +937,7 @@ impl Render for ModelPanel {
                                         SharedString::from(format!(
                                             "effort-fill-{old_fill}-{new_fill}"
                                         )),
-                                        Animation::new(std::time::Duration::from_millis(180))
-                                            .with_easing(ease_out_quint()),
+                                        Animation::new(effort_motion).with_easing(ease_out_quint()),
                                         move |fill, t| {
                                             fill.w(zpx(old_fill + (new_fill - old_fill) * t))
                                         },
@@ -922,8 +972,7 @@ impl Render for ModelPanel {
                                 SharedString::from(format!(
                                     "effort-thumb-{old_position}-{new_position}"
                                 )),
-                                Animation::new(std::time::Duration::from_millis(180))
-                                    .with_easing(ease_out_quint()),
+                                Animation::new(effort_motion).with_easing(ease_out_quint()),
                                 move |thumb, t| {
                                     thumb
                                         .left(zpx(old_position + (new_position - old_position) * t))

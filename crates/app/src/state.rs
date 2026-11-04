@@ -71,6 +71,8 @@ enum Msg {
     Refresh,
     PanelDeleted(String, u64),
     ReplyFinished(SessionId),
+    TurnFailed(SessionId),
+    TurnBegan(SessionId),
     PeerActivity(SessionId, del_agent::peers::PeerMessage),
     Unloaded(SessionId),
     Statuses(Vec<ProviderStatus>),
@@ -122,6 +124,11 @@ pub struct AppState {
     pub spaces: spaces::Spaces,
     pub space_swipe: spaces::Swipe,
     pub project_info: HashMap<PathBuf, crate::projects::GitInfo>,
+    /// Sessions whose latest turn failed. The process is still usable, so this is
+    /// apart from its status; a new turn clears it.
+    pub failed_turns: HashSet<SessionId>,
+    /// Keyboard focus of rows and tabs, kept across renders.
+    pub control_focus: crate::keyboard_control::FocusHandles,
     project_loading: std::collections::HashSet<PathBuf>,
     pub project_preferences: crate::projects::ProjectPreferences,
     pub launch_options: HashMap<u64, crate::projects::LaunchOptions>,
@@ -167,6 +174,7 @@ pub struct AppState {
     pub sidebar_drag: crate::sidebar::DragMotion,
     pub sidebar_hover: crate::hover_motion::HoverMotion,
     pub sidebar_scroll: ScrollHandle,
+    pub settings_scroll: ScrollHandle,
     pub space_switcher_open: bool,
     pub expanded_sidebar_projects: std::collections::HashSet<(String, PathBuf)>,
     pub providers: Vec<ProviderStatus>,
@@ -271,7 +279,11 @@ impl AppState {
                     Ok(ManagerEvent::TitleLoading { session, loading }) => {
                         let _ = events_tx.send(Msg::TitleLoading(session, loading));
                     }
-                    Ok(ManagerEvent::StatusChanged { .. }) | Err(RecvError::Lagged(_)) => {
+                    Ok(
+                        ManagerEvent::StatusChanged { .. }
+                        | ManagerEvent::ConfigurationChanged { .. },
+                    )
+                    | Err(RecvError::Lagged(_)) => {
                         let _ = events_tx.send(Msg::Refresh);
                     }
                     Ok(ManagerEvent::Event {
@@ -283,6 +295,22 @@ impl AppState {
                             },
                     }) => {
                         let _ = events_tx.send(Msg::ReplyFinished(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
+                        event:
+                            del_agent::AgentEvent::TurnCompleted {
+                                status: del_agent::TurnStatus::Failed,
+                                ..
+                            },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnFailed(session));
+                    }
+                    Ok(ManagerEvent::Event {
+                        session,
+                        event: del_agent::AgentEvent::TurnStarted { .. },
+                    }) => {
+                        let _ = events_tx.send(Msg::TurnBegan(session));
                     }
                     Ok(ManagerEvent::Event {
                         session,
@@ -364,6 +392,8 @@ impl AppState {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences,
             launch_options: HashMap::new(),
@@ -407,6 +437,7 @@ impl AppState {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: Provider::ALL
@@ -618,6 +649,15 @@ impl AppState {
                 }
                 self.set_records(self.manager.list_sessions());
             }
+            Msg::TurnFailed(id) => {
+                self.failed_turns.insert(id);
+                cx.notify();
+            }
+            Msg::TurnBegan(id) => {
+                if self.failed_turns.remove(&id) {
+                    cx.notify();
+                }
+            }
             Msg::ReplyFinished(id) => {
                 if self.backend().manager.is_temporary(&id) {
                     return;
@@ -698,7 +738,7 @@ impl AppState {
                 }
                 self.replace_space_tab(&Tab::Draft(key), Tab::Session(id.clone()));
                 self.overrides_mut()
-                    .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+                    .move_side_chat_state(&Self::tab_unread_id(&Tab::Draft(key)), &id);
                 self.save_overrides();
                 self.set_records(self.manager.list_sessions());
                 if let Some(record) = self.records.iter().find(|r| r.id == id) {
@@ -930,7 +970,17 @@ impl AppState {
             .map(|r| (&r.id, &r.cwd))
             .chain(self.terminal_rows.iter().map(|r| (&r.id, &r.cwd)))
         {
-            if let Err(error) = self.manager.set_peer_project(id, &self.project_root(cwd)) {
+            // A newly spawned worktree already inherits its caller's project.
+            // Until Git inspection finishes, cwd is only a display fallback;
+            // registering it would transiently split the peer project.
+            let project = self
+                .project_info
+                .get(cwd)
+                .map(|info| &info.root)
+                .or_else(|| self.project_preferences.directories.get(cwd));
+            if let Some(project) = project
+                && let Err(error) = self.manager.set_resolved_peer_project(id, cwd, project)
+            {
                 self.error = Some(format!("Could not save peer project: {error}"));
             }
         }
@@ -1025,6 +1075,33 @@ impl AppState {
             && self
                 .side_chat_owner(uid)
                 .is_some_and(|tab| tab.selection() == self.selection)
+    }
+
+    pub fn conversation_usage(
+        &self,
+        main: &crate::session_usage::SessionUsage,
+    ) -> crate::session_usage::SessionUsage {
+        let id = match &self.selection {
+            Selection::Draft(key) => Self::tab_unread_id(&Tab::Draft(*key)),
+            Selection::Session(id) | Selection::Terminal(id) => id.clone(),
+        };
+        main.with_side_chats(self.overrides.side_chat_costs(&id))
+    }
+
+    pub fn record_side_chat_costs(
+        &mut self,
+        uid: u64,
+        side: &str,
+        costs: &std::collections::BTreeMap<String, f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.side_chat_owner(uid).map(Self::tab_unread_id) else {
+            return;
+        };
+        if self.overrides_mut().merge_side_chat_costs(&id, side, costs) {
+            self.save_overrides();
+            cx.notify();
+        }
     }
 
     pub fn side_chat_unread(&self, uid: u64, side: &str) -> bool {
@@ -1416,7 +1493,7 @@ impl AppState {
         if let Some(title) = self.overrides.title(terminal).map(str::to_owned) {
             self.overrides_mut().rename(chat, &title);
         }
-        self.overrides_mut().move_side_chat_unread(terminal, chat);
+        self.overrides_mut().move_side_chat_state(terminal, chat);
         self.overrides_mut().remove(terminal);
         self.terminal_rows.retain(|row| &row.id != terminal);
         self.save_overrides();
@@ -1447,7 +1524,7 @@ impl AppState {
             }
             self.replace_space_tab(&Tab::Draft(key), Tab::Terminal(id.clone()));
             self.overrides_mut()
-                .move_side_chat_unread(&Self::tab_unread_id(&Tab::Draft(key)), &id);
+                .move_side_chat_state(&Self::tab_unread_id(&Tab::Draft(key)), &id);
             self.save_overrides();
             self.drafts.remove(&key);
             self.launch_options.remove(&key);
@@ -2089,6 +2166,39 @@ impl AppState {
         cx.notify();
     }
 
+    /// MCP has already closed the backend. Preserve history and Git files while
+    /// acknowledging only after the sidebar archive preference reaches disk.
+    pub fn finish_agent_close(
+        &mut self,
+        id: SessionId,
+        archive: bool,
+        reply: tokio::sync::oneshot::Sender<del_mcp::HostResult<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tab(&Tab::Session(id.clone()), cx);
+        self.unloaded_chats.push(id.clone());
+        if archive {
+            self.overrides_mut().set_archived(&id, true);
+            if let Some(path) = sessions::overrides_path() {
+                let generation = self.overrides_writer.request();
+                let (writer, snapshot) = (self.overrides_writer.clone(), self.overrides.clone());
+                self.rt.spawn_blocking(move || {
+                    let result = writer
+                        .write(generation, &snapshot, &path)
+                        .map_err(|e| del_mcp::HostError::Failed(e.to_string()));
+                    let _ = reply.send(result);
+                });
+            } else {
+                let _ = reply.send(Err(del_mcp::HostError::Failed(
+                    "Sidebar storage unavailable".into(),
+                )));
+            }
+        } else {
+            let _ = reply.send(Ok(()));
+        }
+        cx.notify();
+    }
+
     /// Archive: hide from the list and end the live session (killing its
     /// child process). It can be restored and resumed later.
     pub fn archive(&mut self, id: SessionId, cx: &mut Context<Self>) {
@@ -2104,6 +2214,9 @@ impl AppState {
         self.save_overrides();
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         let close_id = id.clone();
+        if let Err(error) = manager.stop_peer_work(&id) {
+            self.error = Some(format!("Could not stop archived work: {error}"));
+        }
         self.rt.spawn(async move {
             let _ = manager.close(&close_id).await;
             let _ = tx.send(Msg::Refresh);
@@ -3403,6 +3516,39 @@ pub(crate) mod tests {
     use gpui::Entity;
 
     #[gpui::test]
+    fn uninspected_worktree_keeps_inherited_peer_project(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = draft(cx);
+        state.update(cx, |s, _| {
+            s.manager = SessionManager::new(dir.path().join("sessions.jsonl"), []).unwrap();
+            let parent = del_agent::SessionId::new("parent");
+            let child = del_agent::SessionId::new("child");
+            let project = dir.path().to_path_buf();
+            let checkout = project.join("new-worktree");
+            s.manager.set_peer_project(&parent, &project).unwrap();
+            s.manager.set_peer_project(&child, &project).unwrap();
+            s.terminal_rows.push(crate::sessions::TerminalRow {
+                id: child.clone(),
+                title: "Child".into(),
+                cwd: checkout.clone(),
+                provider: Some(Provider::Codex),
+                account_id: None,
+                active: false,
+                summary: String::new(),
+                pinned: false,
+            });
+            s.sync_peer_projects();
+            assert!(
+                s.manager.authorize_peer(&parent, &child).is_ok(),
+                "UI refresh must not replace inherited project with an uninspected cwd"
+            );
+            s.project_preferences.directories.insert(checkout, project);
+            s.sync_peer_projects();
+            assert!(s.manager.authorize_peer(&parent, &child).is_ok());
+        });
+    }
+
+    #[gpui::test]
     fn draft_permissions_follow_provider_on_new_tabs_and_switches(cx: &mut gpui::TestAppContext) {
         let state = draft(cx);
         state.update(cx, |state, cx| {
@@ -3444,6 +3590,8 @@ pub(crate) mod tests {
             spaces: Default::default(),
             space_swipe: Default::default(),
             project_info: HashMap::new(),
+            failed_turns: Default::default(),
+            control_focus: Default::default(),
             project_loading: Default::default(),
             project_preferences: Default::default(),
             launch_options: HashMap::new(),
@@ -3502,6 +3650,7 @@ pub(crate) mod tests {
             sidebar_drag: Default::default(),
             sidebar_hover: Default::default(),
             sidebar_scroll: Default::default(),
+            settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
             providers: vec![],
@@ -3712,7 +3861,7 @@ pub(crate) mod tests {
             let draft_id = super::AppState::tab_unread_id(&Tab::Draft(0));
             s.overrides_mut()
                 .set_side_chat_unread(&draft_id, "draft-side", true);
-            s.overrides_mut().move_side_chat_unread(&draft_id, &id);
+            s.overrides_mut().move_side_chat_state(&draft_id, &id);
             assert!(s.overrides.side_chat_unread(&id, "draft-side"));
             assert!(!s.overrides.unread(&draft_id));
         });
@@ -4114,6 +4263,36 @@ pub(crate) mod tests {
             assert!(s.account_is_selected(provider, None));
             assert!(!s.model_catalog().loaded);
         });
+    }
+
+    #[gpui::test]
+    fn empty_and_failed_model_catalog_notices_remain_inside_the_picker(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = draft(cx);
+        let picker_state = state.clone();
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            crate::model_picker::ModelPicker::new(picker_state, window, cx)
+        });
+        for result in [Ok(vec![]), Err("fixture catalog unavailable".into())] {
+            cx.update(|window, cx| {
+                state.update(cx, |state, cx| {
+                    let (provider, _, cwd) = state.effective();
+                    state.apply(super::Msg::Models(provider, None, cwd, result), cx);
+                });
+                picker.update(cx, |picker, cx| picker.open_picker(false, window, cx));
+            });
+            cx.run_until_parked();
+            let panel = cx.debug_bounds("model-picker-models").unwrap();
+            let notice = cx.debug_bounds("model-catalog-notice").unwrap();
+            assert!(notice.size.height > gpui::px(0.));
+            assert!(notice.top() >= panel.top());
+            assert!(notice.bottom() <= panel.bottom());
+            assert!(notice.left() >= panel.left() && notice.right() <= panel.right());
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
@@ -4861,7 +5040,7 @@ pub(crate) mod tests {
         impl Render for Fixture {
             fn render(
                 &mut self,
-                _: &mut gpui::Window,
+                window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) -> impl IntoElement {
                 gpui::div()
@@ -4872,6 +5051,7 @@ pub(crate) mod tests {
                         &self.rename,
                         &self.usage,
                         &self.updater,
+                        window,
                         cx,
                     ))
             }

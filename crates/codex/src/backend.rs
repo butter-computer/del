@@ -462,6 +462,9 @@ impl CodexBackend {
         drop(opening);
         let mut history = {
             let mut st = session.state.lock().unwrap();
+            if method == "thread/start" {
+                st.mapper.set_fork_baseline(Default::default());
+            }
             st.mapper.set_pricing(
                 id.as_str(),
                 resp.model
@@ -858,15 +861,37 @@ impl AgentBackend for CodexBackend {
         source: &SessionId,
         temporary: bool,
     ) -> Result<Option<SessionHandle>> {
+        // Native forks inherit cumulative token counters. Without a live source
+        // baseline (or for durable forks that can outlive this adapter), use the
+        // manager's transcript fallback instead of billing inherited usage again.
+        let baseline = temporary
+            .then(|| self.session(source).ok())
+            .flatten()
+            .and_then(|session| {
+                let state = session.state.lock().unwrap();
+                (!state.starting && state.mapper.turn_id().is_none())
+                    .then(|| state.mapper.latest_tokens())
+                    .flatten()
+            });
+        let Some(baseline) = baseline else {
+            return Ok(None);
+        };
         let mut params = thread_params(&config);
         params.insert("threadId".into(), json!(source.as_str()));
         params.insert("ephemeral".into(), json!(temporary));
         params.insert("excludeTurns".into(), json!(true));
         // This is a new identity: mint new browser credentials and do not replay
         // inherited turns into the child's visible transcript.
-        self.open("thread/fork", params, None, config.provider)
-            .await
-            .map(Some)
+        let handle = self
+            .open("thread/fork", params, None, config.provider)
+            .await?;
+        self.session(&handle.id)?
+            .state
+            .lock()
+            .unwrap()
+            .mapper
+            .set_fork_baseline(baseline);
+        Ok(Some(handle))
     }
 
     async fn resume_transferred(
@@ -1176,7 +1201,7 @@ async fn route(
                         let mut st = s.state.lock().unwrap();
                         st.starting = false;
                         st.interrupt_pending = false;
-                        st.mapper = Mapper::default();
+                        st.mapper.reset_connection();
                         // Sessions stay registered; `thread_connection` resumes
                         // them on the replacement server at the next request.
                         st.detached = true;

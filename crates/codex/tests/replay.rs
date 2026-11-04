@@ -1128,11 +1128,14 @@ async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns()
         HANDSHAKE[2],
         ACCOUNT_OK[0],
         ACCOUNT_OK[1],
-        r#"> {"id":3,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true,"config":{"thread_unload_delay_secs":0}}}"#,
-        r#"< {"id":3,"result":{"thread":{"id":"child","turns":[{"id":"old","status":"completed","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"inherited"}]}]}]}}}"#,
+        r#"> {"id":3,"method":"thread/start","params":{"cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","config":{"thread_unload_delay_secs":0}}}"#,
+        r#"< {"id":3,"result":{"thread":{"id":"parent","turns":[]}}}"#,
+        r#"> {"id":4,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true,"config":{"thread_unload_delay_secs":0}}}"#,
+        r#"< {"id":4,"result":{"thread":{"id":"child","turns":[{"id":"old","status":"completed","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"inherited"}]}]}]}}}"#,
     ]);
     let (client, rx, server) = replay(lines);
     let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    backend.start_session(config()).await.unwrap();
     let child = backend
         .fork_session(config(), &SessionId::new("parent"), true)
         .await
@@ -1444,4 +1447,25 @@ for line in sys.stdin:
     assert_eq!(launch["home"], home.display().to_string());
     assert_eq!(launch["profile"], "1");
     backend.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_native_fork_baseline_uses_transcript_fallback() {
+    let (client, rx, server) = replay(script(&[
+        HANDSHAKE[0],
+        HANDSHAKE[1],
+        HANDSHAKE[2],
+        ACCOUNT_OK[0],
+        ACCOUNT_OK[1],
+    ]));
+    let backend = CodexBackend::attach(opts(), client, rx).await.unwrap();
+    assert!(
+        backend
+            .fork_session(config(), &SessionId::new("unloaded"), true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    backend.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
 }

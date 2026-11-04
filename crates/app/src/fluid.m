@@ -986,12 +986,12 @@ typedef NS_ENUM(NSInteger,DelBlend){DelBlendNone,DelBlendAdd,DelBlendOver,DelBle
     [encoder dispatchThreads:MTLSizeMake(_blurB.width,_blurB.height,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];
     [encoder endEncoding];
     if(_blurMix>0) {
-        // Half of half resolution, then a Gaussian of about 6 logical pixels of sigma in all:
+        // Half of half resolution, then a wide Gaussian:
         // enough to soften the scene behind text while still letting its shapes read.
         NSUInteger strongWidth=MAX(_blurB.width/2,1),strongHeight=MAX(_blurB.height/2,1);
         if(!_strong[0]||_strong[0].width!=strongWidth||_strong[0].height!=strongHeight)
             for(int i=0;i<2;i++)_strong[i]=[self texture:MTLPixelFormatRGBA16Float width:strongWidth height:strongHeight];
-        float pixel=0.60f*_params.blur.z*_params.geometry.z;
+        float pixel=2.0f*_params.blur.z*_params.geometry.z;
         simd_float2 across={pixel/(float)_params.geometry.x/(float)_params.blur.z,0},down={0,pixel/(float)_params.geometry.y/(float)_params.blur.z};
         encoder=[command computeCommandEncoder];
         [encoder setComputePipelineState:[self compute:@"strong_blur"]];

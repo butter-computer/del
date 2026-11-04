@@ -14,7 +14,7 @@ use crate::providers;
 use crate::zoom::px as zpx;
 use del_agent::Provider;
 use del_core::composer;
-use del_core::typography::TEXT_MD;
+use del_core::typography::TEXT_PROSE;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -82,7 +82,9 @@ pub(crate) fn account_menu_label(
         .child(
             div()
                 .flex_1()
-                .when(selected, |label| label.text_color(rgb(0x4cc38a)))
+                .when(selected, |label| {
+                    label.text_color(crate::appearance::ActionTone::Success.foreground())
+                })
                 .child(name),
         )
         .children(remaining.map(|remaining| {
@@ -136,7 +138,8 @@ pub(crate) fn account_menu_label(
         }))
 }
 
-pub const QUEUE_SURFACE_RGBA: u32 = 0xffffff10;
+/// Composer controls stay readable but sit below what is being written.
+pub(crate) const CONTROL_TEXT: u32 = 0xffffffb8;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 type PasteHandler = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
@@ -326,7 +329,7 @@ pub fn provider_logo(provider: Provider) -> Svg {
     let (path, color) = provider_brand(provider);
     svg()
         .path(path)
-        .size(crate::icons::size())
+        .size(zpx(crate::icons::MARK_SIZE))
         .flex_none()
         .text_color(rgb(color))
 }
@@ -344,6 +347,7 @@ pub(crate) fn provider_button(
 ) -> Button {
     chip(id)
         .tooltip_with_action("Select provider / account", &crate::SelectProvider, None)
+        .text_color(rgba(CONTROL_TEXT))
         .h(zpx(24.))
         .px(zpx(8.))
         .disabled(locked)
@@ -357,7 +361,8 @@ pub(crate) fn provider_button(
 }
 
 impl RenderOnce for ComposerCard {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let can_send = self.dictation == crate::dictation::Phase::Idle
             && (self.has_attachments
                 || composer::submission(&self.input.read(cx).value()).is_some());
@@ -396,7 +401,8 @@ impl RenderOnce for ComposerCard {
         let agent = provider_button("agent", provider, provider_ready, starting);
         let agent_el = {
             let current = provider;
-            agent.dropdown_menu(move |menu, window, cx| {
+            // The composer sits low in the window, so its menu opens upward.
+            agent.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
                 providers::VISIBLE
                     .iter()
                     .fold(menu.check_side(Side::Right), |menu, &p| {
@@ -586,27 +592,34 @@ impl RenderOnce for ComposerCard {
                 },
             );
 
-        let custom_settings = settings.is_some();
         // The wrapper owns the tint; the textarea adds no second background.
         v_flex()
+            .debug_selector(|| "composer-card".into())
             .w_full()
             .max_w(zpx(max_width))
             .p_2()
             .gap_1()
             .rounded(zpx(8.0))
             .bg(crate::appearance::composer_surface())
+            // A hairline holds the edge over any background; focus firms it up.
+            .border_1()
+            .border_color(if focused {
+                rgba(0xffffff1f)
+            } else {
+                crate::appearance::separator()
+            })
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
                 div()
                     .relative()
-                    .w_full()
+                    .mx(-zpx(4.))
                     .child(
                         Textarea::new(&input)
                             .token(|token, _, _| {
                                 h_flex()
                                     .items_center()
                                     .gap_1()
-                                    .text_size(zpx(TEXT_MD))
+                                    .text_size(zpx(TEXT_PROSE))
                                     .text_color(rgb(0x579fff))
                                     .child(
                                         crate::icons::path("icons/skill.svg")
@@ -618,7 +631,7 @@ impl RenderOnce for ComposerCard {
                             .on_paste(move |item, window, cx| on_paste(item, window, cx))
                             .appearance(false)
                             .bordered(false)
-                            .text_size(zpx(TEXT_MD)),
+                            .text_size(zpx(TEXT_PROSE)),
                     )
                     .children(input_edge_fades(&input)),
             )
@@ -628,14 +641,16 @@ impl RenderOnce for ComposerCard {
                     .justify_between()
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w_0()
                             .items_center()
                             .gap_0p5()
-                            .when(custom_settings, |row| row.flex_1().min_w_0())
                             .child(crate::micro_motion::control(
                                 "attach-motion",
                                 true,
                                 move |motion| {
                                     chip("attach-files")
+                                        .text_color(muted)
                                         .size(crate::icons::button_size())
                                         .p_0()
                                         .child(motion.glyph(Glyph::Add))
@@ -646,9 +661,10 @@ impl RenderOnce for ComposerCard {
                             ))
                             .child(settings.unwrap_or_else(|| {
                                 h_flex()
+                                    .min_w_0()
                                     .items_center()
                                     .gap_0p5()
-                                    .child(agent_el)
+                                    .child(div().flex_none().child(agent_el))
                                     .when_some(model_picker, |row, picker| row.child(picker))
                                     .into_any_element()
                             }))
@@ -669,10 +685,13 @@ impl RenderOnce for ComposerCard {
                                         .on_click(move |_, window, cx| on_cancel_goal(window, cx)),
                                 )
                             })
-                            .when(show_folder, |row| row.child(folder_el)),
+                            .when(show_folder, |row| {
+                                row.child(div().flex_none().child(folder_el))
+                            }),
                     )
                     .child(
                         h_flex()
+                            .flex_none()
                             .items_center()
                             .gap_1()
                             .when(show_voice, |row| row.child(voice))
@@ -695,15 +714,16 @@ mod tests {
         running: bool,
         sent: std::rc::Rc<std::cell::Cell<usize>>,
         stopped: std::rc::Rc<std::cell::Cell<usize>>,
+        width: f32,
     }
     impl Render for StopFixture {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let stopped = self.stopped.clone();
             let sent = self.sent.clone();
-            div().w(px(600.)).child(
+            div().w(px(self.width)).child(
                 ComposerCard::new(
                     &self.input,
-                    600.,
+                    self.width,
                     self.provider,
                     true,
                     self.picker.clone(),
@@ -733,6 +753,7 @@ mod tests {
                 running: true,
                 sent: sent.clone(),
                 stopped: stopped.clone(),
+                width: 600.,
             }
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -764,5 +785,35 @@ mod tests {
                 assert_eq!(stopped.get(), index + 1 + usize::from(running));
             }
         }
+    }
+
+    #[gpui::test]
+    fn long_model_name_keeps_send_inside_a_narrow_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        state.update(cx, |state, cx| {
+            state.set_model(
+                Some("A deliberately long model name that must shrink".into()),
+                cx,
+            );
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            let picker = cx.new(|cx| crate::model_picker::ModelPicker::new(state, window, cx));
+            StopFixture {
+                input,
+                picker,
+                provider: Provider::Claude,
+                running: false,
+                sent: Default::default(),
+                stopped: Default::default(),
+                width: 320.,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx.debug_bounds("composer-card").unwrap();
+        let send = cx.debug_bounds("composer-action").unwrap();
+        assert!(send.right() <= card.right());
+        assert!(send.left() >= card.left());
     }
 }

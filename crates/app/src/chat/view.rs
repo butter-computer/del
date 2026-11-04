@@ -3,6 +3,7 @@
 
 use super::model::{Block, Change, ChatModel, Phase};
 use crate::appearance::rgba;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::zoom::px as zpx;
 use del_agent::{AgentError, AgentEvent, ApprovalResponse, SessionId, SessionManager, UserInput};
 use del_core::typography::TEXT_SM;
@@ -454,7 +455,13 @@ impl ChatView {
                 let time = chrono::Local::now();
                 self.response_times.insert(ix, time);
                 let start = super::work_history::request_start(&self.model, ix);
-                let elapsed = self.work_started.get(&start).map(|at| at.elapsed());
+                // A chat opened with its session is still loading when the first turn
+                // starts, so that turn is timed only by the live "Working for" clock.
+                let elapsed = self
+                    .work_started
+                    .get(&start)
+                    .or(self.working_since.as_ref())
+                    .map(|at| at.elapsed());
                 if let Some(elapsed) = elapsed {
                     self.work_elapsed.insert(ix, elapsed);
                 }
@@ -805,9 +812,17 @@ impl ChatView {
     }
 
     pub fn submit_input(&mut self, input: UserInput, steer: bool, cx: &mut Context<Self>) {
+        // A fresh human message can amend idle peer work. Automatic queue
+        // draining still waits for that work to complete; older follow-ups stay.
+        let steer = steer
+            || (!self.is_running()
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|id| self.backend.manager.peer_blocks_user_queue(id)));
         let id = self.enqueue(input, cx);
         if !self.is_running() || steer {
-            self.deliver_queued(id, steer && self.is_running(), cx);
+            self.deliver_queued(id, steer, cx);
         }
     }
 
@@ -855,7 +870,7 @@ impl ChatView {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 let busy = matches!(&result, Err(AgentError::Busy(_)));
-                if busy {
+                if busy && !steer {
                     this.queue.wait(&item_id);
                 } else {
                     if let Err(error) = &result {
@@ -881,7 +896,7 @@ impl ChatView {
                         this.remove_row(row);
                     }
                     this.model.reject_input();
-                    if busy {
+                    if busy && !steer {
                         // Completion can precede provider readiness. A Busy rejection
                         // is undelivered; retry after yielding, without inventing a
                         // running turn that would wait forever for another completion.
@@ -1214,10 +1229,8 @@ impl ChatView {
             (Phase::Running, _) if self.interrupt_requested => "Stopping…",
             (Phase::Running, _) if waiting => "Waiting for your approval",
             (Phase::Running, _) => "",
-            (Phase::Idle, Some(del_agent::TurnStatus::Completed)) => "",
-            (Phase::Idle, Some(del_agent::TurnStatus::Interrupted)) => "Stopped",
-            (Phase::Idle, Some(del_agent::TurnStatus::Failed)) => "Turn failed",
-            (Phase::Idle, None) => "",
+            // Finished turns report themselves in the transcript, once.
+            (Phase::Idle, _) => "",
         };
         if label.is_empty() {
             return div().into_any_element();
@@ -1231,12 +1244,17 @@ impl ChatView {
             .px(if self.model.goal.is_some() {
                 zpx(crate::goal_ui::GOAL_INSET + 10.)
             } else {
-                zpx(8.)
+                zpx(12.)
             })
+            .mb(zpx(4.))
             .items_center()
             .justify_between()
             .text_size(zpx(TEXT_SM))
-            .text_color(muted)
+            .text_color(if waiting {
+                crate::appearance::ActionTone::Warning.foreground()
+            } else {
+                muted
+            })
             .child(label)
             .into_any_element()
     }
@@ -1262,7 +1280,11 @@ impl Render for ChatView {
         self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
         if let Some(jump) = &self.jump {
-            let t = (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0);
+            let t = if cx.reduce_motion() {
+                1.0
+            } else {
+                (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0)
+            };
             self.scroller.scroll_to(ListOffset {
                 item_ix: jump.target,
                 offset_in_item: zpx(0.0),
@@ -1294,85 +1316,47 @@ impl Render for ChatView {
             .as_ref()
             .map(|jump| jump.target)
             .or_else(|| active_prompt(&prompts, top, at_end));
+        let rail_motion =
+            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 100 });
         let hover = self.rail_hover;
         let previous_hover = self.rail_previous_hover;
-        let work = self
-            .session
-            .as_ref()
-            .and_then(|id| self.backend.manager.peer_work(id));
         v_flex()
             .size_full()
-            .when_some(
-                work.filter(|w| w.status != del_agent::peers::WorkStatus::Complete),
-                |column, work| {
-                    let paused = work.status == del_agent::peers::WorkStatus::Paused;
-                    let label = match work.status {
-                        del_agent::peers::WorkStatus::Paused => {
-                            "Current work paused · queued messages are waiting"
-                        }
-                        del_agent::peers::WorkStatus::Waiting => {
-                            "Waiting for a peer · current task stays active"
-                        }
-                        _ => {
-                            "Current task and peer requests · queued messages follow when finished"
-                        }
-                    };
-                    column.child(
-                        h_flex()
-                            .px_3()
-                            .py_2()
-                            .gap_2()
-                            .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(0xffffff8c))
-                            .child(label)
-                            .when(!paused, |row| {
-                                row.child(
-                                    div()
-                                        .id("pause-peer-work")
-                                        .cursor_pointer()
-                                        .child("Pause")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(id) = &this.session {
-                                                let _ = this
-                                                    .backend
-                                                    .manager
-                                                    .control_peer_work(id, "pause");
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(paused, |row| {
-                                row.child(
-                                    div()
-                                        .id("resume-peer-work")
-                                        .cursor_pointer()
-                                        .child("Resume")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(id) = &this.session
-                                                && let Err(error) = this
-                                                    .backend
-                                                    .manager
-                                                    .control_peer_work(id, "resume")
-                                            {
-                                                this.pending_errors.push(error.to_string());
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    )
-                },
-            )
             .child(
-                h_flex()
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .child(
+                        v_flex().size_full().min_w_0().child(
+                            list(self.scroller.clone(), {
+                                let view = view.clone();
+                                move |ix, _, cx| {
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .when(ix == 0, |row| {
+                                            row.pt(zpx(super::blocks::TRANSCRIPT_TOP))
+                                        })
+                                        .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
+                                        .into_any_element()
+                                }
+                            })
+                            .w_full()
+                            .flex_1()
+                            .min_h_0()
+                            .pb_2(),
+                        ),
+                    )
+                    // Overlaid so the transcript and the composer share one column.
+                    .child(
                         v_flex()
                             .id("message-navigation")
-                            .w(zpx(24.0))
-                            .h_full()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(zpx(if prompts.len() >= 6 { 24.0 } else { 0.0 }))
                             .flex_none()
                             .justify_center()
                             .py_3()
@@ -1403,6 +1387,7 @@ impl Render for ChatView {
                                                 });
                                             div()
                                                 .id(("message-jump", ix))
+                                                .keyboard_control()
                                                 .role(gpui::Role::Button)
                                                 .aria_label(format!(
                                                     "Jump to message: {}",
@@ -1489,10 +1474,8 @@ impl Render for ChatView {
                                                         SharedString::from(format!(
                                                             "rail-{ix}-{previous_hover:?}-{hover:?}"
                                                         )),
-                                                        Animation::new(
-                                                            std::time::Duration::from_millis(100),
-                                                        )
-                                                        .with_easing(ease_out_quint()),
+                                                        Animation::new(rail_motion)
+                                                            .with_easing(ease_out_quint()),
                                                         move |tick, t| {
                                                             let weight =
                                                                 previous + (next - previous) * t;
@@ -1509,22 +1492,6 @@ impl Render for ChatView {
                                         },
                                     ))
                             })),
-                    )
-                    .child(
-                        v_flex().flex_1().min_w_0().h_full().child(
-                            list(self.scroller.clone(), move |ix, _, cx| {
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .px_3()
-                                    .child(view.update(cx, |this, cx| this.render_row(ix, cx)))
-                                    .into_any_element()
-                            })
-                            .w_full()
-                            .flex_1()
-                            .min_h_0()
-                            .py_2(),
-                        ),
                     ),
             )
             .child(
@@ -1932,6 +1899,120 @@ mod tests {
             view.sync(None, cx);
             assert!(view.working_label(1).is_none());
         });
+    }
+
+    #[gpui::test]
+    fn first_turn_started_while_loading_still_records_its_elapsed_time(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager,
+                },
+                None,
+                None,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            let change = view.model.push_user("first".into(), false);
+            view.sync(Some(change), cx);
+            // TurnStarted landed during loading, so nothing recorded a start.
+            assert!(view.work_started.is_empty());
+            let started = AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            };
+            let change = view.model.apply(&started);
+            view.sync(change, cx);
+            let reply = AgentEvent::AssistantTextDelta {
+                turn_id: "t1".into(),
+                text: "done".into(),
+            };
+            let change = view.model.apply(&reply);
+            view.sync(change, cx);
+            view.on_event(
+                &AgentEvent::TurnCompleted {
+                    turn_id: "t1".into(),
+                    status: del_agent::TurnStatus::Completed,
+                },
+                cx,
+            );
+            assert!(view.work_elapsed.contains_key(&1));
+        });
+    }
+
+    /// The real path: the turn starts on the backend, then the view attaches and
+    /// replays it while loading, so only the live clock can time it.
+    #[gpui::test]
+    fn first_turn_attached_mid_flight_records_its_elapsed_time(cx: &mut gpui::TestAppContext) {
+        use std::{sync::Arc, time::Duration};
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            [Arc::new(
+                del_agent::MockBackend::new(del_agent::Provider::Claude)
+                    .with_delay(Duration::from_millis(40)),
+            ) as Arc<dyn del_agent::AgentBackend>],
+        )
+        .unwrap();
+        let session = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Claude,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: Default::default(),
+            }))
+            .unwrap();
+        runtime
+            .block_on(manager.send_prompt(&session.id, UserInput::text("tool please")))
+            .unwrap();
+        let view = cx.new(|cx| {
+            ChatView::new(
+                Backend {
+                    runtime: runtime.handle().clone(),
+                    manager: manager.clone(),
+                },
+                Some(session.id.clone()),
+                None,
+                cx,
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while view.read_with(cx, |view, _| view.completed_turns == 0) {
+            assert!(std::time::Instant::now() < deadline, "turn never completed");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.work_elapsed
+                    .keys()
+                    .any(|ix| matches!(view.model.blocks[*ix], Block::Assistant { .. })),
+                "the first turn lost its elapsed time"
+            );
+        });
+        runtime.block_on(manager.shutdown());
+        runtime.shutdown_background();
     }
 
     #[gpui::test]
@@ -2631,6 +2712,39 @@ mod search_tests {
             window.set_rem_size(px(14.));
             div().w(px(650.)).h(px(350.)).child(self.0.clone())
         }
+    }
+    #[gpui::test]
+    fn message_jump_settles_in_one_frame_with_reduce_motion(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_dir, _runtime, backend) = backend();
+        let messages = (0..12)
+            .map(|i| search::Message {
+                role: "You",
+                text: format!("Message {i}"),
+            })
+            .collect::<Vec<_>>();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Fixture(cx.new(|cx| ChatView::saved_transcript(backend, search::model(&messages), cx)))
+        });
+        cx.run_until_parked();
+        let chat = root.read_with(cx, |root, _| root.0.clone());
+        chat.update(cx, |chat, cx| {
+            chat.jump = Some(MessageJump {
+                target: 0,
+                from: -400.,
+                started: std::time::Instant::now(),
+            });
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.jump.is_none());
+            assert_eq!(chat.scroller.logical_scroll_top().item_ix, 0);
+            assert_eq!(chat.scroller.logical_scroll_top().offset_in_item, px(0.));
+        });
     }
     #[gpui::test]
     fn search_reveals_deep_markdown_match_and_clears_highlight(cx: &mut gpui::TestAppContext) {

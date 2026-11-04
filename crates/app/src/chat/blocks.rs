@@ -3,10 +3,13 @@
 use super::attachments::AttachmentSummary;
 use super::model::{ApprovalBlock, ApprovalState, Block, DiffKind, FileChangeBlock, ToolCall};
 use super::view::{COLUMN_MAX_WIDTH, ChatView};
+use crate::appearance::ActionTone;
 use crate::appearance::{rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::zoom::px as zpx;
 use del_agent::{ApprovalKind, ApprovalResponse, FileChangeKind, TurnStatus};
-use del_core::typography::{TEXT_LG, TEXT_MD, TEXT_SM};
+use del_core::typography::{PROSE_LEADING, TEXT_LG, TEXT_MD, TEXT_PROSE, TEXT_SM, TEXT_XL};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
@@ -16,13 +19,22 @@ use gpui_kit::*;
 const TEXT: u32 = 0xe8e8e8;
 const STRONG: u32 = 0xf5f5f5;
 const MUTED: u32 = 0xffffff8c;
-const FAINT: u32 = 0xffffff4d;
 /// Fill of cards (tool calls, diffs, the user's message).
 const CARD: u32 = 0xffffff0d;
 const CARD_HOVER: u32 = 0xffffff14;
-const GREEN: u32 = 0x5fc27eff;
-const RED: u32 = 0xf0716bff;
-const MONO: &str = "Menlo";
+/// The user's message: one step above the page.
+const USER_CARD: u32 = 0xffffff12;
+const HAIRLINE: u32 = 0xffffff0f;
+/// Secondary reading text: code context, tool output, error detail.
+const BODY_MUTED: u32 = 0xffffffb3;
+/// Labels that must stay legible but read as secondary to `MUTED`.
+const ROW_HEIGHT: f32 = 26.;
+const ROW_GAP: f32 = 6.;
+pub(super) const TRANSCRIPT_TOP: f32 = 16.;
+const MONO: &str = del_core::typography::MONO_FONT;
+/// Every transcript row starts its text here, so prose, tool rows, the user's
+/// card and the composer share one left edge.
+const TEXT_INSET: f32 = 12.;
 /// Diff lines drawn in an expanded file card; the rest are summarized.
 const MAX_DIFF_LINES: usize = 400;
 
@@ -66,6 +78,7 @@ impl ChatView {
             let range = section.range();
             let header = h_flex()
                 .id(("work-history", section.start))
+                .keyboard_control()
                 .role(Role::Button)
                 .aria_label(if expanded {
                     "Collapse work details"
@@ -73,28 +86,33 @@ impl ChatView {
                     "Expand work details"
                 })
                 .w_full()
-                .min_h(zpx(32.))
-                .px_2()
-                .gap_2()
+                .h(zpx(ROW_HEIGHT))
+                .px(zpx(TEXT_INSET))
+                .gap(zpx(ROW_GAP))
                 .items_center()
                 .cursor_pointer()
+                .rounded_md()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
+                .hover(|row| row.bg(rgba(CARD)))
                 .child(label)
-                .child(crate::icons::icon(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                }))
+                .child(disclosure(expanded))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_work(range.clone(), cx);
                 }));
-            let header = h_flex()
-                .w_full()
-                .justify_center()
-                .px_3()
-                .pb(zpx(8.))
-                .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(header));
+            let header = h_flex().w_full().justify_center().px_3().pb(zpx(8.)).child(
+                v_flex()
+                    .w_full()
+                    .max_w(zpx(COLUMN_MAX_WIDTH))
+                    .child(header)
+                    .child(
+                        div()
+                            .h(zpx(1.))
+                            .mt(zpx(2.))
+                            .mx(zpx(TEXT_INSET))
+                            .bg(crate::appearance::separator()),
+                    ),
+            );
             return v_flex()
                 .w_full()
                 .child(header)
@@ -181,13 +199,7 @@ impl ChatView {
                     .detach();
                 }
             }
-            let style = TextViewStyle::default().heading_font_size(|level, _| {
-                if level <= 2 {
-                    zpx(TEXT_LG)
-                } else {
-                    zpx(TEXT_MD)
-                }
-            });
+            let style = prose_style();
             return h_flex()
                 .w_full()
                 .justify_center()
@@ -196,16 +208,18 @@ impl ChatView {
                     div()
                         .w_full()
                         .max_w(zpx(COLUMN_MAX_WIDTH))
-                        .px_2()
+                        .px(zpx(TEXT_INSET))
                         .rounded_lg()
                         .when(matches!(block, Block::User { .. }), |row| {
-                            row.py_2().bg(rgba(CARD))
+                            row.py_2().bg(rgba(USER_CARD))
                         })
-                        .text_size(zpx(TEXT_MD))
+                        .text_size(zpx(TEXT_PROSE))
+                        .line_height(relative(PROSE_LEADING))
                         .text_color(rgb(TEXT))
                         .child(
                             TextView::new(&flash.text_view)
                                 .style(style)
+                                .code_block_actions(code_block_actions)
                                 .selectable(true)
                                 .on_link_click({
                                     let chat = cx.entity().downgrade();
@@ -238,14 +252,15 @@ impl ChatView {
             let range = group.clone();
             let header = h_flex()
                 .id(("activity-group", ix))
-                .h(zpx(28.))
-                .px_2()
-                .gap_2()
+                .keyboard_control()
+                .h(zpx(ROW_HEIGHT))
+                .px(zpx(TEXT_INSET))
+                .gap(zpx(ROW_GAP))
                 .items_center()
                 .cursor_pointer()
                 .rounded_md()
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
@@ -255,13 +270,31 @@ impl ChatView {
                         .highlight_color(rgb(STRONG))
                         .into_any_element()
                 } else {
-                    div().min_w_0().truncate().child(label).into_any_element()
+                    // A failure count is news; the summary before it is not.
+                    let (summary, failures) = match label
+                        .rsplit_once(" · ")
+                        .filter(|(_, tail)| tail.ends_with("failed/declined"))
+                    {
+                        Some((summary, failures)) => {
+                            (summary.to_owned(), Some(failures.to_owned()))
+                        }
+                        None => (label.to_string(), None),
+                    };
+                    h_flex()
+                        .min_w_0()
+                        .gap(zpx(4.))
+                        .child(div().min_w_0().truncate().child(summary))
+                        .when_some(failures, |row, failures| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child(failures),
+                            )
+                        })
+                        .into_any_element()
                 })
-                .child(crate::icons::icon(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                }))
+                .child(disclosure(expanded))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.expanded_activity.remove(&ix) {
                         this.expanded_activity.insert(ix);
@@ -303,7 +336,7 @@ impl ChatView {
                 .w_full()
                 .justify_center()
                 .px_3()
-                .py_2()
+                .pb(zpx(2.))
                 .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(content))
                 .into_any_element();
         }
@@ -318,7 +351,7 @@ impl ChatView {
                 .py_2()
                 .gap_2()
                 .text_size(zpx(TEXT_SM))
-                .text_color(rgba(MUTED))
+                .text_color(crate::appearance::secondary_text())
                 .child("Switched from")
                 .child(crate::composer_ui::provider_logo(*from).size(zpx(14.)))
                 .child(crate::providers::display_name(*from))
@@ -366,7 +399,7 @@ impl ChatView {
                     .justify_center()
                     .py_2()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         h_flex()
                             .max_w_full()
@@ -377,6 +410,7 @@ impl ChatView {
                                     .gap_2()
                                     .items_center()
                                     .id(SharedString::from(format!("peer-current-{}", message.id)))
+                                    .keyboard_control()
                                     .min_w_0()
                                     .max_w(zpx(200.))
                                     .cursor_pointer()
@@ -400,6 +434,7 @@ impl ChatView {
                                     .gap_2()
                                     .items_center()
                                     .id(SharedString::from(format!("peer-other-{}", message.id)))
+                                    .keyboard_control()
                                     .min_w_0()
                                     .max_w(zpx(200.))
                                     .cursor_pointer()
@@ -478,10 +513,11 @@ impl ChatView {
                 .when_some(self.working_label(ix), |column, label| {
                     column.child(
                         h_flex()
-                            .px_2()
-                            .py_1()
-                            .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(0xffffff66))
+                            .px(zpx(TEXT_INSET))
+                            .h(zpx(ROW_HEIGHT))
+                            .items_center()
+                            .text_size(zpx(TEXT_MD))
+                            .text_color(crate::appearance::faint_text())
                             .child(
                                 gpui_kit::component::shimmer::ShimmerText::new(label)
                                     .id(SharedString::from(format!("working-shimmer-{ix}")))
@@ -520,13 +556,34 @@ impl ChatView {
                 .into_any_element(),
             Block::Approval(approval) => self.approval_card(approval, cx).into_any_element(),
             Block::Error { .. } => div().h_0().into_any_element(),
-            Block::TurnEnd { status } => turn_end(*status).into_any_element(),
+            Block::TurnEnd { status } => turn_end(
+                *status,
+                self.model.blocks[..ix]
+                    .iter()
+                    .rev()
+                    .take_while(|block| !matches!(block, Block::User { .. }))
+                    .find_map(|block| match block {
+                        Block::Error { message, .. } => Some(message.clone()),
+                        _ => None,
+                    }),
+            )
+            .into_any_element(),
         };
+        // A new turn gets more air than the steps inside one.
+        let opens_turn = ix > 0 && matches!(block, Block::User { .. });
+        let closes_turn = matches!(block, Block::TurnEnd { .. });
         h_flex()
             .w_full()
             .justify_center()
             .px_3()
-            .pb(if compact { zpx(2.) } else { zpx(6.) })
+            .when(opens_turn, |row| row.pt(zpx(14.)))
+            .pb(if compact {
+                zpx(2.)
+            } else if closes_turn {
+                zpx(10.)
+            } else {
+                zpx(6.)
+            })
             .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(content))
             .into_any_element()
     }
@@ -544,14 +601,15 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("reasoning", ix))
-                    .px_2()
-                    .h(zpx(22.0))
+                    .keyboard_control()
+                    .px(zpx(TEXT_INSET))
+                    .h(zpx(ROW_HEIGHT))
                     .items_center()
-                    .gap_1p5()
+                    .gap(zpx(ROW_GAP))
                     .rounded_md()
                     .cursor_pointer()
-                    .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_size(zpx(TEXT_MD))
+                    .text_color(crate::appearance::secondary_text())
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                     .role(Role::Button)
@@ -567,15 +625,17 @@ impl ChatView {
                             .into_any_element()
                     } else {
                         div().child("Thought").into_any_element()
-                    }),
+                    })
+                    .child(disclosure(expanded)),
             )
             .when(expanded, |col| {
                 col.child(
                     div()
-                        .px_2()
-                        .text_size(zpx(TEXT_SM))
+                        .px(zpx(TEXT_INSET))
+                        .pb(zpx(4.))
+                        .text_size(zpx(TEXT_MD))
                         .line_height(relative(1.5))
-                        .text_color(rgba(MUTED))
+                        .text_color(crate::appearance::secondary_text())
                         .child(text.to_owned()),
                 )
             })
@@ -583,6 +643,10 @@ impl ChatView {
 
     fn tool_card(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
         let (_, label) = super::activity::describe(tool);
+        let failed = matches!(
+            tool.state,
+            super::model::ToolState::Error | super::model::ToolState::Declined
+        );
         let color = rgba(MUTED);
         let file = match self.model.blocks.get(ix + 1) {
             Some(Block::FileChange(file))
@@ -605,9 +669,15 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("tool", ix))
-                    .h(zpx(26.))
-                    .px_2()
-                    .gap_2()
+                    .keyboard_control()
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "{} {label}",
+                        if tool.expanded { "Collapse" } else { "Expand" }
+                    ))
+                    .h(zpx(ROW_HEIGHT))
+                    .px(zpx(TEXT_INSET))
+                    .gap(zpx(ROW_GAP))
                     .items_center()
                     .rounded_md()
                     .cursor_pointer()
@@ -615,31 +685,41 @@ impl ChatView {
                     .text_color(color)
                     .hover(|row| row.bg(rgba(CARD)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(div().min_w_0().truncate().child(label))
-                    .child(
-                        crate::icons::icon(if tool.expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .with_size(zpx(12.))
-                        .text_color(rgba(FAINT)),
-                    ),
+                    .child(match label.split_once(' ').filter(|_| failed) {
+                        // The verb says which row in the group went wrong.
+                        Some((verb, rest)) => h_flex()
+                            .min_w_0()
+                            .gap(zpx(4.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child(verb.to_owned()),
+                            )
+                            .child(div().min_w_0().truncate().child(rest.to_owned()))
+                            .into_any_element(),
+                        None => div()
+                            .min_w_0()
+                            .truncate()
+                            .child(label.clone())
+                            .into_any_element(),
+                    })
+                    .child(disclosure(tool.expanded)),
             )
             .when_some(details, |card, details| {
                 card.child(
                     div()
                         .id(("tool-output", ix))
-                        .px_2()
-                        .py_3()
+                        .px(zpx(TEXT_INSET))
+                        .py(zpx(10.))
                         .max_h(zpx(260.))
                         .overflow_y_scroll()
                         .rounded_lg()
-                        .bg(rgba(CARD))
+                        .bg(crate::appearance::code_surface())
                         .font_family(MONO)
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
-                        .text_color(rgba(MUTED))
+                        .text_color(rgba(BODY_MUTED))
                         .whitespace_normal()
                         .child(if details.is_empty() {
                             "No output".to_owned()
@@ -670,99 +750,90 @@ impl ChatView {
             .child(
                 h_flex()
                     .id(("file", ix))
-                    .h(zpx(26.0))
-                    .px_2()
-                    .gap_2()
+                    .h(zpx(ROW_HEIGHT))
+                    .px(zpx(TEXT_INSET))
+                    .gap(zpx(ROW_GAP))
                     .items_center()
-                    .rounded_lg()
-                    .when(has_diff, |row| row.cursor_pointer())
-                    .hover(|row| row.bg(rgba(CARD_HOVER)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(crate::icons::path("icons/pencil.svg").text_color(rgba(MUTED)))
-                    .child(
-                        div()
-                            .text_size(zpx(TEXT_MD))
-                            .text_color(rgba(MUTED))
-                            .child(kind_label),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(zpx(TEXT_MD))
-                            .text_color(rgba(MUTED))
-                            .child(
-                                change
-                                    .path
-                                    .file_name()
-                                    .unwrap_or(change.path.as_os_str())
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            ),
-                    )
+                    .rounded_md()
+                    .text_size(zpx(TEXT_MD))
+                    .text_color(crate::appearance::secondary_text())
                     .when(has_diff, |row| {
-                        row.child(
-                            crate::icons::icon(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .with_size(zpx(12.))
-                            .text_color(rgba(FAINT)),
-                        )
+                        row.cursor_pointer().hover(|row| row.bg(rgba(CARD)))
                     })
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
+                    .child(div().min_w_0().truncate().child(format!(
+                        "{kind_label} {}",
+                        change
+                            .path
+                            .file_name()
+                            .unwrap_or(change.path.as_os_str())
+                            .to_string_lossy()
+                    )))
                     .when(change.added > 0 || change.removed > 0, |row| {
                         row.child(
                             h_flex()
-                                .gap_1p5()
-                                .font_family(MONO)
+                                .flex_none()
+                                .gap(zpx(4.))
                                 .text_size(zpx(TEXT_SM))
-                                .child(
-                                    div()
-                                        .text_color(rgba(GREEN))
-                                        .child(format!("+{}", change.added)),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgba(RED))
-                                        .child(format!("-{}", change.removed)),
-                                ),
+                                .when(change.added > 0, |counts| {
+                                    counts.child(
+                                        div()
+                                            .text_color(ActionTone::Success.foreground())
+                                            .child(format!("+{}", change.added)),
+                                    )
+                                })
+                                .when(change.removed > 0, |counts| {
+                                    counts.child(
+                                        div()
+                                            .text_color(ActionTone::Danger.foreground())
+                                            .child(format!("−{}", change.removed)),
+                                    )
+                                }),
                         )
-                    }),
+                    })
+                    .when(has_diff, |row| row.child(disclosure(expanded))),
             )
             .when(expanded && has_diff, |card| {
                 let hidden = change.lines.len().saturating_sub(MAX_DIFF_LINES);
                 card.child(
                     v_flex()
                         .id(("diff", ix))
-                        .pb_1()
-                        .max_h(zpx(220.0))
+                        .mt(zpx(2.))
+                        .mb(zpx(4.))
+                        .py(zpx(6.))
+                        .max_h(zpx(260.0))
                         .overflow_y_scroll()
+                        .rounded_lg()
+                        .bg(crate::appearance::code_surface())
                         .children(change.lines.iter().take(MAX_DIFF_LINES).map(|line| {
+                            let added = ActionTone::Success.foreground();
+                            let removed = ActionTone::Danger.foreground();
                             let (marker, fill, color) = match line.kind {
-                                DiffKind::Added => ("+", 0x5fc27e1f, GREEN),
-                                DiffKind::Removed => ("-", 0xf0716b1f, RED),
-                                DiffKind::Context => (" ", 0x00000000, MUTED),
-                                DiffKind::Hunk => ("", 0x00000000, FAINT),
+                                DiffKind::Added => ("+", Some(added.opacity(0.13)), added),
+                                DiffKind::Removed => ("−", Some(removed.opacity(0.13)), removed),
+                                DiffKind::Context => (" ", None, rgba(BODY_MUTED)),
+                                DiffKind::Hunk => ("", None, crate::appearance::faint_text()),
                             };
                             h_flex()
-                                .px_2()
+                                .px(zpx(TEXT_INSET))
                                 .gap_2()
-                                .bg(rgba(fill))
+                                .when_some(fill, |row, fill| row.bg(fill))
                                 .font_family(MONO)
                                 .text_size(zpx(TEXT_SM))
                                 .line_height(relative(1.5))
-                                .text_color(rgba(color))
-                                .child(div().w(zpx(8.0)).flex_none().child(marker))
+                                .text_color(color)
+                                .when(line.kind != DiffKind::Hunk, |row| {
+                                    row.child(div().w(zpx(8.0)).flex_none().child(marker))
+                                })
                                 .child(div().whitespace_nowrap().child(line.text.clone()))
                         }))
                         .when(hidden > 0, |diff| {
                             diff.child(
                                 div()
-                                    .px_2()
+                                    .px(zpx(TEXT_INSET))
                                     .pt_1()
                                     .text_size(zpx(TEXT_SM))
-                                    .text_color(rgba(FAINT))
+                                    .text_color(crate::appearance::faint_text())
                                     .child(format!(
                                         "{hidden} more {}",
                                         if hidden == 1 { "line" } else { "lines" }
@@ -781,76 +852,197 @@ impl ChatView {
         };
         let pending = approval.state == ApprovalState::Pending;
         let (approve_id, deny_id) = (approval.id.clone(), approval.id.clone());
+        let attention = ActionTone::Warning.foreground();
         v_flex()
-            .p_2p5()
-            .gap_2()
+            .my(zpx(4.))
+            .p(zpx(TEXT_INSET))
+            .gap(zpx(10.))
             .rounded_lg()
-            .bg(rgba(0xe8b04a14))
+            .bg(crate::appearance::composer_surface())
+            .when(pending, |card| {
+                card.border_1().border_color(attention.opacity(0.28))
+            })
+            .when(!pending, |card| {
+                card.border_1().border_color(rgba(HAIRLINE))
+            })
             .child(
-                div()
+                h_flex()
+                    .gap(zpx(8.))
+                    .items_center()
                     .text_size(zpx(TEXT_MD))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(STRONG))
+                    .when(pending, |row| {
+                        row.child(
+                            crate::icons::path("icons/waiting-ring.svg")
+                                .with_size(zpx(14.))
+                                .text_color(attention),
+                        )
+                    })
                     .child(title),
             )
             .child(
                 div()
-                    .px_2()
-                    .py_1()
+                    .px(zpx(10.))
+                    .py(zpx(7.))
                     .rounded_md()
-                    .bg(rgba(0x00000040))
+                    .bg(crate::appearance::code_surface())
                     .font_family(MONO)
                     .text_size(zpx(TEXT_SM))
+                    .line_height(relative(1.5))
                     .text_color(rgb(TEXT))
                     .child(approval.detail.clone()),
             )
             .child(if pending {
                 h_flex()
-                    .gap_1()
-                    .child(pill("approve", "Approve", true).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.respond(approve_id.clone(), ApprovalResponse::Approve, cx)
-                        },
-                    )))
-                    .child(pill("deny", "Deny", false).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.respond(deny_id.clone(), ApprovalResponse::Deny, cx)
-                        },
-                    )))
+                    .gap(zpx(6.))
+                    .child(
+                        Button::new("approve")
+                            .primary()
+                            .small()
+                            .label("Approve")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(approve_id.clone(), ApprovalResponse::Approve, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("deny")
+                            .ghost()
+                            .small()
+                            .bg(rgba(crate::appearance::QUIET_FILL))
+                            .label("Deny")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(deny_id.clone(), ApprovalResponse::Deny, cx)
+                            })),
+                    )
                     .into_any_element()
             } else {
                 let (label, color) = match approval.state {
-                    ApprovalState::Approved => ("Approved", GREEN),
-                    ApprovalState::Closed => ("No longer needed", MUTED),
-                    _ => ("Denied", RED),
+                    ApprovalState::Approved => ("Approved", ActionTone::Success.foreground()),
+                    ApprovalState::Closed => ("No longer needed", rgba(MUTED)),
+                    _ => ("Denied", ActionTone::Danger.foreground()),
                 };
                 div()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(color))
+                    .text_color(color)
                     .child(label)
                     .into_any_element()
             })
     }
 }
 
-fn pill(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(zpx(24.0))
-        .px_3()
-        .flex()
+/// The one disclosure arrow transcript rows use, directly after their text.
+fn disclosure(expanded: bool) -> Icon {
+    crate::icons::icon(if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
+    .with_size(zpx(11.))
+    .flex_none()
+    .text_color(crate::appearance::faint_text())
+}
+
+/// A code block's corner: its language and a Copy with the same confirmation
+/// as a reply's. Passing actions also drops the extra top padding the bare
+/// language label needs, so the code sits evenly in its block.
+fn code_block_actions(
+    block: &gpui_kit::base::text::CodeBlock,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    use std::hash::{Hash as _, Hasher as _};
+    let code = block.code();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut hasher);
+    let key = hasher.finish();
+    // Counts clicks, so a repeated click restarts the confirmation; 0 is idle.
+    let copies = window.use_keyed_state(
+        ElementId::NamedInteger("code-copy".into(), key),
+        cx,
+        |_, _| 0u32,
+    );
+    let copied = *copies.read(cx) > 0;
+    h_flex()
+        .h(zpx(24.))
+        .pl(zpx(8.))
+        .gap(zpx(2.))
         .items_center()
-        .rounded_full()
-        .cursor_pointer()
-        .text_size(zpx(TEXT_MD))
-        .font_weight(FontWeight::MEDIUM)
-        .when(primary, |p| p.bg(rgb(0xffffff)).text_color(rgb(0x111113)))
-        .when(!primary, |p| {
-            p.bg(rgba(0xffffff14))
-                .text_color(rgb(STRONG))
-                .hover(|p| p.bg(rgba(0xffffff1f)))
+        .rounded_md()
+        .bg(crate::appearance::code_surface())
+        .font_family(cx.theme().font_family.clone())
+        .text_size(zpx(del_core::typography::TEXT_XS))
+        .text_color(crate::appearance::secondary_text())
+        .when_some(block.lang().filter(|lang| !lang.is_empty()), |row, lang| {
+            row.child(lang)
         })
-        .child(label)
+        .child(
+            div()
+                .id(ElementId::NamedInteger("code-copy-button".into(), key))
+                .keyboard_control()
+                .size(zpx(24.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label(if copied { "Copied" } else { "Copy code" })
+                .hover(|button| button.bg(rgba(CARD_HOVER)))
+                .child(
+                    crate::micro_motion::MorphIcon::new(
+                        ElementId::NamedInteger("code-copy-icon".into(), key),
+                        crate::animated_icons::Morph::CopyCheck,
+                        copied,
+                    )
+                    .with_size(zpx(13.))
+                    .text_color(crate::appearance::secondary_text()),
+                )
+                // Pressing Copy must not start a text selection in the block.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                    let click = copies.update(cx, |count, cx| {
+                        *count = count.wrapping_add(1).max(1);
+                        cx.notify();
+                        *count
+                    });
+                    let copies = copies.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1500))
+                            .await;
+                        copies.update(cx, |count, cx| {
+                            if *count == click {
+                                *count = 0;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }),
+        )
+}
+
+fn prose_style() -> TextViewStyle {
+    TextViewStyle::default()
+        .heading_font_size(|level, _| {
+            zpx(match level {
+                1 => TEXT_XL,
+                2 => TEXT_LG,
+                _ => TEXT_PROSE,
+            })
+        })
+        // The same surface as diffs and tool output.
+        .code_block(StyleRefinement::default().bg(crate::appearance::code_surface()))
+        // A column heading is a label to read, not disabled text.
+        .table_head(
+            StyleRefinement::default()
+                .text_color(crate::appearance::secondary_text())
+                .font_weight(FontWeight::MEDIUM),
+        )
 }
 
 fn user_message(
@@ -868,13 +1060,16 @@ fn user_message(
     });
     let sent_as_goal = goal || objective.is_some();
     let text = objective.unwrap_or(text);
+    // The card hugs its text, up to the column; a short prompt is not a full-width band.
     h_flex()
-        .w_full()
+        .max_w_full()
+        .self_start()
         .items_start()
         .gap_2()
-        .p_2p5()
+        .px(zpx(TEXT_INSET))
+        .py(zpx(8.))
         .rounded_lg()
-        .bg(rgba(0xffffff12))
+        .bg(rgba(USER_CARD))
         .when(steer, |row| {
             row.child(
                 crate::icons::path("icons/queue.svg")
@@ -885,14 +1080,14 @@ fn user_message(
         })
         .child(
             v_flex()
-                .flex_1()
+                .flex_shrink_1()
                 .min_w_0()
                 .gap_1()
                 .when(!text.is_empty(), |column| {
                     column.child(
                         div()
-                            .text_size(zpx(TEXT_MD))
-                            .line_height(relative(1.5))
+                            .text_size(zpx(TEXT_PROSE))
+                            .line_height(relative(PROSE_LEADING))
                             .text_color(rgb(STRONG))
                             .child(text),
                     )
@@ -900,8 +1095,8 @@ fn user_message(
                 .when(sent_as_goal, |column| {
                     column.child(
                         div()
-                            .text_size(zpx(11.))
-                            .text_color(rgba(MUTED))
+                            .text_size(zpx(del_core::typography::TEXT_XS))
+                            .text_color(crate::appearance::secondary_text())
                             .child("◎  Sent as goal"),
                     )
                 })
@@ -909,7 +1104,7 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(MUTED))
+                            .text_color(crate::appearance::secondary_text())
                             .child(label),
                     )
                 }),
@@ -938,13 +1133,7 @@ fn assistant_message(
         completed,
         reduced,
     } = footer;
-    let style = TextViewStyle::default().heading_font_size(|level, _| {
-        if level <= 2 {
-            zpx(TEXT_LG)
-        } else {
-            zpx(TEXT_MD)
-        }
-    });
+    let style = prose_style();
     let copy_chat = chat.clone();
     let hover_chat = chat.clone();
     let group = SharedString::from(format!("assistant-message-{ix}"));
@@ -958,8 +1147,9 @@ fn assistant_message(
             });
         })
         .group(group.clone())
-        .px_2()
-        .text_size(zpx(TEXT_MD))
+        .px(zpx(TEXT_INSET))
+        .text_size(zpx(TEXT_PROSE))
+        .line_height(relative(PROSE_LEADING))
         .text_color(rgb(TEXT))
         .child(
             state
@@ -968,6 +1158,7 @@ fn assistant_message(
                     TextView::markdown(("markdown", ix), super::citations::markdown(&text))
                 })
                 .style(style)
+                .code_block_actions(code_block_actions)
                 .stream_fade(false)
                 .selectable(true)
                 .on_link_click(move |url, _, _, cx| {
@@ -984,11 +1175,14 @@ fn assistant_message(
                     .gap(zpx(4.))
                     .items_center()
                     .justify_start()
-                    .text_size(zpx(11.))
-                    .text_color(rgba(MUTED))
+                    .text_size(zpx(del_core::typography::TEXT_XS))
+                    .text_color(crate::appearance::secondary_text())
                     .child(
                         div()
                             .id(("copy-response", ix))
+                            .keyboard_control()
+                            // Tab can land here without a hover, so focus must show it.
+                            .focus_visible(|button| button.opacity(1.))
                             .size(zpx(24.))
                             .flex_none()
                             .flex()
@@ -1006,46 +1200,86 @@ fn assistant_message(
                                     copied,
                                 )
                                 .with_size(zpx(13.))
-                                .text_color(rgba(MUTED)),
+                                .text_color(crate::appearance::secondary_text()),
                             )
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 let _ = copy_chat.update(cx, |chat, cx| chat.copy_response(ix, cx));
-                            }),
+                            })
+                            .with_animation(
+                                SharedString::from(format!("response-copy-{ix}-{hovered:?}")),
+                                Animation::new(std::time::Duration::from_millis(160))
+                                    .with_easing(ease_out_quint()),
+                                move |button, t| {
+                                    button.opacity(footer_opacity(hovered, reduced, t))
+                                },
+                            ),
                     )
                     .when_some(replied_at, |footer, time| {
-                        footer.child(time.format("%H:%M").to_string())
-                    })
-                    .with_animation(
-                        SharedString::from(format!("response-footer-{ix}-{hovered:?}")),
-                        Animation::new(std::time::Duration::from_millis(160))
-                            .with_easing(ease_out_quint()),
-                        move |footer, t| {
-                            let opacity = match hovered {
-                                None => 0.,
-                                Some(true) if reduced => 1.,
-                                Some(false) if reduced => 0.,
-                                Some(true) => t,
-                                Some(false) => 1. - t,
-                            };
-                            footer.opacity(opacity)
-                        },
-                    ),
+                        footer.child(
+                            div()
+                                .child(time.format("%H:%M").to_string())
+                                .with_animation(
+                                    SharedString::from(format!("response-time-{ix}-{hovered:?}")),
+                                    Animation::new(std::time::Duration::from_millis(160))
+                                        .with_easing(ease_out_quint()),
+                                    move |time, t| {
+                                        time.opacity(footer_opacity(hovered, reduced, t))
+                                    },
+                                ),
+                        )
+                    }),
             )
         })
 }
 
-fn turn_end(status: TurnStatus) -> impl IntoElement {
+/// The reply footer's 160 ms fade, in both directions.
+fn footer_opacity(hovered: Option<bool>, reduced: bool, t: f32) -> f32 {
+    match hovered {
+        None => 0.,
+        Some(true) if reduced => 1.,
+        Some(false) if reduced => 0.,
+        Some(true) => t,
+        Some(false) => 1. - t,
+    }
+}
+
+fn turn_end(status: TurnStatus, error: Option<String>) -> impl IntoElement {
+    let failed = status == TurnStatus::Failed;
+    let danger = ActionTone::Danger.foreground();
     let label = match status {
         TurnStatus::Completed => "Completed",
         TurnStatus::Interrupted => "Stopped by you",
         TurnStatus::Failed => "Turn failed",
     };
-    div()
-        .px_2()
-        .text_size(zpx(TEXT_SM))
-        .text_color(rgba(FAINT))
-        .child(label)
+    h_flex()
+        .px(zpx(TEXT_INSET))
+        .py(zpx(4.))
+        .gap(zpx(6.))
+        .items_start()
+        .text_size(zpx(TEXT_MD))
+        .line_height(zpx(18.))
+        .text_color(if failed { danger } else { rgba(MUTED) })
+        .when(failed, |row| {
+            row.child(
+                div().h(zpx(18.)).flex_none().flex().items_center().child(
+                    crate::icons::path("icons/error.svg")
+                        .with_size(zpx(14.))
+                        .text_color(danger),
+                ),
+            )
+        })
+        .child(div().flex_none().child(label))
+        .when_some(error.filter(|_| failed), |row, error| {
+            row.child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .whitespace_normal()
+                    .text_color(rgba(BODY_MUTED))
+                    .child(error),
+            )
+        })
 }
 
 /// The opening message is rendered before there is a backend session to follow.
@@ -1062,22 +1296,22 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                 .child(
                     h_flex()
                         .w_full()
-                        .pt_2()
-                        .child(div().w(zpx(24.)).flex_none())
+                        .pt(zpx(TRANSCRIPT_TOP))
+                        .justify_center()
+                        .px_3()
                         .child(
-                            h_flex().flex_1().min_w_0().justify_center().px_6().child(
-                                div()
-                                    .w_full()
-                                    .max_w(zpx(COLUMN_MAX_WIDTH))
-                                    .child(user_message(
-                                        input.text.clone(),
-                                        false,
-                                        input.command.as_ref().is_some_and(|c| {
-                                            c.kind == del_agent::CommandKind::Goal
-                                        }),
-                                        AttachmentSummary::from_input(&input),
-                                    )),
-                            ),
+                            div()
+                                .w_full()
+                                .max_w(zpx(COLUMN_MAX_WIDTH))
+                                .child(user_message(
+                                    input.text.clone(),
+                                    false,
+                                    input
+                                        .command
+                                        .as_ref()
+                                        .is_some_and(|c| c.kind == del_agent::CommandKind::Goal),
+                                    AttachmentSummary::from_input(&input),
+                                )),
                         ),
                 ),
         )
@@ -1087,11 +1321,11 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                     .w_full()
                     .max_w(zpx(COLUMN_MAX_WIDTH))
                     .h(zpx(20.))
-                    .px_2()
+                    .px(zpx(TEXT_INSET))
                     .gap_1p5()
                     .items_center()
                     .text_size(zpx(TEXT_SM))
-                    .text_color(rgba(MUTED))
+                    .text_color(crate::appearance::secondary_text())
                     .when(!failed, |row| {
                         row.child(crate::icons::spinner()).child("Starting agent…")
                     }),

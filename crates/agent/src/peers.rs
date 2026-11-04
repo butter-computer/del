@@ -44,6 +44,9 @@ pub enum WorkStatus {
 pub struct PeerWork {
     pub id: String,
     pub status: WorkStatus,
+    /// Explicit Stop is sticky; an agent-managed pause can wake on new input.
+    #[serde(default)]
+    pub stopped_by_user: bool,
     /// The peer exchange must not replace this session's existing assignment.
     pub retains_original_work: bool,
 }
@@ -163,6 +166,34 @@ impl PeerStore {
             return Ok(());
         }
         self.update(|state| {
+            state
+                .projects
+                .insert(session.clone(), project.to_path_buf());
+            Ok(())
+        })
+    }
+
+    /// Resolve a provisional cwd identity for every peer that inherited it.
+    /// Host Git inspection supplies both paths; models cannot expand scope.
+    pub fn register_resolved(
+        &mut self,
+        session: &SessionId,
+        cwd: &Path,
+        project: &Path,
+    ) -> Result<()> {
+        if !cwd.is_absolute() || !project.is_absolute() {
+            return Err(failure("Project paths must be absolute"));
+        }
+        let inherited = cwd != project && self.state.projects.values().any(|p| p == cwd);
+        if !inherited && self.project(session) == Some(project) {
+            return Ok(());
+        }
+        self.update(|state| {
+            if cwd != project {
+                for existing in state.projects.values_mut().filter(|p| p.as_path() == cwd) {
+                    *existing = project.to_path_buf();
+                }
+            }
             state
                 .projects
                 .insert(session.clone(), project.to_path_buf());
@@ -436,6 +467,43 @@ impl PeerStore {
         })
     }
 
+    pub fn cancel_request(&mut self, caller: &SessionId, id: &str) -> Result<PeerMessage> {
+        let caller = self.resolve(caller);
+        let message = self
+            .message(id)
+            .ok_or_else(|| failure("Unknown peer request"))?;
+        if message.from != caller || message.reply_to.is_some() {
+            return Err(failure("Only the sender can withdraw its own request"));
+        }
+        if !matches!(
+            message.state,
+            DeliveryState::Queued | DeliveryState::Failed | DeliveryState::Cancelled
+        ) {
+            return Err(failure(
+                "This request may have started. Ask the recipient to stop; uncertain delivery needs user review",
+            ));
+        }
+        let message = self.set_delivery(
+            id,
+            DeliveryState::Cancelled,
+            Some("Withdrawn by the requesting agent before delivery".into()),
+        )?;
+        // An empty worker whose only assignments were withdrawn has nothing to
+        // continue. Never infer completion for work that reached a provider.
+        let to = &message.to;
+        if self
+            .work(to)
+            .is_some_and(|w| !w.retains_original_work && !w.stopped_by_user)
+            && self
+                .messages(to)
+                .iter()
+                .all(|m| m.state == DeliveryState::Cancelled)
+        {
+            self.finish_work(to)?;
+        }
+        Ok(message)
+    }
+
     pub fn work(&self, id: &SessionId) -> Option<PeerWork> {
         self.state.work.get(id).cloned()
     }
@@ -483,7 +551,33 @@ impl PeerStore {
             return Ok(());
         }
         self.update(|state| {
-            state.work.get_mut(id).unwrap().status = WorkStatus::Paused;
+            let work = state.work.get_mut(id).unwrap();
+            work.status = WorkStatus::Paused;
+            work.stopped_by_user = true;
+            Ok(())
+        })
+    }
+
+    pub fn pause_automatic(&mut self, id: &SessionId) -> Result<()> {
+        if !self.state.work.contains_key(id) {
+            return Ok(());
+        }
+        let queued = self
+            .pending(id)
+            .is_some_and(|message| message.state == DeliveryState::Queued);
+        self.update(|state| {
+            let work = state.work.get_mut(id).unwrap();
+            // A reply can arrive before the agent's pause call. Keep it eligible
+            // for dispatch, but never let a late agent response undo user Stop.
+            if work.status == WorkStatus::Paused && work.stopped_by_user {
+                return Ok(());
+            }
+            work.stopped_by_user = false;
+            work.status = if queued {
+                WorkStatus::Active
+            } else {
+                WorkStatus::Paused
+            };
             Ok(())
         })
     }
@@ -519,7 +613,9 @@ impl PeerStore {
             return Ok(());
         }
         self.update(|state| {
-            state.work.get_mut(id).unwrap().status = WorkStatus::Active;
+            let work = state.work.get_mut(id).unwrap();
+            work.status = WorkStatus::Active;
+            work.stopped_by_user = false;
             Ok(())
         })
     }
@@ -553,7 +649,9 @@ fn activate(state: &mut State, id: &SessionId, original: bool) {
     match state.work.get_mut(id) {
         Some(work) if work.status != WorkStatus::Complete => {
             work.retains_original_work |= original;
-            if work.status == WorkStatus::Waiting {
+            if work.status == WorkStatus::Waiting
+                || (work.status == WorkStatus::Paused && !work.stopped_by_user)
+            {
                 work.status = WorkStatus::Active;
             }
             // A user stop stays stopped, even when another peer sends a message.
@@ -564,6 +662,7 @@ fn activate(state: &mut State, id: &SessionId, original: bool) {
                 PeerWork {
                     id: uuid::Uuid::new_v4().to_string(),
                     status: WorkStatus::Active,
+                    stopped_by_user: false,
                     retains_original_work: original,
                 },
             );
@@ -607,6 +706,87 @@ mod tests {
         assert!(store.wait(&a).is_err());
         store.finish_work(&a).unwrap();
         assert!(!store.user_queue_blocked(&a));
+    }
+
+    #[test]
+    fn resolving_parent_project_keeps_uninspected_spawned_worktrees_in_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        let provisional = Path::new("/project/parent-worktree");
+        store.register(&id("a"), provisional).unwrap();
+        store.register(&id("b"), provisional).unwrap();
+        let request = store
+            .send(&id("a"), &id("b"), "first", "Task", None, false)
+            .unwrap();
+        store
+            .register_resolved(&id("a"), provisional, Path::new("/project"))
+            .unwrap();
+        store.claim(&request.id).unwrap();
+        assert!(store.authorize(&id("a"), &id("outsider")).is_err());
+    }
+
+    #[test]
+    fn withdrawing_undelivered_tasks_unblocks_parent_without_restarting_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.json");
+        let mut store = setup(path.clone());
+        let first = store
+            .send(&id("a"), &id("b"), "spawn", "Old task", None, false)
+            .unwrap();
+        store
+            .set_delivery(
+                &first.id,
+                DeliveryState::Failed,
+                Some("Project mismatch".into()),
+            )
+            .unwrap();
+        let second = store
+            .send(&id("a"), &id("b"), "retry", "Old retry", None, false)
+            .unwrap();
+        store.pause(&id("b")).unwrap();
+        assert!(store.finish_work(&id("a")).is_err());
+        assert!(store.cancel_request(&id("c"), &first.id).is_err());
+        assert!(store.cancel_request(&id("outsider"), &first.id).is_err());
+        store.cancel_request(&id("a"), &first.id).unwrap();
+        assert!(store.finish_work(&id("a")).is_err());
+        store.cancel_request(&id("a"), &second.id).unwrap();
+        store.cancel_request(&id("a"), &second.id).unwrap();
+        store.finish_work(&id("a")).unwrap();
+        assert_eq!(store.work(&id("b")).unwrap().status, WorkStatus::Paused);
+        assert!(store.work(&id("b")).unwrap().stopped_by_user);
+        let store = PeerStore::open(path).unwrap();
+        assert!(!store.user_queue_blocked(&id("a")));
+        assert!(store.pending(&id("b")).is_none());
+        assert_eq!(
+            store.message(&second.id).unwrap().state,
+            DeliveryState::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_cannot_race_a_claim_or_hide_an_uncertain_delivery() {
+        for status in [
+            DeliveryState::Delivering,
+            DeliveryState::Delivered,
+            DeliveryState::Uncertain,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = setup(dir.path().join("peers.json"));
+            let task = store
+                .send(&id("a"), &id("b"), "task", "Run", None, false)
+                .unwrap();
+            store.claim(&task.id).unwrap();
+            store.set_delivery(&task.id, status, None).unwrap();
+            assert!(store.cancel_request(&id("a"), &task.id).is_err());
+            assert_eq!(store.message(&task.id).unwrap().state, status);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        let task = store
+            .send(&id("a"), &id("b"), "task", "Run", None, false)
+            .unwrap();
+        store.cancel_request(&id("a"), &task.id).unwrap();
+        assert!(store.claim(&task.id).is_err());
     }
 
     fn setup(path: PathBuf) -> PeerStore {
@@ -701,7 +881,7 @@ mod tests {
         assert!(store.claim(&second.id).is_err());
         store.claim(&first.id).unwrap();
         drop(store);
-        let mut store = PeerStore::open(path).unwrap();
+        let mut store = PeerStore::open(path.clone()).unwrap();
         assert_eq!(
             store.pending(&id("a")).unwrap().state,
             DeliveryState::Uncertain
@@ -713,11 +893,29 @@ mod tests {
         );
         assert!(store.work(&id("a")).unwrap().retains_original_work);
         store.pause(&id("a")).unwrap();
+        drop(store);
+        let mut store = PeerStore::open(path).unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert!(store.work(&id("a")).unwrap().stopped_by_user);
         store
             .send(&id("b"), &id("a"), "third", "three", None, false)
             .unwrap();
         assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Paused);
     }
+    #[test]
+    fn peer_input_arriving_before_agent_pause_does_not_get_stranded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        store
+            .send(&id("b"), &id("a"), "new-task", "Review", None, false)
+            .unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Active);
+        store.pause(&id("a")).unwrap();
+        store.pause_automatic(&id("a")).unwrap();
+        assert_eq!(store.work(&id("a")).unwrap().status, WorkStatus::Paused);
+    }
+
     #[test]
     fn unreadable_mailbox_fails_closed() {
         let dir = tempfile::tempdir().unwrap();

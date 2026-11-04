@@ -6,11 +6,13 @@ use crate::peers::{DeliveryState, PeerMessage, PeerWork, WorkStatus};
 #[derive(Clone, Copy)]
 pub(super) enum SendOrigin<'a> {
     User,
+    // Explicit user steering may amend work while a peer obligation blocks follow-ups.
+    UserSteer,
     Peer(&'a str),
     Continuation,
 }
 
-pub(super) const CONTINUE_WORK: &str = "<del_work_continuation>Continue unfinished work and current peer obligations from the recorded conversation. A new peer request after a completed task is new work; do not restart the completed task. A turn ending or sending a peer reply does not complete your work. Use reply_to_session for requests. Call session_work complete only when the original task and all peer work are actually finished. If you can do no more until a peer replies, call session_work wait. If blocked for another reason, call session_work pause and explain why. Do not process queued user messages yourself.</del_work_continuation>";
+pub(super) const CONTINUE_WORK: &str = "<del_work_continuation>Continue unfinished work and current peer obligations from the recorded conversation. A new peer request after a completed task is new work; do not restart the completed task. A turn ending or sending a peer reply does not complete your work. Use reply_to_session for requests. Inspect session_work get for delivery errors; use cancel_session_request to withdraw your own obsolete queued or failed requests without reopening a worker. Call session_work complete only when the original task and all peer work are actually finished. If you can do no more until a peer replies, call session_work wait. If blocked for another reason, call session_work pause and explain why. Do not process queued user messages yourself.</del_work_continuation>";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextCursor {
@@ -212,6 +214,19 @@ impl SessionManager {
         self.shared.peers.lock().unwrap().register(session, project)
     }
 
+    pub fn set_resolved_peer_project(
+        &self,
+        session: &SessionId,
+        cwd: &Path,
+        project: &Path,
+    ) -> Result<()> {
+        self.shared
+            .peers
+            .lock()
+            .unwrap()
+            .register_resolved(session, cwd, project)
+    }
+
     /// Create an equal chat peer with a durable first request back to its caller.
     /// Keep the caller's directory/project identity rather than allowing model
     /// input to register a new project or broaden execution permissions.
@@ -222,16 +237,20 @@ impl SessionManager {
         cwd: &Path,
         prompt: &str,
     ) -> Result<SessionHandle> {
+        let config = self.peer_spawn_config(caller, provider, cwd).await?;
+        self.spawn_prepared_peer_session(caller, config, prompt)
+            .await
+    }
+
+    /// Validate the requested source directory before the host prepares Git work.
+    pub async fn peer_spawn_config(
+        &self,
+        caller: &SessionId,
+        provider: Provider,
+        cwd: &Path,
+    ) -> Result<SessionConfig> {
         let caller = self.resolve_peer(caller);
         let parent = self.session_record(&caller)?;
-        let project = self
-            .shared
-            .peers
-            .lock()
-            .unwrap()
-            .project(&caller)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| AgentError::Backend("Caller has no registered Del project".into()))?;
         let requested = cwd.to_path_buf();
         let inherited = parent.cwd.clone();
         let same_directory = tokio::task::spawn_blocking(move || {
@@ -247,32 +266,34 @@ impl SessionManager {
         if !same_directory {
             return Err(AgentError::Backend("New chat peers must use the caller's working directory; they inherit its Del project".into()));
         }
-        let same_provider = provider == parent.provider;
-        let child = self
-            .start_account_session(
-                SessionConfig {
-                    cwd: parent.cwd.clone(),
-                    provider,
-                    model: if same_provider { parent.model } else { None },
-                    reasoning_effort: if same_provider {
-                        parent.reasoning_effort
-                    } else {
-                        None
-                    },
-                    service_tier: if same_provider {
-                        parent.service_tier
-                    } else {
-                        None
-                    },
-                    permission_mode: parent.permission_mode,
-                },
-                if same_provider {
-                    parent.account_id
-                } else {
-                    None
-                },
-            )
-            .await?;
+        let same = provider == parent.provider;
+        Ok(SessionConfig {
+            cwd: parent.cwd,
+            provider,
+            model: if same { parent.model } else { None },
+            reasoning_effort: if same { parent.reasoning_effort } else { None },
+            service_tier: if same { parent.service_tier } else { None },
+            permission_mode: parent.permission_mode,
+        })
+    }
+
+    /// Host-only seam for workspaces prepared by Del's Git launch machinery.
+    /// Permissions and project membership always come from the authenticated caller.
+    pub async fn spawn_prepared_peer_session(
+        &self,
+        caller: &SessionId,
+        mut config: SessionConfig,
+        prompt: &str,
+    ) -> Result<SessionHandle> {
+        let caller = self.resolve_peer(caller);
+        let parent = self.session_record(&caller)?;
+        config.permission_mode = parent.permission_mode;
+        let account = if config.provider == parent.provider {
+            parent.account_id
+        } else {
+            None
+        };
+        let child = self.start_account_session(config, account).await?;
         let queued = (|| {
             // Revalidate after provider startup: a deleted caller must not leave
             // an unowned agent running an instruction with no reply destination.
@@ -284,8 +305,26 @@ impl SessionManager {
                 .update(&child.id, |record| {
                     record.title = Some(prompt.trim().chars().take(60).collect());
                 })?;
-            self.set_peer_project(&child.id, &project)?;
-            self.send_to_peer(&caller, &child.id, &format!("spawn:{}", child.id), prompt)?;
+            // Startup awaits the provider. Inherit the caller's current project,
+            // which Git inspection may have resolved while startup was pending.
+            let mut peers = self.shared.peers.lock().unwrap();
+            let project = peers
+                .project(&caller)
+                .map(Path::to_path_buf)
+                .ok_or_else(|| {
+                    AgentError::Backend("Caller has no registered Del project".into())
+                })?;
+            peers.register(&child.id, &project)?;
+            let message = peers.send(
+                &caller,
+                &child.id,
+                &format!("spawn:{}", child.id),
+                prompt,
+                None,
+                false,
+            )?;
+            drop(peers);
+            self.publish_peer(&message);
             Ok(())
         })();
         if let Err(error) = queued {
@@ -293,6 +332,30 @@ impl SessionManager {
             return Err(error);
         }
         Ok(child)
+    }
+
+    /// Stop/close is sticky, unlike a model's cooperative pause.
+    pub fn stop_peer_work(&self, session: &SessionId) -> Result<()> {
+        let session = self.resolve_peer(session);
+        let mut peers = self.shared.peers.lock().unwrap();
+        peers.pause(&session)?;
+        let work = peers.work(&session);
+        drop(peers);
+        self.publish_local(&session, AgentEvent::PeerWorkChanged { work });
+        Ok(())
+    }
+
+    /// The authenticated sender can withdraw only an unstarted request.
+    /// Sharing the mailbox lock with claim() closes the cancellation/send race.
+    pub fn cancel_peer_request(&self, caller: &SessionId, request: &str) -> Result<PeerMessage> {
+        let caller = self.resolve_peer(caller);
+        let mut peers = self.shared.peers.lock().unwrap();
+        let message = peers.cancel_request(&caller, request)?;
+        let work = peers.work(&message.to);
+        drop(peers);
+        self.publish_peer(&message);
+        self.publish_local(&message.to, AgentEvent::PeerWorkChanged { work });
+        Ok(message)
     }
 
     pub fn resolve_peer(&self, id: &SessionId) -> SessionId {
@@ -485,7 +548,7 @@ impl SessionManager {
             "complete" => {
                 peers.finish_work(session)?;
             }
-            "pause" => peers.pause(session)?,
+            "pause" => peers.pause_automatic(session)?,
             "wait" => peers.wait(session)?,
             "resume" => peers.resume(session)?,
             _ => return Err(AgentError::Backend("Unknown session_work action".into())),
@@ -494,6 +557,24 @@ impl SessionManager {
         drop(peers);
         self.publish_local(session, AgentEvent::PeerWorkChanged { work: work.clone() });
         Ok(work)
+    }
+
+    pub(super) fn resume_steered_work(
+        &self,
+        session: &SessionId,
+        before: Option<PeerWork>,
+    ) -> Result<()> {
+        let mut peers = self.shared.peers.lock().unwrap();
+        if let Some(before) = before
+            && before.status == WorkStatus::Paused
+            && peers.work(session).as_ref() == Some(&before)
+        {
+            peers.resume(session)?;
+            let work = peers.work(session);
+            drop(peers);
+            self.publish_local(session, AgentEvent::PeerWorkChanged { work });
+        }
+        Ok(())
     }
 
     fn publish_local(&self, session: &SessionId, event: AgentEvent) {
@@ -913,6 +994,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_pause_wakes_on_peer_reply_but_user_stop_waits_for_steer() {
+        for provider in [Provider::Codex, Provider::Claude] {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = SessionManager::new(
+                dir.path().join("index"),
+                [Arc::new(crate::MockBackend::new(provider)) as Arc<dyn AgentBackend>],
+            )
+            .unwrap();
+            let parent = manager
+                .start_session(config(provider, dir.path()))
+                .await
+                .unwrap();
+            let child = manager
+                .start_session(config(provider, dir.path()))
+                .await
+                .unwrap();
+            let request = manager
+                .send_to_peer(&parent.id, &child.id, "task", "Check this")
+                .unwrap();
+            manager.control_peer_work(&parent.id, "pause").unwrap();
+            assert!(!manager.dispatch_peer(&parent.id).await.unwrap());
+            assert!(manager.dispatch_peer(&child.id).await.unwrap());
+            idle(&manager, &child.id).await;
+            manager
+                .reply_to_peer(&child.id, &request.id, "answer", "Checked")
+                .unwrap();
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Active,
+                "a peer reply should wake an agent-managed pause without Resume"
+            );
+            assert!(manager.dispatch_peer(&parent.id).await.unwrap());
+            idle(&manager, &parent.id).await;
+            manager.interrupt(&parent.id).await.unwrap();
+            manager
+                .send_to_peer(&child.id, &parent.id, "another", "New detail")
+                .unwrap();
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Paused
+            );
+            assert!(
+                !manager.dispatch_peer(&parent.id).await.unwrap(),
+                "user Stop must stay stopped"
+            );
+            manager
+                .steer_input(&parent.id, UserInput::text("Continue with this amendment"))
+                .await
+                .unwrap();
+            idle(&manager, &parent.id).await;
+            assert_eq!(
+                manager.peer_work(&parent.id).unwrap().status,
+                WorkStatus::Active,
+                "explicit steering resumes work without a separate Resume button"
+            );
+            assert!(manager.peer_blocks_user_queue(&parent.id));
+            assert!(manager.dispatch_peer(&parent.id).await.unwrap());
+            manager.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     async fn completed_session_accepts_new_peer_work_without_reviving_previous_task() {
         let dir = tempfile::tempdir().unwrap();
         let manager = SessionManager::new(
@@ -973,6 +1116,46 @@ mod tests {
             .unwrap();
         assert!(!manager.peer_blocks_user_queue(&recipient.id));
         manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_steer_reaches_idle_peer_wait_without_releasing_followups() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("index"),
+            [Arc::new(crate::MockBackend::new(Provider::Claude)) as Arc<dyn AgentBackend>],
+        )
+        .unwrap();
+        let a = manager
+            .start_session(config(Provider::Claude, dir.path()))
+            .await
+            .unwrap();
+        let b = manager
+            .start_session(config(Provider::Claude, dir.path()))
+            .await
+            .unwrap();
+        manager
+            .send_to_peer(&b.id, &a.id, "task", "Review this")
+            .unwrap();
+        manager.dispatch_peer(&a.id).await.unwrap();
+        idle(&manager, &a.id).await;
+        assert!(manager.peer_blocks_user_queue(&a.id));
+        let work = manager.peer_work(&a.id).unwrap();
+        manager
+            .steer_input(&a.id, UserInput::text("Use the new screenshots"))
+            .await
+            .unwrap();
+        idle(&manager, &a.id).await;
+        assert_eq!(manager.peer_work(&a.id).unwrap().status, work.status);
+        assert!(manager.peer_blocks_user_queue(&a.id));
+        assert!(matches!(
+            manager
+                .send_prompt(&a.id, UserInput::text("later followup"))
+                .await,
+            Err(AgentError::Busy(_))
+        ));
+        assert!(manager.subscribe_with_history(&a.id).unwrap().0.iter().any(|event|
+            matches!(event, AgentEvent::UserMessage { text } if text == "Use the new screenshots")));
     }
 
     #[tokio::test]

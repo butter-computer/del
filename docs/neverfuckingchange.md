@@ -192,6 +192,16 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Unread conversations
 
+- Saved session rows show a hover card after 120 ms to the right, clamped to the window.
+  Include title, age/activity, project, code folder path and Git branch with existing
+  icons. Omit the redundant worktree-name line (such as `checkout`) and provider/model line. The row owns the preview even over Archive,
+  Pin, Restore and Delete: don't attach competing tooltips to those buttons.
+  Keep the content width at 300 logical pixels. Animate only fresh appearance with
+  a short fade/slide, respecting reduced motion. Switching between sessions is
+  immediate and static: no fade, slide or other animation on row changes.
+  Use the hovered row's cached directory metadata, never the
+  selected chat's Git state. Inspect Git off-thread. Suppress during rename/drag;
+  leaving or pressing dismisses the card. Hover must not select or mark a chat read.
 - Mark replies completed in chats the user is not viewing as unread. Sidebar
   rows show unread as semibold title text and a filled done check; top tabs keep
   the blue dot.
@@ -493,6 +503,11 @@ This records the final decisions, including corrections to earlier experiments.
   "What are we building?" heading.
   Show the starting branch as a muted grey branch icon followed by its name, without a "Branch:" prefix.
   Hide Git controls for non-repositories; disable them while launch is in progress.
+- Selecting another starting branch in a dirty checkout automatically creates a
+  managed worktree at that branch’s latest locally available commit. Preserve the
+  source branch, index, and all files; never stash/reset or copy uncommitted edits.
+  Retry the same prepared worktree even if the source becomes clean. Apply this
+  preparation consistently to Chat, Terminal, and agent-created chats.
 - Create unique owned worktrees and branches asynchronously, retain their directory
   on resume, and reuse the same worktree on a failed-start retry.
 - Never discard Git work when a session closes, unloads, archives, or is deleted.
@@ -820,9 +835,19 @@ the browser's last viewport instead of sampling a nearly zero-width page.
   of silently queuing work that cannot run. Keep project isolation unchanged.
 
 - Chat agents can create actual chat peers through `spawn_session`, inheriting the
-  caller’s directory, project, permissions, and same-provider account/model. The
-  first task is a durable peer request with a reply route, not an untracked user
+  caller’s directory, project, permissions, and same-provider account/model unless
+  an explicit model is selected. Model changes clear inherited effort/tier unless
+  supplied. `session_models` discovers native model choices without inference.
+  Optional starting branches and managed worktrees use the existing Git preparation
+  and preserve the caller's project and permissions; uncommitted edits are not copied.
+  The first task is a durable peer request with a reply route, not an untracked user
   prompt. Unopened worker chats are driven by the same background peer scheduler.
+- Agents may configure idle chats or close/archive chats they directly spawned in
+  the current app launch. Configuration preserves public history and publishes the
+  provider and model together before the next turn. Closing pauses unfinished peer
+  work and preserves conversation history, branches, and worktree files. These
+  controls do not grant authority over arbitrary project peers. Terminal spawns
+  reject chat-only configuration and workspace options explicitly.
 
 - Peers perform delegated tasks within existing permissions and standing user
   constraints, including new requests after an earlier assignment completes.
@@ -940,7 +965,7 @@ activity bar. It supersedes earlier rules where they conflict.
 - The bottom status bar has branch/files/colored line changes, context, allowance, session cost, running commands, and the Chat/Terminal toggle. Keep provider/model in the composer and keep-awake in the sidebar.
 - Context means the active conversation carried by the model, measured by its latest usage snapshot, never cumulative lifetime tokens. Show percent used with a reported capacity or an exact known model specification; clear it on provider switch, and show unavailable in Terminal mode.
 - Missing allowance or price data is unknown, not zero. Account allowances identify the selected profile by full email (including the default CLI account), include reset times when reported, and refresh no more than once per minute, including failed queries.
-- The cost headline shows the active provider; hover/click breaks down the conversation by provider across every switch. Cost updates are cumulative within a stable provider scope and replace earlier values. Persist captured costs across app restarts; don't reconstruct CLI process costs from native history without reliable boundaries. Disclose that captured pricing may exclude older/Terminal activity and may differ from actual billing.
+- The cost headline sums the main chat and all its side chats, including closed ones; hover/click breaks down that family by provider across every switch. Reconcile each chat independently before summing. Side-chat costs follow their stable storage identity and migrate with draft-to-session/terminal-to-chat ownership; keep them when a side tab closes. Cost updates are cumulative within a stable provider scope and replace earlier values. Persist captured costs across app restarts; don't reconstruct CLI process costs from native history without reliable boundaries. Disclose that captured pricing may exclude older/Terminal activity and may differ from actual billing.
 - Git and process inspection run off the UI thread with deadlines. Count renamed files once. Process lists include only Del-owned trees and attached provider roots; hide background provider connections, shells and helpers. Count this session’s commands and offer both This session and All sessions sections with listening ports. Drafts count all sessions. Empty sections say “0 running”. Shared provider commands with unverifiable ownership belong only in All sessions; never collect command arguments.
 
 - Keep allowance account identity/reset information, but omit provider/account actions and all checked/refresh interval rows from status popovers. Composer overflow fades use the theme surface and actual wrapped text geometry without intercepting editing.
@@ -950,3 +975,32 @@ activity bar. It supersedes earlier rules where they conflict.
   state across tab and Space switches and app restarts, including the Changes pane.
   Explicit tool-opening actions can still reveal the sidebar.
 - Omit the redundant “clean” text from the branch status bar when no files changed.
+
+
+## Session controls follow-up
+
+- Hide relative ages while a session’s working spinner is visible, including
+  activity from its Side chats.
+- The right sidebar has a 320-logical-pixel minimum. Keep provider and model on
+  one row in Side chat composers, including Claude / Opus 5.5 High.
+- Steer is explicit user input even between native turns while waiting for peers.
+  Deliver that amendment without completing, pausing, or dropping peer obligations
+  and without releasing later follow-ups. Failed steering remains reviewable.
+- Agent-created chats apply the same built-in provider permissions as ordinary
+  Del chats before launch, including parents with legacy permission metadata.
+- Each new Side chat action creates a separate fork from the main conversation’s
+  current context. Preserve independent settings, draft, queue, history, unread
+  state, lifecycle, and persisted identity for all open side chats. Selecting an
+  existing tab or opening a peer link reuses that chat rather than creating one.
+
+- Keep peer coordination automatic and out of the transcript header: no task
+  banner or Pause/Resume controls. Incoming peer work wakes agent-managed pauses,
+  but explicit user Stop stays stopped across restarts. Successful user steering
+  resumes stopped work while retaining peer obligations and queued follow-ups.
+
+- Fresh human Send in an idle chat amends blocked peer work immediately, without
+  releasing older follow-ups. Native running turns still queue normal input.
+- Agents can inspect their delivery receipts and withdraw only their own queued
+  or definitely failed requests. Never silently replay ambiguous deliveries.
+- Close/archive holds workers stopped even if new peer messages arrive. Preserve
+  inherited project membership while Git worktree metadata is still loading.

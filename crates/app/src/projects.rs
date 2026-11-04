@@ -302,11 +302,15 @@ pub fn prepare(cwd: &Path, options: &LaunchOptions, storage: &Path) -> Result<Pa
         return Err("This folder is not a Git repository.".into());
     }
     let base = options.branch.as_deref().unwrap_or(&info.current);
-    if options.worktree {
+    let parent = storage.join("worktrees").join(&options.token);
+    // Keep a fallback checkout on retries, even if the source has since become
+    // clean or switched branches. Never stash, reset, or copy the user's edits.
+    let prepared = !options.token.is_empty() && parent.join("worktree.json").exists();
+    let dirty_switch = base != info.current && !git(cwd, &["status", "--porcelain"])?.is_empty();
+    if options.worktree || prepared || dirty_switch {
         if options.token.is_empty() {
             return Err("Missing worktree launch identity.".into());
         }
-        let parent = storage.join("worktrees").join(&options.token);
         let path = parent.join("checkout");
         let manifest = parent.join("worktree.json");
         let branch = format!("del/session-{}", options.token);
@@ -337,10 +341,7 @@ pub fn prepare(cwd: &Path, options: &LaunchOptions, storage: &Path) -> Result<Pa
             return Ok(path);
         }
         // Verify a commit first, including for unborn repositories and stale branch selections.
-        let commit = git(
-            cwd,
-            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-        )?;
+        let commit = &owned.base_commit;
         std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
         crate::sessions::write_atomic(
             &manifest,
@@ -356,15 +357,12 @@ pub fn prepare(cwd: &Path, options: &LaunchOptions, storage: &Path) -> Result<Pa
                 "-b",
                 &branch,
                 path.to_str().ok_or("Invalid worktree path")?,
-                &commit,
+                commit,
             ],
         )?;
         return Ok(path);
     }
     if base != info.current {
-        if !git(cwd, &["status", "--porcelain"])?.is_empty() {
-            return Err("This checkout has local changes. Use New worktree or commit/stash them before switching branches.".into());
-        }
         if !info.branches.iter().any(|branch| branch == base) {
             return Err("The selected branch no longer exists.".into());
         }
@@ -566,16 +564,78 @@ mod tests {
         assert_ne!(second, path);
     }
     #[test]
-    fn local_switch_refuses_dirty_checkout_and_worktree_refuses_unknown_base() {
+    fn dirty_branch_launch_uses_selected_tip_and_reuses_it_after_source_changes() {
+        let repo = repository();
+        let storage = tempfile::tempdir().unwrap();
+        git(repo.path(), &["switch", "feature"]).unwrap();
+        std::fs::write(repo.path().join("target.txt"), "selected branch tip").unwrap();
+        git(repo.path(), &["add", "."]).unwrap();
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "target tip",
+            ],
+        )
+        .unwrap();
+        let tip = git(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        git(repo.path(), &["switch", "main"]).unwrap();
+        // Even an untracked file (such as .concord/) currently blocks launch.
+        std::fs::write(repo.path().join("local.txt"), "keep me").unwrap();
+        let options = LaunchOptions {
+            worktree: false,
+            ..options()
+        };
+        let path = prepare(repo.path(), &options, storage.path()).unwrap();
+        assert_ne!(path, repo.path());
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), tip);
+        assert_eq!(
+            std::fs::read_to_string(path.join("target.txt")).unwrap(),
+            "selected branch tip"
+        );
+        assert!(!path.join("local.txt").exists());
+        assert_eq!(inspect(repo.path()).current, "main");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("local.txt")).unwrap(),
+            "keep me"
+        );
+        // A provider-start retry must keep its prepared workspace even if the
+        // source becomes clean or the selected branch advances in the meantime.
+        std::fs::remove_file(repo.path().join("local.txt")).unwrap();
+        git(repo.path(), &["switch", "feature"]).unwrap();
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "later tip",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            prepare(repo.path(), &options, storage.path()).unwrap(),
+            path
+        );
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), tip);
+    }
+    #[test]
+    fn clean_local_switch_and_unknown_base() {
         let repo = repository();
         let storage = tempfile::tempdir().unwrap();
         let local = LaunchOptions {
             branch: Some("feature".into()),
             ..Default::default()
         };
-        std::fs::write(repo.path().join("dirty"), "keep").unwrap();
-        assert!(prepare(repo.path(), &local, storage.path()).is_err());
-        std::fs::remove_file(repo.path().join("dirty")).unwrap();
         prepare(repo.path(), &local, storage.path()).unwrap();
         assert_eq!(inspect(repo.path()).current, "feature");
         let bad = LaunchOptions {
@@ -640,12 +700,26 @@ mod tests {
             std::fs::read_to_string(repo.path().join("dirty")).unwrap(),
             "keep"
         );
-        // Refusing a dirty switch leaves the current branch and files alone.
+        // Switching from a dirty source preserves its index and files.
+        git(repo.path(), &["add", "dirty"]).unwrap();
+        std::fs::write(repo.path().join("dirty"), "unstaged").unwrap();
+        let status = git(repo.path(), &["status", "--porcelain"]).unwrap();
         let other = LaunchOptions {
-            branch: Some("feature".into()),
-            ..Default::default()
+            worktree: false,
+            ..options()
         };
-        assert!(prepare(repo.path(), &other, storage.path()).is_err());
+        let path = prepare(repo.path(), &other, storage.path()).unwrap();
+        assert_ne!(path, repo.path());
+        assert!(!path.join("dirty").exists());
+        assert_eq!(
+            git(repo.path(), &["status", "--porcelain"]).unwrap(),
+            status
+        );
+        assert_eq!(git(repo.path(), &["show", ":dirty"]).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("dirty")).unwrap(),
+            "unstaged"
+        );
         assert_eq!(inspect(repo.path()).current, "main");
         assert!(repo.path().join("dirty").exists());
     }

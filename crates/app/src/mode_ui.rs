@@ -1,5 +1,6 @@
 //! Main-app session modes and the GPUI end of the MCP command channel.
 use crate::appearance::{rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::mcp_bridge::{BridgeEvent, McpBridge};
 use crate::sessions::TerminalRow;
 use crate::state::Selection;
@@ -36,18 +37,20 @@ pub(super) struct PendingQuestion {
 pub(super) fn tab_mark(provider: Option<Provider>) -> AnyElement {
     match provider {
         Some(provider) => composer_ui::provider_logo(provider).into_any_element(),
-        None => crate::icons::path("icons/terminal.svg").into_any_element(),
+        None => crate::icons::path("icons/terminal.svg")
+            .with_size(zpx(crate::icons::MARK_SIZE))
+            .into_any_element(),
     }
 }
 
 pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
     div()
         .relative()
-        .size(zpx(18.))
+        .size(zpx(crate::icons::MARK_SIZE))
         .flex_none()
         .child(
             crate::icons::path("icons/terminal.svg")
-                .size(zpx(16.))
+                .size(zpx(crate::icons::MARK_SIZE))
                 .text_color(rgba(0xffffffcc)),
         )
         .when_some(provider, |icon, provider| {
@@ -56,13 +59,13 @@ pub(super) fn terminal_mark(provider: Option<Provider>) -> AnyElement {
                     .absolute()
                     .right(zpx(-2.))
                     .bottom(zpx(-2.))
-                    .size(zpx(11.))
+                    .size(zpx(10.))
                     .rounded(zpx(3.))
                     .bg(crate::appearance::popup_surface())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(composer_ui::provider_logo(provider).size(zpx(9.))),
+                    .child(composer_ui::provider_logo(provider).size(zpx(8.))),
             )
         })
         .into_any_element()
@@ -1099,6 +1102,45 @@ impl AppShell {
                     self.notices.pop_front();
                 }
             }
+            BridgeEvent::PrepareWorkspace {
+                cwd,
+                branch,
+                new_worktree,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let options = crate::projects::LaunchOptions {
+                    branch,
+                    worktree: new_worktree,
+                    token: uuid::Uuid::new_v4().to_string(),
+                };
+                let Some(storage) = del_agent::data_dir() else {
+                    let _ = reply.send(Err(HostError::Failed(
+                        "Del data directory unavailable".into(),
+                    )));
+                    return;
+                };
+                self.state
+                    .read(cx)
+                    .backend()
+                    .runtime
+                    .spawn_blocking(move || {
+                        let result = crate::projects::prepare(&cwd, &options, &storage)
+                            .map_err(HostError::Failed);
+                        let _ = reply.send(result);
+                    });
+            }
+            BridgeEvent::CloseChat {
+                target,
+                archive,
+                reply,
+            } => {
+                self.state.update(cx, |state, cx| {
+                    state.finish_agent_close(target, archive, reply, cx)
+                });
+            }
             BridgeEvent::SpawnTerminal {
                 caller: _,
                 request,
@@ -1161,6 +1203,9 @@ impl AppShell {
     }
 
     pub(super) fn render_new_session_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.page_bounds.get().size.width < zpx(540.);
+        self.branch_picker
+            .update(cx, |picker, cx| picker.set_compact(compact, cx));
         let s = self.state.read(cx);
         let cwd = s.effective().2;
         let info = s.project_info.get(&cwd).cloned().unwrap_or_default();
@@ -1185,7 +1230,7 @@ impl AppShell {
         h_flex()
             .h_full()
             .min_w_0()
-            .gap_2()
+            .gap(if compact { zpx(2.) } else { zpx(8.) })
             .items_center()
             .child(
                 h_flex()
@@ -1197,24 +1242,30 @@ impl AppShell {
                             .ghost()
                             .disabled(!enabled)
                             .h(zpx(24.))
-                            .px_2()
+                            .px(if compact { zpx(4.) } else { zpx(8.) })
                             .min_w_0()
                             .max_w(zpx(150.))
-                            .text_size(zpx(13.))
+                            .text_size(zpx(12.))
                             .tooltip(cwd.display().to_string())
+                            .accessibility_label("Choose project folder")
                             .child(
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(crate::icons::icon(IconName::Folder))
                                     .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(crate::sessions::folder_name(&cwd)),
-                                    ),
+                                        crate::icons::icon(IconName::Folder)
+                                            .with_size(zpx(crate::icons::MARK_SIZE)),
+                                    )
+                                    .when(!compact, |row| {
+                                        row.child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(crate::sessions::folder_name(&cwd)),
+                                        )
+                                    }),
                             )
-                            .text_color(rgba(0xffffff8c))
+                            .text_color(crate::appearance::secondary_text())
                             .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),
                     )
                     .when(git, |row| row.child(self.branch_picker.clone())),
@@ -1230,14 +1281,17 @@ impl AppShell {
                                 .relative()
                                 .size(crate::icons::size())
                                 .child(
-                                    crate::icons::path("icons/git-unavailable.svg")
-                                        .size(crate::icons::size()),
+                                    // The same branch mark as the status bar and branch picker.
+                                    crate::icons::path("icons/git-branch.svg")
+                                        .size(zpx(crate::icons::MARK_SIZE)),
                                 )
                                 .child(
                                     div().absolute().right_0().bottom_0().size(zpx(7.)).child(
                                         crate::icons::icon(IconName::Close)
                                             .with_size(zpx(7.))
-                                            .text_color(rgb(0xff646b)),
+                                            .text_color(
+                                                crate::appearance::ActionTone::Danger.foreground(),
+                                            ),
                                     ),
                                 ),
                         )
@@ -1250,6 +1304,7 @@ impl AppShell {
                 row.pr(zpx(6.)).child(
                     gpui_kit::component::checkbox::Checkbox::new("new-worktree")
                         .small()
+                        .text_color(crate::appearance::secondary_text())
                         .focus_ring(false)
                         .label("New worktree")
                         .checked(worktree)
@@ -1269,7 +1324,7 @@ impl AppShell {
         } else {
             0.0
         };
-        let Some(started) = self.mode_slide_started else {
+        let Some(started) = self.mode_slide_started.filter(|_| !cx.reduce_motion()) else {
             return target;
         };
         let t = (started.elapsed().as_secs_f32() / 0.18).min(1.0);
@@ -1296,6 +1351,7 @@ impl AppShell {
             row = row.child(
                 div()
                     .id(SharedString::from(format!("new-mode-{label}")))
+                    .keyboard_control()
                     .role(gpui::Role::Button)
                     .aria_label(label)
                     .relative()
@@ -1307,6 +1363,11 @@ impl AppShell {
                     .justify_center()
                     .text_size(zpx(12.0))
                     .cursor_pointer()
+                    .text_color(if self.state.read(cx).mode() == choice {
+                        rgb(0xf5f5f5)
+                    } else {
+                        crate::appearance::secondary_text()
+                    })
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.state.read(cx).mode() == choice || this.state.read(cx).is_starting()
@@ -1520,7 +1581,7 @@ impl AppShell {
                     .bg(crate::appearance::popup_surface())
                     .child(
                         div()
-                            .text_size(zpx(14.))
+                            .text_size(zpx(del_core::typography::TEXT_PROSE))
                             .whitespace_normal()
                             .child(question.question.clone()),
                     )

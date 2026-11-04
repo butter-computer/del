@@ -58,6 +58,19 @@ pub enum BridgeEvent {
         request: SpawnRequest,
         reply: oneshot::Sender<HostResult<SessionInfo>>,
     },
+    /// Git preparation uses the same app-owned path as the new-chat composer.
+    PrepareWorkspace {
+        cwd: PathBuf,
+        branch: Option<String>,
+        new_worktree: bool,
+        reply: oneshot::Sender<HostResult<PathBuf>>,
+    },
+    /// The backend is already closed; remove its view and persist archive metadata.
+    CloseChat {
+        target: SessionId,
+        archive: bool,
+        reply: oneshot::Sender<HostResult<()>>,
+    },
     /// Write text to the target terminal, including the Enter/submit action.
     SendTerminal {
         caller: SessionId,
@@ -992,12 +1005,42 @@ impl McpHost for AppHost {
         request: SpawnRequest,
     ) -> HostResult<SessionInfo> {
         if self.info(caller)?.mode == SessionMode::Chat {
+            // Apply Del's ordinary built-in provider policy before inheritance,
+            // including imported/background parents that have not been opened.
+            crate::providers::prepare_session_permissions(&self.manager, caller)
+                .map_err(|e| HostError::Failed(e.to_string()))?;
+            let mut config = self
+                .manager
+                .peer_spawn_config(caller, request.provider, &request.cwd)
+                .await
+                .map_err(|e| HostError::Failed(e.to_string()))?;
+            request.apply_model(&mut config);
+            if request.new_worktree || request.branch.is_some() {
+                let (reply, rx) = oneshot::channel();
+                self.emit(BridgeEvent::PrepareWorkspace {
+                    cwd: config.cwd.clone(),
+                    branch: request.branch.clone(),
+                    new_worktree: request.new_worktree,
+                    reply,
+                })?;
+                config.cwd = self.reply(caller, rx).await??;
+            }
             let child = self
                 .manager
-                .spawn_peer_session(caller, request.provider, &request.cwd, &request.prompt)
+                .spawn_prepared_peer_session(caller, config, &request.prompt)
                 .await
                 .map_err(|e| HostError::Failed(e.to_string()))?;
             return self.info(&child.id);
+        }
+        if request.new_worktree
+            || request.branch.is_some()
+            || request.model.is_some()
+            || request.reasoning_effort.is_some()
+            || request.service_tier.is_some()
+        {
+            return Err(HostError::Failed(
+                "Model and workspace spawn options require Chat mode".into(),
+            ));
         }
         let (reply, rx) = oneshot::channel();
         self.emit(BridgeEvent::SpawnTerminal {
@@ -1019,6 +1062,38 @@ impl McpHost for AppHost {
         Ok(info)
     }
 
+    async fn close_session(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        archive: bool,
+    ) -> HostResult<()> {
+        self.authorize_peer(caller, target)?;
+        if self.info(target)?.mode != SessionMode::Chat
+            || self.manager.is_terminal_owned(target)
+            || self.manager.is_temporary(target)
+        {
+            return Err(HostError::Failed(
+                "Only main Chat sessions can be closed through this tool".into(),
+            ));
+        }
+        // Explicit close must not be undone by a later peer request.
+        self.manager
+            .stop_peer_work(target)
+            .map_err(|e| HostError::Failed(e.to_string()))?;
+        self.manager
+            .close(target)
+            .await
+            .map_err(|e| HostError::Failed(e.to_string()))?;
+        let (reply, rx) = oneshot::channel();
+        self.emit(BridgeEvent::CloseChat {
+            target: target.clone(),
+            archive,
+            reply,
+        })?;
+        self.reply(caller, rx).await?
+    }
+
     async fn notify(&self, caller: &SessionId, title: &str, body: &str) -> HostResult<()> {
         self.info(caller)?;
         self.emit(BridgeEvent::Notify {
@@ -1026,5 +1101,68 @@ impl McpHost for AppHost {
             title: title.into(),
             body: body.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod spawn_permission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_spawn_applies_normal_permissions_before_child_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("index"),
+            [
+                Arc::new(del_agent::MockBackend::new(Provider::Claude))
+                    as Arc<dyn del_agent::AgentBackend>,
+                Arc::new(del_agent::MockBackend::new(Provider::Codex))
+                    as Arc<dyn del_agent::AgentBackend>,
+            ],
+        )
+        .unwrap();
+        let parent = manager
+            .start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::Codex,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::Ask,
+            })
+            .await
+            .unwrap();
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop, stopped) = watch::channel(false);
+        let host = AppHost {
+            manager: manager.clone(),
+            events,
+            terminals: Default::default(),
+            reported: Default::default(),
+            revocations: Default::default(),
+            stopped,
+            next_question: AtomicU64::new(1),
+        };
+        let child = host
+            .spawn_session(
+                &parent.id,
+                SpawnRequest {
+                    provider: Provider::Claude,
+                    cwd: dir.path().into(),
+                    prompt: "Inspect files".into(),
+                    branch: None,
+                    new_worktree: false,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.session_record(&child.id).unwrap().permission_mode,
+            del_agent::PermissionMode::FullAuto
+        );
+        manager.shutdown().await;
     }
 }

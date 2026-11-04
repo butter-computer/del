@@ -81,7 +81,7 @@ impl<K> Slot<K> {
                 .when(self.visual.active, |tab| {
                     tab.bg(crate::appearance::rgba(0xffffff14))
                 })
-                .text_color(crate::appearance::rgba(0xffffff8c))
+                .text_color(crate::appearance::secondary_text())
                 .text_size(zpx(del_core::typography::TEXT_MD))
                 .child(crate::icons::icon(self.visual.icon.clone()).with_size(zpx(15.)))
                 .child(

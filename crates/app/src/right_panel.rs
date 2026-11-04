@@ -2,6 +2,7 @@
 
 use crate::animated_icons::Glyph;
 use crate::appearance::{ActionTone, rgb, rgba};
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
@@ -17,8 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-pub const PANEL_WIDTH: f32 = 340.0;
-const MONO: &str = "Menlo";
+pub const PANEL_MIN_WIDTH: f32 = 320.0;
+pub const PANEL_WIDTH: f32 = 360.0;
+const MONO: &str = del_core::typography::MONO_FONT;
 /// Largest text file loaded into the editor.
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// Changed files whose diffs a refresh loads; the rest are only counted.
@@ -165,8 +167,11 @@ impl Render for DraggedSidebarTab {
                     .border_1()
                     .border_color(crate::appearance::separator())
                     .text_color(rgb(0xf5f5f5))
-                    .text_size(zpx(14.))
-                    .child(crate::icons::icon(self.pane.icon()).with_size(zpx(15.)))
+                    .text_size(zpx(TEXT_MD))
+                    .child(
+                        crate::icons::icon(self.pane.icon())
+                            .with_size(zpx(crate::icons::MARK_SIZE)),
+                    )
                     .child(self.pane.tab_label().1),
             )
     }
@@ -1180,13 +1185,30 @@ impl RightPanel {
     ) {
         // A new tool takes this blank's place. Selecting an already-open
         // singleton tool leaves the blank available to return to.
-        let position = if pane == Pane::Terminal || !self.open_panes.contains(&pane) {
+        let position = if matches!(pane, Pane::Terminal | Pane::SideChat)
+            || !self.open_panes.contains(&pane)
+        {
             self.consume_blank(pane)
         } else {
             None
         };
         if pane == Pane::Terminal {
             self.new_terminal_tab(window, cx);
+        } else if pane == Pane::SideChat {
+            // Each invocation snapshots the current main conversation through
+            // the normal fork path. Existing tabs keep their own live resources.
+            let context = self.side_context.clone();
+            let panel = cx.new(|cx| {
+                let mut panel = RightPanel::new(self.root.clone(), window, cx);
+                if let Some(context) = context {
+                    panel.set_side_context(context);
+                }
+                panel.open_panes = vec![Pane::SideChat];
+                panel.blank_tabs.clear();
+                panel.show_workspace(Pane::SideChat, window, cx);
+                panel
+            });
+            self.accept_tab(panel, window, cx);
         } else {
             self.open_tool(pane, window, cx);
         }
@@ -1197,7 +1219,10 @@ impl RightPanel {
         let Some(position) = position else {
             return;
         };
-        let key = self.tab_key(self.pane, self.pane_instance(self.pane));
+        let key = self.active_hosted.as_ref().map_or_else(
+            || self.tab_key(self.pane, self.pane_instance(self.pane)),
+            |id| SidebarTab::Hosted(id.clone()),
+        );
         let mut order = self.sidebar_keys();
         order.retain(|tab| tab != &key);
         order.insert(position.min(order.len()), key);
@@ -2361,6 +2386,7 @@ impl RightPanel {
         let selector = id.to_string();
         div()
             .id(id.clone())
+            .keyboard_control()
             .debug_selector(move || selector.clone())
             .group(id.clone())
             .role(gpui::Role::Button)
@@ -2374,11 +2400,11 @@ impl RightPanel {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_size(zpx(14.))
+            .text_size(zpx(TEXT_MD))
             .text_color(if active {
                 rgb(0xf5f5f5)
             } else {
-                rgba(0xffffff8c)
+                crate::appearance::secondary_text()
             })
             .when(active, |t| t.bg(rgba(0xffffff14)))
             .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
@@ -2400,7 +2426,22 @@ impl RightPanel {
                 });
                 cx.new(|_| preview)
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                // Enter on a Browser tab continues into its address field, which the
+                // Tab order cannot reach by itself. It needs a frame to be on screen.
+                if pane == Pane::Browser && matches!(event, ClickEvent::Keyboard(_)) {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(50))
+                            .await;
+                        let _ = this.update(cx, |this, _| {
+                            if let Some(browser) = &this.browser {
+                                browser.focus_address();
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 if let Some(id) = &hosted_click {
                     this.select_hosted(id.clone(), window, cx);
                     return;
@@ -2422,7 +2463,7 @@ impl RightPanel {
                 div()
                     .mr_1p5()
                     .flex_none()
-                    .child(crate::icons::icon(pane.icon()).with_size(zpx(15.))),
+                    .child(crate::icons::icon(pane.icon()).with_size(zpx(crate::icons::MARK_SIZE))),
             )
             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
             .when(working, |tab| tab.child(crate::icons::working_spinner()))
@@ -2432,6 +2473,8 @@ impl RightPanel {
             .child(
                 div()
                     .id(SharedString::from(close_id))
+                    .keyboard_control()
+                    .focus_visible(|button| button.opacity(1.))
                     .debug_selector(move || close_selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(format!("Close {label} sidebar tab"))
@@ -2442,7 +2485,7 @@ impl RightPanel {
                     .items_center()
                     .justify_center()
                     .rounded_sm()
-                    .text_color(rgba(0xffffff80))
+                    .text_color(crate::appearance::secondary_text())
                     .opacity(0.)
                     .group_hover(id, |button| button.opacity(1.))
                     .hover(|b| b.bg(rgba(0xffffff14)))
@@ -2539,11 +2582,11 @@ impl RightPanel {
                             .child(self.file_hover.marker(
                                 marker_key,
                                 if is_selected {
-                                    ActionTone::Accent.surface(false)
+                                    rgba(0xffffff14)
                                 } else {
                                     rgba(0)
                                 },
-                                rgba(0xffffff24),
+                                rgba(0xffffff14),
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if is_dir {
@@ -2566,7 +2609,7 @@ impl RightPanel {
                                 } else {
                                     IconName::File
                                 })
-                                .with_size(zpx(15.))
+                                .with_size(zpx(crate::icons::MARK_SIZE))
                                 .text_color(if is_dir && open {
                                     rgb(0xf5f5f5)
                                 } else if is_dir {
@@ -2703,19 +2746,21 @@ impl RightPanel {
                                     |(preview, label)| {
                                         div()
                                             .id(label)
+                                            .keyboard_control()
                                             .role(gpui::Role::Button)
                                             .aria_label(label)
-                                            .h(zpx(20.0))
-                                            .px_1p5()
+                                            .h(zpx(22.0))
+                                            .px_2()
                                             .flex()
                                             .items_center()
                                             .rounded_md()
                                             .text_size(zpx(TEXT_SM))
                                             .cursor_pointer()
+                                            .text_color(crate::appearance::secondary_text())
                                             .when(self.markdown_preview == preview, |button| {
                                                 button
-                                                    .bg(ActionTone::Accent.surface(false))
-                                                    .text_color(ActionTone::Accent.foreground())
+                                                    .bg(rgba(0xffffff14))
+                                                    .text_color(rgb(0xf5f5f5))
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.markdown_preview = preview;
@@ -2729,8 +2774,13 @@ impl RightPanel {
                         .child(
                             div()
                                 .id("close-file-preview")
+                                .keyboard_control()
                                 .role(gpui::Role::Button)
                                 .aria_label("Close file preview")
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Close file preview")
+                                        .build(window, cx)
+                                })
                                 .size(crate::icons::button_size())
                                 .flex_none()
                                 .flex()
@@ -2752,6 +2802,9 @@ impl RightPanel {
                 )
             })
             .when(matches!(self.viewer, Viewer::Text { .. }), |preview| {
+                // Save and Revert only have something to do once there are edits, so
+                // they stay quiet until then and colour never decorates a clean file.
+                let dirty = self.selected_dirty();
                 preview.child(
                     h_flex()
                         .flex_none()
@@ -2759,24 +2812,14 @@ impl RightPanel {
                         .px_2()
                         .py_1()
                         .child(
-                            action(
-                                "save-file",
-                                if self.selected_dirty() {
-                                    "Save •"
-                                } else {
-                                    "Save"
-                                },
-                                ActionTone::Success,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
+                            file_action("save-file", "Save", dirty, dirty)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
                         )
+                        .child(file_action("revert-file", "Revert", dirty, false).on_click(
+                            cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
+                        ))
                         .child(
-                            action("revert-file", "Revert", ActionTone::Warning).on_click(
-                                cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
-                            ),
-                        )
-                        .child(
-                            action("reload-file", "Reload", ActionTone::Accent)
+                            file_action("reload-file", "Reload", true, false)
                                 .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
                         ),
                 )
@@ -3238,7 +3281,7 @@ impl RightPanel {
                                 .py_2()
                                 .gap_1()
                                 .text_size(zpx(TEXT_SM))
-                                .text_color(rgba(0xffffff8c))
+                                .text_color(crate::appearance::secondary_text())
                                 .child("Recent commits")
                                 .child(
                                     h_flex()
@@ -3250,12 +3293,12 @@ impl RightPanel {
                                         ))
                                         .child(
                                             div()
-                                                .text_color(rgb(0x5fc27e))
+                                                .text_color(ActionTone::Success.foreground())
                                                 .child(format!("+{commit_added}")),
                                         )
                                         .child(
                                             div()
-                                                .text_color(rgb(0xf0716b))
+                                                .text_color(ActionTone::Danger.foreground())
                                                 .child(format!("−{commit_removed}")),
                                         ),
                                 ),
@@ -3279,31 +3322,22 @@ impl RightPanel {
                                 )
                                 .child(
                                     h_flex()
+                                        .min_w_0()
                                         .gap_2()
                                         .items_baseline()
                                         .text_size(zpx(TEXT_SM))
+                                        .text_color(crate::appearance::secondary_text())
                                         .child(
                                             div()
-                                                .text_color(rgb(0x5fc27e))
+                                                .flex_none()
+                                                .text_color(ActionTone::Success.foreground())
                                                 .child(format!("+{}", commit.added)),
                                         )
                                         .child(
                                             div()
-                                                .text_color(rgb(0xf0716b))
-                                                .child(format!("−{}", commit.removed)),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .gap_2()
-                                        .text_size(zpx(TEXT_SM))
-                                        .text_color(rgba(0xffffff8c))
-                                        .child(
-                                            div()
-                                                .font_family(MONO)
                                                 .flex_none()
-                                                .child(commit.short_id.clone()),
+                                                .text_color(ActionTone::Danger.foreground())
+                                                .child(format!("−{}", commit.removed)),
                                         )
                                         .child(
                                             div()
@@ -3311,6 +3345,12 @@ impl RightPanel {
                                                 .min_w_0()
                                                 .truncate()
                                                 .child(commit.author.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(MONO)
+                                                .flex_none()
+                                                .child(commit.short_id.clone()),
                                         )
                                         .child(div().flex_none().child(commit.date.clone())),
                                 )
@@ -3325,7 +3365,7 @@ impl RightPanel {
                         .py_2()
                         .gap_2()
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff8c))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!(
                             "{} {}",
                             total_files,
@@ -3333,12 +3373,12 @@ impl RightPanel {
                         ))
                         .child(
                             div()
-                                .text_color(rgb(0x5fc27e))
+                                .text_color(ActionTone::Success.foreground())
                                 .child(format!("+{total_added}")),
                         )
                         .child(
                             div()
-                                .text_color(rgb(0xf0716b))
+                                .text_color(ActionTone::Danger.foreground())
                                 .child(format!("−{total_removed}")),
                         ),
                 )
@@ -3377,7 +3417,8 @@ impl RightPanel {
                                 } else {
                                     IconName::ChevronRight
                                 })
-                                .with_size(zpx(12.)),
+                                .with_size(zpx(11.))
+                                .text_color(rgba(0xffffff66)),
                             )
                             .child(
                                 div()
@@ -3386,18 +3427,23 @@ impl RightPanel {
                                     .truncate()
                                     .child(path.display().to_string()),
                             )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(rgb(0x5fc27e))
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(rgb(0xf0716b))
-                                    .child(format!("-{removed}")),
-                            )
+                            // A zero side says nothing, as in the status bar and the transcript.
+                            .when(added > 0, |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(ActionTone::Success.foreground())
+                                        .child(format!("+{added}")),
+                                )
+                            })
+                            .when(removed > 0, |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(ActionTone::Danger.foreground())
+                                        .child(format!("−{removed}")),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.change_expanded.remove(&path) {
                                     this.change_expanded.insert(path.clone());
@@ -3462,7 +3508,7 @@ impl RightPanel {
                                             .py_1()
                                             .flex_none()
                                             .text_size(zpx(TEXT_SM))
-                                            .text_color(rgba(0xffffff8c))
+                                            .text_color(crate::appearance::secondary_text())
                                             .child(format!(
                                                 "{hidden} more {} not shown",
                                                 if hidden == 1 { "line" } else { "lines" }
@@ -3480,7 +3526,7 @@ impl RightPanel {
                         .border_t_1()
                         .border_color(rgba(0xffffff14))
                         .text_size(zpx(TEXT_SM))
-                        .text_color(rgba(0xffffff8c))
+                        .text_color(crate::appearance::secondary_text())
                         .child(format!(
                             "{} more changed {} not shown",
                             self.change_omitted,
@@ -3501,23 +3547,13 @@ impl RightPanel {
             .get(&self.terminal_tabs[self.terminal_active])
         {
             let view = terminal.read(cx).terminal_view();
-            let theme = del_terminal::TerminalTheme::new(
-                crate::appearance::rgb(0xf5f5f5),
-                crate::appearance::page_surface(),
-            );
-            view.update(cx, |view, cx| {
-                view.set_appearance(
-                    theme,
-                    zpx(del_core::ShellMetrics::default().page_radius),
-                    cx,
-                )
-            });
+            crate::terminal_host::apply_shell_theme(&view, cx);
             return div().size_full().min_h_0().child(view).into_any_element();
         }
         div()
             .p_3()
             .text_size(zpx(TEXT_MD))
-            .text_color(rgba(0xffffff8c))
+            .text_color(crate::appearance::secondary_text())
             .child(if self.terminal_error.is_some() {
                 "Terminal unavailable. Switch back to Terminal to retry."
             } else {
@@ -3697,17 +3733,19 @@ impl RightPanel {
             .child(
                 div()
                     .id("new-sidebar-tab")
+                    .keyboard_control()
                     .ml_2()
                     .debug_selector(|| "new-sidebar-tab".into())
                     .role(gpui::Role::Button)
                     .aria_label("New sidebar tab")
-                    .size(zpx(crate::icons::TOOL_TAB_HEIGHT))
+                    .size(zpx(24.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .flex_none()
                     .rounded_md()
                     .cursor_pointer()
+                    .text_color(rgba(0xffffff8c))
                     .hover(|button| button.bg(rgba(0xffffff14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
                     .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),
@@ -3724,14 +3762,14 @@ impl RightPanel {
                             .cursor_pointer()
                             .hover(|control| control.opacity(0.85))
                             .text_size(zpx(TEXT_SM))
-                            .text_color(rgba(0xffffff8c))
+                            .text_color(crate::appearance::secondary_text())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_hidden = !this.show_hidden;
                                 this.directory_entries.clear();
                                 this.refresh_tree(cx);
                                 cx.notify();
                             }))
-                            .child(".files")
+                            .child("Dotfiles")
                             .child(
                                 div()
                                     .relative()
@@ -3756,7 +3794,7 @@ impl RightPanel {
                                                     show_hidden
                                                 )),
                                                 Animation::new(std::time::Duration::from_millis(
-                                                    120,
+                                                    if cx.reduce_motion() { 0 } else { 120 },
                                                 ))
                                                 .with_easing(ease_out_quint()),
                                                 move |thumb, t| {
@@ -3865,22 +3903,44 @@ impl Render for RightPanel {
     }
 }
 
-fn action(id: &'static str, label: &'static str, tone: ActionTone) -> Stateful<Div> {
+/// A file action: a quiet neutral button, green only for a Save with work to keep.
+fn file_action(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    primary: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
+        .when(enabled, |button| button.keyboard_control())
         .role(gpui::Role::Button)
         .aria_label(label)
-        .px_1p5()
-        .h(zpx(28.))
+        .px_2()
+        .h(zpx(24.))
         .flex()
         .items_center()
         .flex_none()
         .rounded_md()
         .text_size(zpx(TEXT_SM))
-        .cursor_pointer()
-        .bg(tone.surface(false))
-        .text_color(tone.foreground())
-        .hover(move |button| button.bg(tone.surface(true)))
+        .map(|button| {
+            if primary {
+                button
+                    .bg(ActionTone::Success.surface(false))
+                    .text_color(ActionTone::Success.foreground())
+                    .cursor_pointer()
+                    .hover(|button| button.bg(ActionTone::Success.surface(true)))
+            } else if enabled {
+                button
+                    .bg(rgba(crate::appearance::QUIET_FILL))
+                    .text_color(crate::appearance::secondary_text())
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgba(0xffffff14)))
+            } else {
+                button
+                    .text_color(crate::appearance::faint_text())
+                    .opacity(0.7)
+            }
+        })
         .child(label)
 }
 
@@ -4262,6 +4322,117 @@ mod tests {
         });
         right.update(cx, |right, cx| right.release(cx));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    #[::gpui::test]
+    fn new_side_chats_are_independent_and_capture_latest_parent(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = del_agent::SessionManager::new(
+            dir.path().join("index"),
+            [
+                std::sync::Arc::new(del_agent::MockBackend::new(del_agent::Provider::Claude))
+                    as std::sync::Arc<dyn del_agent::AgentBackend>,
+            ],
+        )
+        .unwrap();
+        let parent = runtime
+            .block_on(manager.start_session(del_agent::SessionConfig {
+                cwd: dir.path().into(),
+                provider: del_agent::Provider::Claude,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: del_agent::PermissionMode::FullAuto,
+            }))
+            .unwrap();
+        let context = crate::side_chat::Context {
+            activity_owner: None,
+            accounts: vec![],
+            backend: crate::chat::Backend {
+                runtime: runtime.handle().clone(),
+                manager: manager.clone(),
+            },
+            source: del_agent::ForkSource::Session(parent.id.clone()),
+        };
+        let (right, cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.set_side_context(context);
+            panel.choose_new_tool(Pane::SideChat, window, cx);
+            panel
+        });
+        let mut ids = Vec::new();
+        for round in 0..2 {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                let ready = right.read_with(cx, |p, cx| {
+                    p.hosted
+                        .last()
+                        .and_then(|t| t.panel.read(cx).side_chat.as_ref())
+                        .or(p.side_chat.as_ref())
+                        .and_then(|s| s.read(cx).session_id())
+                        .cloned()
+                });
+                if let Some(id) = ready {
+                    ids.push(id);
+                    break;
+                }
+                runtime.block_on(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                });
+            }
+            assert_eq!(ids.len(), round + 1, "new side chat must own a new session");
+            if round == 0 {
+                runtime
+                    .block_on(manager.send_prompt(
+                        &parent.id,
+                        del_agent::UserInput::text("LATEST_PARENT_MARKER"),
+                    ))
+                    .unwrap();
+                runtime.block_on(async {
+                    for _ in 0..300 {
+                        if manager.status(&parent.id) == Some(del_agent::SessionStatus::Idle) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                });
+                cx.update(|window, cx| {
+                    right.update(cx, |p, cx| p.choose_new_tool(Pane::SideChat, window, cx))
+                });
+            }
+        }
+        assert_ne!(ids[0], ids[1]);
+        let snapshots: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::to_string(&manager.export_fork(id).unwrap()).unwrap())
+            .collect();
+        assert!(!snapshots[0].contains("LATEST_PARENT_MARKER"));
+        assert!(snapshots[1].contains("LATEST_PARENT_MARKER"));
+        right.read_with(cx, |p, cx| {
+            assert_eq!(p.hosted.len(), 2);
+            let saved = p.snapshot(true, cx);
+            assert_eq!(saved.hosted.len(), 2);
+            assert_ne!(
+                saved.hosted[0].panel.side_chat_id,
+                saved.hosted[1].panel.side_chat_id
+            );
+            let encoded = serde_json::to_vec(&saved).unwrap();
+            let restored: SavedPanel = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored.active_hosted, p.active_hosted);
+            for tab in restored.hosted {
+                assert_eq!(tab.panel.open_panes, vec![Pane::SideChat]);
+            }
+        });
+        cx.update(|window, cx| right.update(cx, |p, cx| p.close_active_tab(window, cx)));
+        assert_eq!(right.read_with(cx, |p, _| p.hosted.len()), 1);
+        assert!(manager.is_live(&ids[0]));
+        right.update(cx, |p, cx| p.release(cx));
+        runtime.block_on(manager.shutdown());
     }
 
     #[::gpui::test]

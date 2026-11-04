@@ -63,6 +63,22 @@ default). Each successful call creates a new session; creation itself is not
 idempotent, so agents must inspect sessions before retrying an unknown outcome.
 Terminal callers retain the existing terminal launch behavior.
 
+### Spawn configuration and lifecycle
+
+See the [README agent controls](../README.md#project-peer-conversations) for the
+agent-facing fields and limitations. `peer_spawn_config` validates the caller's
+source directory and prepares inherited configuration. The app alone supplies a
+prepared workspace to `spawn_prepared_peer_session`; that host-only seam always
+re-reads permissions and project membership from the caller. Git remains in the
+existing app project module, outside the model and provider adapters.
+
+`session_models` reads the account-specific native catalog without inference.
+`configure_session` uses the existing provider handoff and next-turn model settings.
+`close_session` holds unfinished peer work stopped, closes the backend, then awaits the UI
+bridge's tab cleanup and optional persisted archive update. It never deletes Git
+work. Configuration/closing require direct-spawn ownership from the authenticated
+server's current-launch relationship map as well as the ordinary project check.
+
 ## Recovery and visibility
 
 ### Main and Side chat discovery
@@ -132,8 +148,11 @@ No tool accepts a sender identity or project supplied by the model.
 Managed chat delivery is serialized with normal provider sends. The agent marks
 `session_work complete` only after its original work is finished; Del does not
 infer that from prose or `TurnCompleted`. `wait` requires an outstanding reply,
-while `pause` keeps both work and queued user inputs intact. The UI has a resume
-control. Cancelling a failed exchange or deleting its recipient wakes a waiting
+while `pause` keeps both work and queued user inputs intact until new peer input
+or explicit user steering arrives. Agent-managed pauses wake automatically; a
+user Stop is durable and incoming peer traffic does not override it. Successful
+Steer resumes stopped work without a separate Resume action. There is no task
+coordination banner or Pause/Resume control above the transcript. Cancelling a failed exchange or deleting its recipient wakes a waiting
 sender so it can handle the failure.
 
 A terminal CLI has no provider-neutral turn/input-queue API. Terminal agents can
@@ -256,3 +275,24 @@ without retaining the old task, and that current/legacy delivery envelopes survi
 Side chat rebinding while altered payloads, endpoints, or appended instructions
 are rejected. The shared policy applies across providers; this new live run used
 Codex, not live Claude/OpenCode/ACP accounts.
+
+## Recovering stalled requests
+
+`session_work get` returns the caller's delivery receipts (IDs, endpoints, state,
+reply linkage and errors). A successful spawn means the chat and first request
+exist; its queued receipt is not a claim that the provider has processed the task.
+Use `cancel_session_request` with an obsolete queued/failed request ID to withdraw
+it. Only its sender can do so. Cancellation shares the delivery-claim lock, remains
+idempotent across restarts, and does not delete or reopen the recipient. It cannot
+cancel a delivering, delivered or uncertain request. Ask a running recipient to
+stop; uncertain deliveries retain the existing explicit user recovery flow.
+
+Fresh human messages submitted while the native agent is idle are explicit
+amendments even when peer work is outstanding. They do not drain older queued
+follow-ups or mark peer obligations complete. Normal messages during a native
+turn remain queued, with Steer available for an explicit interruption.
+
+Close/archive holds peer work stopped. New peer messages cannot revive that
+worker; explicit human steering can resume it. Background project inspection
+must never replace a spawned child's inherited project with a provisional
+worktree-directory fallback.

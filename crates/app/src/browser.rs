@@ -1,6 +1,7 @@
 //! UI-thread-owned native WebKit view. Cached panels explicitly hide their views.
 #[cfg(target_os = "macos")]
 mod native {
+    use gpui_kit::component::{GlobalState, WindowExt};
     use gpui_kit::prelude::*;
     use gpui_kit::*;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -9,6 +10,12 @@ mod native {
         ffi::{CStr, CString, c_char, c_void},
         rc::Rc,
     };
+
+    /// A surface colour as the 0xRRGGBB the native pane takes.
+    fn rgb_channels(color: Rgba) -> u32 {
+        let channel = |value: f32| (value * 255.).round() as u32;
+        channel(color.r) << 16 | channel(color.g) << 8 | channel(color.b)
+    }
 
     unsafe extern "C" {
         fn del_browser_create(
@@ -24,9 +31,14 @@ mod native {
             height: f64,
             zoom: f64,
             light: bool,
+            background: u32,
+            field: u32,
+            radius: f64,
             mouse_passthrough: bool,
         );
         fn del_browser_url(view: *mut c_void) -> *const c_char;
+        fn del_browser_focus_address(view: *mut c_void);
+        fn del_browser_theme(view: *mut c_void, page: u32, field: u32, text: u32, secondary: u32);
         fn del_browser_hide(view: *mut c_void);
         fn del_browser_release(view: *mut c_void);
         fn del_browser_command(
@@ -63,6 +75,9 @@ mod native {
                 pointer: Cell::new(std::ptr::null_mut()),
             }))
         }
+        pub fn focus_address(&self) {
+            unsafe { del_browser_focus_address(self.0.pointer.get()) };
+        }
         pub fn hide(&self) {
             unsafe { del_browser_hide(self.0.pointer.get()) };
         }
@@ -90,8 +105,28 @@ mod native {
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
                     ensure_created(&view, window);
+                    if view.pointer.get().is_null() {
+                        return;
+                    }
+                    // AppKit subviews paint above GPUI. Yield to overlays so
+                    // their controls cannot be obscured or receive clicks twice.
+                    if window.has_active_dialog(cx)
+                        || window.has_active_sheet(cx)
+                        || window.has_active_prompt()
+                        || GlobalState::is_in_deferred_context(cx)
+                    {
+                        unsafe { del_browser_hide(view.pointer.get()) };
+                        return;
+                    }
                     let bounds = bounds.intersect(&window.content_mask().bounds);
                     unsafe {
+                        del_browser_theme(
+                            view.pointer.get(),
+                            crate::appearance::page_surface().into(),
+                            crate::appearance::composer_surface().into(),
+                            crate::appearance::rgb(0xf5f5f5).into(),
+                            crate::appearance::secondary_text().into(),
+                        );
                         del_browser_frame(
                             view.pointer.get(),
                             bounds.origin.x.as_f32() as f64,
@@ -100,6 +135,10 @@ mod native {
                             bounds.size.height.as_f32() as f64,
                             del_core::zoom::factor() as f64,
                             crate::appearance::light(),
+                            rgb_channels(crate::appearance::page_surface()),
+                            rgb_channels(crate::appearance::composer_surface()),
+                            (del_core::ShellMetrics::default().page_radius
+                                * del_core::zoom::factor()) as f64,
                             cx.has_active_drag(),
                         )
                     };
@@ -171,6 +210,7 @@ impl Browser {
     pub fn new(url: &str, _: &str) -> Self {
         Self(url.into())
     }
+    pub fn focus_address(&self) {}
     pub fn hide(&self) {}
     pub fn command(&self, _: serde_json::Value, _: &gpui_kit::Window) -> BrowserReply {
         delete_profile("")

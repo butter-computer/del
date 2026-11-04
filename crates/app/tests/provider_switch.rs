@@ -4,6 +4,10 @@
 #[allow(dead_code)]
 mod mcp_bridge;
 
+#[path = "../src/providers.rs"]
+#[allow(dead_code)]
+mod providers;
+
 use del_agent::*;
 use std::{sync::Arc, time::Duration};
 

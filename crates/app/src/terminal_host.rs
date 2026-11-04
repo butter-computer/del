@@ -597,7 +597,7 @@ impl Render for TerminalLauncher {
                     .gap_3()
                     .child(
                         div()
-                            .text_size(zpx(20.))
+                            .text_size(zpx(del_core::typography::TEXT_XL))
                             .text_color(rgb(0xf5f5f5))
                             .child("Open a terminal"),
                     )
@@ -726,6 +726,22 @@ impl Focusable for TerminalHost {
         self.terminal.read(cx).focus_handle(cx)
     }
 }
+/// A plain shell follows the selected theme and page corners, wherever it is hosted.
+/// Provider-session terminals keep their own dark treatment.
+pub fn apply_shell_theme(view: &Entity<del_terminal::TerminalView>, cx: &mut App) {
+    let theme = del_terminal::TerminalTheme::new(
+        crate::appearance::rgb(0xf5f5f5),
+        crate::appearance::page_surface(),
+    );
+    view.update(cx, |view, cx| {
+        view.set_appearance(
+            theme,
+            crate::zoom::px(del_core::ShellMetrics::default().page_radius),
+            cx,
+        )
+    });
+}
+
 impl TerminalHost {
     /// Let the page's blurred background show through this terminal.
     pub fn set_terminal_glass(&mut self, glass: Option<f32>, cx: &mut Context<Self>) {

@@ -1,5 +1,4 @@
 //! Independent side conversations with durable local context and scoped settings.
-use crate::appearance::rgba;
 use crate::chat::{Backend, ChatView};
 use crate::zoom::px as zpx;
 use del_agent::{ForkLifetime, ForkSource, Provider, SessionConfig, SessionId, UserInput};
@@ -50,6 +49,7 @@ pub struct SideChat {
     storage_error: bool,
     importing: bool,
     loading: bool,
+    waiting_for_tools: bool,
     closed: bool,
     visible: bool,
     error: Option<String>,
@@ -136,7 +136,19 @@ impl SideChat {
                 .is_some_and(|chat| chat.read(cx).has_active_work())
     }
 
+    fn report_costs(&self, cx: &mut App) {
+        if let Some(chat) = &self.chat
+            && let Some((state, owner)) = &self.context.activity_owner
+        {
+            let costs = chat.read(cx).usage.costs.clone();
+            let _ = state.update(cx, |state, cx| {
+                state.record_side_chat_costs(*owner, &self.storage_id, &costs, cx);
+            });
+        }
+    }
+
     fn report_activity(&self, submitted: bool, cx: &mut App) {
+        self.report_costs(cx);
         if let Some((state, owner)) = &self.context.activity_owner {
             let working = self.is_working(cx);
             let _ = state.update(cx, |state, cx| {
@@ -181,6 +193,9 @@ impl SideChat {
             && let Some(state) = state.upgrade()
         {
             cx.observe(&state, |this, _, cx| {
+                if this.waiting_for_tools {
+                    this.start(cx);
+                }
                 this.link_parent(cx);
                 if this.is_visible(cx) {
                     this.set_unread(false, cx);
@@ -191,7 +206,7 @@ impl SideChat {
         }
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
-                .placeholder("Ask anything...")
+                .placeholder("Ask anything…")
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             input.set_submit_on_enter(true, cx);
@@ -239,6 +254,7 @@ impl SideChat {
             storage_error: false,
             importing: false,
             loading: false,
+            waiting_for_tools: false,
             closed: false,
             visible: false,
             error: None,
@@ -297,6 +313,7 @@ impl SideChat {
     }
 
     pub fn save(&mut self, cx: &mut gpui::Context<Self>) {
+        self.report_costs(cx);
         if self.closed || self.storage_error {
             return;
         }
@@ -336,6 +353,15 @@ impl SideChat {
 
     fn start(&mut self, cx: &mut gpui::Context<Self>) {
         if self.closed || self.storage_error || self.loading || self.session.is_some() {
+            return;
+        }
+        self.waiting_for_tools = self
+            .context
+            .activity_owner
+            .as_ref()
+            .and_then(|(state, _)| state.upgrade())
+            .is_some_and(|state| !state.read(cx).browser_tools_ready);
+        if self.waiting_for_tools {
             return;
         }
         self.loading = true;
@@ -517,6 +543,7 @@ impl SideChat {
     ) {
         if self.storage_error
             || self.loading
+            || self.waiting_for_tools
             || self.chat.as_ref().is_some_and(|chat| {
                 chat.read(cx).is_loading()
                     || chat.read(cx).is_running()
@@ -603,9 +630,7 @@ impl SideChat {
                     .first()
                     .map(|item| item.id.clone());
                 if let Some(id) = first {
-                    chat.update(cx, |chat, cx| {
-                        chat.deliver_queued(id, chat.is_running(), cx)
-                    });
+                    chat.update(cx, |chat, cx| chat.deliver_queued(id, true, cx));
                 }
             }
             return;
@@ -860,7 +885,7 @@ impl SideChat {
             !self.loading,
             locked,
         )
-        .dropdown_menu(move |menu, window, cx| {
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
             crate::providers::VISIBLE
                 .iter()
                 .fold(menu, |menu, &provider| {
@@ -942,18 +967,32 @@ impl SideChat {
                 });
             });
         h_flex()
+            .id("side-model-settings")
             .items_center()
-            .flex_wrap()
+            .flex_nowrap()
             .min_w_0()
             .gap_0p5()
-            .child(account)
-            .child(self.model_picker.clone())
+            .child(
+                div()
+                    .id("side-provider-control")
+                    .debug_selector(|| "side-provider-control".into())
+                    .flex_none()
+                    .child(account),
+            )
+            .child(
+                div()
+                    .id("side-model-control")
+                    .debug_selector(|| "side-model-control".into())
+                    .flex_none()
+                    .child(self.model_picker.clone()),
+            )
             .into_any_element()
     }
 
     fn settings_locked(&self, cx: &App) -> bool {
         self.storage_error
             || self.loading
+            || self.waiting_for_tools
             || self.chat.as_ref().is_some_and(|chat| {
                 let chat = chat.read(cx);
                 chat.is_loading() || chat.is_running() || !chat.queue.items.is_empty()
@@ -1158,17 +1197,22 @@ impl Render for SideChat {
                         div().mb_2().child(
                             crate::icons::path("icons/side-chat.svg")
                                 .with_size(zpx(28.))
-                                .text_color(rgba(0xffffff80)),
+                                .text_color(crate::appearance::secondary_text()),
                         ),
                     )
-                    .child("Side chat")
+                    .child(
+                        div()
+                            .text_size(zpx(del_core::typography::TEXT_LG))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Side chat"),
+                    )
                     .child(
                         div()
                             .w_full()
                             .max_w(zpx(320.))
                             .min_w_0()
                             .whitespace_normal()
-                            .text_color(rgba(0xffffff80))
+                            .text_color(crate::appearance::secondary_text())
                             .text_center()
                             .child("Explore a side question with the main chat’s context."),
                     )
@@ -1351,6 +1395,47 @@ mod tests {
             runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         }
         let chat = side.read_with(cx, |side, _| side.chat.clone().unwrap());
+        if provider == Provider::Claude {
+            side.update(cx, |s, cx| {
+                manager
+                    .set_model_settings(
+                        s.session.as_ref().unwrap(),
+                        Some("opus".into()),
+                        Some("high".into()),
+                        None,
+                    )
+                    .unwrap();
+                s.models = vec![del_agent::ModelInfo {
+                    id: "opus".into(),
+                    name: "Opus 5.5".into(),
+                    description: String::new(),
+                    efforts: vec![del_agent::EffortOption::named("high")],
+                    default_effort: Some("high".into()),
+                    is_default: true,
+                    fast_tier: None,
+                }];
+                cx.notify();
+            });
+            cx.simulate_resize(gpui::size(
+                zpx(crate::right_panel::PANEL_MIN_WIDTH),
+                gpui::px(800.),
+            ));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let provider = cx.debug_bounds("side-provider-control").unwrap();
+            let model = cx.debug_bounds("side-model-control").unwrap();
+            assert!(
+                (provider.center().y - model.center().y).abs() < gpui::px(2.),
+                "provider and model must share one row"
+            );
+            assert!(provider.right() <= model.left());
+            let send = cx.debug_bounds("composer-action").unwrap();
+            assert!(
+                model.right() <= send.left(),
+                "model must leave room for Send"
+            );
+            assert!(send.right() <= zpx(crate::right_panel::PANEL_MIN_WIDTH));
+            cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(800.)));
+        }
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "queue attachment").unwrap();
         let attachment = del_agent::Attachment {
@@ -1557,6 +1642,78 @@ mod tests {
             1,
             "Side queue actions must never deliver to the parent"
         );
+        // Click the actual Steer control while native execution is idle but
+        // paused peer work still blocks automatic follow-ups (the reported failure).
+        let child = side.read_with(cx, |s, _| s.session.clone().unwrap());
+        manager
+            .send_to_peer(&parent.id, &child, "pending-task", "Inspect the code")
+            .unwrap();
+        runtime.block_on(manager.dispatch_peer(&child)).unwrap();
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if manager.status(&child) == Some(del_agent::SessionStatus::Idle)
+                && !chat.read_with(cx, |c, _| c.is_running())
+            {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        manager.control_peer_work(&child, "pause").unwrap();
+        assert!(manager.peer_blocks_user_queue(&child));
+        chat.update(cx, |c, cx| {
+            c.enqueue(UserInput::text("Steer while waiting"), cx);
+            c.queue.items[0].id = "peer-wait-steer".into();
+            c.enqueue(UserInput::text("Keep this followup queued"), cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("steer-peer-wait-steer").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |c, _| c.queue.items.len() == 1 && !c.is_running()) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        chat.read_with(cx, |c, _| {
+            assert_eq!(c.queue.items.len(), 1);
+            assert_eq!(c.queue.items[0].input.text, "Keep this followup queued");
+        });
+        assert!(manager.peer_blocks_user_queue(&child));
+        assert_eq!(
+            manager.peer_work(&child).unwrap().status,
+            del_agent::peers::WorkStatus::Active
+        );
+        assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
+            matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Steer while waiting")));
+        // A fresh human Send must also reach this idle chat without draining
+        // the older automatic follow-up or losing the outstanding peer request.
+        manager.control_peer_work(&child, "pause").unwrap();
+        chat.update(cx, |c, cx| {
+            c.submit_input(UserInput::text("Direct human amendment"), false, cx)
+        });
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if chat.read_with(cx, |c, _| c.queue.items.len() == 1 && !c.is_running()) {
+                break;
+            }
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            });
+        }
+        chat.read_with(cx, |c, _| {
+            assert_eq!(c.queue.items.len(), 1);
+            assert_eq!(c.queue.items[0].input.text, "Keep this followup queued");
+        });
+        assert!(manager.subscribe_with_history(&child).unwrap().0.iter().any(|e|
+            matches!(e, del_agent::AgentEvent::UserMessage { text } if text == "Direct human amendment")));
+        assert!(manager.peer_blocks_user_queue(&child));
         side.update(cx, |side, cx| side.forget(cx));
     }
 
@@ -1725,6 +1882,7 @@ mod tests {
         let parent_tab = crate::state::Tab::Session(parent.id.clone());
         state.update(cx, |state, cx| state.select(parent.id.clone(), cx));
         let owner = state.read_with(cx, |state, _| state.uid_of(&parent_tab));
+        state.update(cx, |s, _| s.browser_tools_ready = false);
         let context = Context {
             activity_owner: Some((state.downgrade(), owner)),
             backend: Backend {
@@ -1735,6 +1893,15 @@ mod tests {
             accounts: vec![],
         };
         let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        side.read_with(cx, |s, _| {
+            assert!(s.waiting_for_tools);
+            assert!(s.session.is_none());
+            assert!(!s.loading);
+        });
+        state.update(cx, |s, cx| {
+            s.browser_tools_ready = true;
+            cx.notify();
+        });
         for _ in 0..200 {
             cx.run_until_parked();
             if side.read_with(cx, |s, cx| {
@@ -1755,6 +1922,24 @@ mod tests {
                     .is_empty()
             );
             assert_eq!(s.parent, Some(parent.id.clone()));
+        });
+        // Usage notifications reach the main status bar even while the side
+        // chat is inactive; its context window must remain the main chat's.
+        let side_view = side.read_with(cx, |s, _| s.chat.clone().unwrap());
+        side_view.update(cx, |chat, cx| {
+            chat.usage.apply(&del_agent::AgentEvent::UsageSnapshot {
+                context_tokens: Some(99),
+                context_window: Some(100),
+                cost_scope: Some("v2:side-test:estimate:codex:thread".into()),
+                cost_usd: Some(2.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| {
+            let main = crate::session_usage::SessionUsage::default();
+            assert_eq!(state.conversation_usage(&main).total_cost(), Some(2.0));
+            assert_eq!(state.conversation_usage(&main).context_tokens, None);
         });
         state.update(cx, |state, cx| {
             state

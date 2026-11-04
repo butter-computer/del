@@ -6,6 +6,7 @@
 //! them.
 
 use crate::animated_icons::Glyph;
+use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::zoom::px as zpx;
 // The wallpaper background is switched off for now; the loader stays so it can
@@ -39,6 +40,7 @@ mod haptics;
 mod hover_motion;
 mod icons;
 mod keybinds;
+mod keyboard_control;
 #[allow(dead_code)]
 mod mcp_bridge;
 mod micro_motion;
@@ -178,6 +180,7 @@ fn tab_action_content(
     shortcut: Option<usize>,
     color: Hsla,
     working: bool,
+    focused: bool,
 ) -> impl IntoElement {
     let glyph_group = group.clone();
     div()
@@ -204,6 +207,7 @@ fn tab_action_content(
                     .flex()
                     .items_center()
                     .justify_center()
+                    .when(focused, |indicator| indicator.opacity(0.))
                     .group_hover(group.clone(), |indicator| indicator.opacity(0.))
                     .child(crate::icons::working_spinner().color(color)),
             )
@@ -216,13 +220,14 @@ fn tab_action_content(
                     .flex()
                     .items_center()
                     .justify_center()
+                    .when(focused, |hint| hint.opacity(0.0))
                     .group_hover(group, |hint| hint.opacity(0.0))
                     .child(
                         div()
                             .px_1()
                             .rounded_sm()
                             .bg(rgb(0x303033))
-                            .text_size(zpx(10.))
+                            .text_size(zpx(del_core::typography::TEXT_XS))
                             .child(format!("⌘{number}")),
                     ),
             )
@@ -230,7 +235,7 @@ fn tab_action_content(
         .motion_child(true, move |feedback| {
             div()
                 .flex()
-                .opacity(0.0)
+                .opacity(if focused { 1.0 } else { 0.0 })
                 .group_hover(glyph_group, |glyph| glyph.opacity(1.0))
                 .child(
                     feedback
@@ -308,9 +313,43 @@ actions!(
 /// the real Codex and Claude backends drive the user's installed CLIs.
 pub fn backends() -> Vec<Arc<dyn AgentBackend>> {
     if std::env::var("DEL_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("mock")) {
+        let delay = std::env::var("DEL_MOCK_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_default();
+        let models = if std::env::var("DEL_MOCK_MODELS").is_ok_and(|value| value == "1") {
+            (0..12)
+                .map(|index| del_agent::ModelInfo {
+                    id: format!("mock-model-{index}"),
+                    name: match index {
+                        0 => "Mock Balanced".into(),
+                        1 => "Mock Quick".into(),
+                        2 => "Mock Extended — a deliberately long model name".into(),
+                        _ => format!("Mock model {:02}", index + 1),
+                    },
+                    description: "Synthetic model for UI development".into(),
+                    efforts: ["low", "medium", "high", "xhigh"]
+                        .into_iter()
+                        .map(del_agent::EffortOption::named)
+                        .collect(),
+                    default_effort: Some("medium".into()),
+                    fast_tier: Some("priority".into()),
+                    is_default: index == 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         return Provider::ALL
             .iter()
-            .map(|&p| Arc::new(MockBackend::new(p)) as Arc<dyn AgentBackend>)
+            .map(|&p| {
+                Arc::new(
+                    MockBackend::new(p)
+                        .with_delay(delay)
+                        .with_models(models.clone()),
+                ) as Arc<dyn AgentBackend>
+            })
             .collect();
     }
     vec![
@@ -403,7 +442,11 @@ impl Render for ResizePreview {
 }
 
 fn sidebar_width(requested: f32, right: bool, viewport: f32, other: f32) -> f32 {
-    let min = if right { 220.0 } else { LEFT_SIDEBAR_MIN };
+    let min = if right {
+        right_panel::PANEL_MIN_WIDTH
+    } else {
+        LEFT_SIDEBAR_MIN
+    };
     let max = if right { 800.0_f32 } else { LEFT_SIDEBAR_MAX };
     requested.clamp(min, max.min(viewport - other - 260.0 - 20.0).max(min))
 }
@@ -419,7 +462,10 @@ struct CachedRight {
 struct AppShell {
     updater: Entity<app_updates::AppUpdater>,
     shell_focus: FocusHandle,
+    focus_watch: keyboard_control::FocusWatch,
     settings_focused: bool,
+    /// Settings has been dismissed and is fading out, like Cmd-K.
+    settings_closing: Option<std::time::Instant>,
     zoom_percent: u16,
     state: Entity<AppState>,
     composer: Entity<TextareaState>,
@@ -730,7 +776,7 @@ impl AppShell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
-                .placeholder("Ask anything...")
+                .placeholder("Ask anything…")
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             state.set_submit_on_enter(true, cx);
@@ -895,7 +941,9 @@ impl AppShell {
         let mut shell = Self {
             updater,
             shell_focus: cx.focus_handle(),
+            focus_watch: Default::default(),
             settings_focused: false,
+            settings_closing: None,
             zoom_percent: del_core::zoom::percent(),
             state,
             composer,
@@ -1743,9 +1791,7 @@ impl AppShell {
                     .first()
                     .map(|item| item.id.clone());
                 if let Some(id) = first {
-                    chat.update(cx, |chat, cx| {
-                        chat.deliver_queued(id, chat.is_running(), cx)
-                    });
+                    chat.update(cx, |chat, cx| chat.deliver_queued(id, true, cx));
                 }
             }
             return;
@@ -1951,7 +1997,7 @@ impl AppShell {
         right_visible: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let muted = rgba(0xffffff8c);
+        let muted = appearance::secondary_text();
         let (tabs, selection, panel) = {
             let st = self.state.read(cx);
             // Live tabs, with just-closed ones (ghosts) kept at their old place
@@ -2163,6 +2209,12 @@ impl AppShell {
                                                 let indicator_id = Some(AppState::tab_unread_id(&select_tab));
                                                 let drag_shell = cx.entity();
                                                 let drop_shell = drag_shell.clone();
+                                                let tab_focus = self.state.read(cx).control_focus.control(&format!("tab-{name}"), cx);
+                                                // Keyboard focus shows the close glyph as hover does.
+                                                let tab_focused = keyboard_control::keyboard_within(&tab_focus, window, cx);
+                                                el = el.keyboard_control_with(&tab_focus).when(tab_focused, |tab| {
+                                                    tab.child(keyboard_control::reveal_when_focused(self.tab_scroll.clone(), false))
+                                                });
                                                 let drag = DraggedTab {
                                                     uid,
                                                     title: title.clone(),
@@ -2215,8 +2267,10 @@ impl AppShell {
                                                             .id(SharedString::from(format!(
                                                                 "close-{name}"
                                                             )))
+                                                            .keyboard_control()
+                                                            .rounded_sm()
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
-                                                            .w(if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
+                                                            .w(if tab_focused { zpx(crate::icons::TAB_CLOSE_SIZE) } else if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
                                                             .overflow_hidden()
                                                             .group_hover(group.clone(), |slot| slot.w(zpx(crate::icons::TAB_CLOSE_SIZE)))
                                                             .flex()
@@ -2240,6 +2294,7 @@ impl AppShell {
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
                                                                     working,
+                                                                    tab_focused,
                                                                 ),
                                                             ),
                                                     );
@@ -2298,7 +2353,11 @@ impl AppShell {
                                                     SharedString::from(format!(
                                                         "tab-shift-{uid}-{old_offset}-{new_offset}"
                                                     )),
-                                                    Animation::new(Duration::from_millis(90))
+                                                    Animation::new(Duration::from_millis(if cx.reduce_motion() {
+                                                        0
+                                                    } else {
+                                                        90
+                                                    }))
                                                         .with_easing(ease_out_quint()),
                                                     move |tab, t| {
                                                         tab.relative().left(zpx(old_offset
@@ -2332,6 +2391,7 @@ impl AppShell {
                             .child(
                                 div()
                                     .id("new-tab")
+                                    .keyboard_control()
                                     .debug_selector(|| "new-main-tab".into())
                                     .ml(zpx(8.5))
                                     .role(gpui::Role::Button)
@@ -2401,8 +2461,12 @@ impl AppShell {
                             .child(
                         div()
                             .id("toggle-right")
+                            .keyboard_control()
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar (⌘\\)").build(window, cx)
+                            })
                             .flex_none()
                             .size(crate::icons::button_size())
                             .mr_2()
@@ -2521,8 +2585,10 @@ impl AppShell {
                                     ))
                                     .with_animation(
                                         ("first-prompt", transition_key),
-                                        Animation::new(Duration::from_millis(120))
-                                            .with_easing(ease_out_quint()),
+                                        Animation::new(Duration::from_millis(
+                                            if cx.reduce_motion() { 0 } else { 120 },
+                                        ))
+                                        .with_easing(ease_out_quint()),
                                         |transcript, t| transcript.opacity(t),
                                     ),
                             )
@@ -2568,6 +2634,7 @@ impl AppShell {
                                             .child(
                                                 new_tab_group()
                                                     .relative()
+                                                    .flex_shrink_1()
                                                     .min_w_0()
                                                     .child(self.render_new_session_options(cx))
                                                     .child(
@@ -2664,9 +2731,20 @@ impl Render for AppShell {
             self.cancel_dictation(cx);
         }
         let settings_open = self.state.read(cx).panel == Panel::Providers;
-        if settings_open && !self.settings_focused {
+        // Reopened during its fade: keep the same dialog and cancel the exit.
+        let reopened =
+            settings_open && !self.settings_focused && self.settings_closing.take().is_some();
+        if settings_open && !self.settings_focused && !reopened {
             let state = self.state.clone();
+            let shell = cx.weak_entity();
             window.open_dialog(cx, move |dialog, window, cx| {
+                let closing = shell
+                    .upgrade()
+                    .and_then(|shell| shell.read(cx).settings_closing);
+                if closing.is_some() {
+                    window.request_animation_frame();
+                }
+                let close_shell = shell.clone();
                 let close_state = state.clone();
                 let height = zpx(420.).min(window.viewport_size().height - zpx(48.));
                 dialog
@@ -2674,11 +2752,33 @@ impl Render for AppShell {
                     .margin_top(((window.viewport_size().height - height) / 2.).max(zpx(24.)))
                     .p_0()
                     .close_button(false)
-                    .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                    .entrance(if closing.is_some() {
+                        gpui_kit::component::dialog::DialogEntrance::None
+                    } else {
+                        gpui_kit::component::dialog::DialogEntrance::FadeSlide
+                    })
+                    .when_some(closing, |dialog, started| {
+                        dialog.opacity(search_ui::exit_opacity(started))
+                    })
                     .bg(appearance::popup_surface())
                     .rounded(zpx(14.))
                     .overflow_hidden()
+                    // Escape and outside clicks ask here first, so they leave through the
+                    // fade with Done instead of the dialog's own instant close.
+                    .on_cancel({
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                if state.panel == Panel::Providers {
+                                    state.toggle_providers(cx);
+                                }
+                            });
+                            false
+                        }
+                    })
                     .on_close(move |_, _, cx| {
+                        // Closed some other way during the fade: nothing left to close later.
+                        let _ = close_shell.update(cx, |this, _| this.settings_closing = None);
                         close_state.update(cx, |state, cx| {
                             if state.panel == Panel::Providers {
                                 state.toggle_providers(cx);
@@ -2711,10 +2811,32 @@ impl Render for AppShell {
             });
         }
         if !settings_open && self.settings_focused {
-            window.close_dialog(cx);
-            self.focus_composer(window, cx);
+            if cx.reduce_motion() {
+                window.close_dialog(cx);
+                self.focus_composer(window, cx);
+            } else {
+                let started = std::time::Instant::now();
+                self.settings_closing = Some(started);
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(search_ui::EXIT_DURATION)
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.settings_closing == Some(started) {
+                            this.settings_closing = None;
+                            window.close_dialog(cx);
+                            this.focus_composer(window, cx);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
         }
         self.settings_focused = settings_open;
+        if self.settings_closing.is_some() {
+            window.request_animation_frame();
+        }
         self.sync_caffeine(cx);
         let terminal_processes = self
             .terminals
@@ -2732,9 +2854,10 @@ impl Render for AppShell {
         self.sync_terminal_sidebar_actions(cx);
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
-        if self
-            .mode_slide_started
-            .is_some_and(|started| started.elapsed() < Duration::from_millis(180))
+        if !cx.reduce_motion()
+            && self
+                .mode_slide_started
+                .is_some_and(|started| started.elapsed() < Duration::from_millis(180))
         {
             window.request_animation_frame();
         }
@@ -2884,6 +3007,10 @@ impl Render for AppShell {
                     input.set_value(title, window, cx);
                     input.focus(window, cx);
                 });
+                // As in Finder: start with the whole name selected, ready to replace.
+                cx.defer_in(window, |_, window, cx| {
+                    window.dispatch_action(Box::new(gpui_kit::component::input::SelectAll), cx);
+                });
             }
             self.renaming_loaded = renaming;
             self.project_renaming_loaded = project_renaming;
@@ -2917,6 +3044,7 @@ impl Render for AppShell {
                 cx,
             );
         });
+        keyboard_control::restore_lost_focus(&self.shell_focus, &self.focus_watch, window, cx);
         v_flex()
             .relative()
             .size_full()
@@ -3178,6 +3306,7 @@ impl Render for AppShell {
                                         &self.rename,
                                         &self.usage,
                                         &self.updater,
+                                        window,
                                         cx,
                                     )),
                             );
@@ -3284,24 +3413,44 @@ impl Render for AppShell {
             )
             .child(self.render_status_bar(cx))
             .child(self.browser_preview.clone())
-            .when(self.search_open || settings_open, |shell| {
-                let shade = div()
-                    .absolute()
-                    .inset_0()
-                    .child(backdrop::blur_layer())
-                    .bg(gpui_kit::rgba(0x00000066));
-                if let Some(started) = self.search_closing {
-                    shell.child(shade.opacity(search_ui::exit_opacity(started)))
-                } else if cx.reduce_motion() {
-                    shell.child(shade)
-                } else {
-                    shell.child(shade.with_animation(
-                        "search-background-dim",
-                        Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-                        |shade, progress| shade.opacity(progress),
-                    ))
-                }
-            })
+            .when(
+                self.search_open || settings_open || self.settings_closing.is_some(),
+                |shell| {
+                    // Black at this strength turns a light workspace muddy grey.
+                    let shade =
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui_kit::rgba(if appearance::light() {
+                                0x1c18102e
+                            } else {
+                                0x00000066
+                            }));
+                    if let Some(started) = self.search_closing.or(self.settings_closing) {
+                        let strength = search_ui::exit_opacity(started);
+                        shell.child(
+                            shade
+                                .opacity(strength)
+                                .child(backdrop::blur_layer(strength)),
+                        )
+                    } else if cx.reduce_motion() {
+                        shell.child(shade.child(backdrop::blur_layer(1.)))
+                    } else {
+                        shell.child(
+                            shade.with_animation(
+                                "search-background-dim",
+                                Animation::new(Duration::from_millis(180))
+                                    .with_easing(ease_out_quint()),
+                                |shade, progress| {
+                                    shade
+                                        .opacity(progress)
+                                        .child(backdrop::blur_layer(progress))
+                                },
+                            ),
+                        )
+                    }
+                },
+            )
     }
 }
 
@@ -3368,6 +3517,12 @@ fn main() {
                 KeyBinding::new("cmd-,", ToggleProviders, None),
             ]);
             keybinds::bind_session_navigation(cx);
+            // Lets UI work check Reduce Motion without touching the system setting.
+            if std::env::var("DEL_BACKEND").as_deref() == Ok("mock")
+                && std::env::var_os("DEL_REDUCE_MOTION").is_some()
+            {
+                cx.set_reduce_motion(true);
+            }
             // Quit runs the shutdown hook, which ends every backend process.
             cx.on_action(|_: &Quit, cx| cx.quit());
             // Closing the window quits, which also runs the shutdown hook.
@@ -3453,7 +3608,10 @@ mod sidebar_width_tests {
         assert_eq!(sidebar_width(300., false, 650., 100.), 270.);
         assert_eq!(sidebar_width(f32::INFINITY, false, 1600., 0.), 320.);
         assert_eq!(sidebar_width(900., true, 1600., 180.), 800.);
-        assert_eq!(sidebar_width(20., true, 1600., 180.), 220.);
+        assert_eq!(
+            sidebar_width(20., true, 1600., 180.),
+            super::right_panel::PANEL_MIN_WIDTH
+        );
     }
 
     #[test]

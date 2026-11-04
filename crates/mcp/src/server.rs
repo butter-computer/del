@@ -723,6 +723,13 @@ impl Inner {
                                 v["is_self"] = json!(&s.id == caller);
                                 if let Some(manager) = &manager {
                                     v["parent_session_id"] = json!(manager.peer_parent(&s.id));
+                                    v["spawned_by"] =
+                                        json!(self.scope.lock().unwrap().parent.get(&s.id));
+                                    if let Ok(record) = manager.session_record(&s.id) {
+                                        v["model"] = json!(record.model);
+                                        v["reasoning_effort"] = json!(record.reasoning_effort);
+                                        v["service_tier"] = json!(record.service_tier);
+                                    }
                                     v["is_side_chat"] =
                                         json!(manager.side_chat_record(&s.id).is_some());
                                     v["is_open"] = json!(
@@ -777,6 +784,21 @@ impl Inner {
                 if let Err(e) = non_empty_max("prompt", &a.prompt, MAX_PROMPT) {
                     return Ok(tool_err(e));
                 }
+                if let Err(e) = validate_model_options(
+                    a.model.as_deref(),
+                    a.reasoning_effort.as_deref(),
+                    a.service_tier.as_deref(),
+                ) {
+                    return Ok(tool_err(e));
+                }
+                if let Some(branch) = &a.branch {
+                    if let Err(e) = non_empty_max("branch", branch, 256) {
+                        return Ok(tool_err(e));
+                    }
+                    if branch.starts_with('-') {
+                        return Ok(tool_err("branch cannot start with '-'"));
+                    }
+                }
                 let cwd = Path::new(&a.cwd);
                 let is_dir = {
                     let probe = cwd.to_path_buf();
@@ -808,6 +830,11 @@ impl Inner {
                     provider: a.provider,
                     cwd: cwd.to_path_buf(),
                     prompt: a.prompt,
+                    model: a.model,
+                    reasoning_effort: a.reasoning_effort,
+                    service_tier: a.service_tier,
+                    branch: a.branch,
+                    new_worktree: a.new_worktree,
                 };
                 match host.spawn_session(caller, req).await {
                     Ok(info) => {
@@ -821,6 +848,57 @@ impl Inner {
                         Ok(tool_json(serde_json::to_value(info).unwrap_or(Value::Null)))
                     }
                     Err(e) => Ok(tool_err(e.to_string())),
+                }
+            }
+            "session_models" => {
+                let a: ModelsArgs = parse(args)?;
+                Ok(match host.session_models(caller, a.provider).await {
+                    Ok(models) => tool_json(json!({"provider":a.provider,"models":models})),
+                    Err(e) => tool_err(e.to_string()),
+                })
+            }
+            "configure_session" | "close_session" => {
+                // Control only directly spawned children, not arbitrary project peers.
+                let target =
+                    SessionId::new(args.get("session_id").and_then(Value::as_str).unwrap_or(""));
+                if self.scope.lock().unwrap().parent.get(&target) != Some(caller) {
+                    return Ok(tool_err(
+                        "Only chats you spawned during this Del launch can be controlled",
+                    ));
+                }
+                if let Err(e) = host.authorize_peer(caller, &target) {
+                    return Ok(tool_err(e.to_string()));
+                }
+                if name == "configure_session" {
+                    let a: crate::ConfigureRequest = parse(args)?;
+                    if let Err(e) = validate_model_options(
+                        a.model.as_deref(),
+                        a.reasoning_effort.as_deref(),
+                        a.service_tier.as_deref(),
+                    ) {
+                        return Ok(tool_err(e));
+                    }
+                    Ok(match host.configure_session(caller, a).await {
+                        Ok(summary) => {
+                            let mut value = serde_json::to_value(summary).unwrap_or(Value::Null);
+                            if let Some(record) = host
+                                .peer_manager()
+                                .and_then(|m| m.session_record(&target).ok())
+                            {
+                                value["configuration"] = json!({"provider":record.provider,"model":record.model,"reasoning_effort":record.reasoning_effort,"service_tier":record.service_tier});
+                            }
+                            tool_json(value)
+                        }
+                        Err(e) => tool_err(e.to_string()),
+                    })
+                } else {
+                    let a: CloseArgs = parse(args)?;
+                    Ok(match host.close_session(caller, &target, a.archive).await {
+                        Ok(()) => tool_json(
+                            json!({"session_id":a.session_id,"closed":true,"archived":a.archive}),
+                        ),
+                        Err(e) => tool_err(e.to_string()),
+                    })
                 }
             }
             "send_to_session" => {
@@ -872,6 +950,16 @@ impl Inner {
                     },
                 )
             }
+            "cancel_session_request" => {
+                let a: CancelRequestArgs = parse(args)?;
+                Ok(
+                    match host.cancel_peer_request(caller, &a.request_id).await {
+                        Ok(message) => tool_json(json!({"receipt":message,
+                        "instruction":"Request withdrawn without reopening the recipient. Continue remaining work, or complete when all obligations are finished."})),
+                        Err(e) => tool_err(e.to_string()),
+                    },
+                )
+            }
             "session_work" => {
                 let a: WorkArgs = parse(args)?;
                 if a.action == "receive" {
@@ -882,9 +970,17 @@ impl Inner {
                         Err(e) => tool_err(e.to_string()),
                     });
                 }
+                let receipts: Vec<_> = host
+                    .peer_receipts(caller)
+                    .into_iter()
+                    .map(|m| {
+                        json!({"id":m.id,"from":m.from,"to":m.to,"reply_to":m.reply_to,
+                        "state":m.state,"error":m.error})
+                    })
+                    .collect();
                 Ok(match host.peer_work(caller, &a.action).await {
                     Ok(work) => tool_json(
-                        json!({"work":work,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete unfinished work. Do not restart an already completed assignment." }}),
+                        json!({"work":work,"receipts":receipts,"instruction": if a.action == "wait" { "End your current turn without marking the task complete. Del will deliver the reply in a continuation; do not poll." } else { "A peer reply or turn boundary does not complete unfinished work. Do not restart an already completed assignment." }}),
                     ),
                     Err(e) => tool_err(e.to_string()),
                 })

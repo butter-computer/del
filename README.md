@@ -6,10 +6,15 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.29` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.35` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.29 source update notes](docs/releases/0.1.29.md) and
-[validation record](docs/releases/0.1.29-validation.md).
+See the [0.1.35 source update notes](docs/releases/0.1.35.md) and
+[validation record](docs/releases/0.1.35-validation.md).
+
+The 0.1.35 PR integrates the completed UI agent passes, council agent controls,
+and session recovery fixes on `codex/session-controls-fixes`. Fresh messages reach
+idle chats even while peer work is pending; agents can inspect delivery receipts
+and withdraw their own undelivered requests without reopening archived workers.
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -39,7 +44,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.29-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.35-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -165,8 +170,15 @@ separate data directory so test conversations cannot mix with normal history:
 DEL_BACKEND=mock DEL_DATA_DIR=/tmp/del-ui-dev cargo run --locked -p del-app
 ```
 
-Mock replies, tool activity, and approvals are simulations; mock providers have
-no model catalog. Do not use mock mode when testing real provider behavior.
+Mock replies, tool activity, and approvals are simulations. The default mock has
+no model catalog. Add `DEL_MOCK_MODELS=1` for twelve clearly labeled synthetic
+models with effort and Fast controls, and `DEL_MOCK_DELAY_MS=350` to inspect
+streaming, loading, and queued follow-ups at a human pace. A prompt's wording
+picks the scenario: `tool`, `approve`, `error`, `group` (several tools, one failing),
+`slow` (tools that each run for seconds), `goal` (an active native goal) and
+`markdown` (every kind of reply block); anything else streams plain text. With the
+mock backend, `DEL_REDUCE_MOTION=1` turns on Reduce Motion without changing the
+system setting. Do not use mock mode when testing real provider behavior.
 
 ### macOS signing and permissions
 
@@ -221,7 +233,8 @@ The sidebar has **Pinned** (hidden when empty) and the **active Space name** (fo
 are persistent collections of projects, with independent pinned chats and tab decks.
 Existing projects and pins start in **Default**. The Space switcher at the top of
 the sidebar lists your Spaces and offers **Create Space** and **Rename Space**,
-each with an icon. Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
+each with an icon. Create and Save stay disabled while a Space name is empty.
+Create projects from the **+** menu. When more than one Space exists, a red **Delete Space** action moves its projects,
 pins, and tabs into the first remaining Space; chats and project files are preserved. Swipe
 horizontally with two fingers over the left sidebar, or pick one from the Space
 switcher or the Space dots, to switch Spaces. Swipes slide both lists
@@ -310,9 +323,14 @@ navigate, Return to choose, and Escape to dismiss. Open the branch picker with �
 Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
-the existing checkout only when it is clean; Git also refuses branches checked out
-elsewhere. With New worktree, Del creates a unique `del/session-<UUID>` branch from
-the selected commit without changing the source checkout. Uncommitted source changes
+the existing checkout when it is clean. If it has local changes, Del automatically
+creates a managed worktree at the selected branch’s latest local commit, preserving
+the original checkout and all staged, unstaged, and untracked files. The same
+fallback applies to agent-spawned chats. With New worktree enabled, Del always
+creates a unique `del/session-<UUID>` branch from the selected commit without
+changing the source checkout. Branch tips are resolved at launch from local Git
+refs; Del does not fetch or pull automatically. Git still refuses a clean shared
+checkout switch to a branch already checked out elsewhere. Uncommitted source changes
 are not copied. An unborn repository needs its first commit before worktree creation.
 
 Del-owned worktrees live in `<Del data>/worktrees/<UUID>/checkout`, with an ownership
@@ -337,13 +355,22 @@ for you, failed, or unread (a filled tick with a bold title, cleared when the ch
 have no status marker. Hide timestamps while unread ticks are visible. Keep-awake uses a neutral hover-colored background and animated gold
 steam while enabled. New sessions come from the **+** after the top tabs, or ⌘N.
 
+Hover a saved session to preview its full title, age and activity, project,
+code folder path, and Git branch with matching icons. Separate worktree-name
+lines (such as `checkout`) are omitted because the path already identifies the folder.
+The compact card appears beside the sidebar after 120 ms with a brief fade and slide.
+It stays visible over Archive, Pin, and archived-session actions; moving between
+rows updates it immediately without animation. Leaving or pressing the row dismisses it. Hovering
+does not select the chat or clear unread replies.
+Git details come from that session's checkout and refresh in the background.
+
 The window follows the Harp workbench layout: back/forward (⌘[ / ⌘]) controls sit in the title bar above the sidebar, 144 px session tabs start at the chat
 page's edge. The 22 px status bar shows session metrics and the Chat/Terminal toggle:
 
 - **Branch + changes**: current checkout, changed-file count, green added/red removed line totals, and ahead/behind counts; click to open Changes.
 - **Context**: active conversation context (history, instructions, tools and current output), shown as percent used. Capacity comes from provider telemetry or an exact known model specification; unknown capacities stay unavailable. This is not cumulative lifetime token traffic. It resets on provider switches; Terminal mode shows unavailable.
 - **Limits**: the selected provider/account's most constrained allowance, with individual windows and local reset times in the menu. Claude and Codex report these; unsupported accounts show unavailable. Refreshes at most once a minute while active.
-- **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the active provider’s total; hover or click for each provider and the conversation total across repeated switches. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
+- **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the total for the main chat plus all its side chats, including closed side chats. Hover or click for each provider’s combined cost across repeated switches. Each chat is reconciled independently before summing, so sibling chats cannot mask or duplicate one another’s usage. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
 - **Processes**: commands and servers for the current session, with PIDs and listening TCP ports. The menu also lists all sessions; empty drafts count all sessions. Empty sections say **0 running**. Background provider connections, shells and helpers are hidden. Commands under shared provider servers without verifiable ownership appear only under all sessions. Refreshes every ten seconds while active; command arguments are never collected.
 - **Chat / Terminal**: switch the active conversation between its chat and native terminal UI.
 
@@ -379,7 +406,7 @@ filter by itself to list its sessions. Tab shortcut badges stay hidden while
 the palette is open. The palette is centered over the conversation pane and
 stays aligned as sidebars resize. A dimmed backdrop, a short fade-and-slide
 entrance, and a 140 ms fade-out keep opening and closing smooth. Reduce Motion
-shows and dismisses it immediately. Clicking outside also dismisses the palette.
+shows and dismisses it immediately. Its blur and dim fade with the panel, and Settings leaves the same way. Clicking outside also dismisses the palette.
 Inserted skill tokens use blue text and icons. Command suggestions show
 navigation hints without argument-placeholder text.
 The search footer places navigation, open, and close hints on the left and **/c /t Filter**
@@ -448,6 +475,11 @@ conversation. Unloading a running session also stops its current work.
   tick is highlighted. Moving onto a different tick emits native haptic feedback
   on supported macOS hardware. Ticks use compact 10 px spacing, with 6 px idle
   bars that grow to at most 18 px on hover.
+- The transcript and composer share one column and one text edge; the message rail
+  overlays the margin rather than taking width from them. Messages and the composer
+  input use 14 pt reading text and chrome uses 13 pt. Diffs, tool output and code blocks
+  share one surface below the page. A failed turn reports once in the transcript, with its
+  error beside it, and a clean branch shows no line counts in the status bar.
 - The transcript uses left-aligned user message cards, unboxed assistant prose, and
   compact expandable tool rows. Consecutive tools share a group immediately, even
   while running. Its header shows the current action and any failure/decline count;
@@ -478,6 +510,13 @@ conversation. Unloading a running session also stops its current work.
   aligns with the reply text’s left edge and keeps a 24 px click target. Copy saves
   the full reply to the clipboard and shows a checkmark for 1.5 seconds; clicking
   again restarts that confirmation.
+- Tab reaches disclosure rows, Copy, title-bar buttons, project-row actions and
+  file actions, with a ring for keyboard focus only; Enter or Space activates them. Clicking one
+  leaves focus in the composer. Session rows, tabs and their hover actions are Tab stops too: focus reveals
+  the actions and scrolls the row or tab into view. Enter on a Browser tab moves to its address field; Esc or
+  Tab returns to the app.
+- Fenced code blocks show their language and a Copy button in the corner, with the same
+  1.5 second checkmark as a reply's Copy.
 - Codex file citations render as clickable filenames in live and saved replies,
   including Side chats. Code examples remain literal.
 - Local file links in replies open in Del’s file viewer; relative links resolve
@@ -518,7 +557,9 @@ conversation. Unloading a running session also stops its current work.
   replies that finish before being opened. A selected chat also becomes unread
   when its reply finishes while Del’s window is inactive. Opening the chat, returning focus to its window, or sending another prompt clears
   the tick. Completion in the actively viewed chat stays read. Hover temporarily hides it so the action icons keep their usual right alignment.
-- Both sidebars resize from their panel boundaries. The right tab row has a thin,
+- Working sessions show the activity spinner without a relative timestamp.
+- Both sidebars resize from their panel boundaries. The right sidebar has a
+  320-logical-pixel minimum so Claude and Opus 5.5 High stay on one composer row. The right tab row has a thin,
   floating divider; the content area stays borderless. The left sidebar only
   resizes between 180 and 320 px at its boundary, with a 16-point hover target
   centered on the gutter.
@@ -549,6 +590,9 @@ The picker uses provider-advertised choices, not a hardcoded list of model names
 All visible catalog entries remain accessible in a bounded scrolling list, without
 a scrollbar; the bottom fades while more entries are below. Refresh retries
 catalog discovery. Availability depends on the installed CLI, agent, and account.
+Empty, loading, and failed catalogs keep a visible status below the model choices;
+the list cannot clip the explanation or the Refresh control. Model names align
+across selected and unselected rows.
 The picker opens with a **Search models…** field. It fuzzy-filters names and
 provider IDs, ignoring case, spaces, and punctuation; clear it to restore all
 choices. Opening the picker again starts with an empty search. Use **↑/↓** to
@@ -569,7 +613,9 @@ advertised effort levels, and the accent follows the selected provider (includin
 Codex blue, Claude orange, and OpenCode white). Use **←/→** in the reasoning controls to move one
 level at a time, stopping at either endpoint. Fast mode is enabled only when the model
 advertises support.
-The model pill immediately shows the effective effort, including the catalog
+Long model names truncate within the picker and composer so effort and send
+controls remain reachable in narrow panes. The model pill immediately shows
+the effective effort, including the catalog
 default before any adjustment. Claude model-specific settings and Codex configured
 reasoning effort are resolved before opening the picker. Providers that advertise
 effort choices without a default show **Auto effort** until one is chosen. Side chat
@@ -657,7 +703,10 @@ the provider releases its send slot, Del retries the undelivered message
 automatically. Stop pauses pending retries too; steering preserves the remaining
 queue and its order.
 
-Queue rows have **Steer**, **Delete**, and **Edit** actions. Edit returns text and
+Queue rows have **Steer**, **Delete**, and **Edit** actions. Explicit Steer also
+delivers while an agent is waiting for peer work between native turns. It keeps
+peer obligations and later queued follow-ups intact; a rejected steer stays in
+the queue with an error. Edit returns text and
 attachments to the composer; an existing draft is preserved as another queued item.
 Drag the queue icon to reorder, without an extra hover icon. Controls remain
 visible at the sidebar’s minimum width. Rows have subtle
@@ -735,6 +784,12 @@ No Codex, Claude, or third-party transcription API is used.
 
 ## Project peer conversations
 
+Agent-created chats apply Del’s normal built-in provider permission policy before
+inheriting their parent settings, including imported/background parents with
+stale permission metadata. Claude starts with `--dangerously-skip-permissions`
+and Codex with its normal full-access configuration. ACP keeps its own policy.
+
+
 Agents in the same Del project can discover each other, read recorded chat context,
 and exchange requests and replies across providers. Sibling worktrees use their
 parent project. A peer can ask for information or edits without changing the
@@ -750,8 +805,11 @@ and dismiss actions in the row's context menu.
 Peer messages are durable and run before queued user messages at a safe input
 boundary. **Finishing a turn or replying to a peer does not finish the original
 task.** The agent continues that work and explicitly completes it before Del
-releases queued user messages. Waiting and paused work remain visible. Uncertain
-delivery after a crash requires review before retrying.
+releases queued user messages. Restored side chats wait for Del’s agent tools before launching.
+Coordination runs automatically without a top-of-chat
+Pause/Resume banner. Incoming peer requests and replies wake agent-managed pauses;
+explicit Stop remains stopped until you steer it. Uncertain delivery after a crash
+requires review before retrying.
 
 Chat agents can create new chat peers with `spawn_session`. New peers inherit the
 caller’s working directory, project, and permissions. When using the same provider,
@@ -763,7 +821,32 @@ Creating a worker does not make either chat an orchestrator or change your selec
 conversation. Each spawn call creates a session; inspect the session list before
 retrying a call whose outcome is unknown.
 
-Tools: `spawn_session`, `list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
+Chat spawns also accept `model`, `reasoning_effort`, `service_tier`, `branch`, and
+`new_worktree`. `session_models` returns the selected provider's live catalog;
+use its exact model and effort IDs. An explicit model clears inherited effort/tier
+unless supplied. `branch` selects the starting branch; without `new_worktree` it
+switches the shared checkout if clean, or automatically creates an isolated
+checkout from the selected branch’s tip if local changes would block the switch.
+With `new_worktree: true`, Del creates
+an isolated managed checkout and unique branch using the existing worktree rules.
+The requested `cwd` must still be the caller's directory; the app prepares the new
+path and retains the original project boundary. Uncommitted edits are not copied.
+Terminal spawns reject these chat-only options rather than silently ignoring them.
+
+`configure_session` changes an idle spawned chat's provider and model selection for
+subsequent prompts. Provider switching preserves public history and uses the new
+provider's default account; unfinished native goals must be cleared first. Omitted
+model/effort/tier fields reset to defaults. `close_session` unloads a spawned chat;
+`archive: true` also hides it from the ordinary sidebar. Both preserve history,
+branches, and worktree files. Active peer work is paused before closing so it does
+not immediately restart; collect replies before closing workers. These controls
+are restricted to chats directly spawned by the caller during this Del launch,
+not arbitrary project peers or the caller itself. Reopening a paused chat does not
+silently resume its delegated task. Peer discovery reports saved model settings
+and the current-launch `spawned_by` identity.
+
+Tools: `spawn_session`, `session_models`, `configure_session`, `close_session`,
+`list_sessions`, `get_session_summary`, `read_session`, `send_to_session`,
 `reply_to_session`, and `session_work`. Context reads are paginated and exclude
 private reasoning. Side chats retain mailbox routing after restoration or provider
 changes. Plain shells are excluded. Terminal agents use a cooperative inbox and
@@ -776,6 +859,13 @@ Main agents and Side chats use these same messaging tools in both directions.
 and previously opened Side chats, including whether they can currently receive
 messages. The list survives restart and provider changes. See
 [peer sessions](docs/peer-sessions.md) for details and recovery behavior.
+
+For council-style reviews, create independent read-only reviewers against the same
+candidate, select their models from `session_models`, and collect their tracked
+replies before closing or archiving them. Reviewers can share a checkout; use
+isolated worktrees for independent edits. Review criteria and iteration belong in
+your skill or prompt. A personal `council` skill is discovered through the normal
+provider skill catalog; it is not bundled with Del.
 
 ## Files, terminals, and browser
 
@@ -795,7 +885,9 @@ tab row. The header and panel open and close together with an interruptible reve
 reduced-motion settings show or hide them immediately. New sessions start with
 the right sidebar closed. Opening it shows one **New tab** chooser and **+**, with
 no Files, Changes, Terminal, or Browser preopened. Each session remembers whether
-its sidebar was open or closed across tab/Space switches and app restarts. Existing tools saved in the former main-area strip migrate into that
+its sidebar was open or closed across tab/Space switches and app restarts. Every **Side chat** action
+creates an independent tab from the main conversation’s latest context. Existing
+side chats keep their own drafts, settings, histories, and saved identities. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.
 
 Project lists initially show five sessions, plus the active session when it sits
@@ -912,9 +1004,13 @@ and MCP configuration are kept separate from saved launch history. See
 ### Browser
 
 On macOS 14 or later, the Browser pane embeds WebKit with an address field,
-back/forward navigation, and reload/stop. Each page has its own Browser tab in
-the session or sidebar row—there is no nested browser tab strip. Use **+** and
+back/forward navigation, and reload/stop. Its toolbar, address field, empty state,
+and rounded page corners follow Del's selected theme and zoom; websites retain
+their own colors. Each page has its own Browser tab in the sidebar row—there is
+no nested browser tab strip. Use **+** and
 enter a URL to open another page; closing or moving a tab affects only that page.
+Native browser content temporarily yields to dialogs and popups so it cannot
+cover their controls; the page stays loaded behind them.
 Existing saved browser groups restore as separate tabs, keeping their profiles
 and page IDs. Agent-created pages also appear as individual sidebar tabs. HTTP(S) and localhost
 pages open inside Del. Browser zoom follows the app's zoom setting. The sidebar
@@ -1033,6 +1129,12 @@ easing. Reduce Motion keeps these transitions instant.
 
 Del opens as a centered window at roughly 70% of the available display width and
 76% of its height, with a minimum size of **960 × 640 logical pixels**.
+
+Conversation prose and the input use a 14 px reading size, with 13 px controls and
+12 px secondary labels. In a narrow new-session pane, folder and branch controls
+show their icons, with full names in tooltips, so New worktree and Chat/Terminal
+remain on the same row. Secondary labels and diff colors use theme-aware ink in
+both light and dark modes.
 
 Zoom scales the shell, chat, controls, file panels, and embedded terminal together
 in 10% steps, bounded to 70–200%. The setting is saved in `zoom.json` next to the

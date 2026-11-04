@@ -49,7 +49,7 @@ impl NotificationType {
             Self::Info => Icon::new(IconName::Info).text_color(cx.theme().info),
             Self::Success => Icon::new(IconName::CircleCheck).text_color(cx.theme().success),
             Self::Warning => Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning),
-            Self::Error => Icon::new(IconName::CircleX).text_color(cx.theme().danger),
+            Self::Error => Icon::new(IconName::CircleAlert).text_color(cx.theme().danger),
         }
     }
 }
@@ -436,7 +436,7 @@ impl Render for Notification {
             .gap_3()
             .refine_style(&self.style)
             .when_some(icon, |this, icon| {
-                this.child(div().absolute().top(px(18.)).left_4().child(icon))
+                this.child(div().absolute().top(px(16.)).left_4().child(icon))
             })
             .child(
                 v_flex()
