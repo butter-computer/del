@@ -503,8 +503,6 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 }
                                 cx.refresh_windows();
                             })))
-                    .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
-                        .child("Force Quit, crashes, and restarting your Mac still end running work. To stop everything now, choose Quit Del Completely (⌥⌘Q)."))
             ))
             .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
             .when(section == SettingsSection::Providers, |content| content

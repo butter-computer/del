@@ -503,6 +503,7 @@ impl SideChat {
                                 None,
                                 cx,
                             )
+                            .with_compact_user_messages()
                         });
                         chat.update(cx, |chat, _| chat.queue.items = this.saved.queue.clone());
                         cx.observe(&chat, |this, chat, cx| {

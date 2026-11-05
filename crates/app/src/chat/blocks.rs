@@ -509,6 +509,7 @@ impl ChatView {
                     *steer,
                     *goal,
                     attachments.clone(),
+                    !self.compact_user_messages,
                 ))
                 .when_some(self.working_label(ix), |column, label| {
                     column.child(
@@ -1050,6 +1051,7 @@ fn user_message(
     steer: bool,
     goal: bool,
     attachments: AttachmentSummary,
+    full_width: bool,
 ) -> impl IntoElement {
     let label = attachments.label();
     let objective = del_agent::split_command(&text).and_then(|(name, args)| {
@@ -1060,9 +1062,10 @@ fn user_message(
     });
     let sent_as_goal = goal || objective.is_some();
     let text = objective.unwrap_or(text);
-    // The card hugs its text, up to the column; a short prompt is not a full-width band.
+    // Main-chat cards span the transcript; Side chats keep text-sized bubbles.
     h_flex()
         .max_w_full()
+        .when(full_width, |row| row.w_full())
         .self_start()
         .items_start()
         .gap_2()
@@ -1311,6 +1314,7 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                                         .as_ref()
                                         .is_some_and(|c| c.kind == del_agent::CommandKind::Goal),
                                     AttachmentSummary::from_input(&input),
+                                    true,
                                 )),
                         ),
                 ),

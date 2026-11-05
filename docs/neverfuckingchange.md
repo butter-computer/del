@@ -292,6 +292,10 @@ This records the final decisions, including corrections to earlier experiments.
 
 ## Transcript layout
 
+- Main-chat user-message backgrounds span the full available transcript column.
+  Side chat user messages remain compact. Preserve the shared text alignment and
+  6 px rail clearance.
+
 - Follow the supplied Codex desktop reference with left-aligned user message cards with their original background, unboxed assistant prose, and compact muted tool rows without leading icons.
 - Assistant replies show only an overlapping-rounded-squares Copy icon and
   local reply time in 24-hour **HH:MM** format beside it in a hover footer, with a 160 ms eased fade in and out.
@@ -992,8 +996,10 @@ activity bar. It supersedes earlier rules where they conflict.
   current context. Preserve independent settings, draft, queue, history, unread
   state, lifecycle, and persisted identity for all open side chats. Selecting an
   existing tab or opening a peer link reuses that chat rather than creating one.
-- Side chat launchers split into equal halves on hover or keyboard focus, with
-  a darker History half with a history icon and smooth 240 ms reveal. History
+- Side chat launchers stay intact. Hover or keyboard focus reveals a compact
+  History card attached below its right edge, styled like the new-session Chat/Terminal
+  card with rounded corners and a darker surface, with a history
+  icon and smooth 240 ms fade/slide. Moving onto the card keeps it visible. History
   loading uses text-free shimmer rows. Option-Shift-Command-S opens history as a right-sidebar
   tab, never a modal. Rows show the first prompt and last-prompt age, newest first;
   legacy snapshots use a clearly labelled saved-time fallback. Respect Reduce Motion. Keep closed Side

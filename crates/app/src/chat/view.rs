@@ -137,6 +137,7 @@ pub struct PeerActivity {
 }
 
 pub struct ChatView {
+    pub(super) compact_user_messages: bool,
     pub usage: crate::session_usage::SessionUsage,
     pub(super) model: ChatModel,
     pub(super) scroller: ListState,
@@ -188,6 +189,10 @@ impl EventEmitter<OpenPeer> for ChatView {}
 impl EventEmitter<PeerActivity> for ChatView {}
 
 impl ChatView {
+    pub fn with_compact_user_messages(mut self) -> Self {
+        self.compact_user_messages = true;
+        self
+    }
     pub fn goal(&self) -> Option<del_agent::Goal> {
         self.model.goal()
     }
@@ -215,6 +220,7 @@ impl ChatView {
             });
         });
         let mut view = Self {
+            compact_user_messages: false,
             queue: session
                 .as_ref()
                 .filter(|id| !backend.manager.is_temporary(id))
