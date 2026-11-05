@@ -48,6 +48,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Open a new Terminal in the right sidebar", "⌃`"),
             ("Toggle the bottom terminal panel", "⌘J"),
             ("Open Side chat in the right sidebar", "⌥⌘S"),
+            ("Open Side history for the current session", "⌥⇧⌘S"),
             ("Toggle left sidebar", "⌘B"),
             ("Toggle right sidebar", "⌘\\ / ⌘⇧B / ⌥⌘B"),
             ("Save the focused file editor", "⌘S"),

@@ -1461,6 +1461,192 @@ impl RightPanel {
         }
     }
 
+    pub(crate) fn select_saved_side_chat(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(tab) = self.hosted.iter().find(|tab| {
+            let panel = tab.panel.read(cx);
+            panel.side_chat_id.as_deref() == Some(id)
+                || panel
+                    .side_chat
+                    .as_ref()
+                    .is_some_and(|side| side.read(cx).storage_id() == id)
+        }) {
+            let key = tab.id.clone();
+            self.select_hosted(key, window, cx);
+            return true;
+        }
+        if self.side_chat_id.as_deref() == Some(id)
+            || self
+                .side_chat
+                .as_ref()
+                .is_some_and(|side| side.read(cx).storage_id() == id)
+        {
+            self.open_tool(Pane::SideChat, window, cx);
+            self.focus_side_chat(window, cx);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn reopen_side_chat(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.select_saved_side_chat(&id, window, cx) {
+            return;
+        }
+        let context = self.side_context.clone();
+        let panel = cx.new(|cx| {
+            let mut panel = Self::new(self.root.clone(), window, cx);
+            if let Some(context) = context {
+                panel.set_side_context(context);
+            }
+            panel.open_panes = vec![Pane::SideChat];
+            panel.blank_tabs.clear();
+            panel.restore_side_chat(id, window, cx);
+            panel
+        });
+        self.accept_tab(panel, window, cx);
+    }
+
+    pub(crate) fn contains_saved_side_chat(&self, id: &str, cx: &App) -> bool {
+        self.side_chat_id.as_deref() == Some(id)
+            || self
+                .side_chat
+                .as_ref()
+                .is_some_and(|side| side.read(cx).storage_id() == id)
+            || self
+                .hosted
+                .iter()
+                .any(|tab| tab.panel.read(cx).contains_saved_side_chat(id, cx))
+    }
+
+    pub(crate) fn side_history_parent(&self, cx: &App) -> Option<del_agent::SessionId> {
+        self.side_context.as_ref().and_then(|context| {
+            context
+                .activity_owner
+                .as_ref()
+                .and_then(|(state, owner)| {
+                    state
+                        .upgrade()
+                        .and_then(|state| match state.read(cx).side_chat_owner(*owner) {
+                            Some(
+                                crate::state::Tab::Session(id) | crate::state::Tab::Terminal(id),
+                            ) => Some(id.clone()),
+                            _ => None,
+                        })
+                })
+                .or_else(|| match &context.source {
+                    del_agent::ForkSource::Session(id) => Some(id.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    pub(crate) fn show_side_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_side_chat(cx);
+        let parent = self.side_history_parent(cx);
+        let requested_parent = parent.clone();
+        let panel = cx.weak_entity();
+        let result = cx.background_executor().spawn(async move {
+            match (del_agent::data_dir(), parent) {
+                (Some(dir), Some(parent)) => {
+                    crate::side_chat::history(&dir.join("side-chats"), &parent)
+                }
+                _ => Ok(Vec::new()),
+            }
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = result.await;
+            let _ = cx.update(|window, cx| {
+                if panel
+                    .upgrade()
+                    .is_none_or(|panel| panel.read(cx).side_history_parent(cx) != requested_parent)
+                {
+                    return;
+                }
+                window.open_dialog(cx, move |dialog, _, _| {
+                    let mut list = v_flex()
+                        .id("side-history-list")
+                        .max_h(zpx(360.))
+                        .overflow_y_scroll()
+                        .gap_1();
+                    match &result {
+                        Ok(entries) if entries.is_empty() => {
+                            list = list.child(
+                                div()
+                                    .p_3()
+                                    .text_color(crate::appearance::secondary_text())
+                                    .child("No previous Side chats for this session."),
+                            );
+                        }
+                        Err(error) => {
+                            list = list.child(
+                                div()
+                                    .p_3()
+                                    .child(format!("Could not load Side history: {error}")),
+                            );
+                        }
+                        Ok(entries) => {
+                            for entry in entries {
+                                let parent = requested_parent.clone();
+                                let id = entry.id.clone();
+                                list = list.child(
+                                    h_flex()
+                                        .id(SharedString::from(format!(
+                                            "side-history-{}",
+                                            entry.id
+                                        )))
+                                        .keyboard_control()
+                                        .role(gpui::Role::Button)
+                                        .aria_label(format!("Reopen {}", entry.title))
+                                        .min_w_0()
+                                        .p_3()
+                                        .gap_2()
+                                        .rounded(zpx(8.))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgba(0xffffff10)))
+                                        .child(crate::composer_ui::provider_logo(entry.provider))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .child(entry.title.clone()),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            if let Some(parent) = parent.clone() {
+                                                window.dispatch_action(
+                                                    Box::new(crate::ReopenSideChat {
+                                                        id: id.clone(),
+                                                        parent,
+                                                    }),
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                );
+                            }
+                        }
+                    }
+                    dialog
+                        .title("Side history")
+                        .width(zpx(460.))
+                        .bg(crate::appearance::popup_surface())
+                        .child(list)
+                });
+            });
+        })
+        .detach();
+    }
+
     pub fn restore_side_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.side_chat_id = Some(id);
         self.show_workspace(Pane::SideChat, window, cx);
@@ -4413,6 +4599,22 @@ mod tests {
             .collect();
         assert!(!snapshots[0].contains("LATEST_PARENT_MARKER"));
         assert!(snapshots[1].contains("LATEST_PARENT_MARKER"));
+        cx.update(|window, cx| {
+            right.update(cx, |p, cx| {
+                let first = p.hosted[0].panel.read(cx).side_chat_id.clone().unwrap();
+                let second = p.hosted[1].panel.read(cx).side_chat_id.clone().unwrap();
+                p.reopen_side_chat(first, window, cx);
+                assert_eq!(
+                    p.hosted.len(),
+                    2,
+                    "history selects an existing tab without forking again"
+                );
+                assert_eq!(p.active_hosted.as_ref(), Some(&p.hosted[0].id));
+                p.reopen_side_chat(second, window, cx);
+                assert_eq!(p.hosted.len(), 2);
+                assert_eq!(p.active_hosted.as_ref(), Some(&p.hosted[1].id));
+            })
+        });
         right.read_with(cx, |p, cx| {
             assert_eq!(p.hosted.len(), 2);
             let saved = p.snapshot(true, cx);

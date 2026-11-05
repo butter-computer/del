@@ -992,6 +992,11 @@ activity bar. It supersedes earlier rules where they conflict.
   current context. Preserve independent settings, draft, queue, history, unread
   state, lifecycle, and persisted identity for all open side chats. Selecting an
   existing tab or opening a peer link reuses that chat rather than creating one.
+- Side chat launchers reveal **/ Side history** inside the same row with a short
+  fade from the right on hover or keyboard focus. Option-Shift-Command-S opens
+  history for the current main session. Respect Reduce Motion. Keep closed Side
+  chat snapshots and restore them without sending a prompt; reuse already-open
+  tabs, including those in the main area. History must never mix main sessions.
 
 - Keep peer coordination automatic and out of the transcript header: no task
   banner or Pause/Resume controls. Incoming peer work wakes agent-managed pauses,

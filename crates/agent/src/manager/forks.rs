@@ -52,6 +52,24 @@ pub struct ForkSnapshot {
     history: Vec<AgentEvent>,
 }
 
+impl ForkSnapshot {
+    pub fn parent(&self) -> Option<&SessionId> {
+        self.parent.as_ref()
+    }
+
+    /// The first actual side-chat prompt, excluding inherited main-chat context.
+    pub fn first_prompt(&self) -> Option<&str> {
+        self.history.iter().find_map(|event| match event {
+            AgentEvent::UserMessage { text }
+                if !text.trim().is_empty() && !text.starts_with("<del_") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+    }
+}
+
 // A snapshot is reference material, not an executable continuation of pending
 // approvals or tools. Exclude reasoning and runtime bookkeeping.
 fn transcript(events: &[AgentEvent]) -> String {

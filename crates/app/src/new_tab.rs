@@ -108,7 +108,12 @@ pub fn tools<T: 'static>(
     let changes = tool(Pane::Changes, "Changes", cx);
     let terminal = tool(Pane::Terminal, "Terminal", cx);
     let files = tool(Pane::Files, "Files", cx);
-    let side_chat = tool(Pane::SideChat, "Side chat", cx);
+    let owner = cx.weak_entity();
+    let side_chat = SideChatLauncher {
+        create: std::rc::Rc::new(move |window, cx| {
+            let _ = owner.update(cx, |this, cx| choose(this, Pane::SideChat, window, cx));
+        }),
+    };
     div()
         .id("new-tab-tools")
         .flex_1()
@@ -137,6 +142,117 @@ pub fn tools<T: 'static>(
         )
         .into_any_element()
 }
+type LaunchAction = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+#[derive(IntoElement)]
+struct SideChatLauncher {
+    create: LaunchAction,
+}
+
+impl RenderOnce for SideChatLauncher {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let hovered = window.use_keyed_state("side-launcher-hover", cx, |_, _| false);
+        let focus = window.use_keyed_state("side-launcher-focus", cx, |_, cx| cx.focus_handle());
+        let focused = focus.read(cx).contains_focused(window, cx);
+        let shown = *hovered.read(cx) || focused;
+        let target = if shown { 1. } else { 0. };
+        let progress = if cx.reduce_motion() {
+            target
+        } else {
+            gpui_kit::base::transition(
+                "side-history-reveal",
+                target,
+                gpui_kit::base::Transition::new(std::time::Duration::from_millis(150)),
+                window,
+                cx,
+            )
+        };
+        let history_focus = focus.read(cx).clone();
+        let create = self.create.clone();
+        h_flex()
+            .id("Side chat")
+            .debug_selector(|| "Side chat".into())
+            .track_focus(&history_focus)
+            .relative()
+            .w_full()
+            .min_w_0()
+            .h(zpx(44.))
+            .flex_none()
+            .rounded_lg()
+            .bg(rgba(0xffffff10))
+            .hover(|s| s.bg(rgba(0xffffff18)))
+            .on_hover(move |value, _, cx| {
+                hovered.update(cx, |hovered, cx| {
+                    *hovered = *value;
+                    cx.notify();
+                })
+            })
+            .child(
+                h_flex()
+                    .id("side-chat-create")
+                    .keyboard_control()
+                    .role(gpui::Role::Button)
+                    .aria_label("Open Side chat")
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_3()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| (self.create)(window, cx))
+                    .child(
+                        Pane::SideChat
+                            .icon()
+                            .with_size(zpx(crate::icons::MARK_SIZE))
+                            .text_color(rgba(0xffffffb3)),
+                    )
+                    .child(div().truncate().child("Side chat")),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right(zpx(12.))
+                    .text_size(zpx(12.))
+                    .opacity(1. - progress)
+                    .text_color(crate::appearance::secondary_text())
+                    .rounded(zpx(4.))
+                    .px_1p5()
+                    .bg(rgba(0xffffff08))
+                    .child("⌥⌘S"),
+            )
+            .child(
+                h_flex()
+                    .id("side-history-open")
+                    .keyboard_control()
+                    .role(gpui::Role::Button)
+                    .aria_label("Open Side history, Option Shift Command S")
+                    .h_full()
+                    .gap_1()
+                    .pr(zpx(12.))
+                    .relative()
+                    .left(zpx(if cx.reduce_motion() {
+                        0.
+                    } else {
+                        6. * (1. - progress)
+                    }))
+                    .opacity(progress)
+                    .text_size(zpx(12.))
+                    .cursor_pointer()
+                    .text_color(crate::appearance::secondary_text())
+                    .hover(|s| s.text_color(rgba(0xffffffff)))
+                    .child("/ Side history")
+                    .child(div().text_size(zpx(10.)).child("⌥⇧⌘S"))
+                    .on_click(move |_, window, cx| {
+                        if shown {
+                            window.dispatch_action(Box::new(crate::OpenSideHistory), cx);
+                        } else {
+                            create(window, cx);
+                        }
+                    }),
+            )
+    }
+}
+
 pub fn destination(input: &str) -> Option<String> {
     let input = input.trim();
     if input.is_empty() {

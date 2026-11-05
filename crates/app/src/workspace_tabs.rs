@@ -442,6 +442,27 @@ impl WorkspaceTabs {
             .any(|panel| panel.read(cx).contains_peer(id, cx))
     }
 
+    pub(crate) fn show_saved_side_chat(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.iter().find(|tab| {
+            tab.panel
+                .as_ref()
+                .is_some_and(|panel| panel.read(cx).contains_saved_side_chat(id, cx))
+        }) else {
+            return false;
+        };
+        let key = tab.id;
+        if let Some(panel) = &tab.panel {
+            panel.update(cx, |panel, cx| panel.select_saved_side_chat(id, window, cx));
+        }
+        self.select(Some(key), window, cx);
+        true
+    }
+
     pub(crate) fn show_peer(
         &mut self,
         id: &del_agent::SessionId,

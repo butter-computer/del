@@ -26,9 +26,69 @@ pub struct SendToMain {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct SavedChat {
+    #[serde(default)]
+    parent: Option<SessionId>,
     snapshot: Option<del_agent::ForkSnapshot>,
     draft: UserInput,
     queue: Vec<crate::followups::Followup>,
+}
+
+#[derive(Clone)]
+pub(crate) struct HistoryEntry {
+    pub id: String,
+    pub title: String,
+    pub provider: Provider,
+    pub modified: std::time::SystemTime,
+}
+
+pub(crate) fn history(
+    directory: &std::path::Path,
+    parent: &SessionId,
+) -> std::io::Result<Vec<HistoryEntry>> {
+    let files = match std::fs::read_dir(directory) {
+        Ok(files) => files,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut entries = Vec::new();
+    for file in files {
+        let file = file?;
+        let path = file.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let bytes = std::fs::read(&path)?;
+        let Ok(saved) = serde_json::from_slice::<SavedChat>(&bytes) else {
+            continue;
+        };
+        let Some(snapshot) = saved.snapshot else {
+            continue;
+        };
+        if saved.parent.as_ref().or_else(|| snapshot.parent()) != Some(parent) {
+            continue;
+        }
+        let title = snapshot
+            .first_prompt()
+            .unwrap_or("Side chat")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        entries.push(HistoryEntry {
+            id: id.to_string(),
+            title: title.chars().take(160).collect(),
+            provider: snapshot.config.provider,
+            modified: file.metadata()?.modified()?,
+        });
+    }
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id)));
+    Ok(entries)
 }
 
 pub struct SideChat {
@@ -331,6 +391,12 @@ impl SideChat {
         if self.saved.snapshot.is_none() {
             return;
         }
+        self.saved.parent = self.parent.clone().or_else(|| {
+            self.saved
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.parent().cloned())
+        });
         self.saved.draft = UserInput::text(self.input.read(cx).value().to_string());
         self.saved.draft.attachments = self.attachments.clone();
         self.saved.draft.skills =
@@ -754,11 +820,8 @@ impl SideChat {
 
     pub fn forget(&mut self, cx: &mut gpui::Context<Self>) {
         self.set_unread(false, cx);
-        let path = self.path();
+        // Closing a tab stops its work, but preserves the snapshot for Side history.
         self.release_inner(true, cx);
-        if let Some(path) = path {
-            let _ = std::fs::remove_file(path);
-        }
     }
     pub fn release(&mut self, cx: &mut gpui::Context<Self>) {
         self.release_inner(false, cx);
@@ -1248,6 +1311,66 @@ mod tests {
     use super::*;
     use ::core::prelude::v1::test;
     use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn side_history_scopes_legacy_snapshots_and_keeps_provider_switches() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let snapshot = |parent: &str, provider: &str, text: &str| {
+            serde_json::json!({
+                "snapshot": {
+                    "config": {"cwd":"/tmp", "model":null,"provider":provider,"permission_mode":"full_auto"},
+                    "account_id":null,"parent":parent,"inherited":"Main chat context must not become the title",
+                    "history":[serde_json::to_value(del_agent::AgentEvent::UserMessage { text: text.into() }).unwrap()]
+                },
+                "draft": serde_json::to_value(UserInput::text("")).unwrap(), "queue":[]
+            })
+        };
+        std::fs::write(
+            dir.path().join(format!("{first}.json")),
+            snapshot("parent-a", "claude", "First side question").to_string(),
+        )
+        .unwrap();
+        let mut switched = snapshot("old-parent", "codex", "Switched provider");
+        switched["parent"] = "parent-a".into();
+        std::fs::write(
+            dir.path().join(format!("{second}.json")),
+            switched.to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!("{other}.json")),
+            snapshot("parent-b", "claude", "Unrelated conversation").to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("not-a-snapshot.json"), "{}").unwrap();
+        let entries = history(dir.path(), &SessionId::new("parent-a")).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.id == first
+            && e.title == "First side question"
+            && e.provider == Provider::Claude));
+        assert!(entries.iter().any(|e| e.id == second
+            && e.title == "Switched provider"
+            && e.provider == Provider::Codex));
+        assert!(
+            entries
+                .windows(2)
+                .all(|pair| pair[0].modified >= pair[1].modified)
+        );
+        assert_eq!(
+            history(dir.path(), &SessionId::new("parent-b"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            history(dir.path(), &SessionId::new("missing"))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     async fn idle(manager: &del_agent::SessionManager, id: &SessionId) {
         for _ in 0..500 {

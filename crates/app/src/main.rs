@@ -264,6 +264,13 @@ fn new_tab_group() -> Div {
         .bg(crate::appearance::composer_surface())
 }
 
+#[derive(::gpui::Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = del, no_json)]
+struct ReopenSideChat {
+    id: String,
+    parent: del_agent::SessionId,
+}
+
 actions!(
     del,
     [
@@ -288,6 +295,7 @@ actions!(
         OpenChanges,
         OpenFiles,
         OpenSideChat,
+        OpenSideHistory,
         SelectProvider,
         SelectModel,
         SelectEffort,
@@ -3173,6 +3181,29 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &OpenFiles, window, cx| {
                 this.open_inner_tool(right_panel::Pane::Files, window, cx);
             }))
+            .on_action(cx.listener(|this, action: &ReopenSideChat, window, cx| {
+                if this.right.read(cx).side_history_parent(cx).as_ref() != Some(&action.parent) {
+                    return;
+                }
+                let found = this.workspace(cx).is_some_and(|workspace| {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.show_saved_side_chat(&action.id, window, cx)
+                    })
+                });
+                if !found {
+                    this.set_right(true, cx);
+                    this.right.update(cx, |right, cx| {
+                        right.reopen_side_chat(action.id.clone(), window, cx)
+                    });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSideHistory, window, cx| {
+                if this.state.read(cx).panel == Panel::Chat {
+                    this.set_right(true, cx);
+                    this.right
+                        .update(cx, |right, cx| right.show_side_history(window, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenSideChat, window, cx| {
                 this.open_inner_tool(right_panel::Pane::SideChat, window, cx);
             }))
@@ -3497,6 +3528,7 @@ fn main() {
                 KeyBinding::new("ctrl-shift-g", OpenChanges, None),
                 KeyBinding::new("cmd-p", OpenFiles, None),
                 KeyBinding::new("alt-cmd-s", OpenSideChat, None),
+                KeyBinding::new("alt-shift-cmd-s", OpenSideHistory, None),
                 KeyBinding::new("cmd-1", Tab1, None),
                 KeyBinding::new("cmd-2", Tab2, None),
                 KeyBinding::new("cmd-3", Tab3, None),
