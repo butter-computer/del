@@ -28,6 +28,42 @@ const MAX_REVIEW_FILES: usize = 500;
 /// Diff rows rendered for one expanded file.
 const MAX_REVIEW_LINES: usize = 2000;
 
+/// Text-free loading rows; the highlight sweeps only across the placeholder shapes.
+fn history_skeleton_bar(key: u32, width: f32, height: f32, animate: bool) -> AnyElement {
+    div()
+        .relative()
+        .w(relative(width))
+        .h(zpx(height))
+        .rounded(zpx(4.))
+        .overflow_hidden()
+        .bg(rgba(0xffffff10))
+        .when(animate, |bar| {
+            bar.child(
+                h_flex()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .w(relative(0.6))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(rgba(0xffffff00), 0.),
+                        linear_color_stop(rgba(0xffffff14), 1.),
+                    )))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(rgba(0xffffff14), 0.),
+                        linear_color_stop(rgba(0xffffff00), 1.),
+                    )))
+                    .with_animation(
+                        ("side-history-shimmer", key),
+                        Animation::new(std::time::Duration::from_millis(1500)).repeat(),
+                        |highlight, t| highlight.left(relative(-0.6 + 1.6 * t)),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
 /// A file's diff parsed once per load, not on every render.
 struct ChangeReview {
     lines: Vec<crate::workspace_files::ReviewLine>,
@@ -84,6 +120,7 @@ pub(crate) enum Pane {
     Changes,
     NewTab,
     SideChat,
+    SideHistory,
 }
 
 impl Pane {
@@ -93,6 +130,7 @@ impl Pane {
             Self::Changes => Icon::default().path("icons/file-diff.svg"),
             Self::Terminal => Icon::default().path("icons/terminal.svg"),
             Self::Browser => IconName::Globe.into(),
+            Self::SideHistory => Icon::default().path("icons/history.svg"),
             Self::SideChat => Icon::default().path("icons/side-chat.svg"),
             Self::NewTab => IconName::File.into(),
         }
@@ -105,6 +143,7 @@ impl Pane {
             Self::Terminal => ("tab-terminal", "Terminal"),
             Self::Browser => ("tab-browser", "Browser"),
             Self::SideChat => ("tab-side-chat", "Side chat"),
+            Self::SideHistory => ("tab-side-history", "Side history"),
             Self::NewTab => ("tab-new", "New tab"),
         }
     }
@@ -408,6 +447,9 @@ pub struct RightPanel {
     focus: FocusHandle,
     side_context: Option<crate::side_chat::Context>,
     side_chat: Option<Entity<crate::side_chat::SideChat>>,
+    side_history: Option<Result<Vec<crate::side_chat::HistoryEntry>, String>>,
+    side_history_request: u64,
+    side_history_owner: Option<Option<del_agent::SessionId>>,
     side_chat_id: Option<String>,
     workspace: bool,
     tabs_in_titlebar: bool,
@@ -934,6 +976,9 @@ impl RightPanel {
     }
 
     fn activate_pane(&mut self, pane: Pane) {
+        if pane != Pane::SideHistory {
+            self.side_history_owner = None;
+        }
         if (pane != Pane::NewTab || !self.blank_tabs.is_empty()) && !self.open_panes.contains(&pane)
         {
             self.open_panes.push(pane);
@@ -1397,6 +1442,11 @@ impl RightPanel {
                 self.change_expanded.clear();
             }
             Pane::SideChat => self.forget_side_chat(cx),
+            Pane::SideHistory => {
+                self.side_history_owner = None;
+                self.side_history_request += 1;
+                self.side_history = None;
+            }
             Pane::NewTab => {
                 self.blank_tabs.clear();
                 self.blank_active = 0;
@@ -1550,10 +1600,18 @@ impl RightPanel {
     }
 
     pub(crate) fn show_side_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.side_history_owner = None;
+        self.open_tool(Pane::SideHistory, window, cx);
+    }
+
+    fn refresh_side_history(&mut self, cx: &mut Context<Self>) {
         self.save_side_chat(cx);
+        self.side_history_request += 1;
+        let request = self.side_history_request;
         let parent = self.side_history_parent(cx);
         let requested_parent = parent.clone();
-        let panel = cx.weak_entity();
+        self.side_history_owner = Some(parent.clone());
+        self.side_history = None;
         let result = cx.background_executor().spawn(async move {
             match (del_agent::data_dir(), parent) {
                 (Some(dir), Some(parent)) => {
@@ -1561,90 +1619,150 @@ impl RightPanel {
                 }
                 _ => Ok(Vec::new()),
             }
+            .map_err(|error| error.to_string())
         });
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let result = result.await;
-            let _ = cx.update(|window, cx| {
-                if panel
-                    .upgrade()
-                    .is_none_or(|panel| panel.read(cx).side_history_parent(cx) != requested_parent)
+            let _ = this.update(cx, |this, cx| {
+                if this.side_history_request == request
+                    && this.side_history_parent(cx) == requested_parent
                 {
-                    return;
+                    this.side_history = Some(result);
+                    cx.notify();
                 }
-                window.open_dialog(cx, move |dialog, _, _| {
-                    let mut list = v_flex()
-                        .id("side-history-list")
-                        .max_h(zpx(360.))
-                        .overflow_y_scroll()
-                        .gap_1();
-                    match &result {
-                        Ok(entries) if entries.is_empty() => {
-                            list = list.child(
-                                div()
-                                    .p_3()
-                                    .text_color(crate::appearance::secondary_text())
-                                    .child("No previous Side chats for this session."),
-                            );
-                        }
-                        Err(error) => {
-                            list = list.child(
-                                div()
-                                    .p_3()
-                                    .child(format!("Could not load Side history: {error}")),
-                            );
-                        }
-                        Ok(entries) => {
-                            for entry in entries {
-                                let parent = requested_parent.clone();
-                                let id = entry.id.clone();
-                                list = list.child(
-                                    h_flex()
-                                        .id(SharedString::from(format!(
-                                            "side-history-{}",
-                                            entry.id
-                                        )))
-                                        .keyboard_control()
-                                        .role(gpui::Role::Button)
-                                        .aria_label(format!("Reopen {}", entry.title))
-                                        .min_w_0()
-                                        .p_3()
-                                        .gap_2()
-                                        .rounded(zpx(8.))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(rgba(0xffffff10)))
-                                        .child(crate::composer_ui::provider_logo(entry.provider))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .truncate()
-                                                .child(entry.title.clone()),
-                                        )
-                                        .on_click(move |_, window, cx| {
-                                            window.close_dialog(cx);
-                                            if let Some(parent) = parent.clone() {
-                                                window.dispatch_action(
-                                                    Box::new(crate::ReopenSideChat {
-                                                        id: id.clone(),
-                                                        parent,
-                                                    }),
-                                                    cx,
-                                                );
-                                            }
-                                        }),
-                                );
-                            }
-                        }
-                    }
-                    dialog
-                        .title("Side history")
-                        .width(zpx(460.))
-                        .bg(crate::appearance::popup_surface())
-                        .child(list)
-                });
             });
         })
         .detach();
+    }
+
+    fn render_side_history(&self, window: &Window, cx: &App) -> AnyElement {
+        let parent = self.side_history_parent(cx);
+        let mut list = v_flex()
+            .id("side-history-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_2();
+        match &self.side_history {
+            None => {
+                let animate = window.is_window_active() && !cx.reduce_motion();
+                for row in 0..3u32 {
+                    list = list.child(
+                        h_flex()
+                            .p_3()
+                            .gap_2()
+                            .items_start()
+                            .child(div().w(zpx(18.)).flex_none().child(history_skeleton_bar(
+                                row * 3,
+                                1.,
+                                18.,
+                                animate,
+                            )))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(history_skeleton_bar(
+                                        row * 3 + 1,
+                                        0.92 - row as f32 * 0.08,
+                                        14.,
+                                        animate,
+                                    ))
+                                    .child(history_skeleton_bar(row * 3 + 2, 0.38, 10., animate)),
+                            ),
+                    );
+                }
+            }
+            Some(Err(error)) => {
+                list = list.child(
+                    div()
+                        .p_3()
+                        .child(format!("Could not load Side history: {error}")),
+                )
+            }
+            Some(Ok(entries)) if entries.is_empty() => {
+                list = list.child(
+                    div()
+                        .p_3()
+                        .text_color(crate::appearance::secondary_text())
+                        .child("No previous Side chats for this session."),
+                )
+            }
+            Some(Ok(entries)) => {
+                for entry in entries {
+                    let id = entry.id.clone();
+                    let parent = parent.clone();
+                    let age = crate::sidebar::relative_time(entry.last_prompt_at)
+                        .unwrap_or_else(|| "now".into());
+                    let recency = if entry.estimated_time {
+                        if age == "now" {
+                            "Saved just now".into()
+                        } else {
+                            format!("Saved {age} ago")
+                        }
+                    } else if age == "now" {
+                        "Last prompt just now".into()
+                    } else {
+                        format!("Last prompt {age} ago")
+                    };
+                    list = list.child(
+                        h_flex()
+                            .id(SharedString::from(format!("side-history-{}", entry.id)))
+                            .keyboard_control()
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Reopen {}. {}", entry.title, recency))
+                            .items_start()
+                            .min_w_0()
+                            .p_3()
+                            .gap_2()
+                            .rounded(zpx(8.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xffffff10)))
+                            .child(crate::composer_ui::provider_logo(entry.provider))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div().w_full().overflow_hidden().child(entry.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(zpx(TEXT_SM))
+                                            .text_color(crate::appearance::secondary_text())
+                                            .child(recency),
+                                    ),
+                            )
+                            .on_click(move |_, window, cx| {
+                                if let Some(parent) = parent.clone() {
+                                    window.dispatch_action(
+                                        Box::new(crate::ReopenSideChat {
+                                            id: id.clone(),
+                                            parent,
+                                        }),
+                                        cx,
+                                    );
+                                }
+                            }),
+                    );
+                }
+            }
+        }
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .p_4()
+            .gap_3()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Side history"),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     pub fn restore_side_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1719,6 +1837,11 @@ impl RightPanel {
                 panel.prepare_to_show(window, cx);
             });
             return;
+        }
+        if self.pane == Pane::SideHistory
+            && self.side_history_owner.as_ref() != Some(&self.side_history_parent(cx))
+        {
+            self.refresh_side_history(cx);
         }
         if self.pane == Pane::SideChat && self.side_chat.is_none() {
             self.ensure_side_chat(window, cx);
@@ -1941,6 +2064,9 @@ impl RightPanel {
             transfer_bounds: Default::default(),
             side_context: None,
             side_chat: None,
+            side_history: None,
+            side_history_request: 0,
+            side_history_owner: None,
             side_chat_id: None,
             pane: Pane::NewTab,
             open_panes: default_panes(),
@@ -4032,6 +4158,7 @@ impl Render for RightPanel {
                 .into_any_element()
         } else {
             match self.pane {
+                Pane::SideHistory => self.render_side_history(window, cx),
                 Pane::Files => self.render_files(window, cx).into_any_element(),
                 Pane::Terminal => self.render_terminal(cx),
                 Pane::Browser => self.render_browser(cx),
@@ -4783,6 +4910,46 @@ mod tests {
         assert_eq!(workspace_count.get(), 1);
         workspace.update(cx, |workspace, cx| workspace.release(cx));
         right.update(cx, |right, cx| right.release(cx));
+    }
+
+    #[::gpui::test]
+    fn side_history_is_a_single_closable_saved_sidebar_tab(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let (_panel, _cx) = cx.add_window_view(|window, cx| {
+            let mut panel = RightPanel::new(dir.path().into(), window, cx);
+            panel.show_side_history(window, cx);
+            panel.show_side_history(window, cx);
+            assert_eq!(panel.pane, Pane::SideHistory);
+            let request = panel.side_history_request;
+            panel.prepare_to_show(window, cx);
+            panel.prepare_to_show(window, cx);
+            assert_eq!(
+                panel.side_history_request, request,
+                "ordinary sidebar updates must not restart the read"
+            );
+            assert_eq!(
+                panel
+                    .open_panes
+                    .iter()
+                    .filter(|p| **p == Pane::SideHistory)
+                    .count(),
+                1
+            );
+            assert!(
+                !panel.blank_tabs.is_empty(),
+                "history preserves the launcher tab"
+            );
+            let saved: SavedPanel =
+                serde_json::from_slice(&serde_json::to_vec(&panel.snapshot(true, cx)).unwrap())
+                    .unwrap();
+            panel.restore(saved, window, cx);
+            assert_eq!(panel.pane, Pane::SideHistory);
+            panel.close_active_tab(window, cx);
+            assert!(!panel.open_panes.contains(&Pane::SideHistory));
+            assert_eq!(panel.pane, Pane::NewTab);
+            panel
+        });
     }
 
     #[::gpui::test]

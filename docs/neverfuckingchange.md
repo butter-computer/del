@@ -992,9 +992,11 @@ activity bar. It supersedes earlier rules where they conflict.
   current context. Preserve independent settings, draft, queue, history, unread
   state, lifecycle, and persisted identity for all open side chats. Selecting an
   existing tab or opening a peer link reuses that chat rather than creating one.
-- Side chat launchers reveal **/ Side history** inside the same row with a short
-  fade from the right on hover or keyboard focus. Option-Shift-Command-S opens
-  history for the current main session. Respect Reduce Motion. Keep closed Side
+- Side chat launchers split into equal halves on hover or keyboard focus, with
+  a darker History half with a history icon and smooth 240 ms reveal. History
+  loading uses text-free shimmer rows. Option-Shift-Command-S opens history as a right-sidebar
+  tab, never a modal. Rows show the first prompt and last-prompt age, newest first;
+  legacy snapshots use a clearly labelled saved-time fallback. Respect Reduce Motion. Keep closed Side
   chat snapshots and restore them without sending a prompt; reuse already-open
   tabs, including those in the main area. History must never mix main sessions.
 

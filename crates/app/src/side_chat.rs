@@ -28,6 +28,10 @@ pub struct SendToMain {
 struct SavedChat {
     #[serde(default)]
     parent: Option<SessionId>,
+    #[serde(default)]
+    last_prompt_at: Option<u64>,
+    #[serde(default)]
+    prompt_time_estimated: bool,
     snapshot: Option<del_agent::ForkSnapshot>,
     draft: UserInput,
     queue: Vec<crate::followups::Followup>,
@@ -38,7 +42,8 @@ pub(crate) struct HistoryEntry {
     pub id: String,
     pub title: String,
     pub provider: Provider,
-    pub modified: std::time::SystemTime,
+    pub last_prompt_at: u64,
+    pub estimated_time: bool,
 }
 
 pub(crate) fn history(
@@ -74,9 +79,10 @@ pub(crate) fn history(
         if saved.parent.as_ref().or_else(|| snapshot.parent()) != Some(parent) {
             continue;
         }
-        let title = snapshot
-            .first_prompt()
-            .unwrap_or("Side chat")
+        let Some(first_prompt) = snapshot.first_prompt() else {
+            continue;
+        };
+        let title = first_prompt
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -84,10 +90,21 @@ pub(crate) fn history(
             id: id.to_string(),
             title: title.chars().take(160).collect(),
             provider: snapshot.config.provider,
-            modified: file.metadata()?.modified()?,
+            last_prompt_at: saved.last_prompt_at.unwrap_or(
+                file.metadata()?
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            estimated_time: saved.prompt_time_estimated || saved.last_prompt_at.is_none(),
         });
     }
-    entries.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id)));
+    entries.sort_by(|a, b| {
+        b.last_prompt_at
+            .cmp(&a.last_prompt_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Ok(entries)
 }
 
@@ -322,7 +339,17 @@ impl SideChat {
         if let Some(path) = view.path() {
             match std::fs::read(&path) {
                 Ok(bytes) => match serde_json::from_slice::<SavedChat>(&bytes) {
-                    Ok(saved) => view.saved = saved,
+                    Ok(mut saved) => {
+                        if saved.last_prompt_at.is_none() {
+                            saved.last_prompt_at = std::fs::metadata(&path)
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|t| t.as_secs());
+                            saved.prompt_time_estimated = true;
+                        }
+                        view.saved = saved;
+                    }
                     Err(error) => {
                         view.storage_error = true;
                         view.error = Some(format!(
@@ -490,6 +517,14 @@ impl SideChat {
                         })
                         .detach();
                         cx.subscribe(&chat, |this, _, _: &crate::chat::PromptSubmitted, cx| {
+                            this.saved.last_prompt_at = Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            );
+                            this.saved.prompt_time_estimated = false;
+                            this.save_soon(cx);
                             this.report_activity(true, cx);
                         })
                         .detach();
@@ -1328,13 +1363,15 @@ mod tests {
                 "draft": serde_json::to_value(UserInput::text("")).unwrap(), "queue":[]
             })
         };
-        std::fs::write(
-            dir.path().join(format!("{first}.json")),
-            snapshot("parent-a", "claude", "First side question").to_string(),
-        )
+        std::fs::write(dir.path().join(format!("{first}.json")), {
+            let mut saved = snapshot("parent-a", "claude", "First side question");
+            saved["last_prompt_at"] = 100.into();
+            saved.to_string()
+        })
         .unwrap();
         let mut switched = snapshot("old-parent", "codex", "Switched provider");
         switched["parent"] = "parent-a".into();
+        switched["last_prompt_at"] = 200.into();
         std::fs::write(
             dir.path().join(format!("{second}.json")),
             switched.to_string(),
@@ -1346,8 +1383,24 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("not-a-snapshot.json"), "{}").unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.json", uuid::Uuid::new_v4())),
+            snapshot("parent-a", "claude", "").to_string(),
+        )
+        .unwrap();
         let entries = history(dir.path(), &SessionId::new("parent-a")).unwrap();
         assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, second);
+        assert_eq!(entries[0].last_prompt_at, 200);
+        assert!(!entries[0].estimated_time);
+        // A later autosave of the older chat must not promote it.
+        let first_path = dir.path().join(format!("{first}.json"));
+        let bytes = std::fs::read(&first_path).unwrap();
+        std::fs::write(&first_path, bytes).unwrap();
+        assert_eq!(
+            history(dir.path(), &SessionId::new("parent-a")).unwrap()[0].id,
+            second
+        );
         assert!(entries.iter().any(|e| e.id == first
             && e.title == "First side question"
             && e.provider == Provider::Claude));
@@ -1357,7 +1410,7 @@ mod tests {
         assert!(
             entries
                 .windows(2)
-                .all(|pair| pair[0].modified >= pair[1].modified)
+                .all(|pair| pair[0].last_prompt_at >= pair[1].last_prompt_at)
         );
         assert_eq!(
             history(dir.path(), &SessionId::new("parent-b"))

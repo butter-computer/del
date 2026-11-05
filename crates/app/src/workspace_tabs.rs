@@ -26,7 +26,7 @@ impl Kind {
             Pane::Terminal => Self::Terminal,
             Pane::Browser => Self::Browser,
             Pane::SideChat => Self::SideChat,
-            Pane::NewTab => Self::Blank,
+            Pane::NewTab | Pane::SideHistory => Self::Blank,
         }
     }
 }

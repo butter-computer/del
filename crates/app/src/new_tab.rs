@@ -162,7 +162,8 @@ impl RenderOnce for SideChatLauncher {
             gpui_kit::base::transition(
                 "side-history-reveal",
                 target,
-                gpui_kit::base::Transition::new(std::time::Duration::from_millis(150)),
+                gpui_kit::base::Transition::new(std::time::Duration::from_millis(240))
+                    .ease(ease_in_out),
                 window,
                 cx,
             )
@@ -179,8 +180,8 @@ impl RenderOnce for SideChatLauncher {
             .h(zpx(44.))
             .flex_none()
             .rounded_lg()
+            .overflow_hidden()
             .bg(rgba(0xffffff10))
-            .hover(|s| s.bg(rgba(0xffffff18)))
             .on_hover(move |value, _, cx| {
                 hovered.update(cx, |hovered, cx| {
                     *hovered = *value;
@@ -196,8 +197,10 @@ impl RenderOnce for SideChatLauncher {
                     .h_full()
                     .flex_1()
                     .min_w_0()
-                    .pl_3()
+                    .w_0()
+                    .px_3()
                     .gap_2()
+                    .hover(|s| s.bg(rgba(0xffffff08)))
                     .cursor_pointer()
                     .on_click(move |_, window, cx| (self.create)(window, cx))
                     .child(
@@ -227,21 +230,24 @@ impl RenderOnce for SideChatLauncher {
                     .role(gpui::Role::Button)
                     .aria_label("Open Side history, Option Shift Command S")
                     .h_full()
-                    .gap_1()
-                    .pr(zpx(12.))
-                    .relative()
-                    .left(zpx(if cx.reduce_motion() {
-                        0.
-                    } else {
-                        6. * (1. - progress)
-                    }))
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .justify_center()
+                    .gap_2()
+                    .px_3()
+                    .bg(rgba(0x00000028))
                     .opacity(progress)
                     .text_size(zpx(12.))
                     .cursor_pointer()
                     .text_color(crate::appearance::secondary_text())
-                    .hover(|s| s.text_color(rgba(0xffffffff)))
-                    .child("/ Side history")
-                    .child(div().text_size(zpx(10.)).child("⌥⇧⌘S"))
+                    .hover(|s| s.bg(rgba(0x00000040)).text_color(rgba(0xffffffff)))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Side history (⌥⇧⌘S)")
+                            .build(window, cx)
+                    })
+                    .child(crate::icons::path("icons/history.svg").with_size(zpx(14.)))
+                    .child(div().truncate().child("Side history"))
                     .on_click(move |_, window, cx| {
                         if shown {
                             window.dispatch_action(Box::new(crate::OpenSideHistory), cx);

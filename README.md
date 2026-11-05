@@ -6,16 +6,20 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.39` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.40` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.39 source update notes](docs/releases/0.1.39.md).
+See the [0.1.40 source update notes](docs/releases/0.1.40.md).
 
-This update keeps chats, Side chats, and integrated terminals running after normal
+This update moves Side history into a right-sidebar tab. Hover the Side chat launcher
+to reveal equal halves: create a Side chat on the left, or open its darker History
+half on the right. History shows each chat’s first prompt and last-prompt age,
+newest first. **Option-Shift-Command-S** opens the same tab.
+
+Chats, Side chats, and integrated terminals keep running after normal
 Quit by default. Change **Settings → Sessions → Keep sessions running after quitting
 Del** to restore full shutdown. Reopen Del to return to the live workspace, or use
 **Quit Del Completely** (**Option-Command-Q**) to stop everything. Force Quit,
 crashes, logout, and restarting the Mac are outside this persistence guarantee.
-It retains [Side history](docs/releases/0.1.38.md) and the existing transcript spacing.
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -45,7 +49,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.39-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.40-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -888,7 +892,7 @@ the right sidebar closed. Opening it shows one **New tab** chooser and **+**, wi
 no Files, Changes, Terminal, or Browser preopened. Each session remembers whether
 its sidebar was open or closed across tab/Space switches and app restarts. Every **Side chat** action
 creates an independent tab from the main conversation’s latest context. Existing
-side chats keep their own drafts, settings, histories, and saved identities. Hover **Side chat** to reveal **/ Side history** inside the launcher, or press **Option-Shift-Command-S**. History is scoped to the current main session and shows saved Side chats with provider logos. Reopening selects an already-open tab when possible. Closing a Side chat stops its work but keeps its snapshot for history; reopening restores its transcript and draft without sending a prompt. Snapshots deleted by older versions cannot be recovered. Existing tools saved in the former main-area strip migrate into that
+side chats keep their own drafts, settings, histories, and saved identities. Hover **Side chat** to reveal a darker **Side history** half inside the launcher, or press **Option-Shift-Command-S**. History opens as a right-sidebar tab scoped to the current main session. It shows saved Side chats with provider logos, their first prompt, and time since the last prompt, sorted newest first. Older snapshots without prompt timestamps show a saved-time fallback. Reopening selects an already-open tab when possible. Closing a Side chat stops its work but keeps its snapshot for history; reopening restores its transcript and draft without sending a prompt. Snapshots deleted by older versions cannot be recovered. Existing tools saved in the former main-area strip migrate into that
 session's sidebar, preserving their drafts, browser profiles, and side chats.
 
 Project lists initially show five sessions, plus the active session when it sits

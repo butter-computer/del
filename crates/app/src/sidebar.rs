@@ -231,7 +231,7 @@ fn footer_trigger_style() -> StyleRefinement {
 }
 
 /// Short relative age: now, 4m, 2h, 5d.
-fn relative_time(updated_secs: u64) -> Option<String> {
+pub(crate) fn relative_time(updated_secs: u64) -> Option<String> {
     if updated_secs == 0 {
         return None;
     }
