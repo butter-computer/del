@@ -286,6 +286,12 @@ This records the final decisions, including corrections to earlier experiments.
 - Result types say **Chat** or **Terminal**, without “You” or “Assistant.”
   Vertically center the type label with the Enter icon.
 - Keep rounded clipping correct, including the footer in light mode.
+- Slash suggestions open at a word boundary anywhere in the composer, including
+  after ordinary text, selected skills, and newlines. Show the provider's available
+  skills, goals, and commands regardless of the query's position. Replace only
+  the active slash word when choosing a completion; preserve surrounding text,
+  selected skill identities, and trailing instructions. Already selected skills
+  remain excluded from suggestions.
 - Inserted skill tokens retain their original blue (`#579FFF`) text and icon.
 - Remove argument-placeholder hints such as `AREA=<value>` from all command
   suggestion footers. Preserve command descriptions and navigation hints.

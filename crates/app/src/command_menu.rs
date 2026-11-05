@@ -106,8 +106,8 @@ pub(super) fn restore_skill_tokens(
     content
 }
 
-/// Complete a slash word after any already selected skills, without consuming
-/// the other tokens or any trailing message text.
+/// Complete the slash word at the caret anywhere in the prompt, without
+/// consuming surrounding text or already selected tokens.
 fn query_range(
     content: &gpui_kit::component::input::InputContent,
     caret: std::ops::Range<usize>,
@@ -126,30 +126,14 @@ fn query_range(
     let end = text[caret.start..]
         .find(char::is_whitespace)
         .map_or(text.len(), |i| caret.start + i);
-    let mut prefix_end = 0;
-    for span in content.tokens() {
-        let range = span.range();
-        if range.start >= start {
-            break;
-        }
-        if range.end > start || !text[prefix_end..range.start].trim().is_empty() {
-            return None;
-        }
-        prefix_end = range.end;
-    }
-    if !text[prefix_end..start].trim().is_empty()
-        || content
-            .tokens()
-            .iter()
-            .any(|span| span.range().start < end && span.range().end > start)
+    if content
+        .tokens()
+        .iter()
+        .any(|span| span.range().start < end && span.range().end > start)
     {
         return None;
     }
     Some(start..end)
-}
-
-fn allowed_after_skills(kind: CommandKind, after_skills: bool) -> bool {
-    !after_skills || matches!(kind, CommandKind::Skill | CommandKind::Goal)
 }
 
 fn matches(command: &ComposerCommand, query: &str) -> bool {
@@ -273,14 +257,12 @@ impl CommandMenu {
             .map(|r| &content.text()[r.start + 1..r.end])
             .unwrap_or_default();
         let selected = selected_skills(&content);
-        let after_skills = range.as_ref().is_some_and(|r| r.start > 0);
         self.matches = self
             .commands
             .iter()
             .enumerate()
             .filter(|(_, command)| {
                 matches(command, query)
-                    && allowed_after_skills(command.kind, after_skills)
                     && !selected
                         .iter()
                         .any(|skill| skill.name == command.name && skill.target == command.target)
@@ -384,7 +366,10 @@ impl CommandMenu {
         }
         self.chosen = Some(command.clone());
         self.input.update(cx, |input, cx| {
-            input.set_value(format!("/{} ", command.name), window, cx);
+            if let Some(range) = query_range(&input.content(), input.selected_range()) {
+                input.set_selected_range(range, cx);
+                input.replace(format!("/{} ", command.name), window, cx);
+            }
             input.focus(window, cx);
         });
         self.open = false;
@@ -595,12 +580,107 @@ impl Render for CommandMenu {
 #[cfg(test)]
 mod tests {
 
+    #[gpui::test]
+    fn inline_completion_preserves_prompt_and_skill_metadata(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let commands: Vec<_> = [
+            CommandKind::Skill,
+            CommandKind::Action,
+            CommandKind::Goal,
+            CommandKind::Fast,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| ComposerCommand {
+            name: format!("command{i}"),
+            description: String::new(),
+            argument_hint: String::new(),
+            kind,
+            source: "test".into(),
+            target: (kind == CommandKind::Skill).then(|| "/repo/skills/review/SKILL.md".into()),
+        })
+        .collect();
+        let skill = commands[0].clone();
+        let (menu, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            input.update(cx, |input, cx| {
+                input.set_value("please / later", window, cx);
+                input.set_selected_range(8..8, cx);
+            });
+            let mut menu = CommandMenu::new(input, state, cx);
+            // Supply the catalog locally; this test exercises menu filtering and
+            // completion without launching or authenticating a provider CLI.
+            let (provider, _, cwd) = menu.state.read(cx).effective();
+            menu.context = Some((provider, menu.state.read(cx).selected_account(), cwd));
+            menu.loading = true;
+            menu.commands = commands;
+            menu.changed(cx);
+            menu
+        });
+        cx.update(|window, cx| {
+            menu.update(cx, |menu, cx| {
+                assert!(menu.open);
+                assert_eq!(
+                    menu.matches.len(),
+                    4,
+                    "all command kinds remain available after prose"
+                );
+                menu.choose(window, cx);
+                let content = menu.input.read(cx).content();
+                assert_eq!(content.text().as_ref(), "please /command0  later");
+                assert_eq!(selected_skills(&content), vec![skill.clone()]);
+
+                let input = del_agent::UserInput {
+                    text: "please /command0 then / later".into(),
+                    skills: vec![skill.clone()],
+                    ..del_agent::UserInput::text("")
+                };
+                menu.input.update(cx, |input_state, cx| {
+                    input_state.set_value(restore_skill_tokens(&input), window, cx);
+                    input_state.set_selected_range(23..23, cx);
+                });
+                menu.open = true;
+                menu.filter(cx);
+                assert_eq!(
+                    menu.matches.len(),
+                    3,
+                    "only the already selected skill is excluded"
+                );
+                menu.choose(window, cx);
+                let content = menu.input.read(cx).content();
+                assert_eq!(
+                    content.text().as_ref(),
+                    "please /command0 then /command1  later"
+                );
+                assert_eq!(selected_skills(&content), vec![skill]);
+            });
+        });
+    }
+
+    #[test]
+    fn slash_suggestions_open_after_prompt_text() {
+        use super::*;
+        use gpui_kit::component::input::InputContent;
+        for text in [
+            "cool cool is everything lit as of now /",
+            "please /review",
+            "héllo\n/skills",
+        ] {
+            let start = text.rfind('/').unwrap();
+            assert_eq!(
+                query_range(&InputContent::new(text), text.len()..text.len()),
+                Some(start..text.len()),
+            );
+        }
+        let text = "please /review this diff";
+        assert_eq!(query_range(&InputContent::new(text), 10..10), Some(7..14));
+    }
+
     #[test]
     fn goal_is_available_after_selected_skills() {
         use super::*;
-        assert!(allowed_after_skills(CommandKind::Goal, true));
-        assert!(allowed_after_skills(CommandKind::Skill, true));
-        assert!(!allowed_after_skills(CommandKind::Action, true));
         let content = gpui_kit::component::input::InputContent::new("/docs /morning /goal")
             .with_token(0..5, InlineToken::new("docs", "/docs"))
             .unwrap()
@@ -721,9 +801,12 @@ mod tests {
         let content = InputContent::new("/review");
         assert_eq!(query_range(&content, 4..4), Some(0..7));
         assert_eq!(query_range(&content, 0..0), Some(0..7));
-        // A selection, prose before the slash, or a non-boundary caret never opens it.
+        // Selections and invalid UTF-8 caret offsets never open it.
         assert_eq!(query_range(&content, 1..4), None);
-        assert_eq!(query_range(&InputContent::new("héllo /re"), 10..10), None);
+        assert_eq!(
+            query_range(&InputContent::new("héllo /re"), 10..10),
+            Some(7..10)
+        );
         assert_eq!(query_range(&InputContent::new("é"), 1..1), None);
         assert_eq!(query_range(&InputContent::new("/re"), 9..9), None);
         // Unicode whitespace before the slash is still only whitespace.
@@ -735,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_only_opens_for_unselected_prefix_commands() {
+    fn menu_only_opens_for_unselected_slash_words() {
         use super::*;
         use gpui_kit::component::input::InputContent;
         for text in ["/", "/review"] {
@@ -744,7 +827,12 @@ mod tests {
                 Some(0..text.len())
             );
         }
-        for text in ["/goal fix this", "see /review", "/goal\n"] {
+        for text in [
+            "/goal fix this",
+            "/goal\n",
+            "https://example.com",
+            "src/main.rs",
+        ] {
             assert_eq!(
                 query_range(&InputContent::new(text), text.len()..text.len()),
                 None

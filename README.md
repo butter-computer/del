@@ -6,14 +6,13 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.43` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.44` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.43 source update notes](docs/releases/0.1.43.md).
+See the [0.1.44 source update notes](docs/releases/0.1.44.md).
 
-This update fixes session startup when the selected branch is already checked out
-in another worktree. Del automatically creates an isolated session branch from the
-selected commit and reuses it on retry, preserving existing branches and files.
-The same preparation applies to Chat, Terminal, and agent-created chats.
+This update opens slash suggestions anywhere in a prompt, including after existing
+text and on later lines. Skills, goals, and commands remain available at the cursor;
+selecting a completion preserves the surrounding text and selected skill tokens.
 
 Side history is available in a right-sidebar tab. Hover the Side chat launcher
 to reveal a compact Side history card attached below its right edge, matching the
@@ -54,7 +53,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.43-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.44-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -648,17 +647,18 @@ offered in the provider picker or Settings; its backend remains for legacy recor
 
 ### Skills and slash commands
 
-Type **/** at the start of the composer to browse the selected harness's skills
-and commands. Type to filter, use **↑/↓** to navigate, **Enter** or **Tab** to
+Type **/** at the start of a word anywhere in the composer to browse the selected
+harness's skills and commands, including after existing text or on a later line. Type to filter, use **↑/↓** to navigate, **Enter** or **Tab** to
 select a command, and **Escape** to dismiss. Selected skills become blue inline
 tokens; their full provider identity survives editing, undo, and switching drafts.
-Type **/** again after a selected skill to add another; each selection stays a
-separate blue token. Select **/goal** before or after adding skills to combine them
+Type **/** again anywhere in the prompt to add another skill; each selection stays
+a separate blue token. Completions replace only the slash word at the cursor,
+preserving text and tokens on both sides. Select **/goal** before or after adding skills to combine them
 with goal mode; the selected skills remain requirements of the native goal.
-Add your instructions after the skills, then send them together.
+Write instructions before, between, or after the skills, then send them together.
 Selections survive queued-message editing too. Claude Code supports up to six
 skills per message; Codex sends every selected skill as a native input item.
-The bounded menu shows descriptions and argument hints, with skills first.
+The bounded menu shows descriptions, with skills first.
 `/skills` narrows the menu to skills. Reopening it refreshes discovery.
 
 - **Codex:** uses app-server `skills/list`, including enabled global, project,
