@@ -6,15 +6,13 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.36` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.37` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.36 source update notes](docs/releases/0.1.36.md) and
-[validation record](docs/releases/0.1.36-validation.md).
+See the [0.1.37 source update notes](docs/releases/0.1.37.md).
 
-This update fixes empty message-navigation previews, restores agent exchanges at
-their recorded positions, and keeps steered messages outside collapsed work details.
-Branch and memory menus reveal more overflow content, and the original coffee cup
-icon is restored. It builds on the [0.1.35 integrated update](docs/releases/0.1.35.md).
+This update adds a small 6 px transcript gutter for room beside the navigation
+marks while keeping user-message text and AI-response text aligned. It builds on the
+[0.1.36 transcript and overflow fixes](docs/releases/0.1.36.md).
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -44,7 +42,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.36-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.37-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

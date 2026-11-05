@@ -1342,7 +1342,7 @@ impl Render for ChatView {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        v_flex().size_full().min_w_0().child(
+                        v_flex().size_full().min_w_0().px(zpx(6.)).child(
                             list(self.scroller.clone(), {
                                 let view = view.clone();
                                 move |ix, _, cx| {

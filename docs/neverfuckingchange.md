@@ -1007,6 +1007,7 @@ activity bar. It supersedes earlier rules where they conflict.
 
 ## Transcript and overflow refinements (0.1.36)
 
+- Keep a modest 6 px horizontal transcript gutter for navigation clearance, shared by user messages and AI replies so their text stays aligned.
 - Navigation ticks require readable text or attachments. Peer previews use their actual message text; empty rows have no tick.
 - Restored coordination receipts belong at recorded exchanges, never a fabricated tail after a final answer. Preserve the durable mailbox and recovery actions.
 - Steered user messages stay visible outside collapsed work details.
