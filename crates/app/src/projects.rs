@@ -307,7 +307,16 @@ pub fn prepare(cwd: &Path, options: &LaunchOptions, storage: &Path) -> Result<Pa
     // clean or switched branches. Never stash, reset, or copy the user's edits.
     let prepared = !options.token.is_empty() && parent.join("worktree.json").exists();
     let dirty_switch = base != info.current && !git(cwd, &["status", "--porcelain"])?.is_empty();
-    if options.worktree || prepared || dirty_switch {
+    // A clean checkout still cannot switch to a branch held by another
+    // worktree. Use the same isolated, retryable fallback as a dirty source.
+    let isolate = options.worktree
+        || prepared
+        || dirty_switch
+        || (base != info.current
+            && git(cwd, &["worktree", "list", "--porcelain", "-z"])?
+                .split('\0')
+                .any(|entry| entry.strip_prefix("branch refs/heads/") == Some(base)));
+    if isolate {
         if options.token.is_empty() {
             return Err("Missing worktree launch identity.".into());
         }
@@ -627,6 +636,50 @@ mod tests {
             path
         );
         assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), tip);
+    }
+    #[test]
+    fn occupied_branch_launch_is_isolated_and_retryable() {
+        let repo = repository();
+        let storage = tempfile::tempdir().unwrap();
+        let existing = prepare(repo.path(), &options(), storage.path()).unwrap();
+        let existing_branch = inspect(&existing).current;
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "advance selected main",
+            ],
+        )
+        .unwrap();
+        let options = LaunchOptions {
+            branch: Some("main".into()),
+            worktree: false,
+            token: uuid::Uuid::new_v4().to_string(),
+        };
+        let tip = git(repo.path(), &["rev-parse", "main"]).unwrap();
+        let path = prepare(&existing, &options, storage.path()).unwrap();
+        assert_ne!(path, existing);
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), tip);
+        assert_eq!(inspect(repo.path()).current, "main");
+        assert_eq!(inspect(&existing).current, existing_branch);
+        assert_eq!(
+            inspect(&path).current,
+            format!("del/session-{}", options.token)
+        );
+        std::fs::write(path.join("retry.txt"), "preserve session edits").unwrap();
+        // The target becomes available, but retry must retain the prepared checkout.
+        git(repo.path(), &["switch", "feature"]).unwrap();
+        assert_eq!(prepare(&existing, &options, storage.path()).unwrap(), path);
+        assert_eq!(
+            std::fs::read_to_string(path.join("retry.txt")).unwrap(),
+            "preserve session edits"
+        );
     }
     #[test]
     fn clean_local_switch_and_unknown_base() {

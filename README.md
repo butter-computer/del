@@ -6,11 +6,16 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.42` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.43` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.42 source update notes](docs/releases/0.1.42.md).
+See the [0.1.43 source update notes](docs/releases/0.1.43.md).
 
-This update moves Side history into a right-sidebar tab. Hover the Side chat launcher
+This update fixes session startup when the selected branch is already checked out
+in another worktree. Del automatically creates an isolated session branch from the
+selected commit and reuses it on retry, preserving existing branches and files.
+The same preparation applies to Chat, Terminal, and agent-created chats.
+
+Side history is available in a right-sidebar tab. Hover the Side chat launcher
 to reveal a compact Side history card attached below its right edge, matching the
 new-session Chat/Terminal card. History shows each chat’s first prompt and last-prompt age,
 newest first. **Option-Shift-Command-S** opens the same tab.
@@ -49,7 +54,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.42-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.43-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -328,14 +333,15 @@ navigate, Return to choose, and Escape to dismiss. Open the branch picker with �
 Git discovery and checkout preparation run in the background.
 Both Chat and Terminal use the prepared working directory. Non-Git folders show a gray Git icon with a red cross and a “No Git repository”
 tooltip. This indicator is not clickable, and there is no branch picker or worktree checkbox. Without a new worktree, selecting a different branch switches
-the existing checkout when it is clean. If it has local changes, Del automatically
+the existing checkout when it is clean and the branch is available. If it has local
+changes or the selected branch is already checked out elsewhere, Del automatically
 creates a managed worktree at the selected branch’s latest local commit, preserving
 the original checkout and all staged, unstaged, and untracked files. The same
 fallback applies to agent-spawned chats. With New worktree enabled, Del always
 creates a unique `del/session-<UUID>` branch from the selected commit without
 changing the source checkout. Branch tips are resolved at launch from local Git
-refs; Del does not fetch or pull automatically. Git still refuses a clean shared
-checkout switch to a branch already checked out elsewhere. Uncommitted source changes
+refs; Del does not fetch or pull automatically. Existing worktrees keep their branches
+and files when the selected branch is already in use. Uncommitted source changes
 are not copied. An unborn repository needs its first commit before worktree creation.
 
 Del-owned worktrees live in `<Del data>/worktrees/<UUID>/checkout`, with an ownership
