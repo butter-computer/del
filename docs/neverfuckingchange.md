@@ -999,7 +999,9 @@ activity bar. It supersedes earlier rules where they conflict.
 - Side chat launchers stay intact. Hover or keyboard focus reveals a compact
   History card attached below its right edge, styled like the new-session Chat/Terminal
   card with rounded corners and a darker surface, with a history
-  icon and smooth 240 ms fade/slide. Moving onto the card keeps it visible. History
+  icon and smooth 240 ms slide from behind the launcher. The card uses an opaque,
+  darker surface and paints behind the Side chat button. Align history provider
+  logos with the first prompt line. Moving onto the card keeps it visible. History
   loading uses text-free shimmer rows. Option-Shift-Command-S opens history as a right-sidebar
   tab, never a modal. Rows show the first prompt and last-prompt age, newest first;
   legacy snapshots use a clearly labelled saved-time fallback. Respect Reduce Motion. Keep closed Side

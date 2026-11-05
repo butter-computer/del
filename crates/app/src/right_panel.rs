@@ -1719,14 +1719,24 @@ impl RightPanel {
                             .rounded(zpx(8.))
                             .cursor_pointer()
                             .hover(|s| s.bg(rgba(0xffffff10)))
-                            .child(crate::composer_ui::provider_logo(entry.provider))
+                            .child(
+                                h_flex()
+                                    .h(zpx(22.))
+                                    .flex_none()
+                                    .items_center()
+                                    .child(crate::composer_ui::provider_logo(entry.provider)),
+                            )
                             .child(
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
                                     .gap_1()
                                     .child(
-                                        div().w_full().overflow_hidden().child(entry.title.clone()),
+                                        div()
+                                            .w_full()
+                                            .line_height(zpx(22.))
+                                            .overflow_hidden()
+                                            .child(entry.title.clone()),
                                     )
                                     .child(
                                         div()

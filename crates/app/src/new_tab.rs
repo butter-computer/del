@@ -171,6 +171,22 @@ impl RenderOnce for SideChatLauncher {
         let history_focus = focus.read(cx).clone();
         let button_hover = hovered.clone();
         let card_hover = hovered.clone();
+        let page = crate::appearance::page_surface();
+        let button_surface = page.blend(rgba(0xffffff10));
+        let button_hover_surface = page.blend(rgba(0xffffff18));
+        let shade = if crate::appearance::light() {
+            0.94
+        } else {
+            0.75
+        };
+        let history_surface = gpui::Rgba {
+            r: button_surface.r * shade,
+            g: button_surface.g * shade,
+            b: button_surface.b * shade,
+            a: 1.,
+        };
+        let history_hover_surface = history_surface.blend(button_surface.alpha(0.25));
+        // Paint the opaque card first so it slides out from behind the launcher.
         v_flex()
             .id("Side chat")
             .debug_selector(|| "Side chat".into())
@@ -191,6 +207,53 @@ impl RenderOnce for SideChatLauncher {
                     });
                 }
             })
+            .when(progress > 0.001, |launcher| {
+                launcher.child(
+                    h_flex()
+                        .id("side-history-open")
+                        .keyboard_control()
+                        .role(gpui::Role::Button)
+                        .aria_label("Open Side history, Option Shift Command S")
+                        .h(zpx(36.))
+                        .pt_1()
+                        .flex_none()
+                        .max_w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .px_2()
+                        .rounded(zpx(8.))
+                        .bg(history_surface)
+                        .absolute()
+                        .right_0()
+                        .top(zpx(8. + 32. * progress))
+                        .text_size(zpx(12.))
+                        .cursor_pointer()
+                        .text_color(crate::appearance::secondary_text())
+                        .hover(move |s| s.bg(history_hover_surface).text_color(rgba(0xffffffff)))
+                        .on_hover(move |inside, _, cx| {
+                            if *inside {
+                                card_hover.update(cx, |hovered, cx| {
+                                    *hovered = true;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child(crate::icons::path("icons/history.svg").with_size(zpx(16.)))
+                        .child(div().min_w_0().truncate().child("Side history"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .rounded(zpx(4.))
+                                .px_1p5()
+                                .text_size(zpx(11.))
+                                .bg(rgba(0xffffff08))
+                                .child("⌥⇧⌘S"),
+                        )
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::OpenSideHistory), cx);
+                        }),
+                )
+            })
             .child(
                 h_flex()
                     .id("side-chat-create")
@@ -204,8 +267,8 @@ impl RenderOnce for SideChatLauncher {
                     .px_3()
                     .gap_2()
                     .rounded_lg()
-                    .bg(rgba(0xffffff10))
-                    .hover(|s| s.bg(rgba(0xffffff18)))
+                    .bg(button_surface)
+                    .hover(move |s| s.bg(button_hover_surface))
                     .cursor_pointer()
                     .on_hover(move |inside, _, cx| {
                         if *inside {
@@ -233,57 +296,6 @@ impl RenderOnce for SideChatLauncher {
                             .child("⌥⌘S"),
                     ),
             )
-            .when(progress > 0.001, |launcher| {
-                launcher.child(
-                    h_flex()
-                        .id("side-history-open")
-                        .keyboard_control()
-                        .role(gpui::Role::Button)
-                        .aria_label("Open Side history, Option Shift Command S")
-                        .h(zpx(36.))
-                        .pt_1()
-                        .flex_none()
-                        .max_w_full()
-                        .min_w_0()
-                        .gap_2()
-                        .px_2()
-                        .rounded(zpx(8.))
-                        .bg(rgba(0xffffff08))
-                        .relative()
-                        .top(zpx(if cx.reduce_motion() {
-                            -4.
-                        } else {
-                            -4. - 4. * (1. - progress)
-                        }))
-                        .opacity(progress)
-                        .text_size(zpx(12.))
-                        .cursor_pointer()
-                        .text_color(crate::appearance::secondary_text())
-                        .hover(|s| s.bg(rgba(0xffffff10)).text_color(rgba(0xffffffff)))
-                        .on_hover(move |inside, _, cx| {
-                            if *inside {
-                                card_hover.update(cx, |hovered, cx| {
-                                    *hovered = true;
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .child(crate::icons::path("icons/history.svg").with_size(zpx(16.)))
-                        .child(div().min_w_0().truncate().child("Side history"))
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded(zpx(4.))
-                                .px_1p5()
-                                .text_size(zpx(11.))
-                                .bg(rgba(0xffffff08))
-                                .child("⌥⇧⌘S"),
-                        )
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(crate::OpenSideHistory), cx);
-                        }),
-                )
-            })
     }
 }
 
