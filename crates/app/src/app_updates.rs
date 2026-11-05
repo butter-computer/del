@@ -165,7 +165,7 @@ impl AppUpdater {
                         Event::Installed(staged, result) => {
                             self.receiver = None;
                             match result {
-                                Ok(()) => cx.quit(),
+                                Ok(()) => crate::session_lifecycle::quit_completely(cx),
                                 // Keep a verified download when the directory is temporarily
                                 // locked or not writable; the user can retry without downloading.
                                 Err(error) => self.restart_error = Some(error),

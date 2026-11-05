@@ -55,6 +55,7 @@ mod providers;
 mod readiness;
 mod right_panel;
 mod search_ui;
+mod session_lifecycle;
 mod session_modes;
 mod session_usage;
 mod sessions;
@@ -288,6 +289,7 @@ actions!(
         ToggleProviders,
         ToggleSidebar,
         Quit,
+        QuitCompletely,
         ToggleFiles,
         ToggleTerminal,
         CloseTab,
@@ -1040,6 +1042,31 @@ impl AppShell {
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
         shell.start_status_ticker(cx);
+        let mut background_requests = session_lifecycle::install();
+        cx.spawn(async move |this, cx| {
+            while background_requests.recv().await.is_some() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.cancel_dictation(cx);
+                        this.save_workspace(cx);
+                        this.state
+                            .update(cx, |state, cx| state.window_activation_changed(false, cx));
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        window.on_window_should_close(cx, |_, cx| {
+            if session_lifecycle::can_background() {
+                session_lifecycle::request_quit(cx);
+                false
+            } else {
+                true
+            }
+        });
         shell.state.update(cx, |state, cx| {
             state.window_activation_changed(window.is_window_active(), cx)
         });
@@ -1055,29 +1082,33 @@ impl AppShell {
         .detach();
         cx.on_app_quit(|this, cx| {
             this.cancel_dictation(cx);
-            this.right.update(cx, |panel, cx| panel.save_side_chat(cx));
-            for cached in this.right_cache.values() {
-                cached
-                    .panel
-                    .update(cx, |panel, cx| panel.save_side_chat(cx));
-            }
-            for workspace in this.workspaces.values() {
-                workspace.update(cx, |workspace, cx| workspace.save_side_chats(cx));
-            }
-            this.remember_right(cx);
-            this.persist_right(cx);
-            if let Err(error) = this.sidebar_widths.save() {
-                eprintln!("Could not save sidebar widths: {error}");
-            }
-            let _ = this.state.read(cx).save_spaces();
-            if let Err(error) = this.state.read(cx).save_draft_owners() {
-                eprintln!("Could not save draft owners: {error}");
-            }
+            this.save_workspace(cx);
             this.state.read(cx).shutdown();
             async {}
         })
         .detach();
         shell
+    }
+
+    fn save_workspace(&mut self, cx: &mut Context<Self>) {
+        self.right.update(cx, |panel, cx| panel.save_side_chat(cx));
+        for cached in self.right_cache.values() {
+            cached
+                .panel
+                .update(cx, |panel, cx| panel.save_side_chat(cx));
+        }
+        for workspace in self.workspaces.values() {
+            workspace.update(cx, |workspace, cx| workspace.save_side_chats(cx));
+        }
+        self.remember_right(cx);
+        self.persist_right(cx);
+        if let Err(error) = self.sidebar_widths.save() {
+            eprintln!("Could not save sidebar widths: {error}");
+        }
+        let _ = self.state.read(cx).save_spaces();
+        if let Err(error) = self.state.read(cx).save_draft_owners() {
+            eprintln!("Could not save draft owners: {error}");
+        }
     }
 
     fn goal_active(&self, cx: &App) -> bool {
@@ -3496,110 +3527,122 @@ fn main() {
         return;
     }
 
-    gpui_kit::application()
-        .with_assets(assets::AppAssets)
-        .run(|cx| {
-            // Must run before any gpui-component feature is used.
-            gpui_kit::init(cx);
-            assets::set_app_icon();
-            del_terminal::init(cx);
-            zoom::load();
-            zoom::init(cx);
-            appearance::load(cx);
+    let app = gpui_kit::application().with_assets(assets::AppAssets);
+    app.on_reopen(session_lifecycle::reopen);
+    app.run(|cx| {
+        // Must run before any gpui-component feature is used.
+        gpui_kit::init(cx);
+        assets::set_app_icon();
+        del_terminal::init(cx);
+        zoom::load();
+        zoom::init(cx);
+        appearance::load(cx);
+        session_lifecycle::load();
 
-            cx.bind_keys([
-                KeyBinding::new("ctrl-m", SelectModel, None),
-                KeyBinding::new("ctrl-shift-m", SelectEffort, None),
-                KeyBinding::new("ctrl-shift-p", SelectProvider, None),
-                KeyBinding::new("ctrl-shift-b", SelectBranch, None),
-                KeyBinding::new("cmd-k", SearchConversations, None),
-                KeyBinding::new("cmd-\\", ToggleFiles, None),
-                KeyBinding::new("cmd-shift-b", ToggleFiles, None),
-                KeyBinding::new("alt-cmd-b", ToggleFiles, None),
-                KeyBinding::new("ctrl-`", ToggleTerminal, None),
-                KeyBinding::new("cmd-j", ToggleTerminalPanel, None),
-                KeyBinding::new("cmd-[", NavigateBack, None),
-                KeyBinding::new("cmd-]", NavigateForward, None),
-                KeyBinding::new("cmd-t", NewWorkspaceTab, None),
-                KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
-                KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-w", CloseTab, None),
-                KeyBinding::new("cmd-shift-w", CloseWorkspaceTab, None),
-                KeyBinding::new("ctrl-shift-g", OpenChanges, None),
-                KeyBinding::new("cmd-p", OpenFiles, None),
-                KeyBinding::new("alt-cmd-s", OpenSideChat, None),
-                KeyBinding::new("alt-shift-cmd-s", OpenSideHistory, None),
-                KeyBinding::new("cmd-1", Tab1, None),
-                KeyBinding::new("cmd-2", Tab2, None),
-                KeyBinding::new("cmd-3", Tab3, None),
-                KeyBinding::new("cmd-4", Tab4, None),
-                KeyBinding::new("cmd-5", Tab5, None),
-                KeyBinding::new("cmd-6", Tab6, None),
-                KeyBinding::new("cmd-7", Tab7, None),
-                KeyBinding::new("cmd-8", Tab8, None),
-                KeyBinding::new("cmd-9", Tab9, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("ctrl-tab", NextWorkspaceTab, None),
-                KeyBinding::new("cmd-shift-]", NextSession, None),
-                KeyBinding::new("ctrl-shift-tab", PrevWorkspaceTab, None),
-                KeyBinding::new("cmd-shift-[", PrevSession, None),
-                KeyBinding::new("cmd-l", FocusComposer, None),
-                KeyBinding::new("cmd-.", StopSession, None),
-                KeyBinding::new("cmd-,", ToggleProviders, None),
-            ]);
-            keybinds::bind_session_navigation(cx);
-            // Lets UI work check Reduce Motion without touching the system setting.
-            if std::env::var("DEL_BACKEND").as_deref() == Ok("mock")
-                && std::env::var_os("DEL_REDUCE_MOTION").is_some()
-            {
-                cx.set_reduce_motion(true);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-m", SelectModel, None),
+            KeyBinding::new("ctrl-shift-m", SelectEffort, None),
+            KeyBinding::new("ctrl-shift-p", SelectProvider, None),
+            KeyBinding::new("ctrl-shift-b", SelectBranch, None),
+            KeyBinding::new("cmd-k", SearchConversations, None),
+            KeyBinding::new("cmd-\\", ToggleFiles, None),
+            KeyBinding::new("cmd-shift-b", ToggleFiles, None),
+            KeyBinding::new("alt-cmd-b", ToggleFiles, None),
+            KeyBinding::new("ctrl-`", ToggleTerminal, None),
+            KeyBinding::new("cmd-j", ToggleTerminalPanel, None),
+            KeyBinding::new("cmd-[", NavigateBack, None),
+            KeyBinding::new("cmd-]", NavigateForward, None),
+            KeyBinding::new("cmd-t", NewWorkspaceTab, None),
+            KeyBinding::new("ctrl-t", NewWorkspaceTab, None),
+            KeyBinding::new("cmd-n", NewSession, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-w", CloseWorkspaceTab, None),
+            KeyBinding::new("ctrl-shift-g", OpenChanges, None),
+            KeyBinding::new("cmd-p", OpenFiles, None),
+            KeyBinding::new("alt-cmd-s", OpenSideChat, None),
+            KeyBinding::new("alt-shift-cmd-s", OpenSideHistory, None),
+            KeyBinding::new("cmd-1", Tab1, None),
+            KeyBinding::new("cmd-2", Tab2, None),
+            KeyBinding::new("cmd-3", Tab3, None),
+            KeyBinding::new("cmd-4", Tab4, None),
+            KeyBinding::new("cmd-5", Tab5, None),
+            KeyBinding::new("cmd-6", Tab6, None),
+            KeyBinding::new("cmd-7", Tab7, None),
+            KeyBinding::new("cmd-8", Tab8, None),
+            KeyBinding::new("cmd-9", Tab9, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("alt-cmd-q", QuitCompletely, None),
+            KeyBinding::new("ctrl-tab", NextWorkspaceTab, None),
+            KeyBinding::new("cmd-shift-]", NextSession, None),
+            KeyBinding::new("ctrl-shift-tab", PrevWorkspaceTab, None),
+            KeyBinding::new("cmd-shift-[", PrevSession, None),
+            KeyBinding::new("cmd-l", FocusComposer, None),
+            KeyBinding::new("cmd-.", StopSession, None),
+            KeyBinding::new("cmd-,", ToggleProviders, None),
+        ]);
+        keybinds::bind_session_navigation(cx);
+        // Lets UI work check Reduce Motion without touching the system setting.
+        if std::env::var("DEL_BACKEND").as_deref() == Ok("mock")
+            && std::env::var_os("DEL_REDUCE_MOTION").is_some()
+        {
+            cx.set_reduce_motion(true);
+        }
+        cx.on_action(|_: &Quit, cx| session_lifecycle::request_quit(cx));
+        cx.on_action(|_: &QuitCompletely, cx| session_lifecycle::quit_completely(cx));
+        cx.set_menus(vec![Menu {
+            name: "Del".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Settings…", ToggleProviders),
+                MenuItem::separator(),
+                MenuItem::action("Quit Del", Quit),
+                MenuItem::action("Quit Del Completely", QuitCompletely),
+            ],
+        }]);
+        // Closing the window quits, which also runs the shutdown hook.
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                session_lifecycle::quit_completely(cx);
             }
-            // Quit runs the shutdown hook, which ends every backend process.
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            // Closing the window quits, which also runs the shutdown hook.
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+        })
+        .detach();
 
-            let metrics = ShellMetrics::default();
-            let (light_x, light_y) = metrics.traffic_light_origin();
+        let metrics = ShellMetrics::default();
+        let (light_x, light_y) = metrics.traffic_light_origin();
 
-            let window_size = cx.primary_display().map_or(WINDOW_SIZE, |display| {
-                let available = display.visible_bounds().size;
-                size(
-                    (available.width * 0.70).max(px(960.)),
-                    (available.height * 0.76).max(px(640.)),
-                )
-            });
-            let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("del".into()),
-                    traffic_light_position: Some(point(px(light_x), px(light_y))),
-                    // Hides the system title bar so the top bar below is drawn
-                    // entirely by us.
-                    ..TitleBar::title_bar_options()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    window_size,
-                    cx,
-                ))),
-                window_min_size: Some(size(px(960.0), px(640.0))),
-                window_background: WindowBackgroundAppearance::Blurred,
-                ..TitleBar::window_options()
-            };
-
-            gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| AppShell::new(window, cx))
-            })
-            .expect("failed to open window");
-
-            cx.activate(true);
+        let window_size = cx.primary_display().map_or(WINDOW_SIZE, |display| {
+            let available = display.visible_bounds().size;
+            size(
+                (available.width * 0.70).max(px(960.)),
+                (available.height * 0.76).max(px(640.)),
+            )
         });
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("del".into()),
+                traffic_light_position: Some(point(px(light_x), px(light_y))),
+                // Hides the system title bar so the top bar below is drawn
+                // entirely by us.
+                ..TitleBar::title_bar_options()
+            }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                window_size,
+                cx,
+            ))),
+            window_min_size: Some(size(px(960.0), px(640.0))),
+            window_background: WindowBackgroundAppearance::Blurred,
+            ..TitleBar::window_options()
+        };
+
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| AppShell::new(window, cx))
+        })
+        .expect("failed to open window");
+
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]

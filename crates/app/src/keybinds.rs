@@ -80,7 +80,8 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("Zoom in", "⌘+ / ⌘⇧="),
             ("Zoom out", "⌘−"),
             ("Reset zoom", "⌘0"),
-            ("Quit Del", "⌘Q"),
+            ("Quit Del (keep sessions running when enabled)", "⌘Q"),
+            ("Quit Del completely and stop sessions", "⌥⌘Q"),
         ],
     ),
     (

@@ -17,6 +17,7 @@ pub enum SettingsSection {
     #[default]
     Appearance,
     Providers,
+    Sessions,
     Keybinds,
 }
 
@@ -228,6 +229,11 @@ pub fn navigation(state: &Entity<AppState>, cx: &App) -> Div {
                             "Appearance",
                             SettingsSection::Appearance,
                             crate::icons::icon(IconName::Palette),
+                        ),
+                        (
+                            "Sessions",
+                            SettingsSection::Sessions,
+                            crate::icons::path("icons/side-chat.svg"),
                         ),
                         (
                             "Providers",
@@ -465,7 +471,7 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .child(v_flex().id("settings").track_scroll(&scroll).size_full().min_w_0().overflow_y_scroll().p_6().gap_5()
         .child(h_flex().w_full().items_center().justify_between().gap_4()
             .child(div().text_size(zpx(del_core::typography::TEXT_XL)).font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Keybinds => "Keybinds" }))
+                .text_color(rgb(0xf5f5f5)).child(match section { SettingsSection::Appearance => "Appearance", SettingsSection::Providers => "Providers", SettingsSection::Sessions => "Sessions", SettingsSection::Keybinds => "Keybinds" }))
             .child(Button::new("settings-done").ghost().small().bg(rgba(crate::appearance::QUIET_FILL)).label("Done")
                 .tooltip("Back to chat (Esc)")
                 .on_click(move |_, _, cx| back.update(cx, |state, cx| state.toggle_providers(cx)))))
@@ -481,6 +487,25 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .checked(s.spaces.global_tabs).accessibility_label("Global session tabs")
                         .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_global_space_tabs(*checked, cx)))))
             })
+            .when(section == SettingsSection::Sessions, |content| content.child(
+                v_flex().w_full().gap_4()
+                    .child(h_flex().w_full().gap_4().items_center()
+                        .child(v_flex().flex_1().min_w_0().gap_2()
+                            .child("Keep sessions running after quitting Del")
+                            .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
+                                .child("Quit hides Del while chats, Side chats, and terminals keep running. Open Del to return to them.")))
+                        .child(gpui_kit::component::switch::Switch::new("keep-sessions-running")
+                            .checked(crate::session_lifecycle::keep_running())
+                            .accessibility_label("Keep sessions running after quitting Del")
+                            .on_click(|enabled, window, cx| {
+                                if let Err(error) = crate::session_lifecycle::set_keep_running(*enabled) {
+                                    window.push_notification(gpui_kit::component::notification::Notification::error(format!("Could not save preference: {error}")), cx);
+                                }
+                                cx.refresh_windows();
+                            })))
+                    .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
+                        .child("Force Quit, crashes, and restarting your Mac still end running work. To stop everything now, choose Quit Del Completely (⌥⌘Q)."))
+            ))
             .when(section == SettingsSection::Keybinds, |content| content.child(crate::keybinds::render()))
             .when(section == SettingsSection::Providers, |content| content
                 .children(providers::VISIBLE.into_iter().map(|provider| {

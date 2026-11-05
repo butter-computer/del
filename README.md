@@ -6,13 +6,16 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.38` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.39` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.38 source update notes](docs/releases/0.1.38.md).
+See the [0.1.39 source update notes](docs/releases/0.1.39.md).
 
-This update adds Side history: hover the Side chat launcher to reveal **/ Side history**,
-or press **Option-Shift-Command-S**, to reopen this session’s saved Side chats.
-It retains the [0.1.37 transcript spacing](docs/releases/0.1.37.md).
+This update keeps chats, Side chats, and integrated terminals running after normal
+Quit by default. Change **Settings → Sessions → Keep sessions running after quitting
+Del** to restore full shutdown. Reopen Del to return to the live workspace, or use
+**Quit Del Completely** (**Option-Command-Q**) to stop everything. Force Quit,
+crashes, logout, and restarting the Mac are outside this persistence guarantee.
+It retains [Side history](docs/releases/0.1.38.md) and the existing transcript spacing.
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -42,7 +45,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.38-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.39-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -1270,7 +1273,8 @@ session shortcuts.
 | Command-[ / Command-] | Back / forward through visited sessions |
 | Command-Comma | Settings |
 | Escape in Settings | Return to the previous workspace view |
-| Command-Q | Quit |
+| Command-Q | Quit; keep sessions running when enabled |
+| Option-Command-Q | Quit completely and stop sessions |
 
 The Settings → Keybinds page lists these shortcuts plus file-editor, terminal,
 search, and model-picker controls. Keybindings are not editable yet.

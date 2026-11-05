@@ -1017,3 +1017,13 @@ activity bar. It supersedes earlier rules where they conflict.
 - Restored coordination receipts belong at recorded exchanges, never a fabricated tail after a final answer. Preserve the durable mailbox and recovery actions.
 - Steered user messages stay visible outside collapsed work details.
 - Branch and memory menus show a partial next row with a taller edge fade before scrolling. Preserve the original coffee cup asset rather than substituting an SF Symbol.
+
+## Session lifetime
+
+- Normal Quit, including Dock Quit and closing the window, keeps main chats, Side
+  chats, and terminals alive by default. Reopening returns to the existing live
+  runtime. Settings → Sessions exposes the saved opt-out switch.
+- Quit Del Completely (Option-Command-Q), app-update restarts, and macOS shutdown
+  stop the runtime. Force Quit/crash/reboot survival is not promised.
+- Hiding on Quit stops dictation, but preserves drafts, queued work, provider
+  processes, Side chat identities, and terminal PTYs.
