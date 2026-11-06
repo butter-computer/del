@@ -49,7 +49,7 @@ impl Render for QueueDragPreview {
 #[derive(Default)]
 pub(crate) struct PendingImports {
     labels: std::collections::HashMap<u64, Vec<(u64, String)>>,
-    held: std::collections::HashSet<u64>,
+    held: std::collections::HashMap<u64, ImportedSend>,
     next: u64,
 }
 impl Global for PendingImports {}
@@ -65,15 +65,60 @@ impl PendingImports {
             .map(|labels| labels.iter().map(|(_, label)| label.clone()).collect())
             .unwrap_or_default()
     }
-    /// Hold `owner`'s Send until its imports land. Returns false when none are pending.
-    pub(crate) fn hold(owner: u64, cx: &mut App) -> bool {
-        if !Self::any(owner, cx) {
-            return false;
+    pub(crate) fn held(owner: u64, cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|imports| imports.held.contains_key(&owner))
+    }
+
+    pub(crate) fn hold(owner: u64, mut send: ImportedSend, cx: &mut App) {
+        let imports = cx.default_global::<Self>();
+        send.waiting = imports
+            .labels
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .map(|(ticket, _)| *ticket)
+            .collect();
+        imports.held.insert(owner, send);
+    }
+
+    fn finish(
+        &mut self,
+        owner: u64,
+        ticket: u64,
+        files: Vec<Attachment>,
+    ) -> (Vec<Attachment>, Option<ImportedSend>) {
+        if let Some(labels) = self.labels.get_mut(&owner) {
+            labels.retain(|(at, _)| *at != ticket);
         }
-        cx.default_global::<Self>().held.insert(owner);
-        true
+        if let Some(send) = self.held.get_mut(&owner)
+            && send.waiting.remove(&ticket)
+        {
+            send.input.attachments.extend(files);
+            let ready = send.waiting.is_empty();
+            return (Vec::new(), ready.then(|| self.held.remove(&owner).unwrap()));
+        }
+        (files, None)
     }
 }
+/// A snapshot of the accepted Send, including its destination and Steer mode.
+/// Completing an import must never read the currently selected composer.
+pub(crate) struct ImportedSend {
+    pub owner: u64,
+    pub content: gpui_kit::component::input::InputContent,
+    pub input: UserInput,
+    pub steer: bool,
+    pub target: ImportTarget,
+    pub window: AnyWindowHandle,
+    pub waiting: std::collections::HashSet<u64>,
+}
+
+pub(crate) enum ImportTarget {
+    Chat(Entity<crate::chat::ChatView>),
+    Draft(u64),
+    Terminal(Box<crate::mode_ui::PreparedTerminalPrompt>),
+}
+
 fn thumbnail(attachment: &Attachment) -> impl IntoElement {
     div()
         .size(zpx(24.))
@@ -317,6 +362,49 @@ impl AppShell {
             Selection::Terminal(id) => Tab::Terminal(id.clone()),
         })
     }
+    pub(super) fn deliver_imported_send(
+        &mut self,
+        send: ImportedSend,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if send.input.text.is_empty() && send.input.attachments.is_empty() {
+            return;
+        }
+        if self.composer_owner == send.owner && self.composer.read(cx).content() == send.content {
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        } else if self.composer_drafts.get(&send.owner) == Some(&send.content) {
+            self.composer_drafts.remove(&send.owner);
+        }
+        if self.goal_modes.get(&send.owner) == send.input.command.as_ref() {
+            self.goal_modes.remove(&send.owner);
+            if self.composer_owner(cx) == send.owner {
+                self.sync_goal_placeholder(window, cx);
+            }
+        }
+        if let Some(attachments) = self.composer_attachments.get_mut(&send.owner) {
+            attachments.retain(|file| !send.input.attachments.contains(file));
+        }
+        match send.target {
+            ImportTarget::Chat(chat) => {
+                chat.update(cx, |chat, cx| chat.submit_input(send.input, send.steer, cx))
+            }
+            ImportTarget::Draft(key) => self.state.update(cx, |state, cx| {
+                state.send_input_to(Selection::Draft(key), send.input, cx)
+            }),
+            ImportTarget::Terminal(prepared) => {
+                self.start_prepared_terminal_prompt(
+                    *prepared,
+                    &send.input.text,
+                    &send.input.attachments,
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
     pub(super) fn sync_composer_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = self.composer_owner(cx);
         if owner != self.composer_owner {
@@ -398,38 +486,30 @@ impl AppShell {
         cx.spawn(async move |this, cx| {
             let result = work.await.map_err(|e| e.to_string());
             let send = this.update(cx, |this, cx| {
-                let error = match result {
-                    Ok((files, errors)) => {
-                        this.composer_attachments
-                            .entry(owner)
-                            .or_default()
-                            .extend(files);
-                        (!errors.is_empty()).then(|| errors.join("\n"))
-                    }
-                    Err(error) => Some(error),
+                let (files, error) = match result {
+                    Ok((files, errors)) => (files, (!errors.is_empty()).then(|| errors.join("\n"))),
+                    Err(error) => (Vec::new(), Some(error)),
                 };
-                // Report only this import's failures; never clear another error.
                 if let Some(error) = error {
                     this.state.update(cx, |s, cx| {
                         s.report_error(format!("Could not attach {error}"));
                         cx.notify();
                     });
                 }
-                let imports = cx.default_global::<PendingImports>();
-                let done = imports.labels.get_mut(&owner).is_none_or(|labels| {
-                    labels.retain(|(at, _)| *at != ticket);
-                    labels.is_empty()
-                });
-                let held = done && imports.held.remove(&owner);
+                let (files, send) = cx
+                    .default_global::<PendingImports>()
+                    .finish(owner, ticket, files);
+                this.composer_attachments
+                    .entry(owner)
+                    .or_default()
+                    .extend(files);
                 cx.notify();
-                held && this.composer_owner(cx) == owner
+                send
             });
-            // A Send pressed during the import goes out now, with the files.
-            if send.unwrap_or(false)
-                && let Some(window) = cx.update(|cx| cx.active_window())
-            {
-                let _ = cx.update_window(window, |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.submit(window, cx));
+            if let Ok(Some(send)) = send {
+                let _ = cx.update_window(send.window, |_, window, cx| {
+                    let _ =
+                        this.update(cx, |this, cx| this.deliver_imported_send(send, window, cx));
                 });
             }
         })
@@ -818,5 +898,86 @@ mod attachment_scroll_tests {
         assert_eq!(attachment_overflow(0., 300.), (false, true));
         assert_eq!(attachment_overflow(-150., 300.), (true, true));
         assert_eq!(attachment_overflow(-300., 300.), (true, false));
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+    use gpui_kit::component::input::TextareaState;
+
+    #[::gpui::test]
+    fn held_import_keeps_original_target_and_batches_after_tab_switch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let (editor, cx) = cx.add_window_view(TextareaState::new);
+        let file = |name: &str| Attachment {
+            path: name.into(),
+            mime: None,
+        };
+        let mut ready = None;
+        cx.update(|window, cx| {
+            editor.update(cx, |input, cx| {
+                input.set_value("original message", window, cx)
+            });
+            cx.default_global::<PendingImports>()
+                .labels
+                .insert(0, vec![(10, "first".into()), (11, "second".into())]);
+            PendingImports::hold(
+                0,
+                ImportedSend {
+                    owner: 0,
+                    content: editor.read(cx).content(),
+                    input: UserInput::text("original message"),
+                    steer: true,
+                    target: ImportTarget::Draft(0),
+                    window: window.window_handle(),
+                    waiting: Default::default(),
+                },
+                cx,
+            );
+            state.update(cx, |state, cx| state.new_session(cx));
+            editor.update(cx, |input, cx| {
+                input.set_value("different chat draft", window, cx)
+            });
+            let imports = cx.default_global::<PendingImports>();
+            // A new drop after Send belongs to the next draft, not the accepted message.
+            imports
+                .labels
+                .get_mut(&0)
+                .unwrap()
+                .push((12, "later".into()));
+            let (files, send) = imports.finish(0, 12, vec![file("later")]);
+            assert_eq!(files, vec![file("later")]);
+            assert!(send.is_none());
+            assert!(imports.finish(0, 10, vec![file("first")]).1.is_none());
+            let (files, send) = imports.finish(0, 11, vec![file("second")]);
+            assert!(files.is_empty());
+            ready = send;
+            assert!(!PendingImports::held(0, cx));
+        });
+        cx.deactivate_window();
+        let send = ready.unwrap();
+        assert!(send.steer);
+        assert_eq!(send.input.attachments, vec![file("first"), file("second")]);
+        let ImportTarget::Draft(key) = send.target else {
+            panic!("destination changed")
+        };
+        // Delivery uses the captured window; it does not consult active_window.
+        cx.update_window(send.window, |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.send_input_to(Selection::Draft(key), send.input, cx)
+            });
+        })
+        .unwrap();
+        state.read_with(cx, |state, _| {
+            assert_ne!(state.selection, Selection::Draft(0))
+        });
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.value().as_ref(), "different chat draft")
+        });
     }
 }

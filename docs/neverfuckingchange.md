@@ -1137,8 +1137,15 @@ activity bar. It supersedes earlier rules where they conflict.
 - While a reply runs, a non-empty draft makes the composer button Send (queues, like
   Return); an empty draft shows Stop. The placeholder reads "Queue a follow-up…".
   Sending while history loads or attachments import holds the message until ready.
+  An accepted send during import retains its original text, attachments, destination
+  and Send/Steer mode, even after switching chats or hiding Del. New draft edits and
+  later attachment imports are separate from that send, in main and Side chats.
 - Queue and Side chat persistence runs in the background, coalesced and ordered, and
-  flushes on quit. Rendering never takes locks or rebuilds derived transcript state.
+  flushes on quit. Permanent deletion drains pending queue writes before cleaning up
+  their attachments, and stale saves cannot recreate the deleted queue. Rendering
+  never takes locks or rebuilds derived transcript state.
+- Tool details retain all input and output inside a 260 logical-pixel maximum-height
+  scroll area. Wheel gestures inside it do not scroll the outer transcript.
 - Fatal turn errors show only inline, with Retry; recoverable ones are toasts. Toasts
   have a severity: errors stay until dismissed; housekeeping and information hide on
   their own; duplicates coalesce; titles are specific, never "Something went wrong".

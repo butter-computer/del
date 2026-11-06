@@ -6,16 +6,14 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.53` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.54` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.53 source update notes](docs/releases/0.1.53.md).
+See the [0.1.54 source update notes](docs/releases/0.1.54.md).
 
-This update is a polish pass: smoother, consistent motion for popovers, menus,
-dialogs, toasts and transcript disclosures; a jump-to-latest pill; Send that queues
-while a reply runs; background saves so Enter stays instant; clearer errors with
-severity and inline Retry; delete confirmations; a remembered window frame and full
-macOS menus; and shared spacing, radius, color and motion tokens in
-`crates/app/src/ui.rs`. See the [0.1.53 notes](docs/releases/0.1.53.md).
+This update keeps sends waiting on attachments tied to their original main or Side
+chat, preserves the original message and Steer choice, and prevents deleted queues
+from being recreated by a background save. Tool details retain full output in a
+height-limited scrolling view. It builds on the [0.1.53 polish pass](docs/releases/0.1.53.md).
 
 Del includes expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
@@ -67,7 +65,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.53-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.54-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

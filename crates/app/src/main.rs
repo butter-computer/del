@@ -2027,7 +2027,8 @@ impl AppShell {
         }
         let owner = self.composer_owner(cx);
         // A pasted or dropped file is still importing: send once it lands.
-        if followup_ui::PendingImports::hold(owner, cx) {
+        let importing = followup_ui::PendingImports::any(owner, cx);
+        if followup_ui::PendingImports::held(owner, cx) {
             return;
         }
         let text = self.composer.read(cx).value().trim().to_string();
@@ -2036,7 +2037,7 @@ impl AppShell {
             .get(&owner)
             .cloned()
             .unwrap_or_default();
-        if self.goal_modes.contains_key(&owner) && !attachments.is_empty() {
+        if self.goal_modes.contains_key(&owner) && (!attachments.is_empty() || importing) {
             self.state.update(cx, |state, cx| {
                 state.report_error("Send attachments in a message before setting a goal.");
                 cx.notify();
@@ -2045,7 +2046,7 @@ impl AppShell {
         }
         self.ensure_chat(cx);
         let chat = self.open_chat(cx);
-        if text.is_empty() && attachments.is_empty() {
+        if text.is_empty() && attachments.is_empty() && !importing {
             if steer && let Some(chat) = chat {
                 let first = chat
                     .read(cx)
@@ -2065,7 +2066,31 @@ impl AppShell {
             } else {
                 text
             };
-            self.submit_terminal_prompt(&text, &attachments, window, cx);
+            if importing {
+                let Some(prepared) = self.prepare_terminal_prompt(cx) else {
+                    return;
+                };
+                followup_ui::PendingImports::hold(
+                    owner,
+                    followup_ui::ImportedSend {
+                        owner,
+                        content: self.composer.read(cx).content(),
+                        input: del_agent::UserInput {
+                            text,
+                            attachments,
+                            ..Default::default()
+                        },
+                        steer,
+                        target: followup_ui::ImportTarget::Terminal(Box::new(prepared)),
+                        window: window.window_handle(),
+                        waiting: Default::default(),
+                    },
+                    cx,
+                );
+                return;
+            } else {
+                self.submit_terminal_prompt(&text, &attachments, window, cx);
+            }
             self.goal_modes.remove(&owner);
             self.sync_goal_placeholder(window, cx);
             return;
@@ -2085,6 +2110,29 @@ impl AppShell {
             text,
             attachments,
         };
+        if importing {
+            let target = match chat {
+                Some(chat) => followup_ui::ImportTarget::Chat(chat),
+                None => match self.state.read(cx).selection {
+                    Selection::Draft(key) => followup_ui::ImportTarget::Draft(key),
+                    _ => return,
+                },
+            };
+            followup_ui::PendingImports::hold(
+                owner,
+                followup_ui::ImportedSend {
+                    owner,
+                    content: self.composer.read(cx).content(),
+                    input,
+                    steer,
+                    target,
+                    window: window.window_handle(),
+                    waiting: Default::default(),
+                },
+                cx,
+            );
+            return;
+        }
         self.goal_modes.remove(&owner);
         self.sync_goal_placeholder(window, cx);
         self.composer_attachments.remove(&owner);

@@ -21,6 +21,12 @@ use gpui_kit::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) struct PreparedTerminalPrompt {
+    key: u64,
+    spec: TerminalLaunchSpec,
+    options: crate::projects::LaunchOptions,
+}
+
 /// Agent questions waiting in the UI, overall and per asking session.
 const MAX_QUESTIONS: usize = 16;
 const MAX_QUESTIONS_PER_SESSION: usize = 3;
@@ -248,21 +254,34 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((key, config)) = self.state.read(cx).terminal_draft() else {
+        if self.state.read(cx).terminal_draft().is_none() {
             return false;
-        };
+        }
+        if let Some(prepared) = self.prepare_terminal_prompt(cx) {
+            self.composer_attachments.remove(&self.composer_owner(cx));
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.start_prepared_terminal_prompt(prepared, prompt, attachments, window, cx);
+        }
+        true
+    }
+
+    pub(super) fn prepare_terminal_prompt(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<PreparedTerminalPrompt> {
+        let (key, config) = self.state.read(cx).terminal_draft()?;
         if self.state.read(cx).is_starting() {
-            return true;
+            return None;
         }
         let mut spec = match TerminalLaunchSpec::from_config(&config) {
             Ok(spec) => spec,
             Err(error) => {
                 self.set_mode_error(error.to_string(), cx);
-                return true;
+                return None;
             }
         };
         spec.account_id = self.state.read(cx).selected_account();
-        let prompt = crate::attachments::terminal_prompt(prompt, attachments);
         let mut options = self.state.read(cx).draft_launch_options();
         if options.token.is_empty() {
             self.state.update(cx, |s, cx| {
@@ -270,12 +289,26 @@ impl AppShell {
             });
             options = self.state.read(cx).draft_launch_options();
         }
+        Some(PreparedTerminalPrompt { key, spec, options })
+    }
+
+    pub(super) fn start_prepared_terminal_prompt(
+        &mut self,
+        prepared: PreparedTerminalPrompt,
+        prompt: &str,
+        attachments: &[del_agent::Attachment],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PreparedTerminalPrompt {
+            key,
+            mut spec,
+            options,
+        } = prepared;
+        let prompt = crate::attachments::terminal_prompt(prompt, attachments);
         self.state.update(cx, |state, cx| {
-            state.begin_terminal_prompt(key, prompt.to_owned(), cx)
+            state.begin_terminal_prompt(key, prompt.clone(), cx)
         });
-        self.composer_attachments.remove(&self.composer_owner(cx));
-        self.composer
-            .update(cx, |input, cx| input.set_value("", window, cx));
         let runtime = self.state.read(cx).backend().runtime;
         let prepare = runtime.spawn_blocking(move || {
             spec.cwd = crate::projects::prepare(
@@ -297,7 +330,6 @@ impl AppShell {
             });
         })
         .detach();
-        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,7 +507,11 @@ impl AppShell {
                         }
                     })
                     .detach();
-                    if !resuming || this.state.read(cx).selection == Selection::Terminal(id.clone())
+                    if (!resuming
+                        && draft.is_none_or(|key| {
+                            this.state.read(cx).selection == Selection::Draft(key)
+                        }))
+                        || this.state.read(cx).selection == Selection::Terminal(id.clone())
                     {
                         host.update(cx, |host, cx| host.focus(window, cx));
                     }

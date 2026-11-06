@@ -34,8 +34,6 @@ const MONO: &str = del_core::typography::MONO_FONT;
 const TEXT_INSET: f32 = 12.;
 /// Diff lines drawn in an expanded file card; the rest are summarized.
 const MAX_DIFF_LINES: usize = 400;
-/// Tool input and output lines drawn when expanded; the rest are summarized.
-const MAX_TOOL_LINES: usize = 400;
 /// Approval details taller than this scroll inside the card.
 const APPROVAL_DETAIL_MAX: f32 = 200.;
 
@@ -90,11 +88,10 @@ impl PeerRow {
     }
 }
 
-/// An expanded tool's input and output as one capped code block.
+/// Full tool input and output, inside a height-limited scrolling viewport.
 #[derive(Clone)]
 pub(super) struct ToolDetails {
     markdown: SharedString,
-    hidden: usize,
 }
 
 impl ToolDetails {
@@ -104,28 +101,14 @@ impl ToolDetails {
         } else {
             format!("{}\n\n{}", tool.input, tool.output)
         };
-        let (shown, hidden) = capped_lines(&text, MAX_TOOL_LINES);
-        let markdown = if shown.trim().is_empty() {
+        let markdown = if text.trim().is_empty() {
             "No output".to_owned()
         } else {
-            code_fence(shown)
+            code_fence(&text)
         };
         Self {
             markdown: markdown.into(),
-            hidden,
         }
-    }
-}
-
-/// The first `max` lines of `text` and how many lines were left out.
-fn capped_lines(text: &str, max: usize) -> (&str, usize) {
-    match text.match_indices('\n').nth(max.saturating_sub(1)) {
-        Some((end, _)) if max > 0 => {
-            let rest = &text[end + 1..];
-            let hidden = rest.lines().count();
-            (&text[..end], hidden)
-        }
-        _ => (text, 0),
     }
 }
 
@@ -902,8 +885,10 @@ impl ChatView {
                 .child(
                     div()
                         .id(("tool-output", ix))
+                        .debug_selector(|| "tool-output".to_owned())
                         .max_h(zpx(260.))
                         .overflow_y_scroll()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                         .rounded(zpx(crate::ui::RADIUS_CARD))
                         .bg(crate::appearance::code_surface())
                         .text_size(zpx(TEXT_SM))
@@ -911,9 +896,6 @@ impl ChatView {
                         .text_color(rgba(BODY_MUTED))
                         .child(selectable_text(("tool-text", ix), details.markdown)),
                 )
-                .when(details.hidden > 0, |column| {
-                    column.child(more_lines(details.hidden))
-                })
                 .when_some(file, |card, file| {
                     card.child(self.file_card(ix + 1, file, true, cx))
                 })
@@ -1820,4 +1802,94 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                         }),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    struct ToolFixture {
+        chat: Entity<ChatView>,
+        tool: ToolCall,
+        outer: ScrollHandle,
+    }
+    impl Render for ToolFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let card = self.chat.update(cx, |chat, cx| {
+                chat.tool_card(0, &self.tool, cx).into_any_element()
+            });
+            v_flex()
+                .id("outer-tools")
+                .w(px(500.))
+                .h(px(500.))
+                .overflow_y_scroll()
+                .track_scroll(&self.outer)
+                .child(div().flex_none().child(card))
+                .child(div().h(px(1000.)).flex_none())
+        }
+    }
+
+    #[::gpui::test]
+    fn full_tool_output_stays_bounded_and_contains_wheel_events(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let backend = crate::chat::Backend {
+            runtime: runtime.handle().clone(),
+            manager: del_agent::SessionManager::new(dir.path().join("index"), []).unwrap(),
+        };
+        let outer = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view(|_, cx| ToolFixture {
+            chat: cx.new(|cx| ChatView::new(backend, None, None, cx)),
+            tool: ToolCall {
+                id: "long".into(),
+                name: "shell".into(),
+                input: "command".into(),
+                output: "output line\n".repeat(900),
+                state: super::super::model::ToolState::Ok,
+                expanded: true,
+            },
+            outer: outer.clone(),
+        });
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let bounds = cx.debug_bounds("tool-output").unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        assert!(bounds.size.height > px(0.) && bounds.size.height <= zpx(260.));
+        for (dx, dy) in [(0., -100.), (-80., -30.), (0., -100000.), (0., 100000.)] {
+            cx.simulate_event(ScrollWheelEvent {
+                position: bounds.center(),
+                delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            assert_eq!(outer.offset(), point(px(0.), px(0.)));
+        }
+    }
+
+    #[test]
+    fn expanded_tool_retains_all_input_and_output_lines() {
+        let input = (0..650).map(|n| format!("input {n}\n")).collect::<String>();
+        let output = (0..900)
+            .map(|n| format!("output {n}\n"))
+            .collect::<String>();
+        let details = ToolDetails::new(&ToolCall {
+            id: "long-tool".into(),
+            name: "shell".into(),
+            input: input.clone(),
+            output: output.clone(),
+            state: super::super::model::ToolState::Ok,
+            expanded: true,
+        });
+        assert!(details.markdown.contains(&input));
+        assert!(details.markdown.contains(&output));
+        assert!(details.markdown.contains("output 899"));
+    }
 }

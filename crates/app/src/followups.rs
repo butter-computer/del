@@ -81,8 +81,17 @@ impl Queue {
         session: &SessionId,
     ) -> Vec<std::path::PathBuf> {
         let path = Self::path_in(data_dir, session);
+        crate::sessions::delete_after_pending_writes(&path, || {
+            Self::remove_saved_queue(data_dir, &path)
+        })
+    }
+
+    fn remove_saved_queue(
+        data_dir: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
         let attachments = data_dir.join("attachments");
-        let queue: Option<Self> = std::fs::read(&path)
+        let queue: Option<Self> = std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         let mut removed = Vec::new();
@@ -371,6 +380,37 @@ mod tests {
         queue.save_later();
         crate::sessions::flush_pending_writes();
         assert_eq!(Queue::open(path).items.len(), 1);
+    }
+
+    #[test]
+    fn deletion_drains_latest_queue_and_prevents_stale_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionId::new("deleted-session");
+        let path = Queue::path_in(dir.path(), &session);
+        let imported = dir.path().join("attachments/latest-import");
+        std::fs::create_dir_all(&imported).unwrap();
+        let file = imported.join("notes.txt");
+        std::fs::write(&file, "latest attachment").unwrap();
+        let mut queue = Queue::open(path.clone());
+        queue.save().unwrap();
+        let mut input = UserInput::text("just queued");
+        input.attachments.push(del_agent::Attachment {
+            path: file,
+            mime: None,
+        });
+        queue.push(input);
+        queue.save_later();
+        let removed = Queue::remove_session_in(dir.path(), &session);
+        assert_eq!(removed, vec![imported.clone()]);
+        assert!(!imported.exists());
+        assert!(!path.exists());
+        // An old ChatView can still finish a turn after permanent deletion.
+        queue.save_later();
+        crate::sessions::flush_pending_writes();
+        assert!(
+            !path.exists(),
+            "a stale save must not recreate a deleted queue"
+        );
     }
 
     #[test]

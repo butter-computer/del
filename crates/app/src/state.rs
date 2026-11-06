@@ -1607,6 +1607,7 @@ impl AppState {
     ) {
         let id = row.id.clone();
         let in_current_space = draft.is_none_or(|key| self.tabs.contains(&Tab::Draft(key)));
+        let select = draft.is_none_or(|key| self.selection == Selection::Draft(key));
         self.project_info.remove(&row.cwd);
         if let Some(old) = self.terminal_rows.iter_mut().find(|r| r.id == id) {
             *old = row;
@@ -1632,7 +1633,9 @@ impl AppState {
             self.pending_prompts.remove(&key);
         }
         if in_current_space {
-            self.select_terminal(id.clone(), cx);
+            if select {
+                self.select_terminal(id.clone(), cx);
+            }
             self.keep_tab(&Tab::Terminal(id), cx);
         }
         cx.notify();
@@ -2161,20 +2164,30 @@ impl AppState {
     }
 
     pub fn send_input(&mut self, input: UserInput, cx: &mut Context<Self>) {
-        if matches!(&self.selection, Selection::Session(id) if self.switching_accounts.contains(id))
-        {
+        self.send_input_to(self.selection.clone(), input, cx);
+    }
+
+    pub fn send_input_to(
+        &mut self,
+        selection: Selection,
+        input: UserInput,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&selection, Selection::Session(id) if self.switching_accounts.contains(id)) {
             return;
         }
         let text = input.text.clone();
         self.error = None;
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
-        match self.selection.clone() {
+        match selection.clone() {
             Selection::Terminal(_) => return,
             Selection::Draft(key) => {
                 let Some(config) = self.drafts.get(&key).cloned() else {
                     return;
                 };
-                self.attach_space_project(&config.cwd);
+                if self.selection == selection {
+                    self.attach_space_project(&config.cwd);
+                }
                 if !self.starting.insert(key) {
                     return;
                 }
@@ -4093,6 +4106,52 @@ pub(crate) mod tests {
             assert_eq!(s.selection, Selection::Draft(0));
             assert!(s.terminal_rows[0].pinned);
             assert!(s.terminal_rows[0].active);
+        });
+    }
+
+    #[gpui::test]
+    fn deferred_send_starts_original_draft_without_changing_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            s.new_session(cx);
+            let selected = s.selection.clone();
+            let input = del_agent::UserInput::text("original held message");
+            s.send_input_to(Selection::Draft(0), input.clone(), cx);
+            assert_eq!(s.selection, selected);
+            assert_eq!(s.pending_prompts[&0].input, input);
+            assert!(s.starting.contains(&0));
+            assert!(!s.is_starting());
+        });
+    }
+
+    #[gpui::test]
+    fn deferred_terminal_keeps_newly_selected_tab(cx: &mut gpui::TestAppContext) {
+        let state = draft(cx);
+        state.update(cx, |s, cx| {
+            let config = s.draft().unwrap().clone();
+            s.begin_terminal_prompt(0, "held prompt".into(), cx);
+            s.new_session(cx);
+            let selected = s.selection.clone();
+            let id = del_agent::SessionId::new("background-terminal");
+            s.terminal_started(
+                Some(0),
+                crate::sessions::TerminalRow {
+                    id: id.clone(),
+                    title: "Codex".into(),
+                    cwd: config.cwd,
+                    provider: Some(config.provider),
+                    account_id: None,
+                    active: true,
+                    summary: String::new(),
+                    pinned: false,
+                },
+                cx,
+            );
+            assert_eq!(s.selection, selected);
+            assert!(s.tabs.contains(&Tab::Terminal(id)));
+            assert!(!s.starting.contains(&0));
         });
     }
 

@@ -159,6 +159,15 @@ impl PreparedSave {
     }
 }
 
+struct PendingSideSend {
+    input: UserInput,
+    steer: bool,
+    content: gpui_kit::component::input::InputContent,
+    chat: Entity<ChatView>,
+    window: AnyWindowHandle,
+    waiting: std::collections::HashSet<u64>,
+}
+
 pub struct SideChat {
     context: Context,
     storage_id: String,
@@ -189,7 +198,7 @@ pub struct SideChat {
     importing: Vec<(u64, String)>,
     import_batches: u64,
     /// Send was pressed during an import; it goes out when the files land.
-    send_after_import: bool,
+    send_after_import: Option<PendingSideSend>,
     loading: bool,
     waiting_for_tools: bool,
     closed: bool,
@@ -441,7 +450,7 @@ impl SideChat {
             storage_error: false,
             importing: Vec::new(),
             import_batches: 0,
-            send_after_import: false,
+            send_after_import: None,
             loading: false,
             waiting_for_tools: false,
             closed: false,
@@ -1013,8 +1022,7 @@ impl SideChat {
 
     fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if !self.importing.is_empty() {
-            self.send_after_import = true;
+        if self.send_after_import.is_some() {
             return;
         }
         if self.loading {
@@ -1031,7 +1039,7 @@ impl SideChat {
             return;
         };
         // While history loads the chat holds the message and sends it after.
-        if text.is_empty() && self.attachments.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() && self.importing.is_empty() {
             if steer {
                 let first = chat
                     .read(cx)
@@ -1046,13 +1054,27 @@ impl SideChat {
             return;
         }
         self.error = None;
-        if self.goal_mode.is_some() && !self.attachments.is_empty() {
+        if self.goal_mode.is_some() && (!self.attachments.is_empty() || !self.importing.is_empty())
+        {
             self.set_error("Send attachments in a message before setting a goal.".into());
             cx.notify();
             return;
         }
         let mut input = self.draft_input(cx);
         input.text = text;
+        if !self.importing.is_empty() {
+            self.send_after_import = Some(PendingSideSend {
+                input,
+                steer,
+                content: self.input.read(cx).content(),
+                chat: chat.clone(),
+                window: window.window_handle(),
+                waiting: self.importing.iter().map(|(batch, _)| *batch).collect(),
+            });
+            self.save(cx);
+            cx.notify();
+            return;
+        }
         input.attachments = std::mem::take(&mut self.attachments);
         chat.update(cx, |chat, cx| {
             chat.submit_input(input, steer, cx);
@@ -1123,11 +1145,26 @@ impl SideChat {
             let result = work.await;
             let send = this.update(cx, |this, cx| {
                 this.importing.retain(|(at, _)| *at != batch);
+                let belongs_to_send = this
+                    .send_after_import
+                    .as_mut()
+                    .is_some_and(|send| send.waiting.remove(&batch));
                 match result {
                     Ok(results) => {
                         for result in results {
                             match result {
-                                Ok(file) => this.attachments.push(file),
+                                Ok(file) => {
+                                    if belongs_to_send {
+                                        this.send_after_import
+                                            .as_mut()
+                                            .unwrap()
+                                            .input
+                                            .attachments
+                                            .push(file);
+                                    } else {
+                                        this.attachments.push(file);
+                                    }
+                                }
                                 Err(error) => this.set_error(format!("Could not attach {error}")),
                             }
                         }
@@ -1136,19 +1173,50 @@ impl SideChat {
                 }
                 this.save(cx);
                 cx.notify();
-                this.importing.is_empty() && std::mem::take(&mut this.send_after_import)
+                if this
+                    .send_after_import
+                    .as_ref()
+                    .is_some_and(|send| send.waiting.is_empty())
+                {
+                    this.send_after_import.take()
+                } else {
+                    None
+                }
             });
-            // A Send pressed during the import goes out now, with the files.
-            if send.unwrap_or(false)
-                && let Some(window) = cx.update(|cx| cx.active_window())
-            {
-                let _ = cx.update_window(window, |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.submit(window, cx));
+            if let Ok(Some(send)) = send {
+                let _ = cx.update_window(send.window, |_, window, cx| {
+                    let _ =
+                        this.update(cx, |this, cx| this.deliver_imported_send(send, window, cx));
                 });
             }
         })
         .detach();
     }
+    fn deliver_imported_send(
+        &mut self,
+        send: PendingSideSend,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.closed || (send.input.text.is_empty() && send.input.attachments.is_empty()) {
+            return;
+        }
+        if self.input.read(cx).content() == send.content {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.attachments
+            .retain(|file| !send.input.attachments.contains(file));
+        if self.goal_mode == send.input.command {
+            self.set_goal_mode(None, window, cx);
+        }
+        send.chat
+            .update(cx, |chat, cx| chat.submit_input(send.input, send.steer, cx));
+        self.report_activity(true, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
     fn pick_attachments(&mut self, cx: &mut gpui::Context<Self>) {
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1897,6 +1965,82 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("composer-commands").is_none());
+    }
+
+    #[::gpui::test]
+    fn held_side_send_keeps_message_mode_and_destination(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), []).unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager,
+        };
+        let context = Context {
+            activity_owner: None,
+            backend: backend.clone(),
+            accounts: vec![],
+            source: ForkSource::New {
+                config: SessionConfig {
+                    cwd: dir.path().into(),
+                    provider: Provider::Codex,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    permission_mode: del_agent::PermissionMode::Plan,
+                },
+                account_id: None,
+            },
+        };
+        let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        let original = cx.new(|cx| ChatView::new(backend.clone(), None, None, cx));
+        let replacement = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        let file = del_agent::Attachment {
+            path: dir.path().join("imported.txt"),
+            mime: None,
+        };
+        let mut ready = None;
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.loading = false;
+                side.chat = Some(original.clone());
+                side.input.update(cx, |input, cx| {
+                    input.set_value("original Side message", window, cx)
+                });
+                side.importing = vec![(1, "imported.txt".into())];
+                side.submit_with_mode(true, window, cx);
+                let held = side.send_after_import.as_ref().unwrap();
+                assert!(held.steer);
+                assert!(held.waiting.contains(&1));
+                assert_eq!(held.input.text, "original Side message");
+                // Changing the visible chat and editing the next draft cannot redirect Send.
+                side.chat = Some(replacement.clone());
+                side.input
+                    .update(cx, |input, cx| input.set_value("next draft", window, cx));
+                let mut send = side.send_after_import.take().unwrap();
+                send.input.attachments.push(file.clone());
+                ready = Some(send);
+            });
+        });
+        cx.deactivate_window();
+        let send = ready.unwrap();
+        cx.update_window(send.window, |_, window, cx| {
+            side.update(cx, |side, cx| side.deliver_imported_send(send, window, cx));
+        })
+        .unwrap();
+        original.read_with(cx, |chat, _| {
+            assert_eq!(chat.queue.items.len(), 1);
+            assert_eq!(chat.queue.items[0].input.text, "original Side message");
+            assert_eq!(chat.queue.items[0].input.attachments, vec![file]);
+        });
+        replacement.read_with(cx, |chat, _| assert!(chat.queue.items.is_empty()));
+        side.read_with(cx, |side, cx| {
+            assert_eq!(side.input.read(cx).value().as_ref(), "next draft")
+        });
     }
 
     #[test]

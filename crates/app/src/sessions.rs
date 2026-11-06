@@ -338,6 +338,8 @@ struct WriterState {
     pending: Vec<(PathBuf, Vec<u8>, u32)>,
     /// The path being written right now, if any.
     writing: Option<PathBuf>,
+    /// Permanently deleted paths cannot be recreated by a stale UI save.
+    deleted: std::collections::HashSet<PathBuf>,
 }
 
 fn writer() -> &'static Writer {
@@ -384,6 +386,9 @@ fn writer() -> &'static Writer {
 pub fn write_atomic_later(path: PathBuf, bytes: Vec<u8>, mode: u32) {
     let writer = writer();
     let mut state = writer.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.deleted.contains(&path) {
+        return;
+    }
     if let Some(entry) = state.pending.iter_mut().find(|entry| entry.0 == path) {
         entry.1 = bytes;
         entry.2 = mode;
@@ -392,6 +397,24 @@ pub fn write_atomic_later(path: PathBuf, bytes: Vec<u8>, mode: u32) {
     }
     drop(state);
     writer.changed.notify_all();
+}
+
+/// Drain the latest snapshot before cleanup reads its attachments, then prevent
+/// any stale owner from saving this permanently deleted path again.
+pub fn delete_after_pending_writes<T>(path: &Path, cleanup: impl FnOnce() -> T) -> T {
+    let writer = writer();
+    let mut state = writer.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.deleted.insert(path.to_owned());
+    while state.writing.as_deref() == Some(path)
+        || state.pending.iter().any(|entry| entry.0 == path)
+    {
+        state = writer
+            .changed
+            .wait(state)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    drop(state);
+    cleanup()
 }
 
 /// Block until every queued [`write_atomic_later`] has reached disk.
