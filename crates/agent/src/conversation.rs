@@ -260,6 +260,7 @@ pub fn public_event(event: &AgentEvent) -> bool {
             | AgentEvent::ToolCallUpdated { .. }
             | AgentEvent::ToolCallFinished { .. }
             | AgentEvent::FileChange { .. }
+            | AgentEvent::PlanUpdated { .. }
             | AgentEvent::PeerMessage { .. }
             | AgentEvent::ProviderSwitched { .. }
     )

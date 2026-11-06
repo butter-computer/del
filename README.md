@@ -6,14 +6,15 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.45` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.46` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.45 source update notes](docs/releases/0.1.45.md).
+See the [0.1.46 source update notes](docs/releases/0.1.46.md).
 
-This update brings the shared slash menu to Side chats, including mid-prompt
-suggestions, keyboard navigation, skill tokens, goals, and Fast controls. Each
-Side chat uses its own provider, account, and folder. `/chat` and `/terminal`
-are excluded from Side chat suggestions.
+This update adds live provider progress checklists to main and Side chats.
+Codex, Claude, and OpenCode report their actual task states; Del shows pending,
+active, completed, and cancelled work with subtle, reduced-motion-aware
+transitions. Recorded progress survives reopening a conversation. See
+[provider progress checklists](docs/provider-progress.md) for behavior and sources.
 
 Side history is available in a right-sidebar tab. Hover the Side chat launcher
 to reveal a compact Side history card attached below its right edge, matching the
@@ -54,7 +55,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.45-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.46-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

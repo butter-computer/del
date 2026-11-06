@@ -52,7 +52,10 @@ impl ChatView {
             let progress = motion.map_or(if expanded { 1. } else { 0. }, |reveal| {
                 reveal.sample(std::time::Instant::now()).0
             });
-            let content = if ix == section.answer {
+            // The provider's checklist stays readable outside folded tool work.
+            let content = if ix == section.answer
+                || matches!(self.model.blocks.get(ix), Some(Block::Plan { .. }))
+            {
                 self.render_block_row(ix, cx)
             } else if expanded || motion.is_some() {
                 gpui_kit::base::MotionReveal::new(
@@ -345,6 +348,9 @@ impl ChatView {
             Block::Tool(_) | Block::FileChange(_) | Block::Reasoning { .. }
         );
         let content = match block {
+            Block::Plan { plan, .. } => {
+                super::plan::card(ix, plan, self.model.plan_is_live(ix), cx.reduce_motion())
+            }
             Block::ProviderSwitch { from, to } => h_flex()
                 .w_full()
                 .justify_center()

@@ -280,6 +280,9 @@ impl ClaudeBackend {
         }
         let mut command = Command::new(&self.options.binary);
         self.options.prepare(&mut command);
+        // Opt this child process into task tools on newer models: Del renders
+        // their structured progress. Global user settings remain untouched.
+        command.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
         let mut args = self.args(config, session_flag);
         if !persist {
             args.push("--no-session-persistence".into());

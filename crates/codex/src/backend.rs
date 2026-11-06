@@ -153,11 +153,14 @@ fn thread_params(config: &SessionConfig) -> serde_json::Map<String, Value> {
     p.insert("approvalPolicy".into(), json!(approval));
     p.insert("sandbox".into(), json!(sandbox));
     p.insert("serviceName".into(), json!(CLIENT_NAME));
+    // Current Codex versions make update_plan opt-in. Enable the structured
+    // progress tool for this thread, without changing the user's config file.
+    p.insert("config".into(), json!({"tools.update_plan.enabled": true}));
     if let Some(m) = &config.model {
         p.insert("model".into(), json!(m));
     }
     if let Some(effort) = &config.reasoning_effort {
-        p.insert("config".into(), json!({"model_reasoning_effort": effort}));
+        p.get_mut("config").unwrap()["model_reasoning_effort"] = json!(effort);
     }
     if let Some(tier) = &config.service_tier {
         p.insert("serviceTier".into(), json!(tier));
@@ -1310,7 +1313,15 @@ mod model_config_tests {
             provider: Provider::Codex,
             permission_mode: PermissionMode::Ask,
         };
-        assert!(!thread_params(&config).contains_key("config"));
+        assert_eq!(
+            thread_params(&config)["config"]["tools.update_plan.enabled"],
+            true
+        );
+        assert!(
+            thread_params(&config)["config"]
+                .get("model_reasoning_effort")
+                .is_none()
+        );
         assert!(!thread_params(&config).contains_key("serviceTier"));
         config.reasoning_effort = Some("high".into());
         config.service_tier = Some("priority".into());

@@ -195,6 +195,7 @@ fn text_id(d: &Value) -> String {
 #[derive(Default)]
 pub struct Stream {
     reasoning: HashMap<String, String>,
+    todo_calls: HashMap<String, Option<Vec<PlanStep>>>,
     turn: String,
 }
 impl Stream {
@@ -259,29 +260,51 @@ impl Stream {
                     })
                     .unwrap_or_default()
             }
-            Some("session.tool.input.started") => vec![AgentEvent::ToolCallStarted {
-                id: string(d, "id"),
-                name: string(d, "name"),
-                input_summary: String::new(),
-            }],
-            Some("session.tool.called") => vec![AgentEvent::ToolCallUpdated {
-                id: string(d, "id"),
-                output_summary: summarize_output(&d["input"].to_string()),
-            }],
+            Some("session.tool.input.started") => {
+                if d["name"] == "todowrite" {
+                    self.todo_calls.insert(string(d, "id"), None);
+                }
+                vec![AgentEvent::ToolCallStarted {
+                    id: string(d, "id"),
+                    name: string(d, "name"),
+                    input_summary: String::new(),
+                }]
+            }
+            Some("session.tool.called") => {
+                if let Some(steps) = self.todo_calls.get_mut(&string(d, "id")) {
+                    *steps = del_agent::plan::todo_steps(&d["input"]["todos"]);
+                }
+                vec![AgentEvent::ToolCallUpdated {
+                    id: string(d, "id"),
+                    output_summary: summarize_output(&d["input"].to_string()),
+                }]
+            }
             Some("session.tool.progress") => vec![AgentEvent::ToolCallUpdated {
                 id: string(d, "id"),
                 output_summary: summarize_output(&d["metadata"].to_string()),
             }],
-            Some("session.tool.success") => vec![AgentEvent::ToolCallFinished {
-                id: string(d, "id"),
-                status: ToolStatus::Completed,
-                output_summary: summarize_output(&content(&d["content"])),
-            }],
-            Some("session.tool.failed") => vec![AgentEvent::ToolCallFinished {
-                id: string(d, "id"),
-                status: ToolStatus::Failed,
-                output_summary: summarize_output(&error_message(&d["error"])),
-            }],
+            Some("session.tool.success") => {
+                let mut out = vec![AgentEvent::ToolCallFinished {
+                    id: string(d, "id"),
+                    status: ToolStatus::Completed,
+                    output_summary: summarize_output(&content(&d["content"])),
+                }];
+                if let Some(input) = self.todo_calls.remove(&string(d, "id"))
+                    && let Some(steps) =
+                        del_agent::plan::todo_steps(&d["metadata"]["todos"]).or(input)
+                {
+                    out.push(todo_event(steps));
+                }
+                out
+            }
+            Some("session.tool.failed") => {
+                self.todo_calls.remove(&string(d, "id"));
+                vec![AgentEvent::ToolCallFinished {
+                    id: string(d, "id"),
+                    status: ToolStatus::Failed,
+                    output_summary: summarize_output(&error_message(&d["error"])),
+                }]
+            }
             Some("session.step.ended") => {
                 let mut out = vec![usage(&d["tokens"])];
                 if let Some(snapshot) = usage_snapshot(d, e["id"].as_str()) {
@@ -323,6 +346,13 @@ impl Stream {
                         }),
                         Some("tool") => {
                             let state = &c["state"];
+                            if c["name"] == "todowrite"
+                                && state["status"] == "completed"
+                                && let Some(steps) =
+                                    del_agent::plan::todo_steps(&state["input"]["todos"])
+                            {
+                                out.push(todo_event(steps));
+                            }
                             out.push(AgentEvent::ToolCallStarted {
                                 id: string(c, "id"),
                                 name: string(c, "name"),
@@ -361,6 +391,15 @@ impl Stream {
             }
             _ => vec![],
         }
+    }
+}
+fn todo_event(steps: Vec<PlanStep>) -> AgentEvent {
+    AgentEvent::PlanUpdated {
+        id: "opencode:todos".into(),
+        update: PlanUpdate::Replace {
+            steps,
+            explanation: None,
+        },
     }
 }
 #[cfg(test)]
@@ -799,5 +838,47 @@ mod telemetry_tests {
         assert!(
             matches!(usage_snapshot(&data,Some("step")), Some(AgentEvent::UsageSnapshot{cost_usd:Some(0.),cost_scope:Some(scope),..}) if scope=="opencode:step")
         );
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn todo_success_matches_history_and_failure_never_completes_work() {
+        let mut stream = Stream::default();
+        let todos = json!([{"content":"Read", "status":"completed"},{"content":"Fix", "status":"in_progress"},{"content":"Skip", "status":"cancelled"}]);
+        stream.event(
+            &json!({"type":"session.tool.input.started","data":{"id":"call","name":"todowrite"}}),
+        );
+        let called = stream.event(
+            &json!({"type":"session.tool.called","data":{"id":"call","input":{"todos":todos}}}),
+        );
+        assert!(
+            !called
+                .iter()
+                .any(|event| matches!(event, AgentEvent::PlanUpdated { .. }))
+        );
+        let live = stream.event(&json!({"type":"session.tool.success","data":{"id":"call","content":[{"type":"text","text":"updated"}],"metadata":{"todos":todos}}}));
+        let plan = live
+            .iter()
+            .find(|event| matches!(event, AgentEvent::PlanUpdated { .. }))
+            .unwrap();
+        let history = Stream::default().message(&json!({"type":"assistant","id":"message","content":[{"type":"tool","name":"todowrite","id":"call","state":{"status":"completed","input":{"todos":todos}}}]}));
+        assert!(history.contains(plan));
+        stream.event(
+            &json!({"type":"session.tool.input.started","data":{"id":"failed","name":"todowrite"}}),
+        );
+        stream.event(
+            &json!({"type":"session.tool.called","data":{"id":"failed","input":{"todos":[]}}}),
+        );
+        let failed = stream.event(&json!({"type":"session.tool.failed","data":{"id":"failed","error":{"message":"denied"}}}));
+        assert!(
+            !failed
+                .iter()
+                .any(|event| matches!(event, AgentEvent::PlanUpdated { .. }))
+        );
+        assert!(stream.todo_calls.is_empty());
     }
 }

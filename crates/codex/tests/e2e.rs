@@ -629,3 +629,43 @@ async fn idle_thread_releases_promptly_while_another_chat_stays_open() {
         .unwrap();
     other_usable.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex; sends one small task-progress prompt"]
+async fn native_plan_updates_are_structured() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = CodexBackend::new(CodexOptions {
+        api_key: None,
+        ..Default::default()
+    });
+    let handle = backend
+        .start_temporary_session(config(dir.path(), PermissionMode::Ask))
+        .await
+        .unwrap();
+    let mut rx = handle.subscribe();
+    backend.send_prompt(&handle.id, UserInput::text("Use update_plan to set exactly two steps: 'Inspect progress rendering' as in_progress and 'Verify restoration' as pending. Then use update_plan again to mark the first step completed while leaving the second pending. Do no other work and reply done.")).await.unwrap();
+    let events = collect_until(&mut rx, is_end).await;
+    backend.shutdown().await.unwrap();
+    let updates: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::PlanUpdated {
+                update: PlanUpdate::Replace { steps, .. },
+                ..
+            } => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        updates.iter().any(|steps| steps.len() == 2
+            && steps[0].status == PlanStatus::InProgress
+            && steps[1].status == PlanStatus::Pending),
+        "expected an active plan: {updates:?}"
+    );
+    assert!(
+        updates.iter().any(|steps| steps.len() == 2
+            && steps[0].status == PlanStatus::Completed
+            && steps[1].status == PlanStatus::Pending),
+        "expected provider-reported partial completion: {updates:?}"
+    );
+}

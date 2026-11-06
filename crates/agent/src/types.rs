@@ -190,6 +190,10 @@ pub enum ApprovalResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    PlanUpdated {
+        id: String,
+        update: crate::PlanUpdate,
+    },
     ProviderSwitched {
         from: Provider,
         to: Provider,

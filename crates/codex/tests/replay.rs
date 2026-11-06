@@ -1128,9 +1128,9 @@ async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns()
         HANDSHAKE[2],
         ACCOUNT_OK[0],
         ACCOUNT_OK[1],
-        r#"> {"id":3,"method":"thread/start","params":{"cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","config":{"thread_unload_delay_secs":0}}}"#,
+        r#"> {"id":3,"method":"thread/start","params":{"cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","config":{"thread_unload_delay_secs":0,"tools.update_plan.enabled":true}}}"#,
         r#"< {"id":3,"result":{"thread":{"id":"parent","turns":[]}}}"#,
-        r#"> {"id":4,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true,"config":{"thread_unload_delay_secs":0}}}"#,
+        r#"> {"id":4,"method":"thread/fork","params":{"threadId":"parent","cwd":"/work","approvalPolicy":"untrusted","sandbox":"read-only","serviceName":"del","ephemeral":true,"excludeTurns":true,"config":{"thread_unload_delay_secs":0,"tools.update_plan.enabled":true}}}"#,
         r#"< {"id":4,"result":{"thread":{"id":"child","turns":[{"id":"old","status":"completed","items":[{"type":"userMessage","id":"u","content":[{"type":"text","text":"inherited"}]}]}]}}}"#,
     ]);
     let (client, rx, server) = replay(lines);

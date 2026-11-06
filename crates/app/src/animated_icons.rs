@@ -29,6 +29,7 @@ pub enum Glyph {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Morph {
+    PlanCheck,
     CopyCheck,
     SendStop,
     PlayPause,
@@ -295,6 +296,17 @@ pub(crate) fn morph_geometry(kind: Morph, t: f32) -> Vec<Stroke> {
                 },
             ]
         }
+        Morph::PlanCheck => {
+            let mut ring = arc(8., 8., 5.5, 0., TAU);
+            ring.opacity = 1. - t;
+            let mut check = line(&[
+                [3., 8.],
+                [3. + 3.5 * t, 8. + 3.5 * t],
+                [3. + 10. * t, 8. - 4. * t],
+            ]);
+            check.opacity = t;
+            vec![ring, check]
+        }
         Morph::Activity => geometry(Glyph::Activity, t, 0.),
         Morph::Disclosure => vec![line(&[
             [4., 6. + 4. * t],
@@ -434,6 +446,7 @@ mod tests {
             assert_ne!(rest[1].points, active[1].points);
         }
         for kind in [
+            Morph::PlanCheck,
             Morph::CopyCheck,
             Morph::SendStop,
             Morph::PlayPause,

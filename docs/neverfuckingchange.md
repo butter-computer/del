@@ -1053,3 +1053,16 @@ activity bar. It supersedes earlier rules where they conflict.
   stop the runtime. Force Quit/crash/reboot survival is not promised.
 - Hiding on Quit stops dictation, but preserves drafts, queued work, provider
   processes, Side chat identities, and terminal PTYs.
+
+## Provider progress checklists
+
+- Main and Side chats share the same provider-authored checklist. It appears only
+  when structured task data arrives, never by parsing assistant prose.
+- Pending, active, completed, and cancelled states remain distinct. Finishing,
+  interrupting, or failing a response never completes unfinished tasks.
+- Keep saved progress across reopening. Continue task lists beside a new turn
+  while preserving earlier cards; provider switches keep unrelated task IDs apart.
+- Keep the checklist readable when tool details collapse. Wrap long labels in
+  narrow Side chats. Use quiet progress motion with a static Reduced Motion path.
+- This display is separate from the Plan permission mode. Enable required task
+  tools only in Del's own provider processes or threads, preserving user settings.

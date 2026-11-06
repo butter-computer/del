@@ -94,6 +94,23 @@ async fn canonicalize(path: &Path) -> Result<PathBuf> {
         .map_err(|e| err(format!("canonicalize task failed: {e}")))??)
 }
 impl OpenCodeBackend {
+    /// Resolve through OpenCode itself, including JSONC and variable expansion,
+    /// before adding the progress-tool opt-in to this chat's process only.
+    async fn chat_server(&self, cwd: &Path) -> Result<Arc<Server>> {
+        let catalog = self.server(cwd).await?;
+        let config = catalog.json(Method::GET, "/api/config", None).await?;
+        let inline = self
+            .environment
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+        let overlay = progress_config(&config, inline.is_some())?;
+        let mut environment = self.environment.clone();
+        environment.push(("OPENCODE_CONFIG_CONTENT".into(), overlay.to_string()));
+        Ok(Arc::new(Server::start(cwd, &environment).await?))
+    }
     pub fn with_environment(environment: Vec<(String, String)>) -> Self {
         {
             let mut backend = Self::default();
@@ -678,7 +695,7 @@ impl AgentBackend for OpenCodeBackend {
     }
     async fn start_session(&self, mut config: SessionConfig) -> Result<SessionHandle> {
         config.cwd = canonicalize(&config.cwd).await?;
-        let server = Arc::new(Server::start(&config.cwd, &self.environment).await?);
+        let server = self.chat_server(&config.cwd).await?;
         let mut body = json!({"location":{"directory":config.cwd},"permissions":permissions(config.permission_mode)});
         if let Some(model) = model_ref(&config)? {
             body["model"] = model;
@@ -752,7 +769,7 @@ impl AgentBackend for OpenCodeBackend {
             // Its event stream or server is gone: stop it before re-attaching.
             self.close(id).await?;
         }
-        let server = Arc::new(Server::start(&config.cwd, &self.environment).await?);
+        let server = self.chat_server(&config.cwd).await?;
         self.install_tools(&server, id).await?;
         configure(&server, id, &config).await?;
         let mut mapping = mapping::Stream::default();
@@ -1495,5 +1512,160 @@ export default Plugin.define({{
             model_ref(&c).unwrap(),
             Some(json!({"id":"org/model","providerID":"provider","variant":"high"}))
         );
+    }
+}
+
+/// OpenCode resolves top-level experimental settings from the last document.
+/// Preserve that entire object, plus any existing inline configuration.
+fn progress_config(entries: &serde_json::Value, had_inline: bool) -> Result<serde_json::Value> {
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| err("invalid configuration response"))?;
+    let documents: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry["type"] == "document")
+        .collect();
+    let mut overlay = if had_inline {
+        documents
+            .iter()
+            .rev()
+            .find(|entry| entry["path"].is_null())
+            .map(|entry| entry["info"].clone())
+            .ok_or_else(|| err("inline configuration was not resolved"))?
+    } else {
+        json!({})
+    };
+    let mut experimental = documents
+        .iter()
+        .rev()
+        .find_map(|entry| entry["info"]["experimental"].as_object())
+        .cloned()
+        .unwrap_or_default();
+    experimental.insert("todo".into(), json!(true));
+    overlay["experimental"] = experimental.into();
+    Ok(overlay)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires authenticated OpenCode; sends one small todo prompt"]
+    async fn real_todo_updates_reach_the_normalized_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = OpenCodeBackend::default();
+        let handle = backend
+            .start_temporary_session(SessionConfig {
+                cwd: dir.path().into(),
+                provider: Provider::OpenCode,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                permission_mode: PermissionMode::Ask,
+            })
+            .await
+            .unwrap();
+        let mut rx = handle.subscribe();
+        backend.send_prompt(&handle.id, UserInput::text("Use todowrite to record exactly two todos: 'Inspect progress rendering' as in_progress and 'Verify restoration' as pending. Then use todowrite again to mark the first completed, leaving the second pending. Do no other work and reply done.")).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let mut plans = Vec::new();
+            loop {
+                let event = rx.recv().await.unwrap();
+                match event {
+                    AgentEvent::PlanUpdated {
+                        update: PlanUpdate::Replace { steps, .. },
+                        ..
+                    } => plans.push(steps),
+                    AgentEvent::TurnCompleted { .. } => return plans,
+                    AgentEvent::ApprovalRequested { id, detail, .. } => {
+                        let answer = if detail.starts_with("todowrite:") {
+                            ApprovalResponse::Approve
+                        } else {
+                            ApprovalResponse::Deny
+                        };
+                        backend
+                            .respond_approval(&handle.id, &id, answer)
+                            .await
+                            .unwrap();
+                    }
+                    AgentEvent::Error { message, .. } => eprintln!("Provider error: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        backend.shutdown().await.unwrap();
+        let plans = result.expect("OpenCode progress timed out");
+        assert!(
+            plans
+                .iter()
+                .any(|steps| steps.len() == 2 && steps[0].status == PlanStatus::InProgress)
+        );
+        assert!(plans.iter().any(|steps| steps.len() == 2
+            && steps[0].status == PlanStatus::Completed
+            && steps[1].status == PlanStatus::Pending));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2; no model inference"]
+    async fn real_progress_config_is_process_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut environment: Vec<_> = [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ]
+        .map(|key| {
+            (
+                key.to_owned(),
+                dir.path().join(key).to_string_lossy().into_owned(),
+            )
+        })
+        .into();
+        environment.push((
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{ /* preserve JSONC */ \"experimental\": {\"todo\": false} }".into(),
+        ));
+        let backend = OpenCodeBackend::with_environment(environment);
+        let chat = backend.chat_server(dir.path()).await.unwrap();
+        let config = chat.json(Method::GET, "/api/config", None).await.unwrap();
+        let entries = config.as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["info"]["experimental"]["todo"] == true)
+        );
+        let catalog = backend.server(dir.path()).await.unwrap();
+        let original = catalog
+            .json(Method::GET, "/api/config", None)
+            .await
+            .unwrap();
+        assert!(
+            original
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["info"]["experimental"]["todo"] == false)
+        );
+        drop(chat);
+        backend.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn progress_overlay_preserves_resolved_inline_and_experimental_settings() {
+        let entries = json!([
+            {"type":"document","path":"/config.jsonc","info":{"experimental":{"feature":true}}},
+            {"type":"directory","path":"/skills"},
+            {"type":"document","info":{"model":"test/model","experimental":{"todo":false,"other":true}}}
+        ]);
+        let overlay = progress_config(&entries, true).unwrap();
+        assert_eq!(
+            overlay,
+            json!({"model":"test/model","experimental":{"todo":true,"other":true}})
+        );
+        let overlay = progress_config(&entries, false).unwrap();
+        assert_eq!(overlay, json!({"experimental":{"todo":true,"other":true}}));
+        assert_eq!(entries[2]["info"]["experimental"]["todo"], false);
     }
 }

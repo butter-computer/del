@@ -283,6 +283,11 @@ impl Translator {
     }
 
     fn user(&mut self, v: &Value) -> Vec<AgentEvent> {
+        // Live stream-json uses snake_case; native JSONL transcripts use camelCase.
+        let tool_result = v
+            .get("tool_use_result")
+            .or_else(|| v.get("toolUseResult"))
+            .unwrap_or(&Value::Null);
         if v["isReplay"] == true && v["parent_tool_use_id"].is_null() {
             self.consumed_inputs = (self.consumed_inputs + 1).min(self.turns.len());
         }
@@ -312,7 +317,15 @@ impl Translator {
                 output_summary: summarize_output(&result_text(&block["content"])),
             });
             if let (ToolStatus::Completed, Some(info)) = (status, self.tools.get(id)) {
-                out.extend(file_change(info, &v["tool_use_result"]));
+                out.extend(file_change(info, tool_result));
+                // Child agents own separate task lists.
+                if v["parent_tool_use_id"].is_null() {
+                    out.extend(crate::plans::completed(
+                        &info.name,
+                        &info.input,
+                        tool_result,
+                    ));
+                }
             }
         }
         out

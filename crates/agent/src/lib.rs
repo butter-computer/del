@@ -11,6 +11,8 @@ pub mod index;
 pub mod manager;
 pub mod mock;
 pub mod peers;
+pub mod plan;
+pub use plan::{Plan, PlanStatus, PlanStep, PlanUpdate};
 pub mod pricing;
 pub mod procgroup;
 pub mod types;

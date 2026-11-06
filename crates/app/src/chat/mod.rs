@@ -9,6 +9,7 @@ mod citations;
 pub(crate) mod links;
 mod loading;
 pub mod model;
+mod plan;
 mod reply_times;
 mod view;
 mod work_history;

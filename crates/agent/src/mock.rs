@@ -6,6 +6,7 @@
 //! `tool` → a tool call with a progress update and a file change;
 //! `slow` → three tools that each run for seconds, to watch live states;
 //! `goal` → also reports an active native goal, for the goal bar;
+//! `checklist` → a changing structured plan, for checklist UI development;
 //! anything else → streamed text with reasoning and token usage.
 
 use crate::ModelInfo;
@@ -317,6 +318,42 @@ async fn run_turn(
                 full.push_str("Understood, I left it alone.");
             }
         }
+    } else if lower.contains("checklist") {
+        let labels = [
+            "Survey repo layout and top-level docs",
+            "Map backend data models and storage",
+            "Map product app, gateway, and evals",
+            "Synthesize full architecture summary",
+        ];
+        for active in 0..=labels.len() {
+            emit(
+                &state,
+                AgentEvent::PlanUpdated {
+                    id: format!("mock:{turn_id}"),
+                    update: crate::PlanUpdate::Replace {
+                        steps: labels
+                            .iter()
+                            .enumerate()
+                            .map(|(index, text)| crate::PlanStep {
+                                id: index.to_string(),
+                                text: (*text).into(),
+                                active_text: None,
+                                status: if index < active {
+                                    crate::PlanStatus::Completed
+                                } else if index == active {
+                                    crate::PlanStatus::InProgress
+                                } else {
+                                    crate::PlanStatus::Pending
+                                },
+                            })
+                            .collect(),
+                        explanation: None,
+                    },
+                },
+            );
+            pause().await;
+        }
+        full.push_str("The checklist is complete. This is a scripted UI preview.");
     } else if lower.contains("markdown") {
         full.push_str(MARKDOWN_REPLY);
     } else if lower.contains("slow") {

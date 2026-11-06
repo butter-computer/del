@@ -1561,6 +1561,10 @@ impl Render for SideChat {
 }
 
 #[cfg(test)]
+#[path = "side_chat_plan_tests.rs"]
+mod plan_tests;
+
+#[cfg(test)]
 #[path = "side_chat_slash_tests.rs"]
 mod slash_tests;
 

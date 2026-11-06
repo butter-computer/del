@@ -180,6 +180,33 @@ impl Mapper {
     pub fn notification(&mut self, method: &str, params: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match method {
+            "turn/plan/updated" => {
+                if let Some(turn) = params["turnId"].as_str()
+                    && let Some(plan) = params["plan"].as_array()
+                {
+                    let steps: Option<Vec<_>> = plan
+                        .iter()
+                        .enumerate()
+                        .map(|(index, step)| {
+                            Some(del_agent::PlanStep {
+                                id: index.to_string(),
+                                text: step["step"].as_str()?.to_owned(),
+                                active_text: None,
+                                status: del_agent::plan::status(step["status"].as_str()?)?,
+                            })
+                        })
+                        .collect();
+                    if let Some(steps) = steps {
+                        out.push(AgentEvent::PlanUpdated {
+                            id: format!("codex:{turn}"),
+                            update: del_agent::PlanUpdate::Replace {
+                                steps,
+                                explanation: params["explanation"].as_str().map(str::to_owned),
+                            },
+                        });
+                    }
+                }
+            }
             "thread/goal/updated" => {
                 if let Some(goal) = crate::commands::goal(&params["goal"]) {
                     out.push(AgentEvent::GoalUpdated { goal: Some(goal) });
@@ -748,5 +775,55 @@ mod mcp_confirmation_tests {
                 RequestAction::Reject { .. }
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    #[test]
+    fn structured_plan_updates_keep_provider_statuses_and_reject_unknown_states() {
+        let mut mapper = Mapper::default();
+        let params = json!({"threadId":"thread", "turnId":"turn", "explanation":"Inspect, then fix", "plan":[
+            {"step":"Inspect", "status":"completed"}, {"step":"Fix", "status":"inProgress"}, {"step":"Test", "status":"pending"}
+        ]});
+        let events = mapper.notification("turn/plan/updated", &params);
+        let [
+            AgentEvent::PlanUpdated {
+                id,
+                update: del_agent::PlanUpdate::Replace { steps, explanation },
+            },
+        ] = events.as_slice()
+        else {
+            panic!("plan update expected")
+        };
+        assert_eq!(id, "codex:turn");
+        assert_eq!(explanation.as_deref(), Some("Inspect, then fix"));
+        assert_eq!(
+            steps.iter().map(|s| s.status).collect::<Vec<_>>(),
+            vec![
+                del_agent::PlanStatus::Completed,
+                del_agent::PlanStatus::InProgress,
+                del_agent::PlanStatus::Pending
+            ]
+        );
+        let mut malformed = params.clone();
+        malformed["plan"][1]["status"] = json!("unknown");
+        assert!(
+            mapper
+                .notification("turn/plan/updated", &malformed)
+                .is_empty()
+        );
+        let end = mapper.notification(
+            "turn/completed",
+            &json!({"turn":{"id":"turn","status":"completed"}}),
+        );
+        assert!(
+            !end.iter()
+                .any(|event| matches!(event, AgentEvent::PlanUpdated { .. }))
+        );
+        assert!(
+            matches!(&mapper.notification("turn/plan/updated", &json!({"turnId":"turn","plan":[]}))[0], AgentEvent::PlanUpdated {update:del_agent::PlanUpdate::Replace {steps,..},..} if steps.is_empty())
+        );
     }
 }

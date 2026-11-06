@@ -72,6 +72,11 @@ pub struct ApprovalBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
+    Plan {
+        id: String,
+        plan: del_agent::Plan,
+        turn_id: Option<String>,
+    },
     ProviderSwitch {
         from: del_agent::Provider,
         to: del_agent::Provider,
@@ -134,6 +139,11 @@ pub struct ChatModel {
 }
 
 impl ChatModel {
+    pub fn plan_is_live(&self, index: usize) -> bool {
+        self.is_running()
+            && self.current_turn.is_some()
+            && matches!(self.blocks.get(index), Some(Block::Plan { turn_id, .. }) if turn_id == &self.current_turn)
+    }
     pub fn is_completed_response(&self, ix: usize) -> bool {
         self.completed_responses.contains(&ix)
     }
@@ -284,6 +294,53 @@ impl ChatModel {
 
     pub fn apply(&mut self, event: &AgentEvent) -> Option<Change> {
         match event {
+            AgentEvent::PlanUpdated { id, update } => {
+                // Provider switches are a boundary even when two providers use
+                // the same task IDs. Ordinary turns may update an existing list.
+                let index = self
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, block)| !matches!(block, Block::ProviderSwitch { .. }))
+                    .find_map(|(index, block)| {
+                        matches!(block, Block::Plan { id: existing, .. } if existing == id)
+                            .then_some(index)
+                    });
+                if let Some(index) = index {
+                    if let Block::Plan { plan, turn_id, .. } = &self.blocks[index]
+                        && self.current_turn.is_some()
+                        && turn_id != &self.current_turn
+                    {
+                        // Continue the provider's task list beside this turn,
+                        // retaining the previous response's historical state.
+                        let mut plan = plan.clone();
+                        plan.apply(update);
+                        return Some(self.push(Block::Plan {
+                            id: id.clone(),
+                            plan,
+                            turn_id: self.current_turn.clone(),
+                        }));
+                    }
+                    let Block::Plan { plan, turn_id, .. } = &mut self.blocks[index] else {
+                        unreachable!()
+                    };
+                    let previous = plan.clone();
+                    plan.apply(update);
+                    *turn_id = self.current_turn.clone();
+                    return (previous != *plan).then_some(Change::Updated(index));
+                }
+                let mut plan = del_agent::Plan::default();
+                plan.apply(update);
+                if plan.steps.is_empty() {
+                    return None;
+                }
+                Some(self.push(Block::Plan {
+                    id: id.clone(),
+                    plan,
+                    turn_id: self.current_turn.clone(),
+                }))
+            }
             AgentEvent::ProviderSwitched { from, to, .. } => {
                 self.seal();
                 self.goal = None;
@@ -1350,5 +1407,146 @@ mod goal_tests {
         assert_eq!(model.goal().unwrap().status, del_agent::GoalStatus::Active);
         model.apply(&AgentEvent::GoalUpdated { goal: None });
         assert!(model.goal().is_none());
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use del_agent::{PlanStatus, PlanUpdate};
+    fn task(id: &str, text: Option<&str>, status: PlanStatus) -> AgentEvent {
+        AgentEvent::PlanUpdated {
+            id: "claude:tasks".into(),
+            update: PlanUpdate::Upsert {
+                id: id.into(),
+                text: text.map(str::to_owned),
+                active_text: None,
+                status: Some(status),
+            },
+        }
+    }
+    #[test]
+    fn journal_replay_restores_progress_without_completing_unfinished_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation.jsonl");
+        let events = vec![
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            task("1", Some("Survey the repo"), PlanStatus::Completed),
+            task("2", Some("Map storage"), PlanStatus::Pending),
+            task("2", None, PlanStatus::InProgress),
+            task("3", Some("Summarize"), PlanStatus::Pending),
+        ];
+        del_agent::conversation::Journal::create(&path, &events).unwrap();
+        let mut model = ChatModel::default();
+        for event in del_agent::conversation::Journal::restore(&path).unwrap() {
+            model.apply(&event);
+        }
+        assert!(!model.is_running());
+        let Block::Plan { plan, .. } = &model.blocks[0] else {
+            panic!("expected plan")
+        };
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| step.status)
+                .collect::<Vec<_>>(),
+            vec![
+                PlanStatus::Completed,
+                PlanStatus::InProgress,
+                PlanStatus::Pending
+            ]
+        );
+        assert!(!model.plan_is_live(0));
+        assert_eq!(
+            model.apply(&task("2", None, PlanStatus::Completed)),
+            Some(Change::Updated(0))
+        );
+        assert_eq!(model.apply(&task("2", None, PlanStatus::Completed)), None);
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "next".into(),
+        });
+        assert!(!model.plan_is_live(0));
+        model.apply(&task("3", None, PlanStatus::InProgress));
+        let latest = model.blocks.len() - 1;
+        assert!(model.plan_is_live(latest));
+        assert!(!model.plan_is_live(0));
+        assert!(
+            matches!(&model.blocks[0], Block::Plan {plan, ..} if plan.steps[2].status == PlanStatus::Pending)
+        );
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "next".into(),
+            status: TurnStatus::Completed,
+        });
+        let Block::Plan { plan, .. } = &model.blocks[latest] else {
+            panic!()
+        };
+        assert_eq!(plan.steps[2].status, PlanStatus::InProgress);
+    }
+
+    #[test]
+    fn clearing_a_plan_on_a_later_turn_does_not_resurrect_old_tasks() {
+        let mut model = ChatModel::default();
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "first".into(),
+        });
+        model.apply(&task("old", Some("Old work"), PlanStatus::Pending));
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "first".into(),
+            status: TurnStatus::Completed,
+        });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "second".into(),
+        });
+        model.apply(&AgentEvent::PlanUpdated {
+            id: "claude:tasks".into(),
+            update: PlanUpdate::Replace {
+                steps: vec![],
+                explanation: None,
+            },
+        });
+        model.apply(&AgentEvent::TurnCompleted {
+            turn_id: "second".into(),
+            status: TurnStatus::Completed,
+        });
+        model.apply(&AgentEvent::TurnStarted {
+            turn_id: "third".into(),
+        });
+        model.apply(&task("new", Some("New work"), PlanStatus::Pending));
+        let Block::Plan { plan, .. } = model.blocks.last().unwrap() else {
+            panic!()
+        };
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].id, "new");
+    }
+
+    #[test]
+    fn absent_unknown_and_cleared_plans_do_not_invent_work() {
+        let mut model = ChatModel::default();
+        assert_eq!(
+            model.apply(&task("missing", None, PlanStatus::Completed)),
+            None
+        );
+        assert!(model.blocks.is_empty());
+        model.apply(&task("1", Some("Inspect"), PlanStatus::Pending));
+        model.apply(&AgentEvent::PlanUpdated {
+            id: "claude:tasks".into(),
+            update: PlanUpdate::Remove { id: "1".into() },
+        });
+        assert!(matches!(&model.blocks[0], Block::Plan {plan, ..} if plan.steps.is_empty()));
+        model.apply(&AgentEvent::ProviderSwitched {
+            from: del_agent::Provider::Claude,
+            to: del_agent::Provider::Codex,
+            session_id: del_agent::SessionId::new("next"),
+            at_ms: 0,
+        });
+        model.apply(&task(
+            "1",
+            Some("A different provider task"),
+            PlanStatus::Pending,
+        ));
+        assert_eq!(model.blocks.len(), 3);
+        assert!(matches!(&model.blocks[0], Block::Plan {plan, ..} if plan.steps.is_empty()));
     }
 }
