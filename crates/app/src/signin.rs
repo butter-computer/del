@@ -491,12 +491,12 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 v_flex().w_full().gap_4()
                     .child(h_flex().w_full().gap_4().items_center()
                         .child(v_flex().flex_1().min_w_0().gap_2()
-                            .child("Keep sessions running after quitting Del")
+                            .child("Keep sessions running when the window closes")
                             .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text())
-                                .child("Quit hides Del while chats, Side chats, and terminals keep running. Open Del to return to them.")))
+                                .child("Closing the window keeps chats, Side chats, and terminals running. Open Del to return. Quit Del stops the app.")))
                         .child(gpui_kit::component::switch::Switch::new("keep-sessions-running")
                             .checked(crate::session_lifecycle::keep_running())
-                            .accessibility_label("Keep sessions running after quitting Del")
+                            .accessibility_label("Keep sessions running when the window closes")
                             .on_click(|enabled, window, cx| {
                                 if let Err(error) = crate::session_lifecycle::set_keep_running(*enabled) {
                                     window.push_notification(gpui_kit::component::notification::Notification::error(format!("Could not save preference: {error}")), cx);

@@ -1,5 +1,4 @@
-//! Normal Quit detaches the UI while retaining its live runtime and PTYs.
-//! Force Quit, crashes and OS shutdown are intentionally outside this contract.
+//! Window close can retain the live runtime and PTYs; explicit Quit always exits.
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -73,6 +72,9 @@ pub fn can_background() -> bool {
     should_background(keep_running(), EXIT_REQUESTED.load(Ordering::SeqCst), false)
 }
 extern "C" fn native_should_background(system_shutdown: bool) -> bool {
+    // Dock Quit and native termination must mean the same thing as Command-Q.
+    // The saved background preference applies to window close, never Quit.
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
     should_background(
         keep_running(),
         EXIT_REQUESTED.load(Ordering::SeqCst),
@@ -111,18 +113,17 @@ pub fn install() -> UnboundedReceiver<()> {
 }
 
 pub fn request_quit(cx: &App) {
-    if should_background(keep_running(), EXIT_REQUESTED.load(Ordering::SeqCst), false) {
-        #[cfg(target_os = "macos")]
-        unsafe {
-            del_session_lifecycle_background();
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            background_requested();
-            cx.hide();
-        }
-    } else {
-        quit_completely(cx);
+    quit_completely(cx);
+}
+pub fn run_in_background(_cx: &App) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        del_session_lifecycle_background();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        background_requested();
+        _cx.hide();
     }
 }
 pub fn quit_completely(cx: &App) {
@@ -145,11 +146,26 @@ mod tests {
     use super::*;
     use ::core::prelude::v1::test;
     #[test]
-    fn quit_policy_preserves_normal_work_but_allows_real_shutdown() {
+    fn window_close_policy_preserves_work_but_allows_real_shutdown() {
         assert!(should_background(true, false, false));
         assert!(!should_background(false, false, false));
         assert!(!should_background(true, true, false));
         assert!(!should_background(true, false, true));
+    }
+    #[::gpui::test]
+    fn explicit_quit_exits_even_with_background_sessions_enabled(cx: &mut TestAppContext) {
+        let previous_keep = KEEP_RUNNING.swap(true, Ordering::SeqCst);
+        let previous_exit = EXIT_REQUESTED.swap(false, Ordering::SeqCst);
+        cx.update(|cx| request_quit(cx));
+        let menu_requested_exit = EXIT_REQUESTED.load(Ordering::SeqCst);
+        EXIT_REQUESTED.store(false, Ordering::SeqCst);
+        let dock_would_background = native_should_background(false);
+        let dock_requested_exit = EXIT_REQUESTED.load(Ordering::SeqCst);
+        KEEP_RUNNING.store(previous_keep, Ordering::SeqCst);
+        EXIT_REQUESTED.store(previous_exit, Ordering::SeqCst);
+        assert!(menu_requested_exit, "Command-Q must request shutdown");
+        assert!(!dock_would_background, "Dock Quit must not hide the app");
+        assert!(dock_requested_exit, "Dock Quit must request shutdown");
     }
     #[test]
     fn preference_defaults_on_and_persists_both_choices() {

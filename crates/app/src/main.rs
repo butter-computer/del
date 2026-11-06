@@ -290,6 +290,7 @@ actions!(
         ToggleSidebar,
         Quit,
         QuitCompletely,
+        RunInBackground,
         ToggleFiles,
         ToggleTerminal,
         CloseTab,
@@ -1061,7 +1062,7 @@ impl AppShell {
         .detach();
         window.on_window_should_close(cx, |_, cx| {
             if session_lifecycle::can_background() {
-                session_lifecycle::request_quit(cx);
+                session_lifecycle::run_in_background(cx);
                 false
             } else {
                 true
@@ -3594,17 +3595,18 @@ fn main() {
         }
         cx.on_action(|_: &Quit, cx| session_lifecycle::request_quit(cx));
         cx.on_action(|_: &QuitCompletely, cx| session_lifecycle::quit_completely(cx));
+        cx.on_action(|_: &RunInBackground, cx| session_lifecycle::run_in_background(cx));
         cx.set_menus(vec![Menu {
             name: "Del".into(),
             disabled: false,
             items: vec![
                 MenuItem::action("Settings…", ToggleProviders),
                 MenuItem::separator(),
+                MenuItem::action("Run in Background", RunInBackground),
                 MenuItem::action("Quit Del", Quit),
-                MenuItem::action("Quit Del Completely", QuitCompletely),
             ],
         }]);
-        // Closing the window quits, which also runs the shutdown hook.
+        // An actual window close (rather than backgrounding) runs the shutdown hook.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 session_lifecycle::quit_completely(cx);
