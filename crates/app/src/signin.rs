@@ -414,8 +414,8 @@ fn appearance_controls() -> impl IntoElement {
     let animated = appearance::background() != appearance::BackgroundAnimation::Off;
     settings_card()
         .child(
-            settings_row("Color mode", None)
-                .child(h_flex().flex_none().gap(zpx(ui::SPACE_XS)).children(
+            settings_row("Color mode", None).child(
+                h_flex().flex_none().gap(zpx(ui::SPACE_XS)).children(
                     [("Light", true), ("Dark", false)]
                         .into_iter()
                         .map(|(label, mode)| {
@@ -429,92 +429,89 @@ fn appearance_controls() -> impl IntoElement {
                                 .when(light == mode, |button| button.bg(rgba(0xffffff20)))
                                 .on_click(move |_, _, cx| appearance::set(mode, cx))
                         }),
-                )),
+                ),
+            ),
         )
         .child(settings_divider())
         .child(
-            settings_row("Theme", Some(theme.description().into()))
-                .child(
-                    Button::new("appearance-theme")
-                        .ghost()
-                        .small()
-                        .accessibility_label(format!("Theme: {}", theme.name()))
-                        .child(
-                            h_flex()
-                                .gap(zpx(ui::SPACE_SM))
-                                .items_center()
-                                .child(theme_swatches(theme, light))
-                                .child(theme.name())
-                                .child(
-                                    crate::icons::icon(IconName::ChevronDown)
-                                        .with_size(zpx(11.))
-                                        .text_color(ui::faint_text()),
-                                ),
+            settings_row("Theme", Some(theme.description().into())).child(
+                Button::new("appearance-theme")
+                    .ghost()
+                    .small()
+                    .accessibility_label(format!("Theme: {}", theme.name()))
+                    .child(
+                        h_flex()
+                            .gap(zpx(ui::SPACE_SM))
+                            .items_center()
+                            .child(theme_swatches(theme, light))
+                            .child(theme.name())
+                            .child(
+                                crate::icons::icon(IconName::ChevronDown)
+                                    .with_size(zpx(11.))
+                                    .text_color(ui::faint_text()),
+                            ),
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        ThemePreset::ALL.into_iter().fold(
+                            menu.scrollable(true).max_h(zpx(360.)),
+                            |menu, option| {
+                                menu.item(
+                                    PopupMenuItem::element(move |_, _| {
+                                        h_flex()
+                                            .id(option.name())
+                                            .role(Role::MenuItem)
+                                            .aria_label(option.name())
+                                            .min_w(zpx(210.))
+                                            .py(zpx(ui::SPACE_XS))
+                                            .gap(zpx(ui::SPACE_MD))
+                                            .items_center()
+                                            .child(theme_swatches(option, light))
+                                            .child(option.name())
+                                    })
+                                    .checked(option == theme)
+                                    .on_click(move |_, _, cx| appearance::set_preset(option, cx)),
+                                )
+                            },
                         )
-                        .dropdown_menu(move |menu, _, _| {
-                            ThemePreset::ALL.into_iter().fold(
-                                menu.scrollable(true).max_h(zpx(360.)),
-                                |menu, option| {
-                                    menu.item(
-                                        PopupMenuItem::element(move |_, _| {
-                                            h_flex()
-                                                .id(option.name())
-                                                .role(Role::MenuItem)
-                                                .aria_label(option.name())
-                                                .min_w(zpx(210.))
-                                                .py(zpx(ui::SPACE_XS))
-                                                .gap(zpx(ui::SPACE_MD))
-                                                .items_center()
-                                                .child(theme_swatches(option, light))
-                                                .child(option.name())
-                                        })
-                                        .checked(option == theme)
-                                        .on_click(
-                                            move |_, _, cx| appearance::set_preset(option, cx),
-                                        ),
-                                    )
-                                },
-                            )
-                        }),
-                ),
+                    }),
+            ),
         )
         .child(settings_divider())
         .child(
-            settings_row("Background animation", None)
-                .child(
-                    Button::new("appearance-background")
-                        .ghost()
-                        .small()
-                        .accessibility_label(format!(
-                            "Background animation: {}",
-                            appearance::background().name()
-                        ))
-                        .child(
-                            h_flex()
-                                .gap(zpx(ui::SPACE_SM))
-                                .items_center()
-                                .child(appearance::background().name())
-                                .child(
-                                    crate::icons::icon(IconName::ChevronDown)
-                                        .with_size(zpx(11.))
-                                        .text_color(ui::faint_text()),
-                                ),
+            settings_row("Background animation", None).child(
+                Button::new("appearance-background")
+                    .ghost()
+                    .small()
+                    .accessibility_label(format!(
+                        "Background animation: {}",
+                        appearance::background().name()
+                    ))
+                    .child(
+                        h_flex()
+                            .gap(zpx(ui::SPACE_SM))
+                            .items_center()
+                            .child(appearance::background().name())
+                            .child(
+                                crate::icons::icon(IconName::ChevronDown)
+                                    .with_size(zpx(11.))
+                                    .text_color(ui::faint_text()),
+                            ),
+                    )
+                    .dropdown_menu(|menu, _, _| {
+                        appearance::BackgroundAnimation::ALL.into_iter().fold(
+                            menu,
+                            |menu, choice| {
+                                menu.item(
+                                    PopupMenuItem::new(choice.name())
+                                        .checked(choice == appearance::background())
+                                        .on_click(move |_, _, cx| {
+                                            appearance::set_background(choice, cx)
+                                        }),
+                                )
+                            },
                         )
-                        .dropdown_menu(|menu, _, _| {
-                            appearance::BackgroundAnimation::ALL.into_iter().fold(
-                                menu,
-                                |menu, choice| {
-                                    menu.item(
-                                        PopupMenuItem::new(choice.name())
-                                            .checked(choice == appearance::background())
-                                            .on_click(move |_, _, cx| {
-                                                appearance::set_background(choice, cx)
-                                            }),
-                                    )
-                                },
-                            )
-                        }),
-                ),
+                    }),
+            ),
         )
         .child(
             settings_row(
@@ -526,14 +523,14 @@ fn appearance_controls() -> impl IntoElement {
                 None,
             )
             .child(
-                    gpui_kit::component::switch::Switch::new("background-mouse-reactive")
-                        // With nothing animating it reads as off; the saved choice returns
-                        // when an animation is picked again.
-                        .checked(animated && appearance::mouse_reactive())
-                        .disabled(!animated)
-                        .accessibility_label("Mouse reactive background")
-                        .on_click(|enabled, _, cx| appearance::set_mouse_reactive(*enabled, cx)),
-                ),
+                gpui_kit::component::switch::Switch::new("background-mouse-reactive")
+                    // With nothing animating it reads as off; the saved choice returns
+                    // when an animation is picked again.
+                    .checked(animated && appearance::mouse_reactive())
+                    .disabled(!animated)
+                    .accessibility_label("Mouse reactive background")
+                    .on_click(|enabled, _, cx| appearance::set_mouse_reactive(*enabled, cx)),
+            ),
         )
 }
 
@@ -712,7 +709,11 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .flex_none()
         .tooltip(|window, cx| {
             gpui_kit::component::tooltip::Tooltip::new("Back to chat")
-                .key_binding(Keystroke::parse("escape").ok().map(gpui_kit::component::kbd::Kbd::new))
+                .key_binding(
+                    Keystroke::parse("escape")
+                        .ok()
+                        .map(gpui_kit::component::kbd::Kbd::new),
+                )
                 .build(window, cx)
         })
         .child(

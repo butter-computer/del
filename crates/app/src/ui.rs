@@ -5,7 +5,6 @@
 //! lengths are logical pixels for `zoom::px`; never use gpui's rem utilities
 //! (`px_2`, `gap_3`, `rounded_md`, ...) in this crate: at Del's 13 px base they
 //! land on fractional sizes such as 6.5 and 9.75.
-#![allow(dead_code)] // Removed once every helper has callers.
 use crate::appearance::{self, ActionTone};
 use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_SM, TEXT_XS};
@@ -49,7 +48,6 @@ pub const ROW_TWO_LINE: f32 = 44.;
 pub const FILL_MS: u64 = 120;
 /// Popovers and floating panels: the same timing as dropdown menus.
 pub const POPOVER_ENTER: Duration = Duration::from_millis(180);
-pub const POPOVER_EXIT: Duration = Duration::from_millis(120);
 /// Vertical lift for a floating surface's entrance.
 pub const POPOVER_LIFT: f32 = 4.;
 /// Height and opacity reveal for rows that join a list or tray.
@@ -112,6 +110,15 @@ pub fn section_label(label: impl Into<SharedString>) -> Div {
         .child(label.into())
 }
 
+/// Group title above a set of rows ("Side history", Keybinds groups).
+pub fn group_title(label: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(zpx(del_core::typography::TEXT_MD))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(primary_text())
+        .child(label.into())
+}
+
 /// A quiet one-line note for empty or loading lists.
 pub fn empty_note(text: impl Into<SharedString>) -> Div {
     div()
@@ -167,21 +174,6 @@ pub fn group_digits(value: u64) -> String {
     out
 }
 
-/// Compact counts: 950, 1.2K, 184K, 1.5M.
-pub fn compact_count(value: u64) -> String {
-    match value {
-        0..1_000 => value.to_string(),
-        1_000..10_000 => trim_decimal(value as f64 / 1_000., "K"),
-        10_000..1_000_000 => format!("{}K", value / 1_000),
-        1_000_000..10_000_000 => trim_decimal(value as f64 / 1_000_000., "M"),
-        _ => format!("{}M", value / 1_000_000),
-    }
-}
-fn trim_decimal(value: f64, suffix: &str) -> String {
-    let text = format!("{value:.1}");
-    format!("{}{suffix}", text.trim_end_matches(".0"))
-}
-
 /// Memory in MB or GB: 512 MB, 2.0 GB.
 pub fn megabytes(mb: f64) -> String {
     if mb >= 1024. {
@@ -198,7 +190,7 @@ pub fn plural(count: usize, one: &str, many: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_count, display_path, ease_out, group_digits, megabytes, plural};
+    use super::{display_path, ease_out, group_digits, megabytes, plural};
 
     #[test]
     fn formats_numbers_for_people() {
@@ -207,11 +199,6 @@ mod tests {
         assert_eq!(group_digits(1000), "1,000");
         assert_eq!(group_digits(184523), "184,523");
         assert_eq!(group_digits(1234567), "1,234,567");
-        assert_eq!(compact_count(950), "950");
-        assert_eq!(compact_count(1000), "1K");
-        assert_eq!(compact_count(1250), "1.2K");
-        assert_eq!(compact_count(184523), "184K");
-        assert_eq!(compact_count(1_500_000), "1.5M");
         assert_eq!(megabytes(512.4), "512 MB");
         assert_eq!(megabytes(2048.), "2.0 GB");
         assert_eq!(plural(1, "file", "files"), "1 file");

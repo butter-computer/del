@@ -619,8 +619,7 @@ fn parse_limits(provider: Provider, value: &serde_json::Value) -> Option<UsageLi
             }
         }
     } else if provider == Provider::Codex {
-        let buckets: Vec<(Option<String>, &serde_json::Value)> = match value
-            ["rateLimitsByLimitId"]
+        let buckets: Vec<(Option<String>, &serde_json::Value)> = match value["rateLimitsByLimitId"]
             .as_object()
             .filter(|m| !m.is_empty())
         {
@@ -903,7 +902,12 @@ mod tests {
         let labels: Vec<_> = codex.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["5-hour", "Weekly", "GPT-5.3-Codex-Spark · 5-hour", "Allowance"]
+            [
+                "5-hour",
+                "Weekly",
+                "GPT-5.3-Codex-Spark · 5-hour",
+                "Allowance"
+            ]
         );
         let legacy = super::parse_limits(
             del_agent::Provider::Codex,

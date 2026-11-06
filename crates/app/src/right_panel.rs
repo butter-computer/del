@@ -1891,7 +1891,7 @@ impl RightPanel {
             .min_h_0()
             .p(zpx(crate::ui::SPACE_LG))
             .gap(zpx(crate::ui::SPACE_MD))
-            .child(group_title("Side history"))
+            .child(crate::ui::group_title("Side history"))
             .child(list)
             .into_any_element()
     }
@@ -4618,14 +4618,6 @@ impl Render for RightPanel {
 
 /// A group title above a list (13 px Medium, primary). Smaller list headings
 /// such as "Recent commits" use `ui::section_label` instead.
-fn group_title(label: &'static str) -> Div {
-    div()
-        .text_size(zpx(TEXT_MD))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(crate::ui::primary_text())
-        .child(label)
-}
-
 /// "Last prompt 4m ago", "Last prompt just now"; saved-time fallbacks for older
 /// snapshots read "Saved 4m ago", "Saved just now".
 fn side_history_recency(age: Option<String>, estimated: bool) -> String {

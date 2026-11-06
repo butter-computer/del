@@ -139,7 +139,11 @@ impl SessionUsage {
     pub fn cost_breakdown(&self) -> String {
         let mut lines = vec!["Main + side chats · all provider switches".into()];
         for (provider, cost) in self.provider_costs() {
-            lines.push(format!("{}  {}", provider_name(&provider), money(Some(cost))));
+            lines.push(format!(
+                "{}  {}",
+                provider_name(&provider),
+                money(Some(cost))
+            ));
         }
         if let Some(total) = self.cost_summary() {
             lines.push(format!("Total  {}", money(Some(total))));

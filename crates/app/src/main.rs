@@ -3084,7 +3084,7 @@ impl Render for AppShell {
                         dialog.opacity(search_ui::exit_opacity(started))
                     })
                     .bg(appearance::popup_surface())
-                    .rounded(zpx(14.))
+                    .rounded(zpx(crate::ui::RADIUS_MODAL))
                     .overflow_hidden()
                     // Escape and outside clicks ask here first, so they leave through the
                     // fade with Done instead of the dialog's own instant close.

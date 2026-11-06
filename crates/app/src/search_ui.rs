@@ -918,7 +918,7 @@ impl AppShell {
             dialog
                 .bg(crate::appearance::popup_surface())
                 .p_0()
-                .rounded(zpx(12.))
+                .rounded(zpx(crate::ui::RADIUS_MODAL))
                 .border_1()
                 .border_color(crate::appearance::separator())
                 .overflow_hidden()
