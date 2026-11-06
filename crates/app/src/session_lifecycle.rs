@@ -93,6 +93,15 @@ unsafe extern "C" {
     ) -> bool;
     fn del_session_lifecycle_background();
     fn del_session_lifecycle_foreground();
+    fn del_show_about_panel();
+}
+
+/// The standard About panel, which reads the name, version and icon from the bundle.
+pub fn show_about() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        del_show_about_panel();
+    }
 }
 
 /// Register after AppKit creates the delegate. The notification is delivered on

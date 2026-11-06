@@ -1,8 +1,58 @@
 //! Read-only reference for app shortcuts and context-specific keyboard controls.
-use crate::appearance::rgba;
+use crate::ui;
 use crate::zoom::px as zpx;
 use gpui_kit::component::*;
 use gpui_kit::*;
+
+/// Tracks a Command hold for the top tabs' number hints. They appear only
+/// after Command alone has been held for `ui::SHORTCUT_HINT_DELAY`, so a quick
+/// ⌘N or ⌘K never flashes them, and they hide on release, any key press, or
+/// window deactivation.
+#[derive(Default)]
+pub(crate) struct HintHold {
+    generation: u64,
+    holding: bool,
+    shown: bool,
+}
+
+impl HintHold {
+    /// Modifiers changed. Returns the generation to check once the delay has
+    /// passed when a fresh Command-only hold just began.
+    pub fn modifiers_changed(&mut self, command_only: bool) -> Option<u64> {
+        if !command_only {
+            self.cancel();
+            return None;
+        }
+        if self.holding {
+            return None;
+        }
+        self.holding = true;
+        self.shown = false;
+        self.generation += 1;
+        Some(self.generation)
+    }
+
+    /// A key press, release or deactivation ends the hold; a later key with
+    /// Command still down never brings the hints back.
+    pub fn cancel(&mut self) {
+        self.holding = false;
+        self.shown = false;
+        self.generation += 1;
+    }
+
+    /// The delay for `generation` passed; true when the hints should now show.
+    pub fn delay_elapsed(&mut self, generation: u64) -> bool {
+        if self.holding && generation == self.generation {
+            self.shown = true;
+        }
+        self.shown
+    }
+
+    /// Changes whenever the hints appear afresh, restarting their fade.
+    pub fn epoch(&self) -> u64 {
+        self.generation
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Picker {
@@ -123,31 +173,34 @@ pub fn render() -> impl IntoElement {
     v_flex()
         .w_full()
         .min_w_0()
-        .gap_5()
+        .gap(zpx(ui::SPACE_XL))
         .children(GROUPS.iter().map(|(title, shortcuts)| {
             v_flex()
                 .w_full()
                 .min_w_0()
-                .gap_2()
+                .gap(zpx(ui::SPACE_MD))
+                // Group title: 13 px Medium, primary ink.
                 .child(
                     div()
                         .text_size(zpx(13.))
                         .font_weight(FontWeight::MEDIUM)
+                        .text_color(ui::primary_text())
                         .child(*title),
                 )
+                // The same card surface as Settings cards.
                 .child(
                     v_flex()
                         .w_full()
                         .min_w_0()
-                        .rounded_lg()
-                        .bg(rgba(0xffffff08))
+                        .rounded(zpx(ui::RADIUS_CARD))
+                        .bg(crate::appearance::composer_surface())
                         .children(shortcuts.iter().map(|(label, shortcut)| {
                             h_flex()
                                 .w_full()
                                 .min_w_0()
-                                .px_3()
-                                .py(zpx(6.))
-                                .gap_3()
+                                .px(zpx(ui::SPACE_LG))
+                                .py(zpx(ui::SPACE_SM))
+                                .gap(zpx(ui::SPACE_LG))
                                 .items_center()
                                 .child(
                                     div()
@@ -155,19 +208,10 @@ pub fn render() -> impl IntoElement {
                                         .min_w_0()
                                         .whitespace_normal()
                                         .text_size(zpx(13.))
+                                        .text_color(ui::primary_text())
                                         .child(*label),
                                 )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .rounded(zpx(4.))
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .bg(rgba(0xffffff0d))
-                                        .text_size(zpx(12.))
-                                        .text_color(rgba(0xffffffb3))
-                                        .child(*shortcut),
-                                )
+                                .child(ui::kbd(*shortcut))
                         })),
                 )
         }))
@@ -177,6 +221,34 @@ pub fn render() -> impl IntoElement {
 mod tests {
     use super::*;
     use ::core::prelude::v1::test;
+
+    #[test]
+    fn hints_need_an_uninterrupted_command_hold() {
+        let mut hold = HintHold::default();
+        // A quick ⌘N: the key press cancels before the delay passes.
+        let generation = hold.modifiers_changed(true).unwrap();
+        hold.cancel();
+        assert!(!hold.delay_elapsed(generation));
+        assert!(!hold.shown);
+        // Holding Command alone shows them after the delay.
+        let generation = hold.modifiers_changed(true).unwrap();
+        assert_eq!(hold.modifiers_changed(true), None, "still the same hold");
+        assert!(hold.delay_elapsed(generation));
+        assert!(hold.shown);
+        // Release hides immediately, and a stale timer cannot bring them back.
+        assert_eq!(hold.modifiers_changed(false), None);
+        assert!(!hold.shown);
+        assert!(!hold.delay_elapsed(generation));
+        // Command plus another modifier never shows them.
+        let generation = hold.modifiers_changed(true).unwrap();
+        hold.modifiers_changed(false);
+        assert!(!hold.delay_elapsed(generation));
+        // Each appearance has a fresh epoch for its fade.
+        let first = hold.epoch();
+        let generation = hold.modifiers_changed(true).unwrap();
+        assert!(hold.delay_elapsed(generation));
+        assert_ne!(hold.epoch(), first);
+    }
     use gpui_kit::component::{button::Button, menu::DropdownMenu};
     #[::gpui::test]
     fn session_arrows_override_cursor_motion_inside_a_focused_composer(
