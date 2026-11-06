@@ -48,11 +48,26 @@ impl Queue {
         }
         queue
     }
+    #[cfg(test)]
     pub fn save(&self) -> std::io::Result<()> {
         let Some(path) = &self.storage else {
             return Ok(());
         };
         crate::sessions::write_atomic(path, &serde_json::to_vec(self)?, crate::sessions::PRIVATE)
+    }
+    /// Snapshot the queue now and write it on the background writer, so a key
+    /// press never waits for fsync. Later saves of the same queue supersede
+    /// earlier ones that have not reached disk yet.
+    pub fn save_later(&self) {
+        let Some(path) = &self.storage else {
+            return;
+        };
+        match serde_json::to_vec(self) {
+            Ok(bytes) => {
+                crate::sessions::write_atomic_later(path.clone(), bytes, crate::sessions::PRIVATE)
+            }
+            Err(error) => eprintln!("Could not save queued follow-ups: {error}"),
+        }
     }
     /// Delete a session's queue file and the imported attachment files it still
     /// references. Returns the attachment paths that were removed.
@@ -334,6 +349,28 @@ mod tests {
         let reopened = Queue::open(path);
         assert_eq!(reopened.next(), Some(busy));
         assert_eq!(reopened.items[1].error.as_deref(), Some("connection lost"));
+    }
+
+    #[test]
+    fn background_saves_coalesce_in_order_and_reach_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut queue = Queue::open(path.clone());
+        let first = queue.push(UserInput::text("first"));
+        queue.save_later();
+        let second = queue.push(UserInput::text("second"));
+        queue.save_later();
+        queue.reorder(&second, &first);
+        queue.save_later();
+        crate::sessions::flush_pending_writes();
+        let reopened = Queue::open(path.clone());
+        let ids: Vec<_> = reopened.items.iter().map(|item| item.id.clone()).collect();
+        assert_eq!(ids, [second.clone(), first]);
+        // A take after the reorder is the final state on disk, never an older snapshot.
+        queue.take(&second);
+        queue.save_later();
+        crate::sessions::flush_pending_writes();
+        assert_eq!(Queue::open(path).items.len(), 1);
     }
 
     #[test]
