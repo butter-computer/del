@@ -108,6 +108,57 @@ pub(crate) fn history(
     Ok(entries)
 }
 
+/// Queue items (id, sending, failed) and whether a reply runs.
+type ActivityKey = (Vec<(String, bool, bool)>, bool);
+
+/// Typing and streaming settle this long before a Side chat is saved.
+const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// One save's inputs, captured on the UI thread and written elsewhere.
+struct PreparedSave {
+    saved: SavedChat,
+    session: Option<SessionId>,
+    parent: Option<SessionId>,
+    path: Option<std::path::PathBuf>,
+    generation: u64,
+    /// The newest generation on disk; an older save never overwrites it.
+    written: std::sync::Arc<std::sync::Mutex<u64>>,
+}
+
+impl PreparedSave {
+    /// Export the live fork, then write. Returns the snapshot that was saved.
+    fn run(
+        mut self,
+        manager: &del_agent::SessionManager,
+    ) -> Result<Option<del_agent::ForkSnapshot>, String> {
+        // Retain the last good snapshot if the provider has just shut down.
+        if let Some(id) = &self.session {
+            match manager.export_fork(id) {
+                Ok(snapshot) => self.saved.snapshot = Some(snapshot),
+                Err(error) if self.saved.snapshot.is_none() => return Err(error.to_string()),
+                Err(_) => {}
+            }
+        }
+        let Some(snapshot) = self.saved.snapshot.clone() else {
+            return Ok(None);
+        };
+        self.saved.parent = self.parent.or_else(|| snapshot.parent().cloned());
+        if let Some(path) = &self.path {
+            let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+            if *written < self.generation {
+                serde_json::to_vec(&self.saved)
+                    .map_err(std::io::Error::other)
+                    .and_then(|bytes| {
+                        crate::sessions::write_atomic(path, &bytes, crate::sessions::PRIVATE)
+                    })
+                    .map_err(|error| format!("Could not save side chat: {error}"))?;
+                *written = self.generation;
+            }
+        }
+        Ok(Some(snapshot))
+    }
+}
+
 pub struct SideChat {
     context: Context,
     storage_id: String,
@@ -124,20 +175,41 @@ pub struct SideChat {
     provider_menu_open: bool,
     models_loading: bool,
     model_generation: u64,
-    save_pending: bool,
+    /// Bumped by each `save_soon`; only the latest timer saves.
+    save_generation: u64,
+    save_running: bool,
+    save_again: bool,
+    write_generation: u64,
+    written: std::sync::Arc<std::sync::Mutex<u64>>,
+    /// The queue and turn state last saved from a chat notification.
+    saved_activity: Option<ActivityKey>,
     storage_error: bool,
-    importing: bool,
+    /// Files still importing, by batch: shown as spinner chips. Every paste
+    /// or drop is kept; a second one waits its turn instead of being dropped.
+    importing: Vec<(u64, String)>,
+    import_batches: u64,
+    /// Send was pressed during an import; it goes out when the files land.
+    send_after_import: bool,
     loading: bool,
     waiting_for_tools: bool,
     closed: bool,
     visible: bool,
     error: Option<String>,
+    /// Errors waiting to be shown as toasts on the next frame.
+    toasts: Vec<String>,
 }
 impl EventEmitter<SendToMain> for SideChat {}
 impl EventEmitter<crate::chat::OpenLink> for SideChat {}
 impl EventEmitter<crate::chat::OpenPeer> for SideChat {}
 
 impl SideChat {
+    /// A failure the person should see once, as a toast like main chat's.
+    /// `error` keeps the latest message for callers that check it.
+    fn set_error(&mut self, message: String) {
+        self.toasts.push(message.clone());
+        self.error = Some(message);
+    }
+
     fn link_parent(&mut self, cx: &App) {
         if self.parent.is_some() || self.closed {
             return;
@@ -285,7 +357,7 @@ impl SideChat {
         }
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
-                .placeholder("Ask anything…")
+                .placeholder(crate::composer_ui::PLACEHOLDER)
                 .auto_grow(3, 8)
                 .submit_on_enter(true);
             input.set_submit_on_enter(true, cx);
@@ -299,7 +371,12 @@ impl SideChat {
             {
                 this.submit_with_mode(*secondary || window.modifiers().platform, window, cx);
             }
-            this.save_soon(cx);
+            match event {
+                // Typing only restarts the idle timer; leaving the field saves now.
+                InputEvent::Change => this.save_soon(cx),
+                InputEvent::Blur => this.save(cx),
+                _ => {}
+            }
         })
         .detach();
         cx.on_release(|this, cx| {
@@ -308,7 +385,7 @@ impl SideChat {
         })
         .detach();
         cx.on_app_quit(|this, cx| {
-            this.save(cx);
+            this.save_now(cx);
             async {}
         })
         .detach();
@@ -334,7 +411,7 @@ impl SideChat {
         cx.subscribe(
             &command_menu,
             |this, _, event: &crate::command_menu::ControlError, cx| {
-                this.error = Some(event.0.clone());
+                this.set_error(event.0.clone());
                 cx.notify();
             },
         )
@@ -355,14 +432,22 @@ impl SideChat {
             provider_menu_open: false,
             models_loading: false,
             model_generation: 0,
-            save_pending: false,
+            save_generation: 0,
+            save_running: false,
+            save_again: false,
+            write_generation: 0,
+            written: Default::default(),
+            saved_activity: None,
             storage_error: false,
-            importing: false,
+            importing: Vec::new(),
+            import_batches: 0,
+            send_after_import: false,
             loading: false,
             waiting_for_tools: false,
             closed: false,
             visible: false,
             error: None,
+            toasts: Vec::new(),
         };
         if let Some(path) = view.path() {
             match std::fs::read(&path) {
@@ -420,62 +505,114 @@ impl SideChat {
         view
     }
 
+    /// Save once activity pauses. Each call pushes the save back, so typing
+    /// and streamed chunks never write per event.
     fn save_soon(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.closed || self.save_pending {
+        if self.closed {
             return;
         }
-        self.save_pending = true;
+        self.save_generation += 1;
+        let generation = self.save_generation;
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(250))
-                .await;
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| {
-                this.save_pending = false;
-                this.save(cx);
+                if this.save_generation == generation {
+                    this.save(cx);
+                }
             });
         })
         .detach();
     }
 
-    pub fn save(&mut self, cx: &mut gpui::Context<Self>) {
-        self.report_costs(cx);
+    /// Capture what a save writes. The fork itself is exported off the UI thread.
+    fn prepare_save(&mut self, cx: &App) -> Option<PreparedSave> {
         if self.closed || self.storage_error {
-            return;
+            return None;
         }
-        // Retain the last good snapshot if the provider has just shut down.
-        if let Some(id) = &self.session {
-            match self.context.backend.manager.export_fork(id) {
-                Ok(snapshot) => self.saved.snapshot = Some(snapshot),
-                Err(error) if self.saved.snapshot.is_none() => {
-                    self.error = Some(error.to_string());
-                    return;
-                }
-                Err(_) => {}
-            }
-        }
-        if self.saved.snapshot.is_none() {
-            return;
-        }
-        self.saved.parent = self.parent.clone().or_else(|| {
-            self.saved
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.parent().cloned())
-        });
         self.saved.draft = self.draft_input(cx);
         if let Some(chat) = &self.chat {
             self.saved.queue = chat.read(cx).queue.items.clone();
         }
-        if let Some(path) = self.path() {
-            let result = serde_json::to_vec(&self.saved)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| {
-                    crate::sessions::write_atomic(&path, &bytes, crate::sessions::PRIVATE)
-                });
-            if let Err(error) = result {
-                self.error = Some(format!("Could not save side chat: {error}"));
-                cx.notify();
+        // A new fork has nothing to fall back on yet; export its first snapshot
+        // here so restarts and settings changes can rely on it immediately.
+        if self.saved.snapshot.is_none()
+            && let Some(id) = &self.session
+            && let Ok(snapshot) = self.context.backend.manager.export_fork(id)
+        {
+            self.saved.snapshot = Some(snapshot);
+        }
+        self.write_generation += 1;
+        Some(PreparedSave {
+            saved: self.saved.clone(),
+            session: self.session.clone(),
+            parent: self.parent.clone(),
+            path: self.path(),
+            generation: self.write_generation,
+            written: self.written.clone(),
+        })
+    }
+
+    /// Persist the fork, draft and queue without blocking a frame: export,
+    /// serialization and the fsync run on a blocking thread. Saves never
+    /// overlap, and a newer save always lands after an older one.
+    pub fn save(&mut self, cx: &mut gpui::Context<Self>) {
+        self.report_costs(cx);
+        if self.save_running {
+            self.save_again = true;
+            return;
+        }
+        let Some(prepared) = self.prepare_save(cx) else {
+            return;
+        };
+        if prepared.path.is_none() {
+            // Nothing to write (no data directory): only refresh the snapshot.
+            match prepared.run(&self.context.backend.manager) {
+                Ok(Some(snapshot)) => self.saved.snapshot = Some(snapshot),
+                Ok(None) => {}
+                Err(error) => self.set_error(error),
             }
+            return;
+        }
+        self.save_running = true;
+        let manager = self.context.backend.manager.clone();
+        let work = self
+            .context
+            .backend
+            .runtime
+            .spawn_blocking(move || prepared.run(&manager));
+        cx.spawn(async move |this, cx| {
+            let result = work
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                this.save_running = false;
+                match result {
+                    Ok(Some(snapshot)) => this.saved.snapshot = Some(snapshot),
+                    Ok(None) => {}
+                    Err(error) => {
+                        this.set_error(error);
+                        cx.notify();
+                    }
+                }
+                if std::mem::take(&mut this.save_again) {
+                    this.save(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Save synchronously, for quitting and closing where nothing runs later.
+    fn save_now(&mut self, cx: &mut gpui::Context<Self>) {
+        self.report_costs(cx);
+        let Some(prepared) = self.prepare_save(cx) else {
+            return;
+        };
+        match prepared.run(&self.context.backend.manager) {
+            Ok(Some(snapshot)) => self.saved.snapshot = Some(snapshot),
+            Ok(None) => {}
+            Err(error) => self.set_error(error),
         }
     }
 
@@ -544,11 +681,29 @@ impl SideChat {
                         cx.observe(&chat, |this, chat, cx| {
                             let errors =
                                 chat.update(cx, |chat, _| std::mem::take(&mut chat.pending_errors));
-                            if let Some(error) = errors.last() {
-                                this.error = Some(error.clone());
+                            for error in errors {
+                                this.set_error(error);
                             }
                             this.report_activity(false, cx);
-                            this.save_soon(cx);
+                            // Streamed chunks notify constantly; save only when the
+                            // queue or turn state changes. Replies save on completion.
+                            let activity = {
+                                let chat = chat.read(cx);
+                                (
+                                    chat.queue
+                                        .items
+                                        .iter()
+                                        .map(|item| {
+                                            (item.id.clone(), item.sending, item.error.is_some())
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    chat.is_running(),
+                                )
+                            };
+                            if this.saved_activity.as_ref() != Some(&activity) {
+                                this.saved_activity = Some(activity);
+                                this.save_soon(cx);
+                            }
                             cx.notify();
                         })
                         .detach();
@@ -574,6 +729,7 @@ impl SideChat {
                         cx.subscribe(&chat, |this, _, _: &crate::chat::ReplyCompleted, cx| {
                             if !this.closed {
                                 this.set_unread(!this.is_visible(cx), cx);
+                                this.save_soon(cx);
                             }
                         })
                         .detach();
@@ -669,9 +825,9 @@ impl SideChat {
     ) {
         self.goal_mode = command;
         let placeholder = if self.goal_mode.is_some() {
-            "Describe your goal, define measurable outcomes for best results"
+            crate::composer_ui::GOAL_PLACEHOLDER
         } else {
-            "Ask anything…"
+            crate::composer_ui::PLACEHOLDER
         };
         self.input.update(cx, |input, cx| {
             input.set_placeholder(placeholder, window, cx)
@@ -705,7 +861,7 @@ impl SideChat {
                 this.models_loading = false;
                 match result {
                     Ok(models) => this.models = models,
-                    Err(error) => this.error = Some(format!("Could not load models: {error}")),
+                    Err(error) => this.set_error(format!("Could not load models: {error}")),
                 }
                 cx.notify();
             });
@@ -747,9 +903,17 @@ impl SideChat {
             ) {
                 Ok(()) => {
                     self.error = None;
+                    // The written snapshot follows in the background; keep the
+                    // in-memory settings current for restarts in the meantime.
+                    if let Some(record) = self.record()
+                        && let Some(snapshot) = self.saved.snapshot.as_mut()
+                    {
+                        snapshot.config = record.config();
+                        snapshot.account_id = record.account_id;
+                    }
                     self.save(cx);
                 }
-                Err(error) => self.error = Some(format!("Could not save model settings: {error}")),
+                Err(error) => self.set_error(format!("Could not save model settings: {error}")),
             }
             cx.notify();
             return;
@@ -800,7 +964,7 @@ impl SideChat {
             return false;
         };
         if self.settings_locked(cx) {
-            self.error = Some(
+            self.set_error(
                 "Finish the current response and queued work before changing Fast mode.".into(),
             );
             cx.notify();
@@ -814,7 +978,7 @@ impl SideChat {
             "on" => true,
             "off" => false,
             _ => {
-                self.error = Some("Use /fast on or /fast off".into());
+                self.set_error("Use /fast on or /fast off".into());
                 cx.notify();
                 return true;
             }
@@ -828,7 +992,7 @@ impl SideChat {
         });
         if enabled {
             let Some(tier) = info.and_then(|model| model.fast_tier.clone()) else {
-                self.error = Some("Fast mode is unavailable for the selected model. Choose a supported model first.".into());
+                self.set_error("Fast mode is unavailable for the selected model. Choose a supported model first.".into());
                 cx.notify();
                 return true;
             };
@@ -849,7 +1013,11 @@ impl SideChat {
 
     fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if self.loading || self.importing {
+        if !self.importing.is_empty() {
+            self.send_after_import = true;
+            return;
+        }
+        if self.loading {
             return;
         }
         if self
@@ -862,9 +1030,7 @@ impl SideChat {
         let Some(chat) = &self.chat else {
             return;
         };
-        if chat.read(cx).is_loading() {
-            return;
-        }
+        // While history loads the chat holds the message and sends it after.
         if text.is_empty() && self.attachments.is_empty() {
             if steer {
                 let first = chat
@@ -881,7 +1047,7 @@ impl SideChat {
         }
         self.error = None;
         if self.goal_mode.is_some() && !self.attachments.is_empty() {
-            self.error = Some("Send attachments in a message before setting a goal.".into());
+            self.set_error("Send attachments in a message before setting a goal.".into());
             cx.notify();
             return;
         }
@@ -936,10 +1102,14 @@ impl SideChat {
         sources: Vec<crate::attachments::ImportSource>,
         cx: &mut gpui::Context<Self>,
     ) {
-        if sources.is_empty() || self.importing {
+        if sources.is_empty() {
             return;
         }
-        self.importing = true;
+        self.import_batches += 1;
+        let batch = self.import_batches;
+        self.importing
+            .extend(sources.iter().map(|source| (batch, source.label())));
+        cx.notify();
         let work = self.context.backend.runtime.spawn_blocking(move || {
             let directory = del_agent::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
@@ -951,22 +1121,31 @@ impl SideChat {
         });
         cx.spawn(async move |this, cx| {
             let result = work.await;
-            let _ = this.update(cx, |this, cx| {
-                this.importing = false;
+            let send = this.update(cx, |this, cx| {
+                this.importing.retain(|(at, _)| *at != batch);
                 match result {
                     Ok(results) => {
                         for result in results {
                             match result {
                                 Ok(file) => this.attachments.push(file),
-                                Err(error) => this.error = Some(error),
+                                Err(error) => this.set_error(format!("Could not attach {error}")),
                             }
                         }
                     }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => this.set_error(format!("Could not attach files: {error}")),
                 }
                 this.save(cx);
                 cx.notify();
+                this.importing.is_empty() && std::mem::take(&mut this.send_after_import)
             });
+            // A Send pressed during the import goes out now, with the files.
+            if send.unwrap_or(false)
+                && let Some(window) = cx.update(|cx| cx.active_window())
+            {
+                let _ = cx.update_window(window, |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.submit(window, cx));
+                });
+            }
         })
         .detach();
     }
@@ -1014,7 +1193,7 @@ impl SideChat {
         self.release_inner(false, cx);
     }
     fn release_inner(&mut self, forget: bool, cx: &mut gpui::Context<Self>) {
-        self.save(cx);
+        self.save_now(cx);
         self.closed = true;
         self.report_activity(false, cx);
         self.chat = None;
@@ -1133,7 +1312,7 @@ impl SideChat {
             "side-account",
             record.provider,
             !self.loading,
-            locked,
+            locked.then(|| self.settings_locked_reason(cx)),
         )
         .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
             crate::providers::VISIBLE
@@ -1221,7 +1400,7 @@ impl SideChat {
             .items_center()
             .flex_nowrap()
             .min_w_0()
-            .gap_0p5()
+            .gap(zpx(crate::ui::SPACE_2XS))
             .child(
                 div()
                     .id("side-provider-control")
@@ -1237,6 +1416,18 @@ impl SideChat {
                     .child(self.model_picker.clone()),
             )
             .into_any_element()
+    }
+
+    /// Why provider and model changes wait, for the locked chip's tooltip.
+    fn settings_locked_reason(&self, cx: &App) -> &'static str {
+        let chat = self.chat.as_ref().map(|chat| chat.read(cx));
+        if chat.is_some_and(|chat| chat.is_running()) {
+            "Can’t switch provider while a reply is running"
+        } else if chat.is_some_and(|chat| !chat.queue.items.is_empty()) {
+            "Can’t switch provider while messages are queued"
+        } else {
+            "Can’t switch provider until the Side chat is ready"
+        }
     }
 
     fn settings_locked(&self, cx: &App) -> bool {
@@ -1331,11 +1522,36 @@ impl SideChat {
 }
 
 impl Render for SideChat {
-    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        // The same dismissible toasts as main chat; nothing shifts the transcript.
+        // Windows without the component root (tests, previews) cannot show toasts.
+        let can_toast = window
+            .root::<gpui_kit::component::Root>()
+            .flatten()
+            .is_some();
+        for error in std::mem::take(&mut self.toasts)
+            .into_iter()
+            .filter(|_| can_toast)
+        {
+            window.defer(cx, move |window, cx| {
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::error(error)
+                        .title("Side chat error")
+                        .autohide(false),
+                    cx,
+                );
+            });
+        }
+        // A fork that could not start or restore has no transcript; say why in its place.
+        let start_error = self
+            .error
+            .clone()
+            .filter(|_| self.session.is_none() && !self.loading);
         let running = self.chat.as_ref().is_some_and(|c| c.read(cx).is_running());
-        let ready = self.chat.as_ref().is_some_and(|c| !c.read(cx).is_loading())
-            && !self.loading
-            && !self.importing;
+        // Loading history or importing files holds a send; only a fork that is
+        // still starting has nowhere to send it.
+        let ready = self.chat.is_some() && !self.loading;
+        let can_send_attachments = !self.attachments.is_empty() || !self.importing.is_empty();
         let empty = self
             .chat
             .as_ref()
@@ -1352,26 +1568,46 @@ impl Render for SideChat {
         let paste = send.clone();
         let cancel_goal = send.clone();
         let settings = self.settings(cx);
-        let attachments =
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .children(self.attachments.iter().enumerate().map(|(index, file)| {
-                    Button::new(("side-attachment", index))
-                        .ghost()
-                        .small()
-                        .label(format!(
-                            "{} ×",
-                            file.path.file_name().unwrap_or_default().to_string_lossy()
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+        // The same thumbnail chips as the main composer.
+        let attachments = h_flex()
+            .flex_wrap()
+            .p(zpx(crate::ui::SPACE_XS))
+            .gap(zpx(crate::ui::SPACE_MD))
+            .children(self.attachments.iter().enumerate().map(|(index, file)| {
+                let open = cx.entity().downgrade();
+                let remove = cx.entity().downgrade();
+                let link = url::Url::from_file_path(&file.path)
+                    .map(|url| url.to_string())
+                    .unwrap_or_else(|_| file.path.to_string_lossy().into_owned());
+                crate::followup_ui::attachment_chip(
+                    "side",
+                    index,
+                    file,
+                    cx,
+                    move |_, cx| {
+                        let _ =
+                            open.update(cx, |_, cx| cx.emit(crate::chat::OpenLink(link.clone())));
+                    },
+                    move |_, cx| {
+                        let _ = remove.update(cx, |this, cx| {
                             if index < this.attachments.len() {
                                 this.attachments.remove(index);
                                 this.save(cx);
                                 cx.notify();
                             }
-                        }))
-                }));
+                        });
+                    },
+                )
+                .into_any_element()
+            }))
+            .children(
+                self.importing
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, label))| {
+                        crate::followup_ui::pending_chip(index, label.clone()).into_any_element()
+                    }),
+            );
         let composer = crate::composer_ui::ComposerCard::new(
             &self.input,
             640.,
@@ -1389,8 +1625,8 @@ impl Render for SideChat {
         })
         .show_folder(false)
         .starting(!ready)
-        .attachments(!self.attachments.is_empty())
-        .attachment_content((!self.attachments.is_empty()).then(|| attachments.into_any_element()))
+        .attachments(can_send_attachments)
+        .attachment_content(can_send_attachments.then(|| attachments.into_any_element()))
         .on_send(move |window, cx| send.update(cx, |this, cx| this.submit(window, cx)))
         .on_stop(move |_, cx| {
             stop.update(cx, |this, cx| {
@@ -1463,42 +1699,17 @@ impl Render for SideChat {
                     }
                 }),
             )
-            .when_some(self.error.clone(), |v, error| {
-                v.child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .px_3()
-                        .py_2()
-                        .gap_1()
-                        .text_size(zpx(12.))
-                        .child(error)
-                        .when(
-                            self.session.is_none() && !self.loading && !self.storage_error,
-                            |v| {
-                                v.child(
-                                    Button::new("retry-side-start")
-                                        .ghost()
-                                        .small()
-                                        .label("Retry")
-                                        .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
-                                )
-                            },
-                        ),
-                )
-            })
             .child(if empty {
                 v_flex()
                     .flex_1()
                     .min_h_0()
                     .justify_center()
                     .items_center()
-                    .p_4()
-                    .gap_2()
+                    .p(zpx(crate::ui::SPACE_XL))
+                    .gap(zpx(crate::ui::SPACE_MD))
                     .text_size(zpx(13.))
                     .child(
-                        div().mb_2().child(
+                        div().mb(zpx(crate::ui::SPACE_MD)).child(
                             crate::icons::path("icons/side-chat.svg")
                                 .with_size(zpx(28.))
                                 .text_color(crate::appearance::secondary_text()),
@@ -1520,6 +1731,33 @@ impl Render for SideChat {
                             .text_center()
                             .child("Explore a side question with the main chat’s context."),
                     )
+                    .when_some(start_error, |column, error| {
+                        column.child(
+                            v_flex()
+                                .w_full()
+                                .max_w(zpx(320.))
+                                .mt(zpx(crate::ui::SPACE_MD))
+                                .items_center()
+                                .gap(zpx(crate::ui::SPACE_SM))
+                                .child(
+                                    crate::ui::inline_error(error)
+                                        .justify_center()
+                                        .text_center(),
+                                )
+                                .when(!self.storage_error, |column| {
+                                    column.child(
+                                        Button::new("retry-side-start")
+                                            .ghost()
+                                            .small()
+                                            .bg(crate::appearance::rgba(
+                                                crate::appearance::QUIET_FILL,
+                                            ))
+                                            .label("Retry")
+                                            .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
+                                    )
+                                }),
+                        )
+                    })
                     .into_any_element()
             } else {
                 div()
@@ -1533,7 +1771,7 @@ impl Render for SideChat {
                     .flex_none()
                     .w_full()
                     .min_w_0()
-                    .p_3()
+                    .p(zpx(crate::ui::SPACE_LG))
                     .items_center()
                     .child(
                         v_flex()
@@ -1542,18 +1780,48 @@ impl Render for SideChat {
                             .min_w_0()
                             .children(queue)
                             .child(
-                                div().relative().child(composer).child(
-                                    deferred(
+                                div()
+                                    .relative()
+                                    // Dropped files attach here, as in the main composer.
+                                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                                        this.attach(
+                                            paths
+                                                .paths()
+                                                .iter()
+                                                .cloned()
+                                                .map(crate::attachments::ImportSource::File)
+                                                .collect(),
+                                            cx,
+                                        )
+                                    }))
+                                    .child(composer)
+                                    .child(
                                         div()
                                             .absolute()
-                                            .bottom_full()
-                                            .mb_2()
-                                            .left_0()
-                                            .w_full()
-                                            .child(self.command_menu.clone()),
+                                            .inset_0()
+                                            .rounded(zpx(crate::ui::RADIUS_CARD))
+                                            .drag_over::<ExternalPaths>(|zone, _, _, _| {
+                                                zone.border_1()
+                                                    .border_color(
+                                                        crate::appearance::ActionTone::Accent
+                                                            .foreground()
+                                                            .opacity(0.6),
+                                                    )
+                                                    .bg(crate::ui::row_hover())
+                                            }),
                                     )
-                                    .with_priority(10),
-                                ),
+                                    .child(
+                                        deferred(
+                                            div()
+                                                .absolute()
+                                                .bottom_full()
+                                                .mb(zpx(crate::ui::SPACE_MD))
+                                                .left_0()
+                                                .w_full()
+                                                .child(self.command_menu.clone()),
+                                        )
+                                        .with_priority(10),
+                                    ),
                             ),
                     ),
             )
@@ -1815,6 +2083,8 @@ mod tests {
 
     fn side_queue_scenario(cx: &mut gpui::TestAppContext, provider: Provider) {
         cx.update(gpui_kit::init);
+        // Rows grow in over a reveal; measure the settled tray.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

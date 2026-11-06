@@ -77,7 +77,7 @@ fn side_chat_displays_its_own_progress_and_saves_it(cx: &mut gpui::TestAppContex
         "Side transcript must render its provider's plan"
     );
     side.update(cx, |side, cx| {
-        side.save(cx);
+        side.save_now(cx);
         let saved = serde_json::to_value(&side.saved).unwrap();
         assert!(
             saved.to_string().contains("plan_updated"),
