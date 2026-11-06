@@ -3,6 +3,7 @@ use crate::animated_icons::Glyph;
 use crate::appearance::rgba;
 use crate::keyboard_control::KeyboardControl as _;
 use crate::right_panel::Pane;
+use crate::ui;
 use crate::zoom::px as zpx;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::*;
@@ -13,11 +14,11 @@ pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
     h_flex()
         .h(zpx(44.))
         .flex_none()
-        .px_3()
-        .gap_3()
+        .px(zpx(ui::SPACE_LG))
+        .gap(zpx(ui::SPACE_LG))
         .child(
             h_flex()
-                .gap_2()
+                .gap(zpx(ui::SPACE_MD))
                 .text_color(rgba(0xffffff35))
                 .child(
                     crate::icons::icon(IconName::ArrowLeft).with_size(zpx(crate::icons::MARK_SIZE)),
@@ -34,9 +35,9 @@ pub fn address_bar(address: &Entity<InputState>) -> AnyElement {
             h_flex()
                 .flex_1()
                 .min_w_0()
-                .px_2()
+                .px(zpx(ui::SPACE_MD))
                 .h(zpx(28.))
-                .rounded(zpx(8.))
+                .rounded(zpx(ui::RADIUS_CARD))
                 .bg(rgba(0xffffff14))
                 .child(
                     Input::new(address)
@@ -68,9 +69,9 @@ pub fn tools<T: 'static>(
             .w_full()
             .min_w_0()
             .h(zpx(44.))
-            .px_3()
-            .gap_2()
-            .rounded_lg()
+            .px(zpx(ui::SPACE_LG))
+            .gap(zpx(ui::SPACE_MD))
+            .rounded(zpx(ui::RADIUS_CARD))
             .bg(rgba(0xffffff10))
             .hover(|b| b.bg(rgba(0xffffff18)))
             .cursor_pointer()
@@ -87,22 +88,13 @@ pub fn tools<T: 'static>(
                     .text_color(rgba(0xffffffb3)),
             )
             .child(div().flex_1().min_w_0().truncate().child(label))
-            .child(
-                div()
-                    .flex_none()
-                    .rounded(zpx(4.))
-                    .px_1p5()
-                    .text_size(zpx(12.))
-                    .text_color(crate::appearance::secondary_text())
-                    .bg(rgba(0xffffff08))
-                    .child(match pane {
-                        Pane::Changes => "⌃⇧G",
-                        Pane::Terminal => "⌃`",
-                        Pane::Files => "⌘P",
-                        Pane::SideChat => "⌥⌘S",
-                        _ => "",
-                    }),
-            )
+            .child(ui::kbd(match pane {
+                Pane::Changes => "⌃⇧G",
+                Pane::Terminal => "⌃`",
+                Pane::Files => "⌘P",
+                Pane::SideChat => "⌥⌘S",
+                _ => "",
+            }))
         })
     };
     let changes = tool(Pane::Changes, "Changes", cx);
@@ -132,7 +124,7 @@ pub fn tools<T: 'static>(
                         .w_full()
                         .max_w(zpx(320.))
                         .flex_none()
-                        .gap_2()
+                        .gap(zpx(ui::SPACE_MD))
                         .text_size(zpx(del_core::typography::TEXT_MD))
                         .child(changes)
                         .child(terminal)
@@ -162,8 +154,9 @@ impl RenderOnce for SideChatLauncher {
             gpui_kit::base::transition(
                 "side-history-reveal",
                 target,
+                // The rule's 240 ms slide, decelerating like other chrome.
                 gpui_kit::base::Transition::new(std::time::Duration::from_millis(240))
-                    .ease(ease_in_out),
+                    .ease(ui::ease_out),
                 window,
                 cx,
             )
@@ -215,13 +208,13 @@ impl RenderOnce for SideChatLauncher {
                         .role(gpui::Role::Button)
                         .aria_label("Open Side history, Option Shift Command S")
                         .h(zpx(36.))
-                        .pt_1()
+                        .pt(zpx(ui::SPACE_XS))
                         .flex_none()
                         .max_w_full()
                         .min_w_0()
-                        .gap_2()
-                        .px_2()
-                        .rounded(zpx(8.))
+                        .gap(zpx(ui::SPACE_MD))
+                        .px(zpx(ui::SPACE_MD))
+                        .rounded(zpx(ui::RADIUS_CARD))
                         .bg(history_surface)
                         .absolute()
                         .right_0()
@@ -240,15 +233,7 @@ impl RenderOnce for SideChatLauncher {
                         })
                         .child(crate::icons::path("icons/history.svg").with_size(zpx(16.)))
                         .child(div().min_w_0().truncate().child("Side history"))
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded(zpx(4.))
-                                .px_1p5()
-                                .text_size(zpx(11.))
-                                .bg(rgba(0xffffff08))
-                                .child("⌥⇧⌘S"),
-                        )
+                        .child(ui::kbd("⌥⇧⌘S"))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::OpenSideHistory), cx);
                         }),
@@ -264,9 +249,9 @@ impl RenderOnce for SideChatLauncher {
                     .h(zpx(44.))
                     .flex_none()
                     .min_w_0()
-                    .px_3()
-                    .gap_2()
-                    .rounded_lg()
+                    .px(zpx(ui::SPACE_LG))
+                    .gap(zpx(ui::SPACE_MD))
+                    .rounded(zpx(ui::RADIUS_CARD))
                     .bg(button_surface)
                     .hover(move |s| s.bg(button_hover_surface))
                     .cursor_pointer()
@@ -286,15 +271,7 @@ impl RenderOnce for SideChatLauncher {
                             .text_color(rgba(0xffffffb3)),
                     )
                     .child(div().flex_1().min_w_0().truncate().child("Side chat"))
-                    .child(
-                        div()
-                            .text_size(zpx(12.))
-                            .text_color(crate::appearance::secondary_text())
-                            .rounded(zpx(4.))
-                            .px_1p5()
-                            .bg(rgba(0xffffff08))
-                            .child("⌥⌘S"),
-                    ),
+                    .child(ui::kbd("⌥⌘S")),
             )
     }
 }
