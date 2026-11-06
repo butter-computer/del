@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(display_path(&home), "~");
         assert_eq!(display_path(&format!("{home}/code/del")), "~/code/del");
         assert_eq!(display_path("/tmp/x"), "/tmp/x");
-        assert_eq!(display_path(&format!("{home}other")), format!("{home}other"));
+        assert_eq!(
+            display_path(&format!("{home}other")),
+            format!("{home}other")
+        );
     }
 
     #[test]

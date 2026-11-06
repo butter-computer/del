@@ -313,7 +313,6 @@ mod age_tests {
     }
 }
 
-
 pub(crate) fn fading_title(text: String) -> impl IntoElement {
     let label = text.clone();
     let text: SharedString = text.replace(['\n', '\r'], " ").into();
@@ -486,7 +485,11 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
         .size(crate::icons::button_size())
         .p_0()
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
-        .text_color(if pinned { crate::ui::primary_text() } else { crate::ui::secondary_text() })
+        .text_color(if pinned {
+            crate::ui::primary_text()
+        } else {
+            crate::ui::secondary_text()
+        })
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
@@ -1764,7 +1767,9 @@ pub fn render(
                     footer_button("show-archived", cx)
                         .selected(show_archived)
                         .when(show_archived, |button| {
-                            button.bg(crate::ui::row_selected()).text_color(crate::ui::primary_text())
+                            button
+                                .bg(crate::ui::row_selected())
+                                .text_color(crate::ui::primary_text())
                         })
                         .tooltip(if show_archived {
                             "Show active sessions"
@@ -1813,7 +1818,9 @@ pub fn render(
                     footer_button("settings-entry", cx)
                         .selected(providers_open)
                         .when(providers_open, |button| {
-                            button.bg(crate::ui::row_selected()).text_color(crate::ui::primary_text())
+                            button
+                                .bg(crate::ui::row_selected())
+                                .text_color(crate::ui::primary_text())
                         })
                         .tooltip_with_action("Settings", &crate::ToggleProviders, None)
                         .accessibility_label("Settings")

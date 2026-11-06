@@ -899,7 +899,10 @@ impl AppShell {
         }
         if let Err(error) = self.terminal_store.save(&TerminalStore::path()) {
             self.state.update(cx, |state, cx| {
-                state.report(state::notices::Severity::Warning, format!("Could not save terminal history: {error}"));
+                state.report(
+                    state::notices::Severity::Warning,
+                    format!("Could not save terminal history: {error}"),
+                );
                 cx.notify();
             });
         }
@@ -1366,7 +1369,10 @@ impl AppShell {
                     && let Err(error) = this.sidebar_widths.save()
                 {
                     this.state.update(cx, |state, cx| {
-                        state.report(state::notices::Severity::Warning, format!("Could not save sidebar widths: {error}"));
+                        state.report(
+                            state::notices::Severity::Warning,
+                            format!("Could not save sidebar widths: {error}"),
+                        );
                         cx.notify();
                     });
                 }
@@ -1606,7 +1612,10 @@ impl AppShell {
     fn persist_right(&self, cx: &mut Context<Self>) {
         if let Err(error) = self.right_store.save(&self.right_store_path) {
             self.state.update(cx, |state, cx| {
-                state.report(state::notices::Severity::Warning, format!("Could not save sidebar state: {error}"));
+                state.report(
+                    state::notices::Severity::Warning,
+                    format!("Could not save sidebar state: {error}"),
+                );
                 cx.notify();
             });
         }
@@ -1615,7 +1624,10 @@ impl AppShell {
     fn delete_browser_profile(&mut self, profile: String, cx: &mut Context<Self>) {
         if let Err(error) = crate::browser::record_deletion(&profile, true) {
             self.state.update(cx, |state, cx| {
-                state.report(state::notices::Severity::Warning, format!("Could not schedule browser data deletion: {error}"));
+                state.report(
+                    state::notices::Severity::Warning,
+                    format!("Could not schedule browser data deletion: {error}"),
+                );
                 cx.notify();
             });
             return;
@@ -2279,8 +2291,12 @@ impl AppShell {
         }
         {
             let live: HashSet<u64> = tabs.iter().map(|(_, uid, _, _)| *uid).collect();
-            self.close_slots.borrow_mut().retain(|uid, _| live.contains(uid));
-            self.tab_shifts.borrow_mut().retain(|uid, _| live.contains(uid));
+            self.close_slots
+                .borrow_mut()
+                .retain(|uid, _| live.contains(uid));
+            self.tab_shifts
+                .borrow_mut()
+                .retain(|uid, _| live.contains(uid));
         }
         let drag_source = dragging_tab.and_then(|uid| {
             tabs.iter()
@@ -2299,7 +2315,11 @@ impl AppShell {
                 .rounded(zpx(8.0))
                 .cursor_pointer()
                 .text_size(zpx(TEXT_MD))
-                .text_color(if active { crate::ui::primary_text() } else { muted })
+                .text_color(if active {
+                    crate::ui::primary_text()
+                } else {
+                    muted
+                })
                 .when(active, |t| t.bg(crate::ui::row_selected()))
                 .when(!active, |t| t.hover(|t| t.bg(crate::ui::row_hover())))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3000,9 +3020,11 @@ impl Render for AppShell {
         let mut notices = self.state.update(cx, |state, _| state.take_notices());
         for chat in self.chats.values() {
             let errors = chat.update(cx, |chat, _| std::mem::take(&mut chat.pending_errors));
-            notices.extend(errors.iter().map(|error| {
-                state::notices::Notice::new(state::notices::Severity::Error, error)
-            }));
+            notices.extend(
+                errors.iter().map(|error| {
+                    state::notices::Notice::new(state::notices::Severity::Error, error)
+                }),
+            );
         }
         if !notices.is_empty() {
             let state = self.state.clone();
@@ -3410,35 +3432,38 @@ impl Render for AppShell {
                     window.prevent_default();
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
-                let modifiers = event.modifiers;
-                let command_only = modifiers.platform
-                    && !modifiers.shift
-                    && !modifiers.alt
-                    && !modifiers.control
-                    && !modifiers.function
-                    && !this.search_open;
-                match this.hint_hold.modifiers_changed(command_only) {
-                    Some(generation) => {
-                        cx.spawn_in(window, async move |this, cx| {
-                            cx.background_executor()
-                                .timer(ui::SHORTCUT_HINT_DELAY)
-                                .await;
-                            let _ = this.update(cx, |this, cx| {
-                                if this.hint_hold.delay_elapsed(generation) && !this.search_open {
-                                    this.state.update(cx, |state, cx| {
-                                        state.shortcut_hints = true;
-                                        cx.notify();
-                                    });
-                                }
-                            });
-                        })
-                        .detach();
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    let modifiers = event.modifiers;
+                    let command_only = modifiers.platform
+                        && !modifiers.shift
+                        && !modifiers.alt
+                        && !modifiers.control
+                        && !modifiers.function
+                        && !this.search_open;
+                    match this.hint_hold.modifiers_changed(command_only) {
+                        Some(generation) => {
+                            cx.spawn_in(window, async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(ui::SHORTCUT_HINT_DELAY)
+                                    .await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.hint_hold.delay_elapsed(generation) && !this.search_open
+                                    {
+                                        this.state.update(cx, |state, cx| {
+                                            state.shortcut_hints = true;
+                                            cx.notify();
+                                        });
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
+                        None if !command_only => this.hide_shortcut_hints(cx),
+                        None => {}
                     }
-                    None if !command_only => this.hide_shortcut_hints(cx),
-                    None => {}
-                }
-            }))
+                }),
+            )
             // Any key, including the second half of ⌘N or ⌘K, ends the hold.
             .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
                 this.hide_shortcut_hints(cx);

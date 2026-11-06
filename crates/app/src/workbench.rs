@@ -453,9 +453,7 @@ impl AppShell {
             }
         } else {
             self.bottom.maximized = false;
-            self.bottom
-                .max_motion
-                .set(false, cx.reduce_motion(), now);
+            self.bottom.max_motion.set(false, cx.reduce_motion(), now);
             self.focus_composer(window, cx);
         }
         cx.notify();
@@ -548,112 +546,121 @@ impl AppShell {
                 .w_full()
                 .min_h_0()
                 .when(settled_max, |panel| panel.flex_1())
-                .when(!settled_max, |panel| panel.flex_none().h(zpx(full * progress)))
+                .when(!settled_max, |panel| {
+                    panel.flex_none().h(zpx(full * progress))
+                })
                 .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .overflow_hidden()
-                        .child(
-            v_flex()
-                .id("bottom-panel")
-                .relative()
-                .w_full()
-                .when(settled_max, |panel| panel.h_full())
-                .when(!settled_max, |panel| panel.h(zpx(full)))
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .h(zpx(PANEL_HEADER_HEIGHT))
-                        .items_center()
-                        .gap(zpx(crate::ui::SPACE_SM))
-                        .text_size(zpx(TEXT_SM))
-                        .child(
-                            div()
-                                .px(zpx(crate::ui::SPACE_SM))
-                                .py(zpx(3.0))
-                                .rounded(zpx(6.0))
-                                .bg(crate::ui::row_selected())
-                                .text_color(crate::ui::primary_text())
-                                .child("Terminal"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family("Menlo")
-                                .text_color(rgba(0xffffff70))
-                                .child(format!("zsh — {project}")),
-                        )
-                        .child(
-                            chrome_button(
-                                "bottom-maximize",
-                                if maximized {
-                                    "Restore panel size"
-                                } else {
-                                    "Maximize panel"
-                                },
-                                true,
+                    div().absolute().inset_0().overflow_hidden().child(
+                        v_flex()
+                            .id("bottom-panel")
+                            .relative()
+                            .w_full()
+                            .when(settled_max, |panel| panel.h_full())
+                            .when(!settled_max, |panel| panel.h(zpx(full)))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .h(zpx(PANEL_HEADER_HEIGHT))
+                                    .items_center()
+                                    .gap(zpx(crate::ui::SPACE_SM))
+                                    .text_size(zpx(TEXT_SM))
+                                    .child(
+                                        div()
+                                            .px(zpx(crate::ui::SPACE_SM))
+                                            .py(zpx(3.0))
+                                            .rounded(zpx(6.0))
+                                            .bg(crate::ui::row_selected())
+                                            .text_color(crate::ui::primary_text())
+                                            .child("Terminal"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family("Menlo")
+                                            .text_color(rgba(0xffffff70))
+                                            .child(format!("zsh — {project}")),
+                                    )
+                                    .child(
+                                        chrome_button(
+                                            "bottom-maximize",
+                                            if maximized {
+                                                "Restore panel size"
+                                            } else {
+                                                "Maximize panel"
+                                            },
+                                            true,
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                if maximized {
+                                                    "Restore panel size"
+                                                } else {
+                                                    "Maximize panel"
+                                                },
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .size(zpx(24.0))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.bottom.maximized = !this.bottom.maximized;
+                                            this.bottom.max_motion.set(
+                                                this.bottom.maximized,
+                                                cx.reduce_motion(),
+                                                std::time::Instant::now(),
+                                            );
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            crate::icons::icon(if maximized {
+                                                IconName::Minimize
+                                            } else {
+                                                IconName::Maximize
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        chrome_button("bottom-close", "Close panel", true)
+                                            .tooltip(|window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    "Close panel",
+                                                )
+                                                .action(&crate::ToggleTerminalPanel, None)
+                                                .build(window, cx)
+                                            })
+                                            .size(zpx(24.0))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_bottom_panel(window, cx)
+                                            }))
+                                            .child(crate::icons::icon(IconName::Close)),
+                                    ),
                             )
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if maximized {
-                                    "Restore panel size"
-                                } else {
-                                    "Maximize panel"
-                                })
-                                .build(window, cx)
-                            })
-                            .size(zpx(24.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.bottom.maximized = !this.bottom.maximized;
-                                this.bottom.max_motion.set(
-                                    this.bottom.maximized,
-                                    cx.reduce_motion(),
-                                    std::time::Instant::now(),
-                                );
-                                cx.notify();
-                            }))
-                            .child(crate::icons::icon(if maximized {
-                                IconName::Minimize
-                            } else {
-                                IconName::Maximize
-                            })),
-                        )
-                        .child(
-                            chrome_button("bottom-close", "Close panel", true)
-                                .tooltip(|window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new("Close panel")
-                                        .action(&crate::ToggleTerminalPanel, None)
-                                        .build(window, cx)
-                                })
-                                .size(zpx(24.0))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_bottom_panel(window, cx)
-                                }))
-                                .child(crate::icons::icon(IconName::Close)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .rounded(zpx(self.metrics.page_radius))
-                        .overflow_hidden()
-                        .bg(crate::appearance::page_surface())
-                        .when_some(self.bottom.error.clone(), |body, error| {
-                            body.child(div().p(zpx(crate::ui::SPACE_SM)).text_size(zpx(TEXT_SM)).child(error))
-                        })
-                        .when_some(
-                            self.bottom.terminals.get(&root).cloned(),
-                            |body, terminal| {
-                                let view = terminal.read(cx).terminal_view();
-                                crate::terminal_host::apply_shell_theme(&view, cx);
-                                body.child(terminal)
-                            },
-                        ),
-                ),
-                        ),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .rounded(zpx(self.metrics.page_radius))
+                                    .overflow_hidden()
+                                    .bg(crate::appearance::page_surface())
+                                    .when_some(self.bottom.error.clone(), |body, error| {
+                                        body.child(
+                                            div()
+                                                .p(zpx(crate::ui::SPACE_SM))
+                                                .text_size(zpx(TEXT_SM))
+                                                .child(error),
+                                        )
+                                    })
+                                    .when_some(
+                                        self.bottom.terminals.get(&root).cloned(),
+                                        |body, terminal| {
+                                            let view = terminal.read(cx).terminal_view();
+                                            crate::terminal_host::apply_shell_theme(&view, cx);
+                                            body.child(terminal)
+                                        },
+                                    ),
+                            ),
+                    ),
                 )
                 // Outside the clip, so the sash keeps its full 6 px target.
                 .child(

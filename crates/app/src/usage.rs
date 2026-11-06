@@ -85,7 +85,9 @@ impl Usage {
             self.loading_since = Some(std::time::Instant::now());
             // Repaint once the delay has passed, so a slow read shows its note.
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(crate::ui::LOADING_DELAY).await;
+                cx.background_executor()
+                    .timer(crate::ui::LOADING_DELAY)
+                    .await;
                 let _ = this.update(cx, |_, cx| cx.notify());
             })
             .detach();
@@ -208,63 +210,64 @@ impl Render for Usage {
             && self
                 .loading_since
                 .is_some_and(|since| since.elapsed() >= crate::ui::LOADING_DELAY);
-        let content = v_flex()
-            .w(zpx(240.))
-            .whitespace_normal()
-            .gap(zpx(crate::ui::SPACE_MD))
-            .child(
-                div()
-                    .text_size(zpx(del_core::typography::TEXT_MD))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Memory usage"),
-            )
-            .child(
-                div()
-                    .relative()
-                    .overflow_hidden()
-                    .child(
-                        v_flex()
-                            .id("memory-list")
-                            .max_h(zpx(166.))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .when(show_loading, |list| {
-                                list.child(crate::ui::empty_note("Reading memory…"))
-                            })
-                            .when(!self.loading && self.entries.is_empty(), |list| {
-                                list.child(crate::ui::empty_note("No loaded sessions"))
-                            })
-                            .children(self.entries.iter().map(|entry| {
-                                let id = entry.id.clone();
-                                let hover_id = id.clone();
-                                let hovered = self.hovered.as_ref() == Some(&id);
-                                let unload_id = id.clone();
-                                let delete_id = id.clone();
-                                let terminal = entry.terminal;
-                                let title = self.state.read(cx).current_title(&id);
-                                let state = self.state.read(cx);
-                                let provider = if terminal {
-                                    state
-                                        .terminal_rows
-                                        .iter()
-                                        .find(|row| row.id == id)
-                                        .and_then(|row| row.provider)
-                                } else {
-                                    state.provider_of(&id)
-                                };
-                                let memory = entry
-                                    .bytes
-                                    .map(|n| crate::ui::megabytes(n as f64 / 1_048_576.))
-                                    .unwrap_or_else(|| "—".into());
-                                // Keyboard focus reveals the row's actions as hover does.
-                                let row_focus = state
-                                    .control_focus
-                                    .container(&format!("memory-{}", id.0), cx);
-                                let hovered = hovered
-                                    || crate::keyboard_control::keyboard_within(
-                                        &row_focus, window, cx,
-                                    );
-                                h_flex()
+        let content =
+            v_flex()
+                .w(zpx(240.))
+                .whitespace_normal()
+                .gap(zpx(crate::ui::SPACE_MD))
+                .child(
+                    div()
+                        .text_size(zpx(del_core::typography::TEXT_MD))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Memory usage"),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .overflow_hidden()
+                        .child(
+                            v_flex()
+                                .id("memory-list")
+                                .max_h(zpx(166.))
+                                .overflow_y_scroll()
+                                .track_scroll(&self.scroll)
+                                .when(show_loading, |list| {
+                                    list.child(crate::ui::empty_note("Reading memory…"))
+                                })
+                                .when(!self.loading && self.entries.is_empty(), |list| {
+                                    list.child(crate::ui::empty_note("No loaded sessions"))
+                                })
+                                .children(self.entries.iter().map(|entry| {
+                                    let id = entry.id.clone();
+                                    let hover_id = id.clone();
+                                    let hovered = self.hovered.as_ref() == Some(&id);
+                                    let unload_id = id.clone();
+                                    let delete_id = id.clone();
+                                    let terminal = entry.terminal;
+                                    let title = self.state.read(cx).current_title(&id);
+                                    let state = self.state.read(cx);
+                                    let provider = if terminal {
+                                        state
+                                            .terminal_rows
+                                            .iter()
+                                            .find(|row| row.id == id)
+                                            .and_then(|row| row.provider)
+                                    } else {
+                                        state.provider_of(&id)
+                                    };
+                                    let memory = entry
+                                        .bytes
+                                        .map(|n| crate::ui::megabytes(n as f64 / 1_048_576.))
+                                        .unwrap_or_else(|| "—".into());
+                                    // Keyboard focus reveals the row's actions as hover does.
+                                    let row_focus = state
+                                        .control_focus
+                                        .container(&format!("memory-{}", id.0), cx);
+                                    let hovered = hovered
+                                        || crate::keyboard_control::keyboard_within(
+                                            &row_focus, window, cx,
+                                        );
+                                    h_flex()
                                     .id(SharedString::from(format!("memory-row-{}", id.0)))
                                     .track_focus(&row_focus)
                                     .debug_selector(|| "memory-row".into())
@@ -384,53 +387,37 @@ impl Render for Usage {
                                                 }),
                                             ),
                                     )
-                            })),
-                    )
-                    .child(
-                        canvas(
-                            |bounds, _, _| bounds,
-                            move |_, bounds, window, _| {
-                                if scroll.max_offset().y + scroll.offset().y > zpx(1.) {
-                                    let mut transparent = background;
-                                    transparent.a = 0.;
-                                    window.paint_quad(fill(
-                                        bounds,
-                                        linear_gradient(
-                                            0.,
-                                            linear_color_stop(background, 0.),
-                                            linear_color_stop(transparent, 1.),
-                                        ),
-                                    ));
-                                }
-                            },
+                                })),
                         )
-                        .absolute()
-                        .bottom_0()
-                        .left_0()
-                        .right_0()
-                        .h(zpx(44.)),
-                    ),
-            )
-            .when_some(self.error.clone(), |view, error| {
-                view.child(crate::ui::inline_error(error))
-            });
-        // The popovers' 180 ms fade with a 4 px lift. Local to this popup so it
-        // is easy to drop if the vendor popover animates entrances itself.
-        if cx.reduce_motion() {
-            return content.into_any_element();
-        }
-        content
-            .with_animation(
-                SharedString::from(format!("memory-popover-enter-{}", self.open_epoch)),
-                Animation::new(crate::ui::POPOVER_ENTER).with_easing(crate::ui::ease_out),
-                |content, t| {
-                    content
-                        .opacity(t)
-                        .relative()
-                        .top(zpx(crate::ui::POPOVER_LIFT * (1. - t)))
-                },
-            )
-            .into_any_element()
+                        .child(
+                            canvas(
+                                |bounds, _, _| bounds,
+                                move |_, bounds, window, _| {
+                                    if scroll.max_offset().y + scroll.offset().y > zpx(1.) {
+                                        let mut transparent = background;
+                                        transparent.a = 0.;
+                                        window.paint_quad(fill(
+                                            bounds,
+                                            linear_gradient(
+                                                0.,
+                                                linear_color_stop(background, 0.),
+                                                linear_color_stop(transparent, 1.),
+                                            ),
+                                        ));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(zpx(44.)),
+                        ),
+                )
+                .when_some(self.error.clone(), |view, error| {
+                    view.child(crate::ui::inline_error(error))
+                });
+        content.into_any_element()
     }
 }
 

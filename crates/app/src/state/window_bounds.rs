@@ -49,7 +49,10 @@ impl Saved {
     }
 
     fn frame(&self) -> Bounds<Pixels> {
-        Bounds::new(point(px(self.x), px(self.y)), size(px(self.width), px(self.height)))
+        Bounds::new(
+            point(px(self.x), px(self.y)),
+            size(px(self.width), px(self.height)),
+        )
     }
 
     /// The frame to open with on a display whose usable area is `visible`:
@@ -133,16 +136,18 @@ mod tests {
 
     #[test]
     fn clamps_size_and_position_onto_the_display() {
-        let WindowBounds::Windowed(frame) =
-            saved(900., 400., 3000., 2000.).restore_on(display()).unwrap()
+        let WindowBounds::Windowed(frame) = saved(900., 400., 3000., 2000.)
+            .restore_on(display())
+            .unwrap()
         else {
             panic!("windowed");
         };
         assert_eq!(frame.size, size(px(1512.), px(920.)));
         assert_eq!(frame.origin, point(px(0.), px(25.)));
 
-        let WindowBounds::Windowed(frame) =
-            saved(1000., 600., 1000., 700.).restore_on(display()).unwrap()
+        let WindowBounds::Windowed(frame) = saved(1000., 600., 1000., 700.)
+            .restore_on(display())
+            .unwrap()
         else {
             panic!("windowed");
         };
@@ -158,9 +163,21 @@ mod tests {
 
     #[test]
     fn falls_back_when_off_screen_or_invalid() {
-        assert!(saved(4000., 80., 1200., 800.).restore_on(display()).is_none());
-        assert!(saved(1450., 80., 1200., 800.).restore_on(display()).is_none());
-        assert!(saved(f32::NAN, 80., 1200., 800.).restore_on(display()).is_none());
+        assert!(
+            saved(4000., 80., 1200., 800.)
+                .restore_on(display())
+                .is_none()
+        );
+        assert!(
+            saved(1450., 80., 1200., 800.)
+                .restore_on(display())
+                .is_none()
+        );
+        assert!(
+            saved(f32::NAN, 80., 1200., 800.)
+                .restore_on(display())
+                .is_none()
+        );
         assert!(saved(0., 80., 0., 800.).restore_on(display()).is_none());
     }
 

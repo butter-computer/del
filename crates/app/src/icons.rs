@@ -416,7 +416,7 @@ mod tests {
         let target = cx.debug_bounds("close-fixture").unwrap();
         assert_eq!(target.size, gpui::size(button_size(), button_size()));
         let visible_hint = |window: &gpui::Window| {
-            let hint: gpui::Hsla = crate::appearance::rgb(0x303033).into();
+            let hint: gpui::Hsla = crate::appearance::rgba(0xffffff0d).into();
             window
                 .painted_quads()
                 .iter()

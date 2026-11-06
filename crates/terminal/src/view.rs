@@ -110,14 +110,23 @@ mod resize_tests {
         let mut current = size(80);
         assert_eq!(resize_step(size(80), current, false), ResizeStep::Idle);
         // A lone change applies at once.
-        assert_eq!(resize_step(size(90), current, false), ResizeStep::Apply(size(90)));
+        assert_eq!(
+            resize_step(size(90), current, false),
+            ResizeStep::Apply(size(90))
+        );
         current = size(90);
         // Every frame of an animation asks for a new size; none applies.
         for frame in 1..=13u16 {
-            assert_eq!(resize_step(size(90 + frame), current, true), ResizeStep::Wait);
+            assert_eq!(
+                resize_step(size(90 + frame), current, true),
+                ResizeStep::Wait
+            );
         }
         // The first settled frame applies the final size, once.
-        assert_eq!(resize_step(size(103), current, false), ResizeStep::Apply(size(103)));
+        assert_eq!(
+            resize_step(size(103), current, false),
+            ResizeStep::Apply(size(103))
+        );
         current = size(103);
         assert_eq!(resize_step(size(103), current, false), ResizeStep::Idle);
     }

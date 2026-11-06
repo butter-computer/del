@@ -2255,8 +2255,10 @@ impl AppState {
         } else {
             "its running reply"
         };
-        let mut notice =
-            notices::Notice::new(notices::Severity::Info, &format!("{verb} — {what} was stopped"));
+        let mut notice = notices::Notice::new(
+            notices::Severity::Info,
+            &format!("{verb} — {what} was stopped"),
+        );
         if undo {
             notice.undo = Some(notices::Undo::Unarchive(id.clone()));
         }
@@ -5299,9 +5301,17 @@ pub(crate) mod tests {
                 Some(terminal.id.clone()),
             ));
             s.delete_account(&chat.id, cx);
-            assert!(s.take_notices()[0].message.contains("used by existing chats"));
+            assert!(
+                s.take_notices()[0]
+                    .message
+                    .contains("used by existing chats")
+            );
             s.delete_account(&terminal.id, cx);
-            assert!(s.take_notices()[0].message.contains("used by existing chats"));
+            assert!(
+                s.take_notices()[0]
+                    .message
+                    .contains("used by existing chats")
+            );
             assert_eq!(s.accounts.len(), 3);
             // Nothing is deleted while an account switch or a startup using it is in flight.
             s.switching_accounts
