@@ -323,6 +323,89 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()>
     Ok(())
 }
 
+/// One background thread that performs [`write_atomic`] for UI-thread callers.
+/// Requests for the same path coalesce: only the newest bytes are written, and
+/// a path never has two writes in flight, so the file always ends up with the
+/// latest snapshot. Each write is still fsynced; it just never blocks a frame.
+struct Writer {
+    state: std::sync::Mutex<WriterState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct WriterState {
+    /// Waiting writes in request order; at most one entry per path.
+    pending: Vec<(PathBuf, Vec<u8>, u32)>,
+    /// The path being written right now, if any.
+    writing: Option<PathBuf>,
+}
+
+fn writer() -> &'static Writer {
+    static WRITER: std::sync::OnceLock<&'static Writer> = std::sync::OnceLock::new();
+    WRITER.get_or_init(|| {
+        let writer: &'static Writer = Box::leak(Box::new(Writer {
+            state: Default::default(),
+            changed: std::sync::Condvar::new(),
+        }));
+        std::thread::Builder::new()
+            .name("del-writes".into())
+            .spawn(move || {
+                loop {
+                    let (path, bytes, mode) = {
+                        let mut state = writer.state.lock().unwrap_or_else(|e| e.into_inner());
+                        while state.pending.is_empty() {
+                            state = writer
+                                .changed
+                                .wait(state)
+                                .unwrap_or_else(|e| e.into_inner());
+                        }
+                        let next = state.pending.remove(0);
+                        state.writing = Some(next.0.clone());
+                        next
+                    };
+                    if let Err(error) = write_atomic(&path, &bytes, mode) {
+                        eprintln!("Could not save {}: {error}", path.display());
+                    }
+                    writer
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .writing = None;
+                    writer.changed.notify_all();
+                }
+            })
+            .expect("spawn the background writer");
+        writer
+    })
+}
+
+/// Queue a durable [`write_atomic`] off the calling thread. A later request for
+/// the same path replaces one that has not started, keeping writes ordered.
+pub fn write_atomic_later(path: PathBuf, bytes: Vec<u8>, mode: u32) {
+    let writer = writer();
+    let mut state = writer.state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = state.pending.iter_mut().find(|entry| entry.0 == path) {
+        entry.1 = bytes;
+        entry.2 = mode;
+    } else {
+        state.pending.push((path, bytes, mode));
+    }
+    drop(state);
+    writer.changed.notify_all();
+}
+
+/// Block until every queued [`write_atomic_later`] has reached disk.
+pub fn flush_pending_writes() {
+    let writer = writer();
+    let mut state = writer.state.lock().unwrap_or_else(|e| e.into_inner());
+    while !state.pending.is_empty() || state.writing.is_some() {
+        state = writer
+            .changed
+            .wait(state)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+}
+
 /// Preserve an unreadable file as `<name>.corrupt-<unix seconds>` beside it.
 /// `keep_original` copies instead of moving, for files whose absence would
 /// itself lose data (the caller must then refuse to overwrite the original).

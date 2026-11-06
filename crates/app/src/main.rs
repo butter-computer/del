@@ -86,7 +86,6 @@ use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
 use del_core::ShellMetrics;
 use del_core::typography::TEXT_MD;
 use del_mcp::SessionMode;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -2025,6 +2024,10 @@ impl AppShell {
             return;
         }
         let owner = self.composer_owner(cx);
+        // A pasted or dropped file is still importing: send once it lands.
+        if followup_ui::PendingImports::hold(owner, cx) {
+            return;
+        }
         let text = self.composer.read(cx).value().trim().to_string();
         let attachments = self
             .composer_attachments
@@ -2065,9 +2068,8 @@ impl AppShell {
             self.sync_goal_placeholder(window, cx);
             return;
         }
-        if chat.as_ref().is_some_and(|chat| chat.read(cx).is_loading())
-            || self.state.read(cx).is_starting()
-        {
+        // While history loads, the chat holds the message and sends it after.
+        if self.state.read(cx).is_starting() {
             return;
         }
         let command = self
@@ -2126,7 +2128,8 @@ impl AppShell {
         let has_attachments = self
             .composer_attachments
             .get(&owner)
-            .is_some_and(|images| !images.is_empty());
+            .is_some_and(|images| !images.is_empty())
+            || followup_ui::PendingImports::any(owner, cx);
         let folder_branch = locked
             .then(|| {
                 let state = self.state.read(cx);
@@ -2175,10 +2178,7 @@ impl AppShell {
             shell_voice.update(cx, |this, cx| this.toggle_dictation(window, cx))
         })
         .show_folder(false)
-        .starting(
-            self.state.read(cx).is_starting()
-                || chat.as_ref().is_some_and(|chat| chat.read(cx).is_loading()),
-        )
+        .starting(self.state.read(cx).is_starting())
         .on_send(move |window, cx| shell.update(cx, |this, cx| this.submit(window, cx)))
         .on_stop(move |_, cx| shell_stop.update(cx, |this, cx| this.stop(cx)))
         .on_provider(move |p, _, cx| state_p.update(cx, |s, cx| s.set_provider(p, cx)))
@@ -2189,37 +2189,33 @@ impl AppShell {
         .on_paste(move |item, _, cx| {
             shell_paste.update(cx, |this, cx| this.paste_attachments(item, cx))
         });
+        // The failed first prompt offers Retry in its own status row, so the
+        // composer never moves; this is what that Retry does.
+        if self.state.read(cx).pending_error().is_some() {
+            cx.set_global(chat::FirstPromptRetry(std::rc::Rc::new(move |window, cx| {
+                retry_shell.update(cx, |this, cx| {
+                    if this.state.read(cx).mode() == SessionMode::Terminal {
+                        let input = this.state.read(cx).pending_input().cloned();
+                        if let Some(input) = input {
+                            this.submit_terminal_prompt(
+                                &input.text,
+                                &input.attachments,
+                                window,
+                                cx,
+                            );
+                        }
+                    } else {
+                        this.state.update(cx, |state, cx| state.retry_pending(cx));
+                    }
+                });
+            })));
+        }
         v_flex()
             .w_full()
             .max_w(zpx(COMPOSER_MAX_WIDTH))
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.attach_paths(owner, paths.0.to_vec(), cx)
             }))
-            .when(self.state.read(cx).pending_error().is_some(), |column| {
-                column.child(
-                    Button::new("retry-first-prompt")
-                        .ghost()
-                        .small()
-                        .label("Retry message")
-                        .on_click(move |_, window, cx| {
-                            retry_shell.update(cx, |this, cx| {
-                                if this.state.read(cx).mode() == SessionMode::Terminal {
-                                    let input = this.state.read(cx).pending_input().cloned();
-                                    if let Some(input) = input {
-                                        this.submit_terminal_prompt(
-                                            &input.text,
-                                            &input.attachments,
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                } else {
-                                    this.state.update(cx, |state, cx| state.retry_pending(cx));
-                                }
-                            });
-                        }),
-                )
-            })
             .child(self.render_followups(cx))
             .child(self.render_goal_bar(cx))
             .children(self.render_agent_messages(cx))
@@ -2227,6 +2223,21 @@ impl AppShell {
                 div()
                     .relative()
                     .child(composer)
+                    // Files dragged over the composer: a quiet ring says it will take
+                    // them. Drawn over the card, so nothing moves.
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(zpx(ui::RADIUS_CARD))
+                            .drag_over::<ExternalPaths>(|zone, _, _, _| {
+                                zone.border_1()
+                                    .border_color(
+                                        appearance::ActionTone::Accent.foreground().opacity(0.6),
+                                    )
+                                    .bg(ui::row_hover())
+                            }),
+                    )
                     .child(self.ambient.read(cx).region_probe(0, zpx(14.0)))
                     .child(
                         deferred(

@@ -138,49 +138,81 @@ pub fn group_at(groups: &[Range<usize>], ix: usize) -> Option<Range<usize>> {
     groups.get(at).filter(|group| group.contains(&ix)).cloned()
 }
 
+/// A group's summary: the running action, or what the finished calls did,
+/// with real counts ("Read 1 file, ran 3 commands").
 pub fn group_label(blocks: &[Block]) -> String {
-    let failed = blocks.iter().filter(|block| matches!(block, Block::Tool(tool) if matches!(tool.state, ToolState::Error | ToolState::Declined))).count();
-    if let Some(tool) = blocks.iter().rev().find_map(|block| match block {
-        Block::Tool(tool) if tool.state == ToolState::Running => Some(tool),
-        _ => None,
-    }) {
-        let label = format!("{} · {} tools", describe(tool).1, blocks.len());
-        return if failed > 0 {
-            format!("{label} · {failed} failed/declined")
-        } else {
-            label
-        };
+    let tools = || {
+        blocks.iter().filter_map(|block| match block {
+            Block::Tool(tool) => Some(tool),
+            _ => None,
+        })
+    };
+    if let Some(tool) = tools().rfind(|tool| tool.state == ToolState::Running) {
+        return format!(
+            "{} · {}",
+            describe(tool).1,
+            crate::ui::plural(blocks.len(), "tool", "tools")
+        );
     }
-    let mut kinds = Vec::new();
-    for block in blocks {
-        if let Block::Tool(tool) = block {
-            let kind = describe(tool).0;
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
+    // Reads and edits count distinct files; other kinds count calls.
+    let mut kinds: Vec<(Kind, Vec<String>)> = Vec::new();
+    for tool in tools() {
+        let (kind, label) = describe(tool);
+        let at = match kinds.iter().position(|(k, _)| *k == kind) {
+            Some(at) => at,
+            None => {
+                kinds.push((kind, Vec::new()));
+                kinds.len() - 1
             }
+        };
+        let key = match kind {
+            Kind::Read | Kind::Edit => label
+                .split_once(' ')
+                .map_or(label.clone(), |(_, file)| file.to_owned()),
+            _ => kinds[at].1.len().to_string(),
+        };
+        if !kinds[at].1.contains(&key) {
+            kinds[at].1.push(key);
         }
     }
     let labels: Vec<_> = kinds
         .iter()
-        .map(|kind| match kind {
-            Kind::Read => "read files",
-            Kind::Search => "searched",
-            Kind::Command => "ran commands",
-            Kind::Edit => "edited files",
-            Kind::Tool => "called tools",
+        .map(|(kind, items)| {
+            let n = items.len();
+            match kind {
+                Kind::Read => format!("read {}", crate::ui::plural(n, "file", "files")),
+                Kind::Search => "searched".to_owned(),
+                Kind::Command => format!("ran {}", crate::ui::plural(n, "command", "commands")),
+                Kind::Edit => format!("edited {}", crate::ui::plural(n, "file", "files")),
+                Kind::Tool => format!("called {}", crate::ui::plural(n, "tool", "tools")),
+            }
         })
         .collect();
     let text = labels.join(", ");
     let mut chars = text.chars();
-    let label = chars
+    chars
         .next()
         .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default();
-    if failed > 0 {
-        format!("{label} · {failed} failed/declined")
-    } else {
-        label
-    }
+        .unwrap_or_default()
+}
+
+/// Failed and declined calls in a group, if any: "1 failed", "2 declined".
+pub fn failure_note(blocks: &[Block]) -> Option<String> {
+    let count = |state: ToolState| {
+        blocks
+            .iter()
+            .filter(|block| matches!(block, Block::Tool(tool) if tool.state == state))
+            .count()
+    };
+    let parts: Vec<String> = [
+        (count(ToolState::Error), "failed"),
+        (count(ToolState::Declined), "declined"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, label)| format!("{n} {label}"))
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 #[cfg(test)]
@@ -244,7 +276,7 @@ mod tests {
         assert_eq!(call.input, "echo first\necho second");
         assert_eq!(
             group_label(&[Block::Tool(call)]),
-            "Running echo first · 1 tools"
+            "Running echo first · 1 tool"
         );
     }
 
@@ -293,7 +325,7 @@ mod tests {
             Block::Tool(tool("shell", "cargo test", ToolState::Ok)),
         ];
         assert_eq!(completed_group(&blocks, 1, false), Some(0..2));
-        assert_eq!(group_label(&blocks), "Read files, ran commands");
+        assert_eq!(group_label(&blocks), "Read 1 file, ran 1 command");
         assert_eq!(completed_group(&blocks, 1, true), Some(0..2));
         blocks.push(Block::Assistant {
             turn_id: "t".into(),
@@ -305,7 +337,14 @@ mod tests {
             tool.state = ToolState::Error;
         }
         assert_eq!(completed_group(&blocks, 1, false), Some(0..2));
-        assert!(group_label(&blocks[..2]).contains("1 failed/declined"));
+        assert_eq!(failure_note(&blocks[..2]).as_deref(), Some("1 failed"));
+        if let Block::Tool(tool) = &mut blocks[1] {
+            tool.state = ToolState::Declined;
+        }
+        assert_eq!(
+            failure_note(&blocks[..2]).as_deref(),
+            Some("1 failed, 1 declined")
+        );
         assert_eq!(completed_group(&blocks, 2, false), None);
     }
 }

@@ -1,7 +1,7 @@
 //! Goal controls share a provider-neutral contract; continuation stays in the harness.
 use crate::animated_icons::Glyph;
 use crate::micro_motion::MotionIconExt as _;
-use crate::{AppShell, appearance::rgba, state::Selection, zoom::px as zpx};
+use crate::{AppShell, state::Selection, zoom::px as zpx};
 use del_agent::{ComposerCommand, GoalAction, GoalStatus};
 use gpui_kit::assets::IconName as GoalIcon;
 use gpui_kit::{
@@ -13,7 +13,13 @@ use gpui_kit::{
     *,
 };
 
-pub(crate) const GOAL_INSET: f32 = 24.;
+/// The goal bar sits on the composer with the queue tray's inset.
+pub(crate) const GOAL_INSET: f32 = crate::ui::SPACE_MD;
+
+/// Goal time as people say it: "45s", "2m 5s", "1h 2m 5s".
+fn goal_time(seconds: u64) -> String {
+    crate::chat::elapsed_label(seconds)
+}
 
 impl AppShell {
     pub(super) fn begin_goal(
@@ -35,9 +41,9 @@ impl AppShell {
 
     pub(super) fn sync_goal_placeholder(&self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = if self.goal_modes.contains_key(&self.composer_owner(cx)) {
-            "Describe your goal, define measurable outcomes for best results"
+            crate::composer_ui::GOAL_PLACEHOLDER
         } else {
-            "Ask anything…"
+            crate::composer_ui::PLACEHOLDER
         };
         self.composer.update(cx, |input, cx| {
             input.set_placeholder(placeholder, window, cx)
@@ -87,125 +93,142 @@ impl AppShell {
             _ => false,
         };
         let paused = goal.status != GoalStatus::Active;
-        v_flex()
-            .mx(zpx(GOAL_INSET))
-            .px_2p5()
-            .py_1()
-            .gap_2()
-            .rounded_t_lg()
-            .bg(rgba(0xffffff0b))
+        let details = v_flex()
+            .pb(zpx(crate::ui::SPACE_MD))
+            .gap(zpx(crate::ui::SPACE_XS))
+            .child(div().text_size(zpx(13.)).child(goal.objective.clone()))
+            .when(goal.tokens_used > 0, |column| {
+                column.child(
+                    div()
+                        .text_size(zpx(del_core::typography::TEXT_XS))
+                        .text_color(crate::ui::secondary_text())
+                        .child(format!(
+                            "{} used",
+                            if goal.tokens_used == 1 {
+                                "1 token".to_owned()
+                            } else {
+                                format!("{} tokens", crate::ui::group_digits(goal.tokens_used))
+                            }
+                        )),
+                )
+            });
+        div()
+            .px(zpx(GOAL_INSET))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(crate::icons::icon(GoalIcon::Target).text_color(rgba(0xffffff88)))
+                crate::followup_ui::tray()
+                    .px(zpx(10.))
+                    .py(zpx(crate::ui::SPACE_XS))
                     .child(
-                        div()
-                            .text_size(zpx(12.))
-                            .flex_none()
-                            .child(goal.status.label()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(zpx(12.))
-                            .text_color(rgba(0xffffff99))
-                            .truncate()
-                            .child(goal.objective.clone()),
-                    )
-                    .when(goal.time_used_seconds > 0, |row| {
-                        row.child(
-                            div()
-                                .text_size(zpx(del_core::typography::TEXT_XS))
-                                .text_color(rgba(0xffffff77))
-                                .child(format!("{}s", goal.time_used_seconds)),
-                        )
-                    })
-                    .child(
-                        Button::new("clear-goal")
-                            .size(crate::icons::button_size())
-                            .p_0()
-                            .ghost()
-                            .disabled(pending)
-                            .tooltip("Clear goal")
-                            .accessibility_label("Clear goal")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.goal_action(GoalAction::Clear, cx)
-                                }),
+                        h_flex()
+                            .items_center()
+                            .gap(zpx(crate::ui::SPACE_MD))
+                            .child(
+                                crate::icons::icon(GoalIcon::Target)
+                                    .text_color(crate::ui::secondary_text()),
                             )
-                            .motion_child(!pending, move |feedback| feedback.glyph(Glyph::Trash)),
-                    )
-                    .when(
-                        goal.can_pause && goal.status != GoalStatus::Complete,
-                        |row| {
-                            row.child(
-                                Button::new("pause-goal")
+                            .child(
+                                div()
+                                    .text_size(zpx(12.))
+                                    .flex_none()
+                                    .child(goal.status.label()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(zpx(12.))
+                                    .text_color(crate::ui::secondary_text())
+                                    .truncate()
+                                    .child(goal.objective.clone()),
+                            )
+                            .when(goal.time_used_seconds > 0, |row| {
+                                row.child(
+                                    div()
+                                        .text_size(zpx(del_core::typography::TEXT_XS))
+                                        .text_color(crate::ui::faint_text())
+                                        .child(goal_time(goal.time_used_seconds)),
+                                )
+                            })
+                            .child(
+                                Button::new("clear-goal")
                                     .size(crate::icons::button_size())
                                     .p_0()
                                     .ghost()
                                     .disabled(pending)
-                                    .tooltip(if paused { "Resume goal" } else { "Pause goal" })
-                                    .accessibility_label(if paused {
-                                        "Resume goal"
-                                    } else {
-                                        "Pause goal"
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.goal_action(
-                                            if paused {
-                                                GoalAction::Resume
+                                    .tooltip("Clear goal")
+                                    .accessibility_label("Clear goal")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.goal_action(GoalAction::Clear, cx)
+                                    }))
+                                    .motion_child(!pending, move |feedback| {
+                                        feedback.glyph(Glyph::Trash)
+                                    }),
+                            )
+                            .when(
+                                goal.can_pause && goal.status != GoalStatus::Complete,
+                                |row| {
+                                    row.child(
+                                        Button::new("pause-goal")
+                                            .size(crate::icons::button_size())
+                                            .p_0()
+                                            .ghost()
+                                            .disabled(pending)
+                                            .tooltip(if paused {
+                                                "Resume goal"
                                             } else {
-                                                GoalAction::Pause
-                                            },
-                                            cx,
-                                        )
+                                                "Pause goal"
+                                            })
+                                            .accessibility_label(if paused {
+                                                "Resume goal"
+                                            } else {
+                                                "Pause goal"
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.goal_action(
+                                                    if paused {
+                                                        GoalAction::Resume
+                                                    } else {
+                                                        GoalAction::Pause
+                                                    },
+                                                    cx,
+                                                )
+                                            }))
+                                            .child(crate::micro_motion::MorphIcon::new(
+                                                "goal-play-pause",
+                                                crate::animated_icons::Morph::PlayPause,
+                                                !paused,
+                                            )),
+                                    )
+                                },
+                            )
+                            .child(
+                                Button::new("expand-goal")
+                                    .size(crate::icons::button_size())
+                                    .p_0()
+                                    .ghost()
+                                    .tooltip("Goal details")
+                                    .accessibility_label("Goal details")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.goal_expanded.remove(&owner) {
+                                            this.goal_expanded.insert(owner);
+                                        }
+                                        cx.notify();
                                     }))
                                     .child(crate::micro_motion::MorphIcon::new(
-                                        "goal-play-pause",
-                                        crate::animated_icons::Morph::PlayPause,
-                                        !paused,
+                                        "goal-disclosure",
+                                        crate::animated_icons::Morph::Disclosure,
+                                        expanded,
                                     )),
-                            )
-                        },
+                            ),
                     )
+                    // The same reversible reveal as transcript disclosures.
                     .child(
-                        Button::new("expand-goal")
-                            .size(crate::icons::button_size())
-                            .p_0()
-                            .ghost()
-                            .tooltip("Goal details")
-                            .accessibility_label("Goal details")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.goal_expanded.remove(&owner) {
-                                    this.goal_expanded.insert(owner);
-                                }
-                                cx.notify();
-                            }))
-                            .child(crate::micro_motion::MorphIcon::new(
-                                "goal-disclosure",
-                                crate::animated_icons::Morph::Disclosure,
-                                expanded,
-                            )),
+                        gpui_kit::component::collapsible::Collapsible::new()
+                            .motion_id(("goal-details-reveal", owner))
+                            .open(expanded)
+                            .content(div().pt(zpx(crate::ui::SPACE_MD)).child(details)),
                     ),
             )
-            .when(expanded, |column| {
-                column.child(
-                    v_flex()
-                        .pb_2()
-                        .gap_1()
-                        .child(div().text_size(zpx(13.)).child(goal.objective))
-                        .when(goal.tokens_used > 0, |column| {
-                            column.child(
-                                div()
-                                    .text_size(zpx(del_core::typography::TEXT_XS))
-                                    .text_color(rgba(0xffffff88))
-                                    .child(format!("{} tokens used", goal.tokens_used)),
-                            )
-                        }),
-                )
-            })
             .into_any_element()
     }
 }

@@ -18,18 +18,15 @@ use gpui_kit::*;
 
 const TEXT: u32 = 0xe8e8e8;
 const STRONG: u32 = 0xf5f5f5;
-const MUTED: u32 = 0xffffff8c;
 /// Fill of cards (tool calls, diffs, the user's message).
 const CARD: u32 = 0xffffff0d;
 const CARD_HOVER: u32 = 0xffffff14;
 /// The user's message: one step above the page.
 const USER_CARD: u32 = 0xffffff12;
-const HAIRLINE: u32 = 0xffffff0f;
 /// Secondary reading text: code context, tool output, error detail.
 const BODY_MUTED: u32 = 0xffffffb3;
-/// Labels that must stay legible but read as secondary to `MUTED`.
-const ROW_HEIGHT: f32 = 26.;
-const ROW_GAP: f32 = 6.;
+const ROW_HEIGHT: f32 = crate::ui::ROW_COMPACT;
+const ROW_GAP: f32 = crate::ui::SPACE_SM;
 pub(super) const TRANSCRIPT_TOP: f32 = 16.;
 const MONO: &str = del_core::typography::MONO_FONT;
 /// Every transcript row starts its text here, so prose, tool rows, the user's
@@ -37,6 +34,198 @@ const MONO: &str = del_core::typography::MONO_FONT;
 const TEXT_INSET: f32 = 12.;
 /// Diff lines drawn in an expanded file card; the rest are summarized.
 const MAX_DIFF_LINES: usize = 400;
+/// Tool input and output lines drawn when expanded; the rest are summarized.
+const MAX_TOOL_LINES: usize = 400;
+/// Approval details taller than this scroll inside the card.
+const APPROVAL_DETAIL_MAX: f32 = 200.;
+
+/// A peer receipt's two ends, resolved once when the receipt arrives rather
+/// than reading the session index on every frame.
+#[derive(Clone)]
+pub(super) struct PeerRow {
+    current: del_agent::SessionId,
+    target: del_agent::SessionId,
+    current_name: SharedString,
+    target_name: SharedString,
+    current_provider: Option<del_agent::Provider>,
+    target_provider: Option<del_agent::Provider>,
+}
+
+impl PeerRow {
+    pub(super) fn resolve(
+        manager: &del_agent::SessionManager,
+        session: Option<&del_agent::SessionId>,
+        message: &del_agent::peers::PeerMessage,
+    ) -> Self {
+        let current = manager.resolve_peer(session.unwrap_or(&message.to));
+        let from = manager.resolve_peer(&message.from);
+        let target = manager.resolve_peer(if current == from {
+            &message.to
+        } else {
+            &message.from
+        });
+        let name = |id: &del_agent::SessionId| -> SharedString {
+            manager
+                .session_record(id)
+                .ok()
+                .and_then(|r| r.title)
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if manager.is_temporary(id) {
+                        "Side chat".into()
+                    } else {
+                        "New session".into()
+                    }
+                })
+                .into()
+        };
+        Self {
+            current_name: name(&current),
+            target_name: name(&target),
+            current_provider: manager.session_record(&current).ok().map(|r| r.provider),
+            target_provider: manager.session_record(&target).ok().map(|r| r.provider),
+            current,
+            target,
+        }
+    }
+}
+
+/// An expanded tool's input and output as one capped code block.
+#[derive(Clone)]
+pub(super) struct ToolDetails {
+    markdown: SharedString,
+    hidden: usize,
+}
+
+impl ToolDetails {
+    fn new(tool: &ToolCall) -> Self {
+        let text = if tool.output.is_empty() {
+            tool.input.clone()
+        } else {
+            format!("{}\n\n{}", tool.input, tool.output)
+        };
+        let (shown, hidden) = capped_lines(&text, MAX_TOOL_LINES);
+        let markdown = if shown.trim().is_empty() {
+            "No output".to_owned()
+        } else {
+            code_fence(shown)
+        };
+        Self {
+            markdown: markdown.into(),
+            hidden,
+        }
+    }
+}
+
+/// The first `max` lines of `text` and how many lines were left out.
+fn capped_lines(text: &str, max: usize) -> (&str, usize) {
+    match text.match_indices('\n').nth(max.saturating_sub(1)) {
+        Some((end, _)) if max > 0 => {
+            let rest = &text[end + 1..];
+            let hidden = rest.lines().count();
+            (&text[..end], hidden)
+        }
+        _ => (text, 0),
+    }
+}
+
+/// Wrap literal text in a code fence longer than any backtick run inside it,
+/// so it renders verbatim (and selectable) whatever it contains.
+fn code_fence(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for ch in text.chars() {
+        run = if ch == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}text\n{text}\n{fence}")
+}
+
+/// "N more lines" under a capped block.
+fn more_lines(hidden: usize) -> Div {
+    div()
+        .px(zpx(TEXT_INSET))
+        .pt(zpx(crate::ui::SPACE_XS))
+        .text_size(zpx(TEXT_SM))
+        .text_color(crate::ui::faint_text())
+        .child(format!(
+            "{} more",
+            crate::ui::plural(hidden, "line", "lines")
+        ))
+}
+
+/// The message a failed turn's row shows: its last error, if any.
+pub(super) fn failed_turn_error(blocks: &[Block]) -> Option<String> {
+    blocks
+        .iter()
+        .rev()
+        .take_while(|block| !matches!(block, Block::User { .. }))
+        .find_map(|block| match block {
+            Block::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+}
+
+/// User text as Markdown that renders literally: punctuation is escaped,
+/// line breaks stay breaks and leading spaces never become code blocks.
+/// `range` (a byte range of `text`) is mapped into the result.
+pub(super) fn literal_markdown(
+    text: &str,
+    range: std::ops::Range<usize>,
+) -> (String, std::ops::Range<usize>) {
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let mut start = 0;
+    let mut end = 0;
+    let mut line_start = true;
+    for (ix, ch) in text.char_indices() {
+        if ix == range.start {
+            start = out.len();
+        }
+        match ch {
+            '\n' => {
+                out.push_str("\\\n");
+                line_start = true;
+            }
+            ' ' | '\t' if line_start => out.push('\u{a0}'),
+            '\r' => {}
+            _ => {
+                line_start = false;
+                if ch.is_ascii_punctuation() {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+        }
+        if ix + ch.len_utf8() == range.end {
+            end = out.len();
+        }
+    }
+    (out, start..end)
+}
+
+/// Rows whose content belongs in a selectable text view, keyed by row.
+fn selectable_text(id: impl Into<ElementId>, markdown: impl Into<SharedString>) -> TextView {
+    TextView::markdown(id, markdown)
+        .style(prose_style())
+        .stream_fade(false)
+        .selectable(true)
+}
+
+/// A collapsible transcript row: the reveal tool groups use, and nothing
+/// mounted below a closed row once its spring has settled.
+fn disclosure_body(
+    id: impl Into<ElementId>,
+    open: bool,
+    header: impl IntoElement,
+    body: Option<AnyElement>,
+) -> gpui_kit::component::collapsible::Collapsible {
+    gpui_kit::component::collapsible::Collapsible::new()
+        .motion_id(id)
+        .open(open)
+        .child(header)
+        .content(body.unwrap_or_else(|| div().into_any_element()))
+}
 
 impl ChatView {
     /// One list row: the block, centered in the transcript column.
@@ -94,28 +283,33 @@ impl ChatView {
                 .gap(zpx(ROW_GAP))
                 .items_center()
                 .cursor_pointer()
-                .rounded_md()
+                .rounded(zpx(crate::ui::RADIUS_ROW))
                 .text_size(zpx(TEXT_MD))
-                .text_color(crate::appearance::secondary_text())
+                .text_color(crate::ui::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(label)
-                .child(disclosure(expanded))
+                .child(disclosure(("work-chevron", section.start), expanded))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_work(range.clone(), cx);
                 }));
-            let header = h_flex().w_full().justify_center().px_3().pb(zpx(8.)).child(
-                v_flex()
-                    .w_full()
-                    .max_w(zpx(COLUMN_MAX_WIDTH))
-                    .child(header)
-                    .child(
-                        div()
-                            .h(zpx(1.))
-                            .mt(zpx(2.))
-                            .mx(zpx(TEXT_INSET))
-                            .bg(crate::appearance::separator()),
-                    ),
-            );
+            let header = h_flex()
+                .w_full()
+                .justify_center()
+                .px(zpx(crate::ui::SPACE_LG))
+                .pb(zpx(crate::ui::SPACE_MD))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(zpx(COLUMN_MAX_WIDTH))
+                        .child(header)
+                        .child(
+                            div()
+                                .h(zpx(1.))
+                                .mt(zpx(crate::ui::SPACE_2XS))
+                                .mx(zpx(TEXT_INSET))
+                                .bg(crate::appearance::separator()),
+                        ),
+                );
             return v_flex()
                 .w_full()
                 .child(header)
@@ -132,13 +326,14 @@ impl ChatView {
             .as_ref()
             .is_some_and(|flash| flash.ix == ix)
             && matches!(self.model.blocks.get(ix), Some(Block::Assistant { .. }))
-            && let Some(state) = self.assistant_text.get(&ix)
+            && let Some(state) = self.ensure_assistant_text(ix, cx)
         {
+            let state = &state;
             return h_flex()
                 .w_full()
                 .justify_center()
-                .px_3()
-                .pb(zpx(6.))
+                .px(zpx(crate::ui::SPACE_LG))
+                .pb(zpx(crate::ui::SPACE_SM))
                 .child(
                     div()
                         .w_full()
@@ -164,8 +359,10 @@ impl ChatView {
         let Some(block) = self.model.blocks.get(ix) else {
             return div().into_any_element();
         };
+        let jumping = self.jump_in_flight();
         if let Some(flash) = self.search_flash.as_mut().filter(|flash| flash.ix == ix) {
-            if !flash.applied {
+            // Reveal the match only once the eased jump has landed on its row.
+            if !flash.applied && !jumping {
                 flash.applied = flash.text_view.update(cx, |state, cx| {
                     let Some(range) = state.rendered_text().range_for_source(flash.range.clone())
                     else {
@@ -206,15 +403,15 @@ impl ChatView {
             return h_flex()
                 .w_full()
                 .justify_center()
-                .px_3()
+                .px(zpx(crate::ui::SPACE_LG))
                 .child(
                     div()
                         .w_full()
                         .max_w(zpx(COLUMN_MAX_WIDTH))
                         .px(zpx(TEXT_INSET))
-                        .rounded_lg()
+                        .rounded(zpx(crate::ui::RADIUS_CARD))
                         .when(matches!(block, Block::User { .. }), |row| {
-                            row.py_2().bg(rgba(USER_CARD))
+                            row.py(zpx(crate::ui::SPACE_MD)).bg(rgba(USER_CARD))
                         })
                         .text_size(zpx(TEXT_PROSE))
                         .line_height(relative(PROSE_LEADING))
@@ -261,9 +458,9 @@ impl ChatView {
                 .gap(zpx(ROW_GAP))
                 .items_center()
                 .cursor_pointer()
-                .rounded_md()
+                .rounded(zpx(crate::ui::RADIUS_ROW))
                 .text_size(zpx(TEXT_MD))
-                .text_color(crate::appearance::secondary_text())
+                .text_color(crate::ui::secondary_text())
                 .hover(|row| row.bg(rgba(CARD)))
                 .child(if live {
                     gpui_kit::component::shimmer::ShimmerText::new(label)
@@ -271,21 +468,15 @@ impl ChatView {
                         .min_w_0()
                         .truncate()
                         .highlight_color(rgb(STRONG))
+                        .duration(crate::ui::SHIMMER_PERIOD)
                         .into_any_element()
                 } else {
                     // A failure count is news; the summary before it is not.
-                    let (summary, failures) = match label
-                        .rsplit_once(" · ")
-                        .filter(|(_, tail)| tail.ends_with("failed/declined"))
-                    {
-                        Some((summary, failures)) => {
-                            (summary.to_owned(), Some(failures.to_owned()))
-                        }
-                        None => (label.to_string(), None),
-                    };
+                    let summary = label.clone();
+                    let failures = super::activity::failure_note(&self.model.blocks[group.clone()]);
                     h_flex()
                         .min_w_0()
-                        .gap(zpx(4.))
+                        .gap(zpx(crate::ui::SPACE_XS))
                         .child(div().min_w_0().truncate().child(summary))
                         .when_some(failures, |row, failures| {
                             row.child(
@@ -297,37 +488,25 @@ impl ChatView {
                         })
                         .into_any_element()
                 })
-                .child(disclosure(expanded))
+                .child(disclosure(("activity-chevron", ix), expanded))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // Keep the header under the pointer while the group opens.
+                    this.scroller.pause_following_tail();
                     if !this.expanded_activity.remove(&ix) {
                         this.expanded_activity.insert(ix);
                     }
-                    this.scroller.remeasure_items(range.clone());
+                    // The virtual list caches heights; remeasure each frame of the reveal.
+                    this.settle(range.clone(), cx);
                     cx.notify();
-                    let range = range.clone();
-                    cx.spawn(async move |this, cx| {
-                        // The virtual list caches heights; remeasure throughout the reveal.
-                        for _ in 0..30 {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(16))
-                                .await;
-                            if this
-                                .update(cx, |this, cx| {
-                                    this.scroller.remeasure_items(range.clone());
-                                    cx.notify();
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    })
-                    .detach();
                 }));
-            let mut children = v_flex().gap_1().pt_1();
-            for at in group {
-                if let Block::Tool(tool) = &self.model.blocks[at] {
-                    children = children.child(self.tool_card(at, tool, cx));
+            let mut children = v_flex()
+                .gap(zpx(crate::ui::SPACE_XS))
+                .pt(zpx(crate::ui::SPACE_XS));
+            if expanded || self.is_settling(ix) {
+                for at in group {
+                    if let Block::Tool(tool) = &self.model.blocks[at] {
+                        children = children.child(self.tool_card(at, tool, cx));
+                    }
                 }
             }
             let content = gpui_kit::component::collapsible::Collapsible::new()
@@ -338,8 +517,8 @@ impl ChatView {
             return h_flex()
                 .w_full()
                 .justify_center()
-                .px_3()
-                .pb(zpx(2.))
+                .px(zpx(crate::ui::SPACE_LG))
+                .pb(zpx(crate::ui::SPACE_2XS))
                 .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(content))
                 .into_any_element();
         }
@@ -354,10 +533,10 @@ impl ChatView {
             Block::ProviderSwitch { from, to } => h_flex()
                 .w_full()
                 .justify_center()
-                .py_2()
-                .gap_2()
+                .py(zpx(crate::ui::SPACE_MD))
+                .gap(zpx(crate::ui::SPACE_MD))
                 .text_size(zpx(TEXT_SM))
-                .text_color(crate::appearance::secondary_text())
+                .text_color(crate::ui::secondary_text())
                 .child("Switched from")
                 .child(crate::composer_ui::provider_logo(*from).size(zpx(14.)))
                 .child(crate::providers::display_name(*from))
@@ -366,32 +545,16 @@ impl ChatView {
                 .child(crate::providers::display_name(*to))
                 .into_any_element(),
             Block::Peer(message) => {
-                let manager = &self.backend.manager;
-                let current = manager.resolve_peer(self.session.as_ref().unwrap_or(&message.to));
-                let from = manager.resolve_peer(&message.from);
-                let target = manager.resolve_peer(if current == from {
-                    &message.to
-                } else {
-                    &message.from
+                let PeerRow {
+                    current,
+                    target,
+                    current_name,
+                    target_name,
+                    current_provider,
+                    target_provider,
+                } = self.peer_rows.get(&message.id).cloned().unwrap_or_else(|| {
+                    PeerRow::resolve(&self.backend.manager, self.session.as_ref(), message)
                 });
-                let name = |id: &del_agent::SessionId| {
-                    manager
-                        .session_record(id)
-                        .ok()
-                        .and_then(|r| r.title)
-                        .filter(|title| !title.trim().is_empty())
-                        .unwrap_or_else(|| {
-                            if manager.is_temporary(id) {
-                                "Side chat".into()
-                            } else {
-                                "New session".into()
-                            }
-                        })
-                };
-                let current_name = name(&current);
-                let target_name = name(&target);
-                let current_provider = manager.session_record(&current).ok().map(|r| r.provider);
-                let target_provider = manager.session_record(&target).ok().map(|r| r.provider);
                 let recovery = matches!(
                     message.state,
                     del_agent::peers::DeliveryState::Uncertain
@@ -403,17 +566,17 @@ impl ChatView {
                     .id(SharedString::from(format!("peer-{}", message.id)))
                     .w_full()
                     .justify_center()
-                    .py_2()
+                    .py(zpx(crate::ui::SPACE_MD))
                     .text_size(zpx(TEXT_SM))
-                    .text_color(crate::appearance::secondary_text())
+                    .text_color(crate::ui::secondary_text())
                     .child(
                         h_flex()
                             .max_w_full()
-                            .gap_2()
+                            .gap(zpx(crate::ui::SPACE_MD))
                             .items_center()
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .gap(zpx(crate::ui::SPACE_MD))
                                     .items_center()
                                     .id(SharedString::from(format!("peer-current-{}", message.id)))
                                     .keyboard_control()
@@ -437,7 +600,7 @@ impl ChatView {
                             .child(div().flex_none().child("⇄"))
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .gap(zpx(crate::ui::SPACE_MD))
                                     .items_center()
                                     .id(SharedString::from(format!("peer-other-{}", message.id)))
                                     .keyboard_control()
@@ -509,8 +672,9 @@ impl ChatView {
                 attachments,
             } => v_flex()
                 .w_full()
-                .gap_2()
+                .gap(zpx(crate::ui::SPACE_MD))
                 .child(user_message(
+                    Some(ix),
                     text.clone(),
                     *steer,
                     *goal,
@@ -524,14 +688,14 @@ impl ChatView {
                             .h(zpx(ROW_HEIGHT))
                             .items_center()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(crate::appearance::faint_text())
+                            .text_color(crate::ui::faint_text())
                             .child(
                                 gpui_kit::component::shimmer::ShimmerText::new(label)
                                     .id(SharedString::from(format!("working-shimmer-{ix}")))
                                     .flex_none()
                                     .highlight_color(rgb(STRONG))
                                     .spread(0.22)
-                                    .duration(std::time::Duration::from_millis(1200)),
+                                    .duration(crate::ui::SHIMMER_PERIOD),
                             ),
                     )
                 })
@@ -562,19 +726,35 @@ impl ChatView {
                 .file_card(ix, change, change.expanded, cx)
                 .into_any_element(),
             Block::Approval(approval) => self.approval_card(approval, cx).into_any_element(),
-            Block::Error { .. } => div().h_0().into_any_element(),
-            Block::TurnEnd { status } => turn_end(
-                *status,
-                self.model.blocks[..ix]
-                    .iter()
-                    .rev()
-                    .take_while(|block| !matches!(block, Block::User { .. }))
-                    .find_map(|block| match block {
-                        Block::Error { message, .. } => Some(message.clone()),
-                        _ => None,
-                    }),
+            Block::Error { message, .. } if self.is_load_failure(ix) => failure_row(
+                "Could not open this conversation",
+                Some(message.clone()),
+                Some(Box::new(cx.listener(|this, _, _, cx| this.retry_load(cx)))),
             )
             .into_any_element(),
+            // A fatal error outside a failed turn has no other row to say so.
+            Block::Error {
+                message,
+                recoverable: false,
+            } if !self.model.blocks[ix + 1..]
+                .iter()
+                .take_while(|block| !matches!(block, Block::User { .. }))
+                .any(|block| matches!(block, Block::TurnEnd { .. })) =>
+            {
+                failure_row("Error", Some(message.clone()), None).into_any_element()
+            }
+            Block::Error { .. } => div().h_0().into_any_element(),
+            Block::TurnEnd {
+                status: TurnStatus::Failed,
+            } => failure_row(
+                "Turn failed",
+                failed_turn_error(&self.model.blocks[..ix]),
+                self.can_retry_turn(ix).then(|| {
+                    Box::new(cx.listener(|this, _, _, cx| this.retry_last(cx))) as ClickHandler
+                }),
+            )
+            .into_any_element(),
+            Block::TurnEnd { status } => turn_end(*status).into_any_element(),
         };
         // A new turn gets more air than the steps inside one.
         let opens_turn = ix > 0 && matches!(block, Block::User { .. });
@@ -582,14 +762,14 @@ impl ChatView {
         h_flex()
             .w_full()
             .justify_center()
-            .px_3()
+            .px(zpx(crate::ui::SPACE_LG))
             .when(opens_turn, |row| row.pt(zpx(14.)))
             .pb(if compact {
-                zpx(2.)
+                zpx(crate::ui::SPACE_2XS)
             } else if closes_turn {
                 zpx(10.)
             } else {
-                zpx(6.)
+                zpx(crate::ui::SPACE_SM)
             })
             .child(div().w_full().max_w(zpx(COLUMN_MAX_WIDTH)).child(content))
             .into_any_element()
@@ -603,49 +783,47 @@ impl ChatView {
         expanded: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        v_flex()
-            .gap_1()
-            .child(
-                h_flex()
-                    .id(("reasoning", ix))
-                    .keyboard_control()
-                    .px(zpx(TEXT_INSET))
-                    .h(zpx(ROW_HEIGHT))
-                    .items_center()
-                    .gap(zpx(ROW_GAP))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(zpx(TEXT_MD))
-                    .text_color(crate::appearance::secondary_text())
-                    .hover(|row| row.bg(rgba(CARD)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .role(Role::Button)
-                    .aria_label(format!(
-                        "{} {}",
-                        if expanded { "Collapse" } else { "Expand" },
-                        if open { "thinking" } else { "thought" }
-                    ))
-                    .child(if open {
-                        gpui_kit::component::shimmer::ShimmerText::new("Thinking")
-                            .id(("reasoning-live", ix))
-                            .highlight_color(rgb(STRONG))
-                            .into_any_element()
-                    } else {
-                        div().child("Thought").into_any_element()
-                    })
-                    .child(disclosure(expanded)),
-            )
-            .when(expanded, |col| {
-                col.child(
-                    div()
-                        .px(zpx(TEXT_INSET))
-                        .pb(zpx(4.))
-                        .text_size(zpx(TEXT_MD))
-                        .line_height(relative(1.5))
-                        .text_color(crate::appearance::secondary_text())
-                        .child(text.to_owned()),
-                )
+        let header = h_flex()
+            .id(("reasoning", ix))
+            .keyboard_control()
+            .px(zpx(TEXT_INSET))
+            .h(zpx(ROW_HEIGHT))
+            .items_center()
+            .gap(zpx(ROW_GAP))
+            .rounded(zpx(crate::ui::RADIUS_ROW))
+            .cursor_pointer()
+            .text_size(zpx(TEXT_MD))
+            .text_color(crate::ui::secondary_text())
+            .hover(|row| row.bg(rgba(CARD)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
+            .role(Role::Button)
+            .aria_label(format!(
+                "{} {}",
+                if expanded { "Collapse" } else { "Expand" },
+                if open { "thinking" } else { "thought" }
+            ))
+            .child(if open {
+                gpui_kit::component::shimmer::ShimmerText::new("Thinking")
+                    .id(("reasoning-live", ix))
+                    .highlight_color(rgb(STRONG))
+                    .duration(crate::ui::SHIMMER_PERIOD)
+                    .into_any_element()
+            } else {
+                div().child("Thought").into_any_element()
             })
+            .child(disclosure(("reasoning-chevron", ix), expanded));
+        let body = (expanded || self.is_settling(ix)).then(|| {
+            div()
+                .px(zpx(TEXT_INSET))
+                .pb(zpx(crate::ui::SPACE_XS))
+                .text_size(zpx(TEXT_MD))
+                .line_height(relative(1.5))
+                .text_color(crate::ui::secondary_text())
+                .child(selectable_text(("reasoning-text", ix), text.to_owned()))
+                .into_any_element()
+        });
+        disclosure_body(("reasoning-reveal", ix), expanded, header, body)
+            .gap(zpx(crate::ui::SPACE_XS))
     }
 
     fn tool_card(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> impl IntoElement {
@@ -654,7 +832,6 @@ impl ChatView {
             tool.state,
             super::model::ToolState::Error | super::model::ToolState::Declined
         );
-        let color = rgba(MUTED);
         let file = match self.model.blocks.get(ix + 1) {
             Some(Block::FileChange(file))
                 if tool.expanded && super::activity::matches_file(tool, file) =>
@@ -663,81 +840,83 @@ impl ChatView {
             }
             _ => None,
         };
-        // Only an expanded card shows the full input and output.
-        let details = tool.expanded.then(|| {
-            if tool.output.is_empty() {
-                tool.input.clone()
-            } else {
-                format!("{}\n\n{}", tool.input, tool.output)
-            }
-        });
-        v_flex()
-            .gap_1()
-            .child(
-                h_flex()
-                    .id(("tool", ix))
-                    .keyboard_control()
-                    .role(Role::Button)
-                    .aria_label(format!(
-                        "{} {label}",
-                        if tool.expanded { "Collapse" } else { "Expand" }
-                    ))
-                    .h(zpx(ROW_HEIGHT))
-                    .px(zpx(TEXT_INSET))
-                    .gap(zpx(ROW_GAP))
-                    .items_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(zpx(TEXT_MD))
-                    .text_color(color)
-                    .hover(|row| row.bg(rgba(CARD)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(match label.split_once(' ').filter(|_| failed) {
-                        // The verb says which row in the group went wrong.
-                        Some((verb, rest)) => h_flex()
-                            .min_w_0()
-                            .gap(zpx(4.))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(ActionTone::Danger.foreground())
-                                    .child(verb.to_owned()),
-                            )
-                            .child(div().min_w_0().truncate().child(rest.to_owned()))
-                            .into_any_element(),
-                        None => div()
-                            .min_w_0()
-                            .truncate()
-                            .child(label.clone())
-                            .into_any_element(),
-                    })
-                    .child(disclosure(tool.expanded)),
-            )
-            .when_some(details, |card, details| {
-                card.child(
+        let header = h_flex()
+            .id(("tool", ix))
+            .keyboard_control()
+            .role(Role::Button)
+            .aria_label(format!(
+                "{} {label}",
+                if tool.expanded { "Collapse" } else { "Expand" }
+            ))
+            .h(zpx(ROW_HEIGHT))
+            .px(zpx(TEXT_INSET))
+            .gap(zpx(ROW_GAP))
+            .items_center()
+            .rounded(zpx(crate::ui::RADIUS_ROW))
+            .cursor_pointer()
+            .text_size(zpx(TEXT_MD))
+            .text_color(crate::ui::secondary_text())
+            .hover(|row| row.bg(rgba(CARD)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
+            .child(match label.split_once(' ').filter(|_| failed) {
+                // The verb says which row in the group went wrong.
+                Some((verb, rest)) => h_flex()
+                    .min_w_0()
+                    .gap(zpx(crate::ui::SPACE_XS))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(ActionTone::Danger.foreground())
+                            .child(verb.to_owned()),
+                    )
+                    .child(div().min_w_0().truncate().child(rest.to_owned()))
+                    .into_any_element(),
+                None => div()
+                    .min_w_0()
+                    .truncate()
+                    .child(label.clone())
+                    .into_any_element(),
+            })
+            .child(disclosure(("tool-chevron", ix), tool.expanded));
+        // Built once per change, and only while the card is open or closing.
+        let body = (tool.expanded || self.is_settling(ix)).then(|| {
+            let signature = (tool.input.len(), tool.output.len());
+            let details = {
+                let mut cache = self.tool_details.borrow_mut();
+                match cache.get(&ix) {
+                    Some((input, output, details)) if (*input, *output) == signature => {
+                        details.clone()
+                    }
+                    _ => {
+                        let details = ToolDetails::new(tool);
+                        cache.insert(ix, (signature.0, signature.1, details.clone()));
+                        details
+                    }
+                }
+            };
+            v_flex()
+                .child(
                     div()
                         .id(("tool-output", ix))
-                        .px(zpx(TEXT_INSET))
-                        .py(zpx(10.))
                         .max_h(zpx(260.))
                         .overflow_y_scroll()
-                        .rounded_lg()
+                        .rounded(zpx(crate::ui::RADIUS_CARD))
                         .bg(crate::appearance::code_surface())
-                        .font_family(MONO)
                         .text_size(zpx(TEXT_SM))
                         .line_height(relative(1.5))
                         .text_color(rgba(BODY_MUTED))
-                        .whitespace_normal()
-                        .child(if details.is_empty() {
-                            "No output".to_owned()
-                        } else {
-                            details
-                        }),
+                        .child(selectable_text(("tool-text", ix), details.markdown)),
                 )
-            })
-            .when_some(file, |card, file| {
-                card.child(self.file_card(ix + 1, file, true, cx))
-            })
+                .when(details.hidden > 0, |column| {
+                    column.child(more_lines(details.hidden))
+                })
+                .when_some(file, |card, file| {
+                    card.child(self.file_card(ix + 1, file, true, cx))
+                })
+                .into_any_element()
+        });
+        disclosure_body(("tool-reveal", ix), tool.expanded, header, body)
+            .gap(zpx(crate::ui::SPACE_XS))
     }
 
     fn file_card(
@@ -753,102 +932,137 @@ impl ChatView {
             FileChangeKind::Deleted => "Deleted",
         };
         let has_diff = !change.lines.is_empty();
-        v_flex()
+        let name = change
+            .path
+            .file_name()
+            .unwrap_or(change.path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+        let full_path = change.path.to_string_lossy().into_owned();
+        // Opens in Del's file viewer through the transcript's local-link handling.
+        let link = if change.path.is_absolute() {
+            url::Url::from_file_path(&change.path)
+                .map(|url| url.to_string())
+                .unwrap_or_else(|_| full_path.clone())
+        } else {
+            full_path.clone()
+        };
+        let file_link = div()
+            .id(("file-link", ix))
+            .min_w_0()
+            .truncate()
+            .cursor_pointer()
+            .hover(|name| name.text_color(rgb(TEXT)).underline())
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(crate::ui::display_path(&full_path))
+                    .build(window, cx)
+            })
+            .child(name)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.emit(super::view::OpenLink(link.clone()));
+            }));
+        let header = h_flex()
+            .id(("file", ix))
+            .h(zpx(ROW_HEIGHT))
+            .px(zpx(TEXT_INSET))
+            .gap(zpx(ROW_GAP))
+            .items_center()
+            .rounded(zpx(crate::ui::RADIUS_ROW))
+            .text_size(zpx(TEXT_MD))
+            .text_color(crate::ui::secondary_text())
+            .when(has_diff, |row| {
+                row.cursor_pointer().hover(|row| row.bg(rgba(CARD)))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
             .child(
                 h_flex()
-                    .id(("file", ix))
-                    .h(zpx(ROW_HEIGHT))
-                    .px(zpx(TEXT_INSET))
-                    .gap(zpx(ROW_GAP))
-                    .items_center()
-                    .rounded_md()
-                    .text_size(zpx(TEXT_MD))
-                    .text_color(crate::appearance::secondary_text())
-                    .when(has_diff, |row| {
-                        row.cursor_pointer().hover(|row| row.bg(rgba(CARD)))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
-                    .child(div().min_w_0().truncate().child(format!(
-                        "{kind_label} {}",
-                        change
-                            .path
-                            .file_name()
-                            .unwrap_or(change.path.as_os_str())
-                            .to_string_lossy()
-                    )))
-                    .when(change.added > 0 || change.removed > 0, |row| {
-                        row.child(
-                            h_flex()
-                                .flex_none()
-                                .gap(zpx(4.))
-                                .text_size(zpx(TEXT_SM))
-                                .when(change.added > 0, |counts| {
-                                    counts.child(
-                                        div()
-                                            .text_color(ActionTone::Success.foreground())
-                                            .child(format!("+{}", change.added)),
-                                    )
-                                })
-                                .when(change.removed > 0, |counts| {
-                                    counts.child(
-                                        div()
-                                            .text_color(ActionTone::Danger.foreground())
-                                            .child(format!("−{}", change.removed)),
-                                    )
-                                }),
-                        )
-                    })
-                    .when(has_diff, |row| row.child(disclosure(expanded))),
+                    .min_w_0()
+                    .gap(zpx(crate::ui::SPACE_XS))
+                    .child(div().flex_none().child(kind_label))
+                    .child(file_link),
             )
-            .when(expanded && has_diff, |card| {
-                let hidden = change.lines.len().saturating_sub(MAX_DIFF_LINES);
-                card.child(
-                    v_flex()
-                        .id(("diff", ix))
-                        .mt(zpx(2.))
-                        .mb(zpx(4.))
-                        .py(zpx(6.))
-                        .max_h(zpx(260.0))
-                        .overflow_y_scroll()
-                        .rounded_lg()
-                        .bg(crate::appearance::code_surface())
-                        .children(change.lines.iter().take(MAX_DIFF_LINES).map(|line| {
-                            let added = ActionTone::Success.foreground();
-                            let removed = ActionTone::Danger.foreground();
-                            let (marker, fill, color) = match line.kind {
-                                DiffKind::Added => ("+", Some(added.opacity(0.13)), added),
-                                DiffKind::Removed => ("−", Some(removed.opacity(0.13)), removed),
-                                DiffKind::Context => (" ", None, rgba(BODY_MUTED)),
-                                DiffKind::Hunk => ("", None, crate::appearance::faint_text()),
-                            };
-                            h_flex()
-                                .px(zpx(TEXT_INSET))
-                                .gap_2()
-                                .when_some(fill, |row, fill| row.bg(fill))
-                                .font_family(MONO)
-                                .text_size(zpx(TEXT_SM))
-                                .line_height(relative(1.5))
-                                .text_color(color)
-                                .when(line.kind != DiffKind::Hunk, |row| {
-                                    row.child(div().w(zpx(8.0)).flex_none().child(marker))
-                                })
-                                .child(div().whitespace_nowrap().child(line.text.clone()))
-                        }))
-                        .when(hidden > 0, |diff| {
-                            diff.child(
+            .when(change.added > 0 || change.removed > 0, |row| {
+                row.child(
+                    h_flex()
+                        .flex_none()
+                        .gap(zpx(crate::ui::SPACE_XS))
+                        .text_size(zpx(TEXT_SM))
+                        .when(change.added > 0, |counts| {
+                            counts.child(
                                 div()
-                                    .px(zpx(TEXT_INSET))
-                                    .pt_1()
-                                    .text_size(zpx(TEXT_SM))
-                                    .text_color(crate::appearance::faint_text())
-                                    .child(format!(
-                                        "{hidden} more {}",
-                                        if hidden == 1 { "line" } else { "lines" }
-                                    )),
+                                    .text_color(ActionTone::Success.foreground())
+                                    .child(format!("+{}", change.added)),
+                            )
+                        })
+                        .when(change.removed > 0, |counts| {
+                            counts.child(
+                                div()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child(format!("−{}", change.removed)),
                             )
                         }),
                 )
             })
+            .when(has_diff, |row| {
+                row.child(disclosure(("file-chevron", ix), expanded))
+            });
+        let body = (has_diff && (expanded || self.is_settling(ix))).then(|| {
+            let hidden = change.lines.len().saturating_sub(MAX_DIFF_LINES);
+            v_flex()
+                .mt(zpx(crate::ui::SPACE_2XS))
+                .mb(zpx(crate::ui::SPACE_XS))
+                .rounded(zpx(crate::ui::RADIUS_CARD))
+                .overflow_hidden()
+                .bg(crate::appearance::code_surface())
+                .child(
+                    // Long lines scroll sideways instead of being clipped.
+                    div()
+                        .id(("diff", ix))
+                        .max_h(zpx(260.0))
+                        .overflow_scroll()
+                        .py(zpx(crate::ui::SPACE_SM))
+                        .child(v_flex().min_w_full().flex_none().items_start().children(
+                            change.lines.iter().take(MAX_DIFF_LINES).map(|line| {
+                                let added = ActionTone::Success.foreground();
+                                let removed = ActionTone::Danger.foreground();
+                                let (marker, fill, color) = match line.kind {
+                                    DiffKind::Added => ("+", Some(added.opacity(0.13)), added),
+                                    DiffKind::Removed => {
+                                        ("−", Some(removed.opacity(0.13)), removed)
+                                    }
+                                    DiffKind::Context => (" ", None, rgba(BODY_MUTED)),
+                                    DiffKind::Hunk => ("", None, crate::ui::faint_text()),
+                                };
+                                h_flex()
+                                    .min_w_full()
+                                    .flex_none()
+                                    .px(zpx(TEXT_INSET))
+                                    .gap(zpx(crate::ui::SPACE_MD))
+                                    .when_some(fill, |row, fill| row.bg(fill))
+                                    .font_family(MONO)
+                                    .text_size(zpx(TEXT_SM))
+                                    .line_height(relative(1.5))
+                                    .text_color(color)
+                                    .when(line.kind != DiffKind::Hunk, |row| {
+                                        row.child(div().w(zpx(8.0)).flex_none().child(marker))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(line.text.clone()),
+                                    )
+                            }),
+                        )),
+                )
+                .when(hidden > 0, |diff| {
+                    diff.child(more_lines(hidden).pb(zpx(crate::ui::SPACE_SM)))
+                })
+                .into_any_element()
+        });
+        disclosure_body(("file-reveal", ix), expanded && has_diff, header, body)
     }
 
     fn approval_card(&self, approval: &ApprovalBlock, cx: &mut Context<Self>) -> impl IntoElement {
@@ -860,21 +1074,21 @@ impl ChatView {
         let pending = approval.state == ApprovalState::Pending;
         let (approve_id, deny_id) = (approval.id.clone(), approval.id.clone());
         let attention = ActionTone::Warning.foreground();
-        v_flex()
-            .my(zpx(4.))
+        let card = v_flex()
+            .my(zpx(crate::ui::SPACE_XS))
             .p(zpx(TEXT_INSET))
             .gap(zpx(10.))
-            .rounded_lg()
+            .rounded(zpx(crate::ui::RADIUS_CARD))
             .bg(crate::appearance::composer_surface())
-            .when(pending, |card| {
-                card.border_1().border_color(attention.opacity(0.28))
-            })
-            .when(!pending, |card| {
-                card.border_1().border_color(rgba(HAIRLINE))
+            .border_1()
+            .border_color(if pending {
+                attention.opacity(0.28)
+            } else {
+                crate::appearance::separator()
             })
             .child(
                 h_flex()
-                    .gap(zpx(8.))
+                    .gap(zpx(crate::ui::SPACE_MD))
                     .items_center()
                     .text_size(zpx(TEXT_MD))
                     .font_weight(FontWeight::MEDIUM)
@@ -889,20 +1103,27 @@ impl ChatView {
                     .child(title),
             )
             .child(
+                // Long commands and patches scroll inside the card; the text selects.
                 div()
-                    .px(zpx(10.))
-                    .py(zpx(7.))
-                    .rounded_md()
+                    .id(SharedString::from(format!(
+                        "approval-detail-{}",
+                        approval.id
+                    )))
+                    .max_h(zpx(APPROVAL_DETAIL_MAX))
+                    .overflow_y_scroll()
+                    .rounded(zpx(crate::ui::RADIUS_ROW))
                     .bg(crate::appearance::code_surface())
-                    .font_family(MONO)
                     .text_size(zpx(TEXT_SM))
                     .line_height(relative(1.5))
                     .text_color(rgb(TEXT))
-                    .child(approval.detail.clone()),
+                    .child(selectable_text(
+                        SharedString::from(format!("approval-text-{}", approval.id)),
+                        code_fence(&approval.detail),
+                    )),
             )
             .child(if pending {
                 h_flex()
-                    .gap(zpx(6.))
+                    .gap(zpx(crate::ui::SPACE_SM))
                     .child(
                         Button::new("approve")
                             .primary()
@@ -926,7 +1147,7 @@ impl ChatView {
             } else {
                 let (label, color) = match approval.state {
                     ApprovalState::Approved => ("Approved", ActionTone::Success.foreground()),
-                    ApprovalState::Closed => ("No longer needed", rgba(MUTED)),
+                    ApprovalState::Closed => ("No longer needed", crate::ui::secondary_text()),
                     _ => ("Denied", ActionTone::Danger.foreground()),
                 };
                 div()
@@ -934,20 +1155,82 @@ impl ChatView {
                     .text_color(color)
                     .child(label)
                     .into_any_element()
+            });
+        // A new request grows in rather than pushing the transcript at once.
+        let progress = if cx.reduce_motion() {
+            1.
+        } else {
+            self.approval_entered.get(&approval.id).map_or(1., |at| {
+                crate::ui::ease_out(at.elapsed().as_secs_f32() / crate::ui::REVEAL.as_secs_f32())
             })
+        };
+        gpui_kit::base::MotionReveal::new(
+            SharedString::from(format!("approval-reveal-{}", approval.id)),
+            progress,
+            card.opacity(progress).into_any_element(),
+        )
     }
 }
 
 /// The one disclosure arrow transcript rows use, directly after their text.
-fn disclosure(expanded: bool) -> Icon {
-    crate::icons::icon(if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    })
-    .with_size(zpx(11.))
-    .flex_none()
-    .text_color(crate::appearance::faint_text())
+/// Its points interpolate from right to down, reversibly; Reduce Motion snaps.
+fn disclosure(id: impl Into<ElementId>, expanded: bool) -> Chevron {
+    Chevron {
+        id: id.into(),
+        expanded,
+    }
+}
+
+#[derive(IntoElement)]
+struct Chevron {
+    id: ElementId,
+    expanded: bool,
+}
+
+impl RenderOnce for Chevron {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = gpui_kit::base::transition(
+            self.id,
+            if self.expanded { 1. } else { 0. },
+            gpui_kit::base::Transition::new(std::time::Duration::from_millis(180))
+                .ease(crate::ui::ease_out),
+            window,
+            cx,
+        );
+        // Right-pointing (collapsed) to down-pointing (expanded), on a 16-unit grid.
+        let mix = |a: [f32; 2], b: [f32; 2]| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        let points = [
+            mix([6., 4.], [4., 6.]),
+            mix([10., 8.], [8., 10.]),
+            mix([6., 12.], [12., 6.]),
+        ];
+        div()
+            .size(zpx(11.))
+            .flex_none()
+            .text_color(crate::ui::faint_text())
+            .child(
+                canvas(
+                    |_, window, _| window.text_style().color,
+                    move |bounds, color, window, _| {
+                        let scale = bounds.size.width.as_f32() / 16.;
+                        let mut path = PathBuilder::stroke(gpui::px(1.5 * scale));
+                        for (i, p) in points.into_iter().enumerate() {
+                            let p = bounds.origin
+                                + point(gpui::px(p[0] * scale), gpui::px(p[1] * scale));
+                            if i == 0 {
+                                path.move_to(p);
+                            } else {
+                                path.line_to(p);
+                            }
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
+                        }
+                    },
+                )
+                .size_full(),
+            )
+    }
 }
 
 /// A code block's corner: its language and a Copy with the same confirmation
@@ -975,7 +1258,7 @@ fn code_block_actions(
         .pl(zpx(8.))
         .gap(zpx(2.))
         .items_center()
-        .rounded_md()
+        .rounded(zpx(crate::ui::RADIUS_ROW))
         .bg(crate::appearance::code_surface())
         .font_family(cx.theme().font_family.clone())
         .text_size(zpx(del_core::typography::TEXT_XS))
@@ -992,7 +1275,7 @@ fn code_block_actions(
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .rounded_md()
+                .rounded(zpx(crate::ui::RADIUS_ROW))
                 .cursor_pointer()
                 .role(Role::Button)
                 .aria_label(if copied { "Copied" } else { "Copy code" })
@@ -1052,7 +1335,10 @@ fn prose_style() -> TextViewStyle {
         )
 }
 
+/// The person's message: selectable text, plus a hover Copy in the corner
+/// that copies the prompt exactly as written (space is always reserved).
 fn user_message(
+    ix: Option<usize>,
     text: String,
     steer: bool,
     goal: bool,
@@ -1068,16 +1354,25 @@ fn user_message(
     });
     let sent_as_goal = goal || objective.is_some();
     let text = objective.unwrap_or(text);
+    let group = SharedString::from(format!("user-message-{}", ix.unwrap_or(usize::MAX)));
+    let copy = ix.filter(|_| !text.trim().is_empty()).map(|ix| PromptCopy {
+        ix,
+        text: text.clone(),
+        group: group.clone(),
+    });
     // Main-chat cards span the transcript; Side chats keep text-sized bubbles.
     h_flex()
+        .group(group)
+        .relative()
         .max_w_full()
         .when(full_width, |row| row.w_full())
         .self_start()
         .items_start()
-        .gap_2()
-        .px(zpx(TEXT_INSET))
-        .py(zpx(8.))
-        .rounded_lg()
+        .gap(zpx(crate::ui::SPACE_MD))
+        .pl(zpx(TEXT_INSET))
+        .pr(zpx(if copy.is_some() { 32. } else { TEXT_INSET }))
+        .py(zpx(crate::ui::SPACE_MD))
+        .rounded(zpx(crate::ui::RADIUS_CARD))
         .bg(rgba(USER_CARD))
         .when(steer, |row| {
             row.child(
@@ -1091,21 +1386,28 @@ fn user_message(
             v_flex()
                 .flex_shrink_1()
                 .min_w_0()
-                .gap_1()
+                .gap(zpx(crate::ui::SPACE_XS))
                 .when(!text.is_empty(), |column| {
+                    let (markdown, _) = literal_markdown(&text, 0..0);
                     column.child(
                         div()
+                            .min_w_0()
                             .text_size(zpx(TEXT_PROSE))
                             .line_height(relative(PROSE_LEADING))
                             .text_color(rgb(STRONG))
-                            .child(text),
+                            .child(match ix {
+                                Some(ix) => {
+                                    selectable_text(("user-text", ix), markdown).into_any_element()
+                                }
+                                None => div().child(text.clone()).into_any_element(),
+                            }),
                     )
                 })
                 .when(sent_as_goal, |column| {
                     column.child(
                         div()
                             .text_size(zpx(del_core::typography::TEXT_XS))
-                            .text_color(crate::appearance::secondary_text())
+                            .text_color(crate::ui::secondary_text())
                             .child("◎  Sent as goal"),
                     )
                 })
@@ -1113,11 +1415,84 @@ fn user_message(
                     column.child(
                         div()
                             .text_size(zpx(TEXT_SM))
-                            .text_color(crate::appearance::secondary_text())
+                            .text_color(crate::ui::secondary_text())
                             .child(label),
                     )
                 }),
         )
+        .children(copy)
+}
+
+/// A prompt's Copy: the reply's glyph and 1.5 s check, shown on hover or focus.
+#[derive(IntoElement)]
+struct PromptCopy {
+    ix: usize,
+    text: String,
+    group: SharedString,
+}
+
+impl RenderOnce for PromptCopy {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let PromptCopy { ix, text, group } = self;
+        // Counts clicks, so a repeated click restarts the confirmation; 0 is idle.
+        let copies = window.use_keyed_state(
+            ElementId::NamedInteger("prompt-copy".into(), ix as u64),
+            cx,
+            |_, _| 0u32,
+        );
+        let copied = *copies.read(cx) > 0;
+        div()
+            .id(("copy-prompt", ix))
+            .keyboard_control()
+            .absolute()
+            .top(zpx(crate::ui::SPACE_XS))
+            .right(zpx(crate::ui::SPACE_XS))
+            .size(zpx(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(zpx(crate::ui::RADIUS_ROW))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(if copied { "Copied" } else { "Copy message" })
+            .opacity(if copied { 1. } else { 0. })
+            .group_hover(group, |button| button.opacity(1.))
+            .focus_visible(|button| button.opacity(1.))
+            .hover(|button| button.bg(rgba(CARD_HOVER)))
+            .child(
+                crate::micro_motion::MorphIcon::new(
+                    ("prompt-copy-confirmation", ix),
+                    crate::animated_icons::Morph::CopyCheck,
+                    copied,
+                )
+                .with_size(zpx(13.))
+                .text_color(crate::ui::secondary_text()),
+            )
+            // Pressing Copy must not start a text selection in the message.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                let click = copies.update(cx, |count, cx| {
+                    *count = count.wrapping_add(1).max(1);
+                    cx.notify();
+                    *count
+                });
+                let copies = copies.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(1500))
+                        .await;
+                    copies.update(cx, |count, cx| {
+                        if *count == click {
+                            *count = 0;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            })
+    }
 }
 
 struct ResponseFooter {
@@ -1149,9 +1524,9 @@ fn assistant_message(
     div()
         .id(("assistant-response", ix))
         .on_hover(move |hovered, _, cx| {
+            // The footer's space is reserved, so the row's height never changes.
             let _ = hover_chat.update(cx, |this, cx| {
                 this.response_hover.insert(ix, *hovered);
-                this.scroller.remeasure_items(ix..ix + 1);
                 cx.notify();
             });
         })
@@ -1180,8 +1555,8 @@ fn assistant_message(
             message.child(
                 h_flex()
                     .h(zpx(26.))
-                    .ml(-zpx(6.))
-                    .gap(zpx(4.))
+                    .ml(-zpx(crate::ui::SPACE_SM))
+                    .gap(zpx(crate::ui::SPACE_XS))
                     .items_center()
                     .justify_start()
                     .text_size(zpx(del_core::typography::TEXT_XS))
@@ -1197,7 +1572,7 @@ fn assistant_message(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(zpx(crate::ui::RADIUS_ROW))
                             .cursor_pointer()
                             .role(Role::Button)
                             .aria_label(if copied { "Copied" } else { "Copy response" })
@@ -1253,9 +1628,7 @@ fn footer_opacity(hovered: Option<bool>, reduced: bool, t: f32) -> f32 {
     }
 }
 
-fn turn_end(status: TurnStatus, error: Option<String>) -> impl IntoElement {
-    let failed = status == TurnStatus::Failed;
-    let danger = ActionTone::Danger.foreground();
+fn turn_end(status: TurnStatus) -> impl IntoElement {
     let label = match status {
         TurnStatus::Completed => "Completed",
         TurnStatus::Interrupted => "Stopped by you",
@@ -1263,23 +1636,40 @@ fn turn_end(status: TurnStatus, error: Option<String>) -> impl IntoElement {
     };
     h_flex()
         .px(zpx(TEXT_INSET))
-        .py(zpx(4.))
-        .gap(zpx(6.))
+        .py(zpx(crate::ui::SPACE_XS))
+        .text_size(zpx(TEXT_MD))
+        .line_height(zpx(18.))
+        .text_color(crate::ui::secondary_text())
+        .child(label)
+}
+
+pub(super) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// A failure in the transcript: the danger mark, what failed, why, and a
+/// Retry when there is something to retry.
+fn failure_row(
+    label: &'static str,
+    error: Option<String>,
+    retry: Option<ClickHandler>,
+) -> impl IntoElement {
+    let danger = ActionTone::Danger.foreground();
+    h_flex()
+        .px(zpx(TEXT_INSET))
+        .py(zpx(crate::ui::SPACE_XS))
+        .gap(zpx(crate::ui::SPACE_SM))
         .items_start()
         .text_size(zpx(TEXT_MD))
         .line_height(zpx(18.))
-        .text_color(if failed { danger } else { rgba(MUTED) })
-        .when(failed, |row| {
-            row.child(
-                div().h(zpx(18.)).flex_none().flex().items_center().child(
-                    crate::icons::path("icons/error.svg")
-                        .with_size(zpx(14.))
-                        .text_color(danger),
-                ),
-            )
-        })
+        .text_color(danger)
+        .child(
+            div().h(zpx(18.)).flex_none().flex().items_center().child(
+                crate::icons::path("icons/error.svg")
+                    .with_size(zpx(14.))
+                    .text_color(danger),
+            ),
+        )
         .child(div().flex_none().child(label))
-        .when_some(error.filter(|_| failed), |row, error| {
+        .when_some(error, |row, error| {
             row.child(
                 div()
                     .min_w_0()
@@ -1289,6 +1679,38 @@ fn turn_end(status: TurnStatus, error: Option<String>) -> impl IntoElement {
                     .child(error),
             )
         })
+        .when_some(retry, |row, retry| {
+            row.child(
+                Button::new("retry-failed-turn")
+                    .ghost()
+                    .small()
+                    .flex_none()
+                    .mt(-zpx(crate::ui::SPACE_2XS))
+                    .bg(rgba(crate::appearance::QUIET_FILL))
+                    .label("Retry")
+                    .on_click(move |event, window, cx| retry(event, window, cx)),
+            )
+        })
+}
+
+pub type RetryFn = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Retries the opening prompt; the app installs it while that prompt failed.
+pub struct FirstPromptRetry(pub RetryFn);
+impl Global for FirstPromptRetry {}
+
+/// The first line of a start failure, short enough for the status row.
+fn short_reason(error: &str) -> String {
+    let line = error
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut reason: String = line.chars().take(120).collect();
+    if line.chars().count() > 120 {
+        reason.push('…');
+    }
+    reason.trim_end_matches('.').to_owned()
 }
 
 /// The opening message is rendered before there is a backend session to follow.
@@ -1307,12 +1729,13 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                         .w_full()
                         .pt(zpx(TRANSCRIPT_TOP))
                         .justify_center()
-                        .px_3()
+                        .px(zpx(crate::ui::SPACE_LG))
                         .child(
                             div()
                                 .w_full()
                                 .max_w(zpx(COLUMN_MAX_WIDTH))
                                 .child(user_message(
+                                    None,
                                     input.text.clone(),
                                     false,
                                     input
@@ -1326,19 +1749,65 @@ pub fn pending_prompt(input: del_agent::UserInput, error: Option<String>) -> imp
                 ),
         )
         .child(
-            v_flex().w_full().items_center().px_3().child(
-                h_flex()
-                    .w_full()
-                    .max_w(zpx(COLUMN_MAX_WIDTH))
-                    .h(zpx(20.))
-                    .px(zpx(TEXT_INSET))
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(zpx(TEXT_SM))
-                    .text_color(crate::appearance::secondary_text())
-                    .when(!failed, |row| {
-                        row.child(crate::icons::spinner()).child("Starting agent…")
-                    }),
-            ),
+            v_flex()
+                .w_full()
+                .items_center()
+                .px(zpx(crate::ui::SPACE_LG))
+                .child(
+                    // One fixed-height status row: starting, or why it could not.
+                    h_flex()
+                        .id("first-prompt-status")
+                        .w_full()
+                        .max_w(zpx(COLUMN_MAX_WIDTH))
+                        .h(zpx(24.))
+                        .px(zpx(TEXT_INSET))
+                        .gap(zpx(crate::ui::SPACE_SM))
+                        .items_center()
+                        .text_size(zpx(TEXT_SM))
+                        .text_color(crate::ui::secondary_text())
+                        .when(!failed, |row| {
+                            row.child(crate::icons::spinner()).child("Starting agent…")
+                        })
+                        .when_some(error, |row, error| {
+                            let full = error.clone();
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(ActionTone::Danger.foreground())
+                                    .child("Could not start"),
+                            )
+                            .child(div().flex_none().child("·"))
+                            .child(
+                                div()
+                                    .id("first-prompt-reason")
+                                    .min_w_0()
+                                    .truncate()
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(full.clone())
+                                            .build(window, cx)
+                                    })
+                                    .child(short_reason(&error)),
+                            )
+                            .child(div().flex_none().child("·"))
+                            .child(
+                                div()
+                                    .id("retry-first-prompt")
+                                    .keyboard_control()
+                                    .flex_none()
+                                    .role(Role::Button)
+                                    .aria_label("Retry message")
+                                    .cursor_pointer()
+                                    .text_color(crate::ui::primary_text())
+                                    .hover(|retry| retry.underline())
+                                    .child("Retry")
+                                    .on_click(|_, window, cx| {
+                                        if let Some(retry) = cx.try_global::<FirstPromptRetry>() {
+                                            let retry = retry.0.clone();
+                                            retry(window, cx);
+                                        }
+                                    }),
+                            )
+                        }),
+                ),
         )
 }
