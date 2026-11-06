@@ -54,6 +54,16 @@ pub fn summary(st: &ProviderStatus) -> &'static str {
     }
 }
 
+/// The provider's own npm install command, offered when its CLI is missing.
+pub fn install_command(provider: Provider) -> Option<&'static str> {
+    match provider {
+        Provider::Codex => Some("npm i -g @openai/codex"),
+        Provider::Claude => Some("npm i -g @anthropic-ai/claude-code"),
+        Provider::OpenCode => Some("npm i -g opencode-ai"),
+        Provider::Acp => None,
+    }
+}
+
 pub fn display_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "Codex",
@@ -144,6 +154,15 @@ mod tests {
             assert_eq!(manager.resume(&session.id).await.unwrap().id, session.id);
         }
         manager.shutdown().await;
+    }
+
+    #[test]
+    fn every_offered_provider_has_an_install_command() {
+        for provider in VISIBLE {
+            let command = install_command(provider).unwrap();
+            assert!(command.starts_with("npm i -g "), "{command}");
+        }
+        assert_eq!(install_command(Provider::Acp), None);
     }
 
     #[test]
