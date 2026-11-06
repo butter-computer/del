@@ -81,14 +81,14 @@ impl Render for SidebarDrag {
                 .left(self.start_pointer_x - window.mouse_position().x)
                 .h(zpx(ROW_HEIGHT))
                 .w(zpx(SIDEBAR_WIDTH - 12.))
-                .px_2()
+                .px(zpx(crate::ui::SPACE_SM))
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .rounded_md()
+                .gap(zpx(crate::ui::SPACE_XS))
+                .rounded(zpx(crate::ui::RADIUS_ROW))
                 .bg(crate::appearance::popup_surface())
                 .text_size(zpx(TEXT_MD))
-                .text_color(rgb(TEXT))
+                .text_color(crate::ui::primary_text())
                 .child(if self.terminal {
                     crate::mode_ui::terminal_mark(self.provider)
                 } else {
@@ -164,9 +164,9 @@ fn loading_title(title: String, id: &del_agent::SessionId) -> AnyElement {
                 .id(SharedString::from(format!("sidebar-title-{}", id.0)))
                 .flex_none()
                 .text_color(rgba(0xffffff66))
-                .highlight_color(rgb(0xf5f5f5))
+                .highlight_color(crate::ui::primary_text())
                 .spread(0.22)
-                .duration(std::time::Duration::from_millis(1200)),
+                .duration(crate::ui::SHIMMER_PERIOD),
         )
         .into_any_element()
 }
@@ -230,25 +230,89 @@ fn footer_trigger_style() -> StyleRefinement {
     StyleRefinement::default().w_0().min_w_0().flex_1()
 }
 
-/// Short relative age: now, 4m, 2h, 5d.
-pub(crate) fn relative_time(updated_secs: u64) -> Option<String> {
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
+const DAY: u64 = 24 * HOUR;
+const WEEK: u64 = 7 * DAY;
+const MONTH: u64 = 30 * DAY;
+const YEAR: u64 = 365 * DAY;
+
+fn age_of(updated_secs: u64) -> Option<u64> {
     if updated_secs == 0 {
         return None;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let age = now.saturating_sub(updated_secs);
+    Some(now.saturating_sub(updated_secs))
+}
+
+/// Short relative age: now, 4m, 2h, 5d, 3w, 4mo, 2y.
+pub(crate) fn relative_time(updated_secs: u64) -> Option<String> {
+    age_of(updated_secs).map(short_age)
+}
+
+/// The hover card's long form: "just now", "4 minutes ago", "1 year ago".
+pub(crate) fn relative_time_long(updated_secs: u64) -> Option<String> {
+    age_of(updated_secs).map(long_age)
+}
+
+fn age_unit(age: u64) -> Option<(u64, &'static str, &'static str)> {
     Some(match age {
-        0..60 => "now".into(),
-        60..3_600 => format!("{}m", age / 60),
-        3_600..86_400 => format!("{}h", age / 3_600),
-        _ => format!("{}d", age / 86_400),
+        0..MINUTE => return None,
+        MINUTE..HOUR => (age / MINUTE, "m", "minute"),
+        HOUR..DAY => (age / HOUR, "h", "hour"),
+        DAY..WEEK => (age / DAY, "d", "day"),
+        WEEK..MONTH => (age / WEEK, "w", "week"),
+        MONTH..YEAR => (age / MONTH, "mo", "month"),
+        _ => (age / YEAR, "y", "year"),
     })
 }
 
-const TEXT: u32 = 0xf0f0f0;
-const MUTED: u32 = 0xffffff8c;
+fn short_age(age: u64) -> String {
+    match age_unit(age) {
+        None => "now".into(),
+        Some((count, short, _)) => format!("{count}{short}"),
+    }
+}
+
+fn long_age(age: u64) -> String {
+    match age_unit(age) {
+        None => "just now".into(),
+        Some((count, _, unit)) => format!(
+            "{} ago",
+            crate::ui::plural(count as usize, unit, &format!("{unit}s"))
+        ),
+    }
+}
+
+#[cfg(test)]
+mod age_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    #[test]
+    fn ages_grow_past_days() {
+        let cases = [
+            (0, "now", "just now"),
+            (59, "now", "just now"),
+            (4 * MINUTE, "4m", "4 minutes ago"),
+            (HOUR, "1h", "1 hour ago"),
+            (5 * DAY, "5d", "5 days ago"),
+            (15 * DAY, "2w", "2 weeks ago"),
+            (40 * DAY, "1mo", "1 month ago"),
+            (300 * DAY, "10mo", "10 months ago"),
+            (400 * DAY, "1y", "1 year ago"),
+            (800 * DAY, "2y", "2 years ago"),
+        ];
+        for (age, short, long) in cases {
+            assert_eq!(short_age(age), short, "{age}");
+            assert_eq!(long_age(age), long, "{age}");
+        }
+        assert_eq!(relative_time(0), None);
+    }
+}
+
 
 pub(crate) fn fading_title(text: String) -> impl IntoElement {
     let label = text.clone();
@@ -396,7 +460,10 @@ pub(crate) fn coffee_icon(active: bool, animate: bool, cx: &App) -> AnyElement {
                     steam
                         .with_animation(
                             ("coffee-steam", i as usize),
-                            Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                            // Slow decorative motion: 30 fps is plenty.
+                            Animation::new(std::time::Duration::from_millis(1800))
+                                .repeat()
+                                .with_max_fps(30.),
                             move |steam, t| {
                                 let phase = (t + i as f32 * 0.5) % 1.;
                                 steam
@@ -419,7 +486,7 @@ fn pin_button(id: impl Into<ElementId>, pinned: bool) -> Button {
         .size(crate::icons::button_size())
         .p_0()
         .accessibility_label(if pinned { "Unpin" } else { "Pin" })
-        .text_color(if pinned { rgb(0xf5f5f5) } else { rgba(MUTED) })
+        .text_color(if pinned { crate::ui::primary_text() } else { crate::ui::secondary_text() })
 }
 
 fn archive_button(id: impl Into<ElementId>) -> Button {
@@ -460,9 +527,9 @@ fn archived_actions(id: &del_agent::SessionId, state: &Entity<AppState>) -> Div 
                 .p_0()
                 .accessibility_label("Permanently delete")
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    delete_state.update(cx, |s, cx| s.permanently_delete(delete_id.clone(), cx));
+                    confirm_permanent_delete(&delete_state, delete_id.clone(), window, cx);
                 })
                 .motion_child(true, move |feedback| {
                     feedback.glyph(Glyph::Trash).text_color(rgb(0xff646b))
@@ -486,7 +553,7 @@ fn session_menu_item(
         .h(zpx(28.))
         .gap(zpx(8.))
         .relative()
-        .px_2()
+        .px(zpx(crate::ui::SPACE_SM))
         .text_size(zpx(TEXT_MD))
         .cursor_pointer()
         .when(destructive, |item| item.text_color(rgb(0xff646b)))
@@ -517,7 +584,7 @@ fn status_glyph(row: &Row, working: bool, unread: bool, failed: bool) -> Option<
         (
             "Working",
             crate::icons::working_spinner()
-                .color(rgba(MUTED).into())
+                .color(crate::ui::secondary_text().into())
                 .into_any_element(),
         )
     } else {
@@ -543,7 +610,7 @@ fn status_glyph(row: &Row, working: bool, unread: bool, failed: bool) -> Option<
             _ if unread => (
                 "Unread",
                 glyph("icons/circle-check-filled.svg")
-                    .text_color(rgb(0xf5f5f5))
+                    .text_color(crate::ui::primary_text())
                     .into_any_element(),
             ),
             _ => return None,
@@ -571,7 +638,7 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
     let info = state.project_info.get(&row.cwd);
     let detail = |icon: &'static str, label: &'static str, value: String| {
         h_flex()
-            .gap_2()
+            .gap(zpx(crate::ui::SPACE_SM))
             .items_center()
             .child(crate::icons::path(icon).text_color(cx.theme().muted_foreground))
             .child(
@@ -589,13 +656,13 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
         .debug_selector(|| "session-hover-card".into())
         .w(zpx(300.))
         .max_w_full()
-        .gap_2()
+        .gap(zpx(crate::ui::SPACE_SM))
         .text_size(zpx(TEXT_MD))
         .text_color(cx.theme().popover_foreground)
         .child(
             h_flex()
                 .items_start()
-                .gap_3()
+                .gap(zpx(crate::ui::SPACE_MD))
                 .child(
                     div()
                         .flex_1()
@@ -608,11 +675,11 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                     h_flex()
                         .flex_none()
                         .items_center()
-                        .gap_1()
+                        .gap(zpx(crate::ui::SPACE_XS))
                         .text_size(zpx(TEXT_SM))
                         .text_color(cx.theme().muted_foreground)
                         .when_some(
-                            relative_time(row.updated_secs)
+                            relative_time_long(row.updated_secs)
                                 .filter(|_| !state.session_working(&row.id)),
                             |d, time| d.child(time),
                         )
@@ -639,7 +706,7 @@ fn session_hover_card(row: &Row, state: &AppState, cx: &App) -> AnyElement {
                 "icons/folder.svg"
             },
             "Directory",
-            row.cwd.to_string_lossy().into_owned(),
+            crate::ui::display_path(&row.cwd.to_string_lossy()),
         ))
         .when_some(
             info.filter(|info| !info.current.is_empty()),
@@ -695,13 +762,13 @@ fn row_item(
         .h(zpx(ROW_HEIGHT))
         .min_h(zpx(ROW_HEIGHT))
         .flex_none()
-        .px_2()
-        .gap_1p5()
+        .px(zpx(crate::ui::SPACE_SM))
+        .gap(zpx(crate::ui::SPACE_XS))
         .items_center()
-        .rounded_md()
+        .rounded(zpx(crate::ui::RADIUS_ROW))
         .cursor_pointer()
         .text_size(zpx(TEXT_MD))
-        .text_color(rgb(TEXT))
+        .text_color(crate::ui::primary_text())
         .when(focused, |row| {
             row.child(crate::keyboard_control::reveal_when_focused(
                 state.read(cx).sidebar_scroll.clone(),
@@ -717,11 +784,11 @@ fn row_item(
         .child(motion.marker_with_opacity(
             id.0.clone(),
             if selected {
-                rgba(0xffffff14)
+                crate::ui::row_selected()
             } else {
                 rgba(0xffffff00)
             },
-            rgba(0xffffff0a),
+            crate::ui::row_hover(),
             Some(std::rc::Rc::new(std::cell::Cell::new(
                 if state.read(cx).sidebar_drag.active.as_ref() == Some(&id) && cx.has_active_drag()
                 {
@@ -793,7 +860,7 @@ fn row_item(
                 .min_w_0()
                 .overflow_hidden()
                 .text_color(if selected || unread {
-                    rgb(0xf5f5f5)
+                    crate::ui::primary_text()
                 } else {
                     rgba(0xffffffcc)
                 })
@@ -831,10 +898,10 @@ fn row_item(
         } else {
             h_flex()
                 .flex_none()
-                .gap_1()
+                .gap(zpx(crate::ui::SPACE_XS))
                 .items_center()
                 .text_size(zpx(TEXT_SM))
-                .text_color(crate::appearance::faint_text())
+                .text_color(crate::ui::faint_text())
                 .when_some(time, |meta, time| meta.child(time))
                 .when_some(status_glyph(row, working, unread, failed), |meta, glyph| {
                     meta.child(glyph)
@@ -853,7 +920,7 @@ fn row_item(
                 .items_center()
                 .gap(zpx(4.0))
                 .w(zpx(ROW_ACTIONS_WIDTH))
-                .rounded_sm()
+                .rounded(zpx(crate::ui::RADIUS_XS))
                 .opacity(if focused { 1.0 } else { 0.0 })
                 .group_hover(hover_group, |a| a.opacity(1.0))
                 .when(!archived, |a| {
@@ -927,13 +994,27 @@ fn row_item(
                     .slide_x(zpx(-4.), zpx(0.))
                     .fade(0., 1.),
                 )
-                .p_3()
+                .p(zpx(crate::ui::SPACE_MD))
                 .rounded(zpx(12.))
                 .build(window, cx)
             },
         );
     }
 
+    // A row that just joined the list grows to its height and fades in, so
+    // the rows below slide with the same quint as drag shifts.
+    if let Some(t) = state.read(cx).row_reveal(&id)
+        && !cx.reduce_motion()
+    {
+        window.request_animation_frame();
+        return div()
+            .flex_none()
+            .h(zpx(ROW_HEIGHT * t))
+            .opacity(t)
+            .overflow_hidden()
+            .child(moving_row(item, &id, state, cx))
+            .into_any_element();
+    }
     moving_row(item, &id, state, cx)
 }
 
@@ -948,7 +1029,7 @@ fn session_menu_content(motion: &crate::hover_motion::HoverMotion, pinned: bool,
         // PopupMenu's wrapper uses 8 logical pixels of padding.
         // A rem-based negative margin leaves strips at smaller font sizes.
         .mx(gpui::px(-8.))
-        .gap_0p5()
+        .gap(zpx(crate::ui::SPACE_2XS))
         .bg(background)
         .child(motion.layer(Some(background), cx.theme().border.into()))
         .child(session_menu_item(
@@ -999,7 +1080,7 @@ fn project_menu_content(
         .flex_1()
         .min_w(zpx(176.))
         .mx(gpui::px(-8.))
-        .gap_0p5()
+        .gap(zpx(crate::ui::SPACE_2XS))
         .bg(background)
         .child(motion.layer(Some(background), cx.theme().border.into()))
         .child(session_menu_item(
@@ -1111,6 +1192,57 @@ fn project_menu(
         }))
 }
 
+/// The one confirmation for permanently deleting a session, from the
+/// archived list, the session menu or the Memory usage popup. Same opaque
+/// dialog as project deletion: Cancel and a red Permanently delete.
+pub(crate) fn confirm_permanent_delete(
+    state: &Entity<AppState>,
+    id: del_agent::SessionId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let title = state.read(cx).current_title(&id);
+    let state = state.clone();
+    window.open_dialog(cx, move |dialog, _, _| {
+        let state = state.clone();
+        let id = id.clone();
+        dialog
+            .title("Permanently delete session?")
+            .bg(crate::appearance::popup_surface())
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+            .footer(
+                gpui_kit::component::dialog::DialogFooter::new()
+                    .child(
+                        Button::new("session-delete-cancel")
+                            .ghost()
+                            .bg(rgba(crate::appearance::QUIET_FILL))
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("session-delete-confirm")
+                            .label("Permanently delete")
+                            .danger()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(gpui_kit::component::dialog::Confirm {
+                                        secondary: false,
+                                    }),
+                                    cx,
+                                )
+                            }),
+                    ),
+            )
+            .child(div().child(format!(
+                "Permanently delete “{title}” and its history. Its directory and files will stay untouched."
+            )))
+            .on_ok(move |_, _, cx| {
+                state.update(cx, |s, cx| s.permanently_delete(id.clone(), cx));
+                true
+            })
+    });
+}
+
 fn session_menu(
     menu: PopupMenu,
     state: &Entity<AppState>,
@@ -1124,17 +1256,20 @@ fn session_menu(
     let id = id.clone();
     menu.item(
         PopupMenuItem::element(move |_, cx| session_menu_content(&motion, pinned, cx)).on_click(
-            move |event, _, cx| {
+            move |event, window, cx| {
                 let Some(action) = click_motion.clicked(event) else {
                     return;
                 };
+                if action == "Permanently delete" {
+                    confirm_permanent_delete(&state, id.clone(), window, cx);
+                    return;
+                }
                 state.update(cx, |s, cx| match action.as_str() {
                     "Rename" => s.start_rename(id.clone(), cx),
                     "Pin" | "Unpin" => s.toggle_session_pin(&id, cx),
                     "Mark as unread" => s.mark_session_unread(&id, cx),
                     "Unload" => s.unload(id.clone(), cx),
                     "Archive" => s.archive(id.clone(), cx),
-                    "Permanently delete" => s.permanently_delete(id.clone(), cx),
                     _ => {}
                 });
             },
@@ -1255,7 +1390,7 @@ fn empty_space(archived: bool) -> impl IntoElement {
             div()
                 .w_full()
                 .text_size(zpx(TEXT_SM))
-                .text_color(crate::appearance::faint_text())
+                .text_color(crate::ui::faint_text())
                 .child(if archived {
                     "Archived sessions will land here."
                 } else {
@@ -1331,23 +1466,29 @@ fn space_contents(
                 .h_full()
                 .track_scroll(&scroll)
                 .min_h_0()
-                .gap_0p5()
+                .gap(zpx(crate::ui::SPACE_2XS))
                 .overflow_y_scroll()
                 .when(rows.iter().any(|r| r.pinned && !r.archived), |list| list.child(
+                    // The first pin mounts the section; it fades in rather than
+                    // appearing already open. Its rows grow in on their own.
+                    div().flex_none().with_animation("pinned-section-mount",
+                        Animation::new(if cx.reduce_motion() { std::time::Duration::ZERO } else { crate::ui::REVEAL })
+                            .with_easing(crate::ui::ease_out),
+                        |section, t| section.opacity(t)).child(
                     gpui_kit::component::collapsible::Collapsible::new()
                         .motion_id("pinned-section-reveal").open(pinned_open).flex_none()
                         .child(div().id("pinned-section-heading").keyboard_control().debug_selector(|| "pinned-heading".into())
                             .role(Role::Button).aria_label(if pinned_open { "Collapse Pinned" } else { "Expand Pinned" })
-                            .px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).cursor_pointer()
-                            .hover(|heading| heading.text_color(crate::appearance::secondary_text())).child("Pinned")
+                            .px(zpx(crate::ui::SPACE_SM)).pt(zpx(crate::ui::SPACE_SM)).pb(zpx(crate::ui::SPACE_XS)).text_size(zpx(TEXT_SM)).text_color(crate::ui::secondary_text()).cursor_pointer()
+                            .hover(|heading| heading.text_color(crate::ui::primary_text())).child("Pinned")
                             .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
-                        .content(v_flex().w_full().gap_0p5()
-                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, window, cx))))))
+                        .content(v_flex().w_full().gap(zpx(crate::ui::SPACE_2XS))
+                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, window, cx)))))))
                 // The Space switcher in the header names the Space, so projects follow
                 // directly; the archive view keeps a plain label.
-                .when(show_archived, |list| list.child(div().px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).child("Archived")))
+                .when(show_archived, |list| list.child(div().px(zpx(crate::ui::SPACE_SM)).pt(zpx(crate::ui::SPACE_SM)).pb(zpx(crate::ui::SPACE_XS)).text_size(zpx(TEXT_SM)).text_color(crate::ui::secondary_text()).child("Archived")))
                 .when(empty, |list| list.child(empty_space(show_archived)))
-                .child(v_flex().debug_selector(|| "projects-list".into()).w_full().flex_none().gap_0p5()
+                .child(v_flex().debug_selector(|| "projects-list".into()).w_full().flex_none().gap(zpx(crate::ui::SPACE_2XS))
                 .children(paths.into_iter().map(|path| {
                     let collapsed = s.project_preferences.collapsed.contains(&path);
                     let project_renaming = s.project_renaming.as_ref() == Some(&path);
@@ -1369,10 +1510,10 @@ fn space_contents(
                     let expand_key = (s.spaces.active.clone(), path.clone());
                     // Projects open and close instantly; no reveal animation.
                     gpui_kit::component::collapsible::Collapsible::new()
-                        .open(!collapsed).flex_none().gap_0p5()
-                        .child(h_flex().id(group.clone()).when(!project_renaming, |row| row.keyboard_control()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px_2().gap_1p5().items_center().rounded_md().cursor_pointer()
+                        .open(!collapsed).flex_none().gap(zpx(crate::ui::SPACE_2XS))
+                        .child(h_flex().id(group.clone()).when(!project_renaming, |row| row.keyboard_control()).group(group.clone()).relative().h(zpx(ROW_HEIGHT)).mt(zpx(6.)).px(zpx(crate::ui::SPACE_SM)).gap(zpx(crate::ui::SPACE_XS)).items_center().rounded(zpx(crate::ui::RADIUS_ROW)).cursor_pointer()
                             .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_MD)).font_weight(FontWeight::MEDIUM)
-                            .hover(|row| row.bg(rgba(0xffffff0a)))
+                            .hover(|row| row.bg(crate::ui::row_hover()))
                             .aria_label(format!("{} {}", if collapsed { "Expand" } else { "Collapse" }, path.display()))
                             .on_click(move |_, _, cx| { if !project_renaming { toggle_state.update(cx, |s, cx| s.toggle_project(toggle_path.clone(), cx)); } })
                             .context_menu(move |menu, window, cx| {
@@ -1390,16 +1531,16 @@ fn space_contents(
                                 .text_color(crate::appearance::ActionTone::Warning.foreground())
                                 .group_hover(group.clone(), |badge| badge.opacity(0.))
                                 .child(format!("{needs} needs you"))))
-                            .child(h_flex().absolute().right(zpx(4.)).top_0().h_full().items_center().gap_0p5()
+                            .child(h_flex().absolute().right(zpx(4.)).top_0().h_full().items_center().gap(zpx(crate::ui::SPACE_2XS))
                                 .child(Button::new(SharedString::from(format!("project-menu-{}", path.display()))).ghost().compact().icon(crate::icons::path("icons/more-horizontal.svg"))
                                     .accessibility_label("Project actions").opacity(0.).group_hover(group.clone(), |button| button.opacity(1.)).focus_visible(|button| button.opacity(1.))
                                     .dropdown_menu(move |menu, window, cx| project_menu(menu, &menu_state, &menu_path, window, cx)))
                                 .when(!show_archived, |row| row.child(Button::new(SharedString::from(format!("project-new-{}", path.display()))).ghost().compact()
                                     .opacity(0.).group_hover(group.clone(), |button| button.opacity(1.)).focus_visible(|button| button.opacity(1.))
-                                    .tooltip(format!("New session in {}", path.display())).accessibility_label("New session in project")
+                                    .tooltip(format!("New session in {}", s.project_name(&path))).accessibility_label(format!("New session in {}", s.project_name(&path)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                     .on_click(move |_, _, cx| { cx.stop_propagation(); new_state.update(cx, |s, cx| s.new_project_session(new_path.clone(), cx)); }).motion_child(true, move |feedback| feedback.glyph(Glyph::Add))))))
-                        .content(v_flex().w_full().min_w_0().pl(zpx(12.)).debug_selector(|| "project-session-content".into()).gap_0p5()
+                        .content(v_flex().w_full().min_w_0().pl(zpx(12.)).debug_selector(|| "project-session-content".into()).gap(zpx(crate::ui::SPACE_2XS))
                             .children(drafts.iter().copied().filter(|key| s.draft_project(*key).is_some_and(|p| p == path)).collect::<Vec<_>>().into_iter().filter(|_| !show_archived).map(|key| {
                                 let state = state.clone();
                                 let close_state = state.clone();
@@ -1407,19 +1548,19 @@ fn space_contents(
                                 let draft_focus = s.control_focus.control(&format!("draft-{key}"), cx);
                                 let draft_focused = crate::keyboard_control::keyboard_within(&draft_focus, window, cx);
                                 let working = s.tab_working(&crate::state::Tab::Draft(key));
-                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).keyboard_control_with(&draft_focus).px_2().h(zpx(ROW_HEIGHT)).flex().items_center().rounded_md()
+                                div().group(group.clone()).id(SharedString::from(format!("project-draft-{key}"))).keyboard_control_with(&draft_focus).px(zpx(crate::ui::SPACE_SM)).h(zpx(ROW_HEIGHT)).flex().items_center().rounded(zpx(crate::ui::RADIUS_ROW))
                                     .text_size(zpx(TEXT_MD)).text_color(crate::appearance::secondary_text()).cursor_pointer()
-                                    .when(s.selection == Selection::Draft(key), |row| row.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
-                                    .hover(|row| row.bg(rgba(0xffffff0a))).gap_1p5()
+                                    .when(s.selection == Selection::Draft(key), |row| row.bg(crate::ui::row_selected()).text_color(crate::ui::primary_text()))
+                                    .hover(|row| row.bg(crate::ui::row_hover())).gap(zpx(crate::ui::SPACE_XS))
                                     .child(crate::mode_ui::tab_mark(s.tab_info(&crate::state::Tab::Draft(key)).1))
                                     .child(div().flex_1().min_w_0().truncate().child("New session"))
-                                    .when(working, |row| row.child(crate::icons::working_spinner().color(rgba(MUTED).into())))
+                                    .when(working, |row| row.child(crate::icons::working_spinner().color(crate::ui::secondary_text().into())))
                                     .when(!working && s.terminal_unread(&crate::state::AppState::tab_unread_id(&crate::state::Tab::Draft(key))), |row| row.child(crate::icons::unread_mark()))
                                     .child(div().id(SharedString::from(format!("close-project-draft-{key}"))).keyboard_control()
                                         .role(Role::Button).aria_label("Close new session")
                                         .size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none().flex().items_center().justify_center()
                                         .opacity(if draft_focused { 1. } else { 0. }).group_hover(group, |button| button.opacity(1.))
-                                        .rounded_sm().hover(|button| button.bg(rgba(0xffffff14)))
+                                        .rounded(zpx(crate::ui::RADIUS_XS)).hover(|button| button.bg(crate::ui::row_selected()))
 
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(move |_, _, cx| {
@@ -1432,7 +1573,7 @@ fn space_contents(
                                 div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, window, cx))))
                             .when(remaining > 0 || (expanded && project_rows.len() > PROJECT_SESSION_LIMIT), |list| list.child(
                                 Button::new(SharedString::from(format!("project-show-more-{}", path.display())))
-                                    .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px_2()
+                                    .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px(zpx(crate::ui::SPACE_SM))
                                     .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_SM))
                                     .label(if expanded { "Show less".into() } else { format!("Show more ({remaining})") })
                                     .on_click(move |_, _, cx| expand_state.update(cx, |s, cx| {
@@ -1485,9 +1626,9 @@ pub fn render(
         .whitespace_nowrap()
         .h_full()
         .flex_none()
-        .gap_0p5()
-        .pl_2()
-        .pb_2()
+        .gap(zpx(crate::ui::SPACE_2XS))
+        .pl(zpx(crate::ui::SPACE_SM))
+        .pb(zpx(crate::ui::SPACE_SM))
         .child(
             // Space switcher on the left; Space actions on the right.
             h_flex()
@@ -1496,13 +1637,13 @@ pub fn render(
                 .flex_none()
                 .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
                 .pr(zpx(6.))
-                .gap_0p5()
+                .gap(zpx(crate::ui::SPACE_2XS))
                 .items_center()
                 .child(
                     Button::new("space-switcher")
                         .ghost()
                         .h(zpx(ICON_BUTTON))
-                        .px_2()
+                        .px(zpx(crate::ui::SPACE_SM))
                         .min_w_0()
                         .rounded(zpx(6.))
                         .tooltip("Switch Space")
@@ -1510,11 +1651,11 @@ pub fn render(
                         .child(
                             h_flex()
                                 .min_w_0()
-                                .gap_1()
+                                .gap(zpx(crate::ui::SPACE_XS))
                                 .items_center()
                                 .text_size(zpx(TEXT_MD))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xf5f5f5))
+                                .text_color(crate::ui::primary_text())
                                 .child(div().min_w_0().truncate().child(space_name))
                                 .child(
                                     crate::micro_motion::MorphIcon::new(
@@ -1565,7 +1706,7 @@ pub fn render(
                     .justify_center()
                     .items_center()
                     .gap_0()
-                    .py_1()
+                    .py(zpx(crate::ui::SPACE_XS))
                     .children(s.spaces.items.iter().map(|space| {
                         let active = space.id == s.spaces.active;
                         let id = space.id.clone();
@@ -1623,7 +1764,7 @@ pub fn render(
                     footer_button("show-archived", cx)
                         .selected(show_archived)
                         .when(show_archived, |button| {
-                            button.bg(rgba(0xffffff14)).text_color(rgb(0xf5f5f5))
+                            button.bg(crate::ui::row_selected()).text_color(crate::ui::primary_text())
                         })
                         .tooltip(if show_archived {
                             "Show active sessions"
@@ -1672,9 +1813,9 @@ pub fn render(
                     footer_button("settings-entry", cx)
                         .selected(providers_open)
                         .when(providers_open, |button| {
-                            button.bg(rgba(0xffffff14)).text_color(rgb(0xf5f5f5))
+                            button.bg(crate::ui::row_selected()).text_color(crate::ui::primary_text())
                         })
-                        .tooltip("Settings (⌘,)")
+                        .tooltip_with_action("Settings", &crate::ToggleProviders, None)
                         .accessibility_label("Settings")
                         .on_click(move |_, _, cx| {
                             prov_state.update(cx, |s, cx| s.toggle_providers(cx))
@@ -1829,7 +1970,7 @@ fn space_menu(
                 .flex_1()
                 .min_w(zpx(152.))
                 .mx(gpui::px(-8.))
-                .gap_0p5()
+                .gap(zpx(crate::ui::SPACE_2XS))
                 .bg(background)
                 .child(motion.layer(Some(background), cx.theme().border.into()))
                 .child(session_menu_item(
@@ -1932,8 +2073,8 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
             .w(zpx(320.))
             .margin_top(window.viewport_size().height * 0.24)
             .close_button(false)
-            .p_4()
-            .gap_3()
+            .p(zpx(crate::ui::SPACE_LG))
+            .gap(zpx(crate::ui::SPACE_MD))
             .border_0()
             .bg(crate::appearance::popup_surface())
             .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
@@ -1941,7 +2082,7 @@ fn space_dialog(state: &Entity<AppState>, rename: bool, window: &mut Window, cx:
             .footer(
                 gpui_kit::component::dialog::DialogFooter::new()
                     .pt_0()
-                    .gap_2()
+                    .gap(zpx(crate::ui::SPACE_SM))
                     .child(
                         Button::new("space-cancel")
                             .ghost()

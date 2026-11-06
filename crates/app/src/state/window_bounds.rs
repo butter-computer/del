@@ -102,6 +102,7 @@ pub fn write(path: &Path, saved: &Saved) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::core::prelude::v1::test;
 
     fn saved(x: f32, y: f32, width: f32, height: f32) -> Saved {
         Saved {

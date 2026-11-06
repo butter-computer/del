@@ -79,7 +79,7 @@ mod workspace_files;
 mod workspace_tabs;
 mod zoom;
 
-use crate::appearance::{page_surface, rgb, rgba, shell_surface};
+use crate::appearance::{page_surface, rgb, shell_surface};
 use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
@@ -146,12 +146,12 @@ impl Render for DraggedTab {
                 .w(width)
                 .overflow_hidden()
                 .h(zpx(TAB_HEIGHT))
-                .px_2()
-                .gap_2()
+                .px(zpx(crate::ui::SPACE_SM))
+                .gap(zpx(crate::ui::SPACE_SM))
                 .items_center()
                 .rounded(zpx(8.0))
                 .bg(appearance::dragged_tab_surface())
-                .text_color(rgb(0xf5f5f5))
+                .text_color(crate::ui::primary_text())
                 .text_size(zpx(TEXT_MD))
                 .shadow_md()
                 .child(if self.terminal {
@@ -227,7 +227,18 @@ impl Tween {
 /// Keeping both inside it prevents the hint from covering the close button.
 /// `hint_fade` restarts the hint's fade-in for each fresh appearance; `None`
 /// (Reduce Motion) shows it at once.
+#[cfg(test)]
 fn tab_action_content(
+    group: SharedString,
+    shortcut: Option<usize>,
+    color: Hsla,
+    working: bool,
+    focused: bool,
+) -> impl IntoElement {
+    tab_action_content_with_fade(group, shortcut, color, working, focused, None)
+}
+
+fn tab_action_content_with_fade(
     group: SharedString,
     shortcut: Option<usize>,
     color: Hsla,
@@ -358,7 +369,7 @@ fn new_tab_group() -> Div {
     h_flex()
         .flex_none()
         .h(zpx(32.0))
-        .px_1()
+        .px(zpx(crate::ui::SPACE_XS))
         .items_center()
         .rounded(zpx(8.0))
         .bg(crate::appearance::composer_surface())
@@ -1153,6 +1164,24 @@ impl AppShell {
             bottom: Default::default(),
         };
         shell.sidebar_motion.settle(true);
+        // State-driven housekeeping runs when state changes, not on every
+        // frame: spinners and steam repaint the shell at display rate.
+        cx.observe(&shell.state, |this, _, cx| {
+            this.sync_caffeine(cx);
+            this.sync_terminal_sidebar_actions(cx);
+        })
+        .detach();
+        // Memory usage asks for terminal roots when it reads, instead of the
+        // shell rebuilding the list every frame.
+        let source = cx.weak_entity();
+        shell.usage.update(cx, |usage, _| {
+            usage.terminal_source = Some(Box::new(move |cx: &App| {
+                source
+                    .upgrade()
+                    .map(|shell| shell.read(cx).terminal_processes(cx))
+                    .unwrap_or_default()
+            }));
+        });
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -1267,6 +1296,20 @@ impl AppShell {
             }
         })
         .detach();
+    }
+
+    /// Terminal process roots for Memory usage.
+    fn terminal_processes(&self, cx: &App) -> Vec<(Tab, u32)> {
+        self.terminals
+            .iter()
+            .map(|(id, host)| (Tab::Terminal(id.clone()), host.read(cx).snapshot().pid))
+            .chain(self.mode_terminals.iter().map(|(id, terminal)| {
+                (
+                    Tab::Session(id.clone()),
+                    terminal.host.read(cx).snapshot().pid,
+                )
+            }))
+            .collect()
     }
 
     /// Moving or resizing reports bounds every frame; write the settled frame
@@ -2249,16 +2292,16 @@ impl AppShell {
                 .group(id)
                 // The close target must fit inside the tab's animated clip.
                 .h(zpx(TAB_HEIGHT))
-                .pl_2()
-                .pr_1()
-                .gap_2()
+                .pl(zpx(crate::ui::SPACE_SM))
+                .pr(zpx(crate::ui::SPACE_XS))
+                .gap(zpx(crate::ui::SPACE_SM))
                 .items_center()
                 .rounded(zpx(8.0))
                 .cursor_pointer()
                 .text_size(zpx(TEXT_MD))
-                .text_color(if active { rgb(0xf5f5f5) } else { muted })
-                .when(active, |t| t.bg(rgba(0xffffff14)))
-                .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
+                .text_color(if active { crate::ui::primary_text() } else { muted })
+                .when(active, |t| t.bg(crate::ui::row_selected()))
+                .when(!active, |t| t.hover(|t| t.bg(crate::ui::row_hover())))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
 
@@ -2508,7 +2551,7 @@ impl AppShell {
                                                                 "close-{name}"
                                                             )))
                                                             .keyboard_control()
-                                                            .rounded_sm()
+                                                            .rounded(zpx(crate::ui::RADIUS_XS))
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
                                                             .w(zpx(slot_width))
                                                             .overflow_hidden()
@@ -2528,7 +2571,7 @@ impl AppShell {
                                                                 });
                                                             })
                                                             .child(
-                                                                tab_action_content(
+                                                                tab_action_content_with_fade(
                                                                     group.clone(),
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
@@ -2649,9 +2692,9 @@ impl AppShell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_md()
+                                    .rounded(zpx(crate::ui::RADIUS_ROW))
                                     .cursor_pointer()
-                                    .hover(|plus| plus.bg(rgba(0xffffff0a)))
+                                    .hover(|plus| plus.bg(crate::ui::row_hover()))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
@@ -2712,18 +2755,18 @@ impl AppShell {
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
                             .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar (⌘\\)").build(window, cx)
+                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar").action(&ToggleFiles, None).build(window, cx)
                             })
                             .flex_none()
                             .size(crate::icons::button_size())
-                            .mr_2()
+                            .mr(zpx(crate::ui::SPACE_SM))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(zpx(crate::ui::RADIUS_ROW))
                             .cursor_pointer()
-                            .hover(|b| b.bg(rgba(0xffffff0a)))
-                            .when(self.right_open, |b| b.bg(rgba(0xffffff14)))
+                            .hover(|b| b.bg(crate::ui::row_hover()))
+                            .when(self.right_open, |b| b.bg(crate::ui::row_selected()))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .when(self.state.read(cx).panel == Panel::Providers, |button| button.invisible())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2811,8 +2854,8 @@ impl AppShell {
                             v_flex()
                                 .w_full()
                                 .items_center()
-                                .px_3()
-                                .pb_3()
+                                .px(zpx(crate::ui::SPACE_MD))
+                                .pb(zpx(crate::ui::SPACE_MD))
                                 .child(self.render_composer(cx)),
                         ),
                 ),
@@ -2847,8 +2890,8 @@ impl AppShell {
                                 v_flex()
                                     .w_full()
                                     .items_center()
-                                    .px_3()
-                                    .pb_3()
+                                    .px(zpx(crate::ui::SPACE_MD))
+                                    .pb(zpx(crate::ui::SPACE_MD))
                                     .child(self.render_composer(cx)),
                             ),
                     )
@@ -2862,13 +2905,13 @@ impl AppShell {
                             .inset_0()
                             .items_center()
                             .justify_center()
-                            .px_3()
+                            .px(zpx(crate::ui::SPACE_MD))
                             .child(
                                 v_flex()
                                     .w_full()
                                     .max_w(zpx(COMPOSER_MAX_WIDTH))
                                     .items_start()
-                                    .gap_2()
+                                    .gap(zpx(crate::ui::SPACE_SM))
                                     .child(
                                         div().relative().w_full().child(self.render_composer(cx)),
                                     )
@@ -2881,7 +2924,7 @@ impl AppShell {
                                             .w_full()
                                             .items_center()
                                             .justify_between()
-                                            .gap_2()
+                                            .gap(zpx(crate::ui::SPACE_SM))
                                             .child(
                                                 new_tab_group()
                                                     .relative()
@@ -3039,7 +3082,7 @@ impl Render for AppShell {
                                     .w(zpx(150.))
                                     .h_full()
                                     .flex_none()
-                                    .p_3()
+                                    .p(zpx(crate::ui::SPACE_MD))
                                     .border_r_1()
                                     .border_color(appearance::separator())
                                     .child(signin::navigation(&state, cx)),
@@ -3081,21 +3124,7 @@ impl Render for AppShell {
         if self.settings_closing.is_some() {
             window.request_animation_frame();
         }
-        self.sync_caffeine(cx);
-        let terminal_processes = self
-            .terminals
-            .iter()
-            .map(|(id, host)| (Tab::Terminal(id.clone()), host.read(cx).snapshot().pid))
-            .chain(self.mode_terminals.iter().map(|(id, terminal)| {
-                (
-                    Tab::Session(id.clone()),
-                    terminal.host.read(cx).snapshot().pid,
-                )
-            }))
-            .collect();
-        self.usage
-            .update(cx, |usage, _| usage.terminal_processes = terminal_processes);
-        self.sync_terminal_sidebar_actions(cx);
+
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
         if !cx.reduce_motion()
@@ -3178,6 +3207,11 @@ impl Render for AppShell {
         }
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
         let inset = zpx(self.metrics.page_inset);
+        // A maximized bottom panel hides the page once its reveal has settled.
+        let page_hidden = {
+            let (open, max, moving) = self.bottom_panel_progress();
+            self.bottom.open && self.bottom.maximized && open >= 1. && max >= 1. && !moving
+        };
         let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
         let left_width = sidebar_width(
             self.sidebar_widths.left,
@@ -3219,6 +3253,11 @@ impl Render for AppShell {
         ));
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
+        // Terminals hold their PTY size while a sidebar or the bottom panel
+        // animates and resize once when it settles.
+        del_terminal::set_layout_animating(
+            animating || left_animating || self.bottom_panel_progress().2,
+        );
         if animating || left_animating {
             window.request_animation_frame();
         }
@@ -3646,17 +3685,11 @@ impl Render for AppShell {
                                             .w_full()
                                             .min_h_0()
                                             .overflow_hidden()
-                                            .when(
-                                                self.bottom.open && self.bottom.maximized,
-                                                |page| page.h(zpx(0.0)).flex_none(),
-                                            )
-                                            .when(
-                                                !(self.bottom.open && self.bottom.maximized),
-                                                |page| page.flex_1(),
-                                            )
+                                            .when(page_hidden, |page| page.h(zpx(0.0)).flex_none())
+                                            .when(!page_hidden, |page| page.flex_1())
                                             .child(self.render_page(window, cx)),
                                     )
-                                    .children(self.render_bottom_panel(cx)),
+                                    .children(self.render_bottom_panel(window, cx)),
                             )
                             .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
                                 // Paint the target above both neighboring surfaces
@@ -3684,16 +3717,25 @@ impl Render for AppShell {
                                 .flex_none()
                                 .overflow_hidden()
                                 .child(
-                                    // Fills whatever width the animation gives it: the panel
-                                    // grows out of the page's own space and lays out at the
-                                    // current width instead of sliding in from offscreen.
-                                    div().size_full().pr(inset).pb(inset).child(
-                                        div()
-                                            .size_full()
-                                            .overflow_hidden()
-                                            .bg(appearance::shell_surface())
-                                            .child(self.right.clone()),
-                                    ),
+                                    // Laid out once at its full width and clipped by the
+                                    // animated slot, like the left sidebar: the reveal slides
+                                    // the panel in instead of reflowing it (and resizing its
+                                    // terminals) on every frame.
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .left_0()
+                                        .w(zpx(full))
+                                        .pr(inset)
+                                        .pb(inset)
+                                        .child(
+                                            div()
+                                                .size_full()
+                                                .overflow_hidden()
+                                                .bg(appearance::shell_surface())
+                                                .child(self.right.clone()),
+                                        ),
                                 )
                                 .child(
                                     self.resize_handle(

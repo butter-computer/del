@@ -488,6 +488,11 @@ impl AppState {
             target.deck.selected = removed.deck.selected;
         }
         let destination = target.id.clone();
+        let destination_name = target.name.clone();
+        self.report(
+            super::notices::Severity::Info,
+            format!("Space deleted · projects moved to {destination_name}"),
+        );
         if self.spaces.active == id {
             self.spaces.active = destination.clone();
         }

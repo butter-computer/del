@@ -230,7 +230,7 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
     );
     Theme::update(cx, |theme| {
         theme.colors.background = gpui_kit::transparent_black();
-        theme.font_size = zpx(del_core::typography::TEXT_MD);
+        apply_zoom_metrics(theme);
         let palette = colors();
         let c = &mut theme.colors;
         let surface = gpui_kit::rgb(palette.neutral[1]).into();
@@ -354,6 +354,14 @@ fn apply(light: bool, preset: ThemePreset, cx: &mut App) {
         c.drop_target = ActionTone::Accent.foreground().opacity(0.08).into();
     });
 }
+/// Theme sizes that follow zoom: the base font and the component radii
+/// (6 and 8 logical pixels).
+pub fn apply_zoom_metrics(theme: &mut Theme) {
+    theme.font_size = zpx(del_core::typography::TEXT_MD);
+    theme.radius = zpx(6.);
+    theme.radius_lg = zpx(8.);
+}
+
 fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     Rgba {
         r: a.r + (b.r - a.r) * t,
@@ -395,9 +403,10 @@ fn status_for_mode(rgb: u32, light: bool) -> u32 {
         (0x5fc27e | 0x4cc38a, true) => 0x366f49,
         (0xf0716b, false) => 0xe58b8b,
         (0xf0716b, true) => 0xb83c3c,
-        // Danger red.
-        (0xff646b | 0xff4545, false) => 0xe08e8c,
-        (0xff646b | 0xff4545, true) => 0xa94848,
+        // Danger red: the same ink as `ActionTone::Danger`, including the
+        // off-palette dictation and file-error reds.
+        (0xff646b | 0xff4545 | 0xff6666 | 0xf08080, false) => 0xe58b8b,
+        (0xff646b | 0xff4545 | 0xff6666 | 0xf08080, true) => 0xb83c3c,
         // Unread dot: Del's softened blue.
         (0x4a9eff, false) => 0x8fb4e6,
         (0x4a9eff, true) => 0x2f5f9e,

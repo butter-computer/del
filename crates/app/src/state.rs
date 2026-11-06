@@ -223,6 +223,8 @@ pub struct AppState {
     /// A stable id per tab (kept when a draft becomes its session), so each
     /// tab animates in exactly once.
     uids: HashMap<Tab, u64>,
+    /// Sidebar rows growing in, by when they appeared.
+    pub row_reveals: HashMap<SessionId, std::time::Instant>,
     /// When each tab uid first appeared, for its opening fraction.
     tab_opened: HashMap<u64, std::time::Instant>,
     next_uid: u64,
@@ -525,6 +527,7 @@ impl AppState {
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             tab_opened: HashMap::new(),
+            row_reveals: HashMap::new(),
             next_uid: 1,
             ghosts: Vec::new(),
             next_draft: 1,
@@ -1019,6 +1022,17 @@ impl AppState {
     }
 
     fn set_records(&mut self, records: Vec<SessionRecord>) {
+        // Sessions that join an already loaded list grow in; the first load
+        // and project expansion stay instant.
+        if !self.records.is_empty() {
+            let known: HashSet<&SessionId> = self.records.iter().map(|r| &r.id).collect();
+            let now = std::time::Instant::now();
+            for record in records.iter().filter(|r| !known.contains(&r.id)) {
+                self.row_reveals.insert(record.id.clone(), now);
+            }
+        }
+        self.row_reveals
+            .retain(|_, started| started.elapsed() < crate::ui::REVEAL);
         self.records = records;
         self.sync_peer_projects();
         self.invalidate_rows();
@@ -1426,7 +1440,22 @@ impl AppState {
         cx.notify();
     }
 
+    /// Rows that just joined the sidebar (created, restored, moved by a pin)
+    /// and when, so they grow in instead of snapping.
+    pub fn reveal_row(&mut self, id: &SessionId) {
+        self.row_reveals
+            .insert(id.clone(), std::time::Instant::now());
+    }
+
+    /// How far a row's entrance has got, if it is still growing in.
+    pub fn row_reveal(&self, id: &SessionId) -> Option<f32> {
+        let started = self.row_reveals.get(id)?;
+        let t = started.elapsed().as_secs_f32() / crate::ui::REVEAL.as_secs_f32();
+        (t < 1.).then(|| crate::ui::ease_out(t))
+    }
+
     pub fn toggle_session_pin(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        self.reveal_row(id);
         if self.terminal_rows.iter().any(|row| &row.id == id) {
             self.toggle_terminal_pin(id, cx);
             return;
@@ -2345,6 +2374,7 @@ impl AppState {
         }
         self.overrides_mut().set_archived(&id, false);
         self.save_overrides();
+        self.reveal_row(&id);
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.select_terminal(id, cx);
         } else {
@@ -3764,6 +3794,7 @@ pub(crate) mod tests {
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
             tab_opened: HashMap::new(),
+            row_reveals: HashMap::new(),
             next_uid: 1,
             ghosts: vec![],
             starting: Default::default(),

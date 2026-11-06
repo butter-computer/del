@@ -150,7 +150,7 @@ impl AppUpdater {
                             match result {
                                 Ok(Some(update)) => Status::Available(update),
                                 Ok(None) => Status::Current,
-                                Err(error) => Status::Failed(error),
+                                Err(error) => Status::Failed(check_failure(error)),
                             }
                         }
                         Event::Progress(percent) => Status::Downloading(percent),
@@ -270,7 +270,7 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
         ),
         Status::Checking => (
             "Checking for updates…".into(),
-            "Checking GitHub releases".into(),
+            "Checking for updates…".into(),
             true,
         ),
         Status::Current => return div().into_any_element(),
@@ -296,7 +296,7 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                 "Restart to update".into()
             },
             format!(
-                "Del {} is ready. Restart whenever you're ready.",
+                "Del {} is downloaded. Restart whenever it suits you.",
                 staged.version
             ),
             false,
@@ -327,10 +327,11 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                         let updater = updater.clone();
                         dialog.title("Restart to update Del?")
                             .bg(crate::appearance::popup_surface())
+                            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                             .child(div().child("Your saved sessions will remain available. Running agents and terminals will stop when Del restarts."))
                             .footer(gpui_kit::component::dialog::DialogFooter::new()
-                                .child(Button::new("update-later").label("Later").on_click(|_, window, cx| window.close_dialog(cx)))
-                                .child(Button::new("update-restart").label("Restart now").on_click(move |_, window, cx| {
+                                .child(Button::new("update-later").ghost().bg(crate::appearance::rgba(crate::appearance::QUIET_FILL)).label("Later").on_click(|_, window, cx| window.close_dialog(cx)))
+                                .child(Button::new("update-restart").primary().label("Restart now").on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     updater.update(cx, |updater, cx| updater.restart(cx));
                                     // Report a failed installation once the worker finishes.
@@ -361,6 +362,17 @@ pub fn render(updater: &Entity<AppUpdater>, cx: &App) -> AnyElement {
                 }
             })
     ).into_any_element()
+}
+
+/// Network failures of the release check read as one plain sentence rather
+/// than curl's own text.
+fn check_failure(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("curl") || lower.contains("timed out") {
+        "Could not check for updates. Check your connection and try again.".into()
+    } else {
+        error
+    }
 }
 
 fn version(value: &str) -> Option<(u64, u64, u64)> {
@@ -1032,6 +1044,18 @@ mod tests {
                     .contains("Another Del installation")
             );
         });
+    }
+
+    #[test]
+    fn network_check_failures_read_plainly() {
+        assert_eq!(
+            super::check_failure("/usr/bin/curl timed out. Please retry.".into()),
+            "Could not check for updates. Check your connection and try again."
+        );
+        assert_eq!(
+            super::check_failure("No signed release asset".into()),
+            "No signed release asset"
+        );
     }
 
     #[test]
