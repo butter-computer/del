@@ -494,7 +494,11 @@ struct ReviewView {
 impl RenderOnce for ReviewView {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         use gpui_kit::component::diff::{Diff, DiffChangeIndicator, DiffHunkSeparator, DiffState};
-        let height = zpx((self.review.lines.len() as f32 * TEXT_SM * 1.6).clamp(48., 320.));
+        let fallback_height = self
+            .review
+            .files
+            .is_empty()
+            .then(|| zpx((self.review.lines.len() as f32 * TEXT_SM * 1.6).clamp(48., 320.)));
         let content = if self.review.files.is_empty() {
             render_plain_review((self.id.clone(), "plain").into(), self.review.clone())
         } else {
@@ -508,6 +512,7 @@ impl RenderOnce for ReviewView {
                 .header_visible(false)
                 .single_gutter(true)
                 .horizontal_scrollbar(false)
+                .fit_height(zpx(320.))
                 .hunk_separator(DiffHunkSeparator::LineInfo)
                 .change_indicator(DiffChangeIndicator::Bars)
                 .border_0()
@@ -519,7 +524,7 @@ impl RenderOnce for ReviewView {
             .debug_selector(|| "diff-scroll-area".into())
             .w_full()
             .min_w_0()
-            .h(height)
+            .when_some(fallback_height, |view, height| view.h(height))
             .flex_none()
             .overflow_hidden()
             .child(content)
@@ -622,6 +627,23 @@ mod tests {
         review.scroll.set_offset(point(px(-120.), px(-200.)));
         assert_eq!(review.scroll.offset(), point(px(-120.), px(-200.)));
     }
+    #[::gpui::test]
+    fn short_diff_height_excludes_hidden_patch_metadata(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let source = "diff --git a/test.rs b/test.rs\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/test.rs\n@@ -0,0 +1,3 @@\n+one\n+two\n+three\n";
+        let review = Rc::new(ChangeReview::parse(source));
+        let (_, cx) = cx.add_window_view(|_, _| DiffFixture(review.clone()));
+        cx.run_until_parked();
+        let expected = cx.update(|window, cx| {
+            window.rem_size() * (f32::from(cx.theme().mono_font_size) / 16.) * 1.6 * 3.
+        });
+        let height = cx.debug_bounds("diff-scroll-area").unwrap().size.height;
+        assert!(
+            (height - expected).abs() <= px(1.),
+            "three displayed rows must have no metadata-sized blank tail: {height:?} vs {expected:?}"
+        );
+    }
+
     struct NestedDiffFixture {
         review: Rc<ChangeReview>,
         outer: ScrollHandle,

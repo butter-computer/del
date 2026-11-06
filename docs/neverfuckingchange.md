@@ -1105,3 +1105,8 @@ activity bar. It supersedes earlier rules where they conflict.
 
 - Use one compact line-number lane in unified diffs: old numbers for deletions,
   current numbers for added/context lines. Do not reserve an empty second lane.
+
+- Fit short diffs to their displayed rows, excluding hidden Git metadata/header
+  space. Retain the height cap and contained scrolling for long diffs.
+- Keep Dotfiles inside the Files content toolbar above the tree, never in the tab
+  strip. Preserve filtering and the file-preview splitter.

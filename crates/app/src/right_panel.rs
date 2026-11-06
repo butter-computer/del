@@ -2853,6 +2853,69 @@ impl RightPanel {
             )
     }
 
+    fn render_dotfiles_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_hidden = self.show_hidden;
+        h_flex()
+            .id("show-hidden-files")
+            .debug_selector(|| "files-dotfiles-toggle".into())
+            .keyboard_control()
+            .role(Role::Button)
+            .aria_label(if show_hidden {
+                "Hide dotfiles"
+            } else {
+                "Show dotfiles"
+            })
+            .ml_auto()
+            .gap(zpx(5.0))
+            .items_center()
+            .cursor_pointer()
+            .hover(|control| control.opacity(0.85))
+            .text_size(zpx(TEXT_SM))
+            .text_color(crate::appearance::secondary_text())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_hidden = !this.show_hidden;
+                this.directory_entries.clear();
+                this.refresh_tree(cx);
+                cx.notify();
+            }))
+            .child("Dotfiles")
+            .child(
+                div()
+                    .relative()
+                    .w(zpx(22.0))
+                    .h(zpx(12.0))
+                    .rounded_full()
+                    .bg(if show_hidden {
+                        ActionTone::Accent.foreground()
+                    } else {
+                        rgba(0xffffff20)
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(zpx(2.0))
+                            .size(zpx(8.0))
+                            .rounded_full()
+                            .bg(rgba(0xffffffe6))
+                            .with_animation(
+                                SharedString::from(format!("hidden-files-thumb-{}", show_hidden)),
+                                Animation::new(std::time::Duration::from_millis(
+                                    if cx.reduce_motion() { 0 } else { 120 },
+                                ))
+                                .with_easing(ease_out_quint()),
+                                move |thumb, t| {
+                                    let (from, to) = if show_hidden {
+                                        (2.0, 12.0)
+                                    } else {
+                                        (12.0, 2.0)
+                                    };
+                                    thumb.left(zpx(from + (to - from) * t))
+                                },
+                            ),
+                    ),
+            )
+    }
+
     fn render_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_editor(window, cx);
         let rows = self.rows.clone();
@@ -3182,7 +3245,7 @@ impl RightPanel {
         let start_y = split_drag.start_y.clone();
         let start_height = split_drag.start_height.clone();
         let measured_start = measured_tree_height.clone();
-        v_flex()
+        let layout = v_flex()
             .debug_selector(|| "files-layout".into())
             .size_full()
             .on_children_prepainted(move |bounds, _, _| {
@@ -3246,7 +3309,21 @@ impl RightPanel {
                     .min_w_0()
                     .overflow_hidden()
                     .child(preview),
+            );
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .debug_selector(|| "files-toolbar".into())
+                    .w_full()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .items_center()
+                    .child(self.render_dotfiles_toggle(cx)),
             )
+            .child(div().flex_1().min_h_0().child(layout))
     }
 
     fn ensure_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3791,7 +3868,6 @@ impl RightPanel {
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
-        let show_hidden = self.show_hidden;
         let transfer_bounds = self.transfer_bounds.clone();
         let mut tab_elements = Vec::new();
         let keys = self.sidebar_keys();
@@ -3966,67 +4042,6 @@ impl RightPanel {
                     .hover(|button| button.bg(rgba(0xffffff14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
                     .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),
-            )
-            .when(
-                self.pane == Pane::Files && self.active_hosted.is_none(),
-                |row| {
-                    row.child(
-                        h_flex()
-                            .id("show-hidden-files")
-                            .ml_auto()
-                            .gap(zpx(5.0))
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|control| control.opacity(0.85))
-                            .text_size(zpx(TEXT_SM))
-                            .text_color(crate::appearance::secondary_text())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_hidden = !this.show_hidden;
-                                this.directory_entries.clear();
-                                this.refresh_tree(cx);
-                                cx.notify();
-                            }))
-                            .child("Dotfiles")
-                            .child(
-                                div()
-                                    .relative()
-                                    .w(zpx(22.0))
-                                    .h(zpx(12.0))
-                                    .rounded_full()
-                                    .bg(if show_hidden {
-                                        ActionTone::Accent.foreground()
-                                    } else {
-                                        rgba(0xffffff20)
-                                    })
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .top(zpx(2.0))
-                                            .size(zpx(8.0))
-                                            .rounded_full()
-                                            .bg(rgba(0xffffffe6))
-                                            .with_animation(
-                                                SharedString::from(format!(
-                                                    "hidden-files-thumb-{}",
-                                                    show_hidden
-                                                )),
-                                                Animation::new(std::time::Duration::from_millis(
-                                                    if cx.reduce_motion() { 0 } else { 120 },
-                                                ))
-                                                .with_easing(ease_out_quint()),
-                                                move |thumb, t| {
-                                                    let (from, to) = if show_hidden {
-                                                        (2.0, 12.0)
-                                                    } else {
-                                                        (12.0, 2.0)
-                                                    };
-                                                    thumb.left(zpx(from + (to - from) * t))
-                                                },
-                                            ),
-                                    ),
-                            ),
-                    )
-                },
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
@@ -5819,6 +5834,39 @@ mod tests {
                 panel.file_tree_height
             )
         });
+    }
+
+    #[::gpui::test]
+    fn dotfiles_toggle_lives_in_files_content_and_still_filters(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".hidden"), "hidden").unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
+        cx.run_until_parked();
+        let toolbar = cx.debug_bounds("files-toolbar").unwrap();
+        let toggle = cx.debug_bounds("files-dotfiles-toggle").unwrap();
+        let tabs = cx.debug_bounds("sidebar-tool-tabs").unwrap();
+        assert!(toolbar.origin.y >= tabs.bottom());
+        assert!(toggle.origin.y >= toolbar.origin.y && toggle.bottom() <= toolbar.bottom());
+        cx.simulate_mouse_down(toggle.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(toggle.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.show_hidden);
+            assert!(
+                panel
+                    .rows
+                    .iter()
+                    .any(|(path, _, _)| path.ends_with(".hidden"))
+            );
+        });
+        panel.update(cx, |panel, cx| {
+            panel.pane = Pane::Changes;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("files-dotfiles-toggle").is_none());
     }
 
     #[::gpui::test]

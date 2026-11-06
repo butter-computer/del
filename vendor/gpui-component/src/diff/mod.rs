@@ -208,6 +208,7 @@ pub struct Diff {
     syntax_highlight: bool,
     header_visible: bool,
     horizontal_scrollbar: bool,
+    fit_height: Option<Pixels>,
     hover_highlight: DiffHoverHighlight,
     hunk_separator: DiffHunkSeparator,
     change_indicator: DiffChangeIndicator,
@@ -239,6 +240,7 @@ impl Diff {
             syntax_highlight: true,
             header_visible: true,
             horizontal_scrollbar: true,
+            fit_height: None,
             hover_highlight: DiffHoverHighlight::default(),
             hunk_separator: DiffHunkSeparator::default(),
             change_indicator: DiffChangeIndicator::default(),
@@ -276,6 +278,12 @@ impl Diff {
     /// Shows the horizontal scrollbar without changing horizontal scrolling.
     pub fn horizontal_scrollbar(mut self, visible: bool) -> Self {
         self.horizontal_scrollbar = visible;
+        self
+    }
+    /// Fits a plain, unwrapped diff to its visible rows, up to this height.
+    /// Wrapped or annotated diffs retain the supplied maximum viewport height.
+    pub fn fit_height(mut self, maximum: Pixels) -> Self {
+        self.fit_height = Some(maximum);
         self
     }
     /// Emphasizes the line, its number, or both under the pointer. Default is none.
@@ -551,6 +559,36 @@ fn render_diff(
         geometry: state.geometry().clone(),
         state: cx.entity(),
     });
+    let fitted_height = props.fit_height.map(|maximum| {
+        if soft_wrap || !code.annotations.items.is_empty() {
+            return maximum;
+        }
+        let width = state.viewport().width.max(px(1.));
+        let mut height = px(0.);
+        for row in state.rows().iter() {
+            height += if matches!(row, DisplayRow::Code { .. }) {
+                row_height
+            } else {
+                // Measure headers, notices and separators with their actual styles.
+                // Hidden headers/separators measure zero; patch metadata adds no rows.
+                let mut element = render_row(row, code.clone(), window, cx);
+                element
+                    .layout_as_root(
+                        gpui::size(
+                            gpui::AvailableSpace::Definite(width),
+                            gpui::AvailableSpace::MinContent,
+                        ),
+                        window,
+                        cx,
+                    )
+                    .height
+            };
+            if height >= maximum {
+                return maximum;
+            }
+        }
+        height
+    });
     let rows = state.rows().clone();
     let scrollbar = state.list().clone();
     let horizontal = state.horizontal_scroll().clone();
@@ -746,6 +784,7 @@ fn render_diff(
         .border_color(cx.theme().border)
         .child(body)
         .refine_style(&props.style)
+        .when_some(fitted_height, |view, height| view.h(height).flex_none())
         .into_any_element()
 }
 
