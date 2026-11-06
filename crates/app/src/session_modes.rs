@@ -12,6 +12,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use crate::zoom::px as zpx;
 use std::time::Duration;
 
 struct HandoffLease {
@@ -541,31 +542,49 @@ impl AppShell {
                     Button::new("return-to-chat")
                         .ghost()
                         .small()
-                        .label("/chat — Return to chat")
+                        .tooltip("Or type /chat in the terminal")
+                        .label("Return to chat")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.switch_terminal_to_chat(id.clone(), window, cx)
                         })),
                 );
         } else {
-            page = page.child(div().p_4().child("Switching session mode…"));
+            page = page.child(quiet_status("switching-mode", "Switching session mode…"));
         }
         if let Some(error) = &self.state.read(cx).error {
-            page = page.child(div().p_2().child(error.clone()));
+            page = page.child(div().p(zpx(crate::ui::SPACE_MD)).child(error.clone()));
         }
         let page = page.children(
             self.render_agent_messages(cx)
-                .map(|messages| div().p_3().child(messages)),
+                .map(|messages| div().p(zpx(crate::ui::SPACE_LG)).child(messages)),
         );
         div()
             .relative()
             .size_full()
-            .rounded_lg()
+            .rounded(zpx(crate::ui::RADIUS_CARD))
             .overflow_hidden()
             .bg(crate::appearance::page_surface())
             .child(self.ambient.clone())
             .child(page)
             .into_any_element()
     }
+}
+
+/// A centered, quiet loading note that appears only if the wait outlasts
+/// `ui::LOADING_DELAY`, so quick switches never flash it.
+pub(crate) fn quiet_status(id: &'static str, text: &'static str) -> impl IntoElement {
+    let delay = crate::ui::LOADING_DELAY.as_secs_f32();
+    let fade = crate::ui::FILL_MS as f32 / 1000.;
+    v_flex().size_full().items_center().justify_center().child(
+        crate::ui::empty_note(text).with_animation(
+            id,
+            Animation::new(std::time::Duration::from_secs_f32(delay + fade)),
+            move |note, t| {
+                let elapsed = t * (delay + fade);
+                note.opacity(((elapsed - delay) / fade).clamp(0., 1.))
+            },
+        ),
+    )
 }
 
 #[cfg(test)]

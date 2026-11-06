@@ -1236,37 +1236,15 @@ impl AppShell {
                 h_flex()
                     .min_w_0()
                     .items_center()
-                    .gap_1()
+                    .gap(zpx(crate::ui::SPACE_XS))
                     .child(
-                        Button::new("new-workspace")
-                            .ghost()
-                            .disabled(!enabled)
-                            .h(zpx(24.))
-                            .px(if compact { zpx(4.) } else { zpx(8.) })
-                            .min_w_0()
-                            .max_w(zpx(150.))
-                            .text_size(zpx(12.))
-                            .tooltip(cwd.display().to_string())
-                            .accessibility_label("Choose project folder")
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        crate::icons::icon(IconName::Folder)
-                                            .with_size(zpx(crate::icons::MARK_SIZE)),
-                                    )
-                                    .when(!compact, |row| {
-                                        row.child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(crate::sessions::folder_name(&cwd)),
-                                        )
-                                    }),
-                            )
-                            .text_color(crate::appearance::secondary_text())
-                            .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),
+                        crate::composer_ui::folder_chip(
+                            "new-workspace",
+                            &cwd,
+                            compact,
+                            (!enabled).then_some("Can’t change folder while the session starts"),
+                        )
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.pick_folder(cx))),
                     )
                     .when(git, |row| row.child(self.branch_picker.clone())),
             )
@@ -1305,7 +1283,15 @@ impl AppShell {
                     gpui_kit::component::checkbox::Checkbox::new("new-worktree")
                         .small()
                         .text_color(crate::appearance::secondary_text())
+                        // An inset ring on the box itself, never an outer outline.
                         .focus_ring(false)
+                        .rounded(zpx(crate::ui::RADIUS_XS))
+                        // The ring's width is always reserved, so focus never moves the label.
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .focus_visible(|checkbox| {
+                            checkbox.border_color(crate::appearance::rgba(0xffffff66))
+                        })
                         .label("New worktree")
                         .checked(worktree)
                         .disabled(!enabled)
@@ -1334,16 +1320,21 @@ impl AppShell {
 
     pub(super) fn render_mode_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let position = self.mode_slide_position(cx);
-        let mut row = h_flex().relative().h(zpx(24.0)).gap_1().flex_none().child(
-            div()
-                .absolute()
-                .top_0()
-                .left(zpx(44.0 * position))
-                .h(zpx(24.0))
-                .w(zpx(40.0 + 20.0 * position))
-                .rounded_md()
-                .bg(rgba(0xffffff20)),
-        );
+        let mut row = h_flex()
+            .relative()
+            .h(zpx(24.0))
+            .gap(zpx(crate::ui::SPACE_XS))
+            .flex_none()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(zpx(44.0 * position))
+                    .h(zpx(24.0))
+                    .w(zpx(40.0 + 20.0 * position))
+                    .rounded(zpx(crate::ui::RADIUS_ROW))
+                    .bg(rgba(0xffffff26)),
+            );
         for (choice, label, width) in [
             (SessionMode::Chat, "Chat", 40.0),
             (SessionMode::Terminal, "Terminal", 60.0),
@@ -1404,13 +1395,20 @@ impl AppShell {
                 } else {
                     if self.terminal_opening.contains(&id) || !self.terminal_attempts.contains(&id)
                     {
-                        page = page.child(div().p_4().child("Reopening conversation…"));
+                        page = page.child(crate::session_modes::quiet_status(
+                            "reopening-conversation",
+                            "Reopening conversation…",
+                        ));
                     } else {
                         page = page.child(
                             v_flex()
-                                .p_4()
-                                .gap_3()
-                                .child("Could not reopen this conversation.")
+                                .size_full()
+                                .items_center()
+                                .justify_center()
+                                .gap(zpx(crate::ui::SPACE_LG))
+                                .child(crate::ui::inline_error(
+                                    "Could not reopen this conversation: its terminal did not start.",
+                                ))
                                 .child(self.restart_button(id.clone(), cx)),
                         );
                     }
@@ -1439,14 +1437,14 @@ impl AppShell {
         }
 
         if let Some(error) = &self.state.read(cx).error {
-            page = page.child(div().p_2().child(error.clone()));
+            page = page.child(div().p(zpx(crate::ui::SPACE_MD)).child(error.clone()));
         }
 
         page.children(self.render_agent_messages(cx).map(|messages| {
             div()
                 .w_full()
                 .max_w(zpx(crate::COMPOSER_MAX_WIDTH))
-                .p_3()
+                .p(zpx(crate::ui::SPACE_LG))
                 .child(messages)
         }))
         .into_any_element()
@@ -1513,8 +1511,8 @@ impl AppShell {
         let mut area = v_flex()
             .w_full()
             .min_w_0()
-            .mb_2()
-            .gap_2()
+            .mb(zpx(crate::ui::SPACE_MD))
+            .gap(zpx(crate::ui::SPACE_MD))
             .text_size(zpx(12.))
             .when_some(summary, |area, summary| {
                 area.child(div().text_color(rgb(0x999999)).child(summary))
@@ -1523,7 +1521,7 @@ impl AppShell {
             let (_, title, body) = &self.notices[notice];
             area = area.child(
                 h_flex()
-                    .gap_2()
+                    .gap(zpx(crate::ui::SPACE_MD))
                     .items_center()
                     .child(div().flex_1().child(format!("{}: {}", title, body)))
                     .child(
@@ -1541,7 +1539,7 @@ impl AppShell {
         if let Some(question) = question {
             let id = question.id;
             let answer_input = question.input.clone();
-            let mut options = h_flex().gap_2().flex_wrap();
+            let mut options = h_flex().gap(zpx(crate::ui::SPACE_MD)).flex_wrap();
             for (index, text) in question.options.iter().enumerate() {
                 let text = text.clone();
                 options = options.child(
@@ -1550,7 +1548,7 @@ impl AppShell {
                         .small()
                         .h_auto()
                         .max_w_full()
-                        .py_2()
+                        .py(zpx(crate::ui::SPACE_MD))
                         .border_1()
                         .border_color(rgba(0xffffff18))
                         .accessibility_label(text.clone())
@@ -1575,9 +1573,9 @@ impl AppShell {
                     .min_w_0()
                     .max_h(zpx(280.))
                     .overflow_y_scroll()
-                    .p_3()
-                    .gap_3()
-                    .rounded(zpx(12.))
+                    .p(zpx(crate::ui::SPACE_LG))
+                    .gap(zpx(crate::ui::SPACE_LG))
+                    .rounded(zpx(crate::ui::RADIUS_CARD))
                     .bg(crate::appearance::popup_surface())
                     .child(
                         div()
@@ -1589,11 +1587,21 @@ impl AppShell {
                     .child(Input::new(&question.input))
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(zpx(crate::ui::SPACE_MD))
                             .justify_end()
                             .child(
-                                Button::new("mcp-answer-send")
+                                Button::new("mcp-answer-dismiss")
                                     .ghost()
+                                    .small()
+                                    .bg(rgba(crate::appearance::QUIET_FILL))
+                                    .label("Dismiss")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.answer_question(id, UserAnswer::Dismissed, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("mcp-answer-send")
+                                    .primary()
                                     .small()
                                     .label("Send answer")
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1606,15 +1614,6 @@ impl AppShell {
                                                 cx,
                                             );
                                         }
-                                    })),
-                            )
-                            .child(
-                                Button::new("mcp-answer-dismiss")
-                                    .ghost()
-                                    .small()
-                                    .label("Dismiss")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.answer_question(id, UserAnswer::Dismissed, window, cx)
                                     })),
                             ),
                     ),
