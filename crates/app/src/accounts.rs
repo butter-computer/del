@@ -594,11 +594,11 @@ fn parse_limits(provider: Provider, value: &serde_json::Value) -> Option<UsageLi
     if provider == Provider::Claude && value["rate_limits_available"] == true {
         let limits = &value["rate_limits"];
         for (key, label) in [
-            ("five_hour", "5 hours"),
-            ("seven_day", "7 days"),
-            ("seven_day_oauth_apps", "7 days · apps"),
-            ("seven_day_opus", "7 days · Opus"),
-            ("seven_day_sonnet", "7 days · Sonnet"),
+            ("five_hour", "5-hour"),
+            ("seven_day", "Weekly"),
+            ("seven_day_oauth_apps", "Weekly · apps"),
+            ("seven_day_opus", "Weekly · Opus"),
+            ("seven_day_sonnet", "Weekly · Sonnet"),
         ] {
             let window = &limits[key];
             if let Some(used) = window["utilization"].as_f64().filter(|n| n.is_finite()) {
@@ -619,43 +619,29 @@ fn parse_limits(provider: Provider, value: &serde_json::Value) -> Option<UsageLi
             }
         }
     } else if provider == Provider::Codex {
-        let buckets: Vec<(String, &serde_json::Value)> = match value["rateLimitsByLimitId"]
+        let buckets: Vec<(Option<String>, &serde_json::Value)> = match value
+            ["rateLimitsByLimitId"]
             .as_object()
             .filter(|m| !m.is_empty())
         {
             Some(map) => map
                 .iter()
-                .map(|(key, value)| (key.clone(), value))
+                .map(|(id, bucket)| (codex_bucket_name(id, bucket), bucket))
                 .collect(),
-            None => vec![("Allowance".into(), &value["rateLimits"])],
+            None => vec![(None, &value["rateLimits"])],
         };
         for (name, bucket) in buckets {
             for key in ["primary", "secondary"] {
                 let window = &bucket[key];
                 if let Some(used) = window["usedPercent"].as_f64().filter(|n| n.is_finite()) {
-                    let duration = window["windowDurationMins"]
-                        .as_u64()
-                        .map(|minutes| {
-                            if minutes % 1440 == 0 {
-                                format!("{} days", minutes / 1440)
-                            } else if minutes % 60 == 0 {
-                                format!("{} hours", minutes / 60)
-                            } else {
-                                format!("{minutes} min")
-                            }
-                        })
-                        .unwrap_or_else(|| key.into());
+                    let duration = window["windowDurationMins"].as_u64().map(window_name);
                     windows.push(UsageWindow {
-                        label: format!("{name} · {duration}"),
+                        label: allowance_label(name.as_deref(), duration.as_deref()),
                         remaining: (100. - used).clamp(0., 100.),
                         resets_at: window["resetsAt"]
                             .as_i64()
                             .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-                            .map(|t| {
-                                t.with_timezone(&chrono::Local)
-                                    .format("%b %-d, %-I:%M %p")
-                                    .to_string()
-                            }),
+                            .map(|t| reset_time(t.with_timezone(&chrono::Local))),
                     });
                 }
             }
@@ -664,11 +650,45 @@ fn parse_limits(provider: Provider, value: &serde_json::Value) -> Option<UsageLi
     (!windows.is_empty()).then_some(UsageLimits { windows })
 }
 fn format_reset(value: &str) -> Option<String> {
-    chrono::DateTime::parse_from_rfc3339(value).ok().map(|t| {
-        t.with_timezone(&chrono::Local)
-            .format("%b %-d, %-I:%M %p")
-            .to_string()
-    })
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|t| reset_time(t.with_timezone(&chrono::Local)))
+}
+/// Reset times use the 24-hour clock everywhere: "Nov 7, 14:05".
+fn reset_time<Tz: chrono::TimeZone>(time: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    time.format("%b %-d, %H:%M").to_string()
+}
+/// A Codex window length in people's words: 300 minutes is "5-hour", 10080 "Weekly".
+fn window_name(minutes: u64) -> String {
+    match minutes {
+        1440 => "Daily".into(),
+        10080 => "Weekly".into(),
+        m if m > 0 && m % 1440 == 0 => format!("{}-day", m / 1440),
+        m if m > 0 && m % 60 == 0 => format!("{}-hour", m / 60),
+        m => format!("{m}-minute"),
+    }
+}
+/// The main `codex` bucket needs no name; others use their reported name, never a raw id.
+fn codex_bucket_name(id: &str, bucket: &serde_json::Value) -> Option<String> {
+    let reported = bucket["limitName"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("codex"));
+    match reported {
+        Some(name) => Some(name.to_owned()),
+        None if id == "codex" => None,
+        None => Some("Allowance".into()),
+    }
+}
+fn allowance_label(bucket: Option<&str>, duration: Option<&str>) -> String {
+    match (bucket, duration) {
+        (Some(bucket), Some(duration)) => format!("{bucket} · {duration}"),
+        (Some(label), None) | (None, Some(label)) => label.to_owned(),
+        (None, None) => "Allowance".into(),
+    }
 }
 
 pub async fn usage_limits(provider: Provider, account: Option<&Account>) -> Option<UsageLimits> {
@@ -792,7 +812,7 @@ pub async fn provider_identity(
             Ok(Ok(del_codex::AuthStatus::ApiKey)) => Ok(Some("API key".into())),
             Ok(Ok(_)) => Ok(None),
             Err(_) => Err(IDENTITY_TIMED_OUT.into()),
-            Ok(Err(_)) => Err("Unable to read Codex account identity".into()),
+            Ok(Err(_)) => Err("Could not read the Codex account identity".into()),
         };
     }
     let args: &[&str] = match provider {
@@ -818,7 +838,7 @@ pub async fn provider_identity(
         .map_err(|e| e.to_string())?;
     if provider == Provider::Claude {
         let data: serde_json::Value = serde_json::from_slice(&result.stdout)
-            .map_err(|_| "Unable to read Claude sign-in status".to_string())?;
+            .map_err(|_| "Could not read the Claude sign-in status".to_string())?;
         if data["loggedIn"] != true {
             return Err("Sign in to connect this account".into());
         }
@@ -868,6 +888,53 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn allowance_labels_use_plain_window_names_never_raw_ids() {
+        let codex = super::parse_limits(del_agent::Provider::Codex, &serde_json::json!({
+            "rateLimitsByLimitId":{
+                "codex":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}},
+                "codex_bengalfox":{"limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":30,"windowDurationMins":300}},
+                "codex_other":{"primary":{"usedPercent":40}}
+            }
+        }))
+        .unwrap();
+        let labels: Vec<_> = codex.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["5-hour", "Weekly", "GPT-5.3-Codex-Spark · 5-hour", "Allowance"]
+        );
+        let legacy = super::parse_limits(
+            del_agent::Provider::Codex,
+            &serde_json::json!({"rateLimits":{"primary":{"usedPercent":5,"windowDurationMins":1440},"secondary":{"usedPercent":5}}}),
+        )
+        .unwrap();
+        let labels: Vec<_> = legacy.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["Daily", "Allowance"]);
+        assert_eq!(super::window_name(60), "1-hour");
+        assert_eq!(super::window_name(2880), "2-day");
+        assert_eq!(super::window_name(45), "45-minute");
+        let claude = super::parse_limits(
+            del_agent::Provider::Claude,
+            &serde_json::json!({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":1},"seven_day_opus":{"utilization":2}}}),
+        )
+        .unwrap();
+        let labels: Vec<_> = claude.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["5-hour", "Weekly · Opus"]);
+    }
+
+    #[test]
+    fn reset_times_use_the_24_hour_clock() {
+        let zone = chrono::FixedOffset::east_opt(0).unwrap();
+        let afternoon = chrono::DateTime::parse_from_rfc3339("2026-11-07T14:05:00Z")
+            .unwrap()
+            .with_timezone(&zone);
+        assert_eq!(super::reset_time(afternoon), "Nov 7, 14:05");
+        let morning = chrono::DateTime::parse_from_rfc3339("2026-01-02T09:30:00Z")
+            .unwrap()
+            .with_timezone(&zone);
+        assert_eq!(super::reset_time(morning), "Jan 2, 09:30");
     }
 
     use super::*;
