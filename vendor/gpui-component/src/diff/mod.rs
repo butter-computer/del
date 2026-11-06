@@ -204,6 +204,7 @@ pub struct Diff {
     state: Entity<DiffState>,
     style: StyleRefinement,
     line_number: bool,
+    single_gutter: bool,
     syntax_highlight: bool,
     header_visible: bool,
     horizontal_scrollbar: bool,
@@ -234,6 +235,7 @@ impl Diff {
             state: state.clone(),
             style: StyleRefinement::default(),
             line_number: true,
+            single_gutter: false,
             syntax_highlight: true,
             header_visible: true,
             horizontal_scrollbar: true,
@@ -253,6 +255,12 @@ impl Diff {
     /// Shows the original and modified line-number lanes. Default is true.
     pub fn line_number(mut self, value: bool) -> Self {
         self.line_number = value;
+        self
+    }
+    /// Uses one line-number lane in unified mode: old numbers for deletions,
+    /// new numbers for additions and unchanged lines.
+    pub fn single_gutter(mut self, enabled: bool) -> Self {
+        self.single_gutter = enabled;
         self
     }
     /// Emphasizes syntax once the state has prepared it. Default is true.
@@ -476,12 +484,14 @@ fn render_diff(
     };
     let mode = state.mode();
     let soft_wrap = props.soft_wrap;
+    let single_gutter = props.single_gutter && mode == DiffMode::Unified;
     let layout = LayoutKey::new(
         rem,
         font_size,
         font_family.clone(),
         mode,
         props.line_number,
+        single_gutter,
         soft_wrap,
     );
     if state.update_layout(layout, row_height) {
@@ -495,6 +505,7 @@ fn render_diff(
                 &font_family,
                 gutter_width,
                 mode,
+                single_gutter,
                 window,
                 cx,
             )
@@ -520,6 +531,7 @@ fn render_diff(
         rem,
         expansion_lines: state.expansion_lines(),
         line_number: props.line_number,
+        single_gutter,
         syntax_highlight: props.syntax_highlight,
         header_visible: props.header_visible,
         hover_highlight: props.hover_highlight,
@@ -704,7 +716,7 @@ fn render_diff(
                                 px(0.)
                             } else {
                                 let painted = state.geometry().borrow().painted_width();
-                                code_width(painted, gutter_width, rem, mode)
+                                code_width(painted, gutter_width, rem, mode, single_gutter)
                             };
                             if state.record_paint(bounds.size, painted) || rehinted {
                                 cx.notify();
@@ -758,6 +770,7 @@ struct CodePresentation {
     rem: Pixels,
     expansion_lines: usize,
     line_number: bool,
+    single_gutter: bool,
     syntax_highlight: bool,
     header_visible: bool,
     hover_highlight: DiffHoverHighlight,
@@ -796,11 +809,17 @@ impl CodePresentation {
 }
 
 /// Total row width for code of `width` in the current mode.
-fn code_width(width: Pixels, gutter_width: Pixels, rem: Pixels, mode: DiffMode) -> Pixels {
+fn code_width(
+    width: Pixels,
+    gutter_width: Pixels,
+    rem: Pixels,
+    mode: DiffMode,
+    single_gutter: bool,
+) -> Pixels {
     if mode == DiffMode::Split {
         (width + gutter_width + rem * 2.) * 2.
     } else {
-        width + gutter_width * 2. + rem * 2.
+        width + gutter_width * if single_gutter { 1. } else { 2. } + rem * 2.
     }
 }
 
@@ -812,6 +831,7 @@ fn measure_code_width(
     family: &SharedString,
     gutter_width: Pixels,
     mode: DiffMode,
+    single_gutter: bool,
     window: &mut Window,
     cx: &App,
 ) -> Pixels {
@@ -861,7 +881,7 @@ fn measure_code_width(
                 .width
         })
         .fold(px(0.), Pixels::max);
-    code_width(width, gutter_width, window.rem_size(), mode)
+    code_width(width, gutter_width, window.rem_size(), mode, single_gutter)
 }
 
 fn render_row(
@@ -1430,7 +1450,9 @@ fn render_unified_cell(
             cx,
         ));
     }
-    let gutters = if single_column {
+    let gutters = if code.single_gutter {
+        [Some((side, Some(ix))), None]
+    } else if single_column {
         [Some((DiffSide::Modified, modified)), None]
     } else {
         [

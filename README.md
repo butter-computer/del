@@ -6,9 +6,9 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.49` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.50` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.49 source update notes](docs/releases/0.1.49.md).
+See the [0.1.50 source update notes](docs/releases/0.1.50.md).
 
 This update adds expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
@@ -59,7 +59,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.49-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.50-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

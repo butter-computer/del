@@ -506,6 +506,7 @@ impl RenderOnce for ReviewView {
                 .clone();
             Diff::new(&state)
                 .header_visible(false)
+                .single_gutter(true)
                 .horizontal_scrollbar(false)
                 .hunk_separator(DiffHunkSeparator::LineInfo)
                 .change_indicator(DiffChangeIndicator::Bars)

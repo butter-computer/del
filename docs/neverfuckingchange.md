@@ -1102,3 +1102,6 @@ activity bar. It supersedes earlier rules where they conflict.
   syntax highlighting, aligned gutters, consistent change backgrounds, and file-type
   icons. Scrolling within a diff never propagates to the outer list, including
   diagonal gestures and scrolling at an edge. Only the vertical scrollbar is shown.
+
+- Use one compact line-number lane in unified diffs: old numbers for deletions,
+  current numbers for added/context lines. Do not reserve an empty second lane.
