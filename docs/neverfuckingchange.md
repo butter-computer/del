@@ -1080,3 +1080,33 @@ activity bar. It supersedes earlier rules where they conflict.
 
 - Hide unavailable Context, Limits, and Cost footer metrics rather than showing
   dash placeholders. Preserve reported zero values and known usage.
+
+- Recent commits expand into indented file lists. Each file independently expands
+  into its historical diff with line numbers and addition/deletion colors. Load
+  details on demand, preserve disclosures during polling, and compare merges to
+  their first parent. Never substitute working-tree changes for a commit diff.
+- Commit timestamps use local calendar dates: Today/recent hours, Yesterday, then
+  ordinal day and short month (with year for earlier years). Full timestamps stay
+  available on hover.
+- Show the project folder icon/name in the footer before branch/change details,
+  with the full active directory on hover and a click opening Files.
+- Commit titles toggle files without a chevron or vertical guide. Show the hash
+  on the left and the author beside the date on the right. Clicking the hash copies
+  the full ID with hover copy/check feedback and must not toggle the commit. Keep file disclosure arrows.
+- Cap individual diffs at 320 logical pixels and support scrolling on both axes,
+  with only a vertical scrollbar and stable scroll positions during rerenders.
+- Commit/file reveals stay quick and reversible (160 ms open, 120 ms close);
+  Reduced Motion makes them immediate.
+
+- Historical and working-file reviews use the virtualized code-diff viewer with
+  syntax highlighting, aligned gutters, consistent change backgrounds, and file-type
+  icons. Scrolling within a diff never propagates to the outer list, including
+  diagonal gestures and scrolling at an edge. Only the vertical scrollbar is shown.
+
+- Use one compact line-number lane in unified diffs: old numbers for deletions,
+  current numbers for added/context lines. Do not reserve an empty second lane.
+
+- Fit short diffs to their displayed rows, excluding hidden Git metadata/header
+  space. Retain the height cap and contained scrolling for long diffs.
+- Keep Dotfiles inside the Files content toolbar above the tree, never in the tab
+  strip. Preserve filtering and the file-preview splitter.
