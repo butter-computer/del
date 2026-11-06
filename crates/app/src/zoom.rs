@@ -159,9 +159,7 @@ fn install(cx: &mut App, path: PathBuf) {
     ]);
     let apply = move |percent, cx: &mut App| {
         del_core::zoom::set(percent);
-        gpui_kit::component::Theme::update(cx, |theme| {
-            theme.font_size = px(del_core::typography::TEXT_MD);
-        });
+        gpui_kit::component::Theme::update(cx, crate::appearance::apply_zoom_metrics);
         cx.refresh_windows();
         if let Err(error) = save(&path, del_core::zoom::percent()) {
             eprintln!("[del zoom] Could not save zoom: {error}");

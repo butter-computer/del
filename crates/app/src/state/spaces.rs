@@ -258,8 +258,7 @@ impl AppState {
                         && !self.project_preferences.archived.contains(*path)
                 })
                 .cloned()
-                .or_else(dirs::home_dir)
-                .unwrap_or_else(|| PathBuf::from("/"));
+                .unwrap_or_else(super::default_directory);
             let provider = self.effective().0;
             self.open_draft(provider, None, cwd, cx);
             // An empty Space needs a usable composer, not a new project or tab.
@@ -489,6 +488,11 @@ impl AppState {
             target.deck.selected = removed.deck.selected;
         }
         let destination = target.id.clone();
+        let destination_name = target.name.clone();
+        self.report(
+            super::notices::Severity::Info,
+            format!("Space deleted · projects moved to {destination_name}"),
+        );
         if self.spaces.active == id {
             self.spaces.active = destination.clone();
         }
@@ -618,7 +622,7 @@ impl AppState {
         }
         let (mut spaces, error): (Spaces, _) = sessions::load_or_set_aside(&path, "spaces");
         if let Some(error) = error {
-            self.error = Some(error);
+            self.report_error(error);
             return;
         }
         spaces.normalize();

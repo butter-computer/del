@@ -2,7 +2,9 @@
 //! session, provider status, and the bridge from the tokio runtime that owns
 //! the backends back into GPUI.
 
+pub mod notices;
 pub mod spaces;
+pub mod window_bounds;
 
 use crate::providers;
 use crate::sessions::{self, Overrides, Row, TerminalRow};
@@ -44,6 +46,24 @@ pub struct Ghost {
     pub at: usize,
     pub title: String,
     pub provider: Option<Provider>,
+    /// How open it was when closed (a tab closed mid-opening shrinks from there).
+    pub from: f32,
+    pub closed_at: std::time::Instant,
+}
+
+impl Ghost {
+    /// Its width fraction now: shrinking from `from` to 0 over the exit time.
+    pub fn fraction(&self, now: std::time::Instant) -> f32 {
+        let t = (now.saturating_duration_since(self.closed_at).as_secs_f32()
+            / crate::tab_motion::EXIT.as_secs_f32())
+        .min(1.);
+        self.from * (1. - crate::ui::ease_out(t))
+    }
+}
+
+/// How far a tab's opening animation has got, `opened` time ago.
+pub fn opening_fraction(elapsed: Duration) -> f32 {
+    crate::ui::ease_out(elapsed.as_secs_f32() / TAB_ANIM.as_secs_f32())
 }
 
 /// One tab in the top bar.
@@ -186,8 +206,11 @@ pub struct AppState {
     pub renaming: Option<SessionId>,
     pub project_renaming: Option<PathBuf>,
     pub show_archived: bool,
-    /// Last problem worth telling the user about.
+    /// Legacy single-message slot still set by other modules; the shell
+    /// drains it into `notices` every frame. New code calls `report*`.
     pub error: Option<String>,
+    /// Messages for the user, oldest first, with their severity.
+    pub notices: notices::Notices,
     /// The prompt that started each session opened this run, for its chat's
     /// first row (taken once by the chat view).
     first_prompts: HashMap<SessionId, UserInput>,
@@ -200,6 +223,10 @@ pub struct AppState {
     /// A stable id per tab (kept when a draft becomes its session), so each
     /// tab animates in exactly once.
     uids: HashMap<Tab, u64>,
+    /// Sidebar rows growing in, by when they appeared.
+    pub row_reveals: HashMap<SessionId, std::time::Instant>,
+    /// When each tab uid first appeared, for its opening fraction.
+    tab_opened: HashMap<u64, std::time::Instant>,
     next_uid: u64,
     pub ghosts: Vec<Ghost>,
     /// A draft is being turned into a session; blocks a double send.
@@ -207,7 +234,36 @@ pub struct AppState {
     switching_accounts: std::collections::HashSet<SessionId>,
 }
 
+/// Where a session starts when nothing better is known: the home folder,
+/// never `/` (the working directory of an app launched from Finder).
+pub fn default_directory() -> PathBuf {
+    dirs::home_dir()
+        .filter(|home| home.as_path() != std::path::Path::new("/"))
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 impl AppState {
+    /// Queue a message for the user. Repeats of one still waiting coalesce.
+    pub fn report(&mut self, severity: notices::Severity, message: impl AsRef<str>) {
+        self.notices
+            .push(notices::Notice::new(severity, message.as_ref()));
+    }
+
+    /// Queue a failure of something the user asked for; it stays until dismissed.
+    pub fn report_error(&mut self, message: impl AsRef<str>) {
+        self.report(notices::Severity::Error, message);
+    }
+
+    /// Everything waiting to be shown, including a message left in the legacy
+    /// `error` slot by another module.
+    pub fn take_notices(&mut self) -> Vec<notices::Notice> {
+        if let Some(error) = self.error.take() {
+            let severity = notices::classify(&error);
+            self.report(severity, error);
+        }
+        self.notices.drain()
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let rt = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -421,8 +477,7 @@ impl AppState {
                     cwd: std::env::current_dir()
                         .ok()
                         .filter(|d| d != std::path::Path::new("/"))
-                        .or_else(dirs::home_dir)
-                        .unwrap_or_else(|| PathBuf::from("/")),
+                        .unwrap_or_else(default_directory),
                     model: None,
                     reasoning_effort: None,
                     service_tier: None,
@@ -456,7 +511,14 @@ impl AppState {
             renaming: None,
             project_renaming: None,
             show_archived: false,
-            error,
+            error: None,
+            notices: {
+                let mut notices = notices::Notices::default();
+                if let Some(error) = error {
+                    notices.push(notices::Notice::new(notices::Severity::Error, &error));
+                }
+                notices
+            },
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
             starting: Default::default(),
@@ -464,6 +526,8 @@ impl AppState {
             tabs: vec![Tab::Draft(0)],
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
+            tab_opened: HashMap::new(),
+            row_reveals: HashMap::new(),
             next_uid: 1,
             ghosts: Vec::new(),
             next_draft: 1,
@@ -530,7 +594,7 @@ impl AppState {
                     && !cfg!(test)
                     && let Err(error) = self.project_preferences.save()
                 {
-                    self.error = Some(error.to_string());
+                    self.report_error(error.to_string());
                 }
                 self.project_info.insert(path, info);
                 self.sync_peer_projects();
@@ -539,7 +603,7 @@ impl AppState {
                 self.switching_accounts.remove(&id);
                 self.set_records(self.manager.list_sessions());
                 if let Err(error) = result {
-                    self.error = Some(format!("Could not switch provider or account: {error}"));
+                    self.report_error(format!("Could not switch provider or account: {error}"));
                 }
                 self.load_models(true, cx);
             }
@@ -559,7 +623,7 @@ impl AppState {
                     if !cfg!(test)
                         && let Err(e) = crate::accounts::save(&self.accounts)
                     {
-                        self.error = Some(format!("Could not save account: {e}"));
+                        self.report_error(format!("Could not save account: {e}"));
                     }
                 } else {
                     self.default_identities.insert(provider, identity);
@@ -581,7 +645,7 @@ impl AppState {
                         if !cfg!(test)
                             && let Err(e) = crate::accounts::save(&self.accounts)
                         {
-                            self.error = Some(format!("Could not save account: {e}"));
+                            self.report_error(format!("Could not save account: {e}"));
                         }
                     }
                     // A slow check (e.g. at startup) says nothing about the login; keep the saved state.
@@ -608,7 +672,7 @@ impl AppState {
                     }
                     Err(error) => {
                         catalog.error = Some(error.clone());
-                        self.error = Some(format!(
+                        self.report_error(format!(
                             "Could not load models: {error}. Try Refresh again."
                         ));
                     }
@@ -749,7 +813,7 @@ impl AppState {
                 }
             }
             Msg::StartFailed(key, error) => {
-                self.error = Some(format!(
+                self.report_error(format!(
                     "Could not start the session: {error}. Your message is saved; use Retry message."
                 ));
                 self.starting.remove(&key);
@@ -758,7 +822,7 @@ impl AppState {
                 }
             }
             Msg::Error(e) => {
-                self.error = Some(e);
+                self.report_error(e);
             }
         }
         cx.notify();
@@ -831,7 +895,7 @@ impl AppState {
         let (drafts, error): (Vec<(u64, SessionConfig, Option<String>)>, _) =
             sessions::load_or_set_aside(&path, "saved draft owners");
         if let Some(error) = error {
-            self.error = Some(error);
+            self.report_error(error);
         }
         if drafts.is_empty() {
             return;
@@ -958,6 +1022,17 @@ impl AppState {
     }
 
     fn set_records(&mut self, records: Vec<SessionRecord>) {
+        // Sessions that join an already loaded list grow in; the first load
+        // and project expansion stay instant.
+        if !self.records.is_empty() {
+            let known: HashSet<&SessionId> = self.records.iter().map(|r| &r.id).collect();
+            let now = std::time::Instant::now();
+            for record in records.iter().filter(|r| !known.contains(&r.id)) {
+                self.row_reveals.insert(record.id.clone(), now);
+            }
+        }
+        self.row_reveals
+            .retain(|_, started| started.elapsed() < crate::ui::REVEAL);
         self.records = records;
         self.sync_peer_projects();
         self.invalidate_rows();
@@ -981,7 +1056,10 @@ impl AppState {
             if let Some(project) = project
                 && let Err(error) = self.manager.set_resolved_peer_project(id, cwd, project)
             {
-                self.error = Some(format!("Could not save peer project: {error}"));
+                self.notices.push(notices::Notice::new(
+                    notices::Severity::Error,
+                    &format!("Could not save peer project: {error}"),
+                ));
             }
         }
     }
@@ -1006,7 +1084,7 @@ impl AppState {
             Some(r) => (r.provider, r.model, r.cwd),
             None => match self.draft() {
                 Some(d) => (d.provider, d.model.clone(), d.cwd.clone()),
-                None => (Provider::Claude, None, PathBuf::from("/")),
+                None => (Provider::Claude, None, default_directory()),
             },
         }
     }
@@ -1213,7 +1291,7 @@ impl AppState {
     }
 
     pub fn terminal_start_failed(&mut self, key: u64, error: String, cx: &mut Context<Self>) {
-        self.error = Some(format!("Could not start terminal: {error}"));
+        self.report_error(format!("Could not start terminal: {error}"));
         self.starting.remove(&key);
         if let Some(pending) = self.pending_prompts.get_mut(&key) {
             pending.error = Some(error);
@@ -1362,7 +1440,22 @@ impl AppState {
         cx.notify();
     }
 
+    /// Rows that just joined the sidebar (created, restored, moved by a pin)
+    /// and when, so they grow in instead of snapping.
+    pub fn reveal_row(&mut self, id: &SessionId) {
+        self.row_reveals
+            .insert(id.clone(), std::time::Instant::now());
+    }
+
+    /// How far a row's entrance has got, if it is still growing in.
+    pub fn row_reveal(&self, id: &SessionId) -> Option<f32> {
+        let started = self.row_reveals.get(id)?;
+        let t = started.elapsed().as_secs_f32() / crate::ui::REVEAL.as_secs_f32();
+        (t < 1.).then(|| crate::ui::ease_out(t))
+    }
+
     pub fn toggle_session_pin(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        self.reveal_row(id);
         if self.terminal_rows.iter().any(|row| &row.id == id) {
             self.toggle_terminal_pin(id, cx);
             return;
@@ -1740,6 +1833,7 @@ impl AppState {
             self.project_preferences
                 .last_directory
                 .as_ref()
+                .filter(|path| path.as_path() != std::path::Path::new("/"))
                 .filter(|path| {
                     let root = self.project_root(path);
                     self.space_has_project(&root)
@@ -1813,6 +1907,8 @@ impl AppState {
 
     fn new_uid(&mut self, tab: Tab) {
         self.uids.insert(tab, self.next_uid);
+        self.tab_opened
+            .insert(self.next_uid, std::time::Instant::now());
         self.next_uid += 1;
     }
 
@@ -1911,11 +2007,19 @@ impl AppState {
         if !shared {
             self.uids.remove(tab);
         }
+        let now = std::time::Instant::now();
+        // Sessions open at full width; drafts and terminals grow in.
+        let from = match (tab, self.tab_opened.remove(&uid)) {
+            (Tab::Session(_), _) | (_, None) => 1.,
+            (_, Some(opened)) => opening_fraction(now.saturating_duration_since(opened)),
+        };
         self.ghosts.push(Ghost {
             uid,
             at,
             title,
             provider,
+            from,
+            closed_at: now,
         });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TAB_ANIM * 12 / 10).await;
@@ -2141,8 +2245,29 @@ impl AppState {
         cx.notify();
     }
 
+    /// Says that closing a session also stopped the work it was doing.
+    fn report_stopped_work(&mut self, id: &SessionId, verb: &str, undo: bool) {
+        if !self.session_working(id) {
+            return;
+        }
+        let what = if self.terminal_rows.iter().any(|row| &row.id == id) {
+            "its running command"
+        } else {
+            "its running reply"
+        };
+        let mut notice =
+            notices::Notice::new(notices::Severity::Info, &format!("{verb} — {what} was stopped"));
+        if undo {
+            notice.undo = Some(notices::Undo::Unarchive(id.clone()));
+        }
+        self.notices.push(notice);
+    }
+
     /// Release the live process and view, retaining history and sidebar metadata.
     pub fn unload(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if !self.unloading.contains(&id) {
+            self.report_stopped_work(&id, "Unloaded", false);
+        }
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.close_tab(&Tab::Terminal(id.clone()), cx);
             // A preview or already closed tab may still own a terminal host.
@@ -2202,6 +2327,7 @@ impl AppState {
     /// Archive: hide from the list and end the live session (killing its
     /// child process). It can be restored and resumed later.
     pub fn archive(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.report_stopped_work(&id, "Archived", true);
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.overrides_mut().set_archived(&id, true);
             self.save_overrides();
@@ -2215,7 +2341,7 @@ impl AppState {
         let (manager, tx) = (self.manager.clone(), self.tx.clone());
         let close_id = id.clone();
         if let Err(error) = manager.stop_peer_work(&id) {
-            self.error = Some(format!("Could not stop archived work: {error}"));
+            self.report_error(format!("Could not stop archived work: {error}"));
         }
         self.rt.spawn(async move {
             let _ = manager.close(&close_id).await;
@@ -2248,6 +2374,7 @@ impl AppState {
         }
         self.overrides_mut().set_archived(&id, false);
         self.save_overrides();
+        self.reveal_row(&id);
         if self.terminal_rows.iter().any(|row| row.id == id) {
             self.select_terminal(id, cx);
         } else {
@@ -2438,7 +2565,7 @@ impl AppState {
                 .get(id)
                 .is_some_and(|status| status == "Waiting for sign-in…")
         }) {
-            self.error = Some("Finish signing in before selecting this account.".into());
+            self.report_error("Finish signing in before selecting this account.");
             cx.notify();
             return;
         }
@@ -2450,8 +2577,8 @@ impl AppState {
                 self.manager.status(&id),
                 Some(SessionStatus::Running | SessionStatus::WaitingApproval)
             ) {
-                self.error = Some(
-                    "Finish or stop the response before switching providers or accounts.".into(),
+                self.report_error(
+                    "Finish or stop the response before switching providers or accounts.",
                 );
                 cx.notify();
                 return;
@@ -2660,7 +2787,7 @@ impl AppState {
         if !cfg!(test)
             && let Err(error) = crate::accounts::save(&accounts)
         {
-            self.error = Some(format!("Could not save default account: {error}"));
+            self.report_error(format!("Could not save default account: {error}"));
         } else {
             self.accounts = accounts;
         }
@@ -2681,9 +2808,8 @@ impl AppState {
                     .is_some_and(|account| account == id)
             })
         {
-            self.error = Some(
-                "Wait for account switching or chat startup to finish before deleting an account."
-                    .into(),
+            self.report_error(
+                "Wait for account switching or chat startup to finish before deleting an account.",
             );
             cx.notify();
             return;
@@ -2698,7 +2824,7 @@ impl AppState {
                 .iter()
                 .any(|r| r.account_id.as_deref() == Some(id))
         {
-            self.error = Some("This account is used by existing chats. Switch those chats to another account before deleting it.".into());
+            self.report_error("This account is used by existing chats. Switch those chats to another account before deleting it.");
             cx.notify();
             return;
         }
@@ -2739,7 +2865,7 @@ impl AppState {
                     });
                 }
             }
-            Err(error) => self.error = Some(format!("Could not delete account: {error}")),
+            Err(error) => self.report_error(format!("Could not delete account: {error}")),
         }
         cx.notify();
     }
@@ -2778,13 +2904,13 @@ impl AppState {
                 self.accounts.push(account.clone());
                 if let Err(e) = crate::accounts::save(&self.accounts) {
                     self.accounts.pop();
-                    self.error = Some(format!("Could not save account: {e}"));
+                    self.report_error(format!("Could not save account: {e}"));
                 } else {
                     self.manager.register_account(id.clone(), account.backend());
                     self.login_account(&id, cx);
                 }
             }
-            Err(e) => self.error = Some(format!("Could not add account: {e}")),
+            Err(e) => self.report_error(format!("Could not add account: {e}")),
         }
         cx.notify();
     }
@@ -2930,7 +3056,7 @@ impl AppState {
         };
         match self.manager.set_model_settings(id, model, effort, tier) {
             Ok(()) => self.set_records(self.manager.list_sessions()),
-            Err(error) => self.error = Some(format!("Could not save model settings: {error}")),
+            Err(error) => self.report_error(format!("Could not save model settings: {error}")),
         }
         cx.notify();
     }
@@ -3120,7 +3246,7 @@ impl AppState {
         if !cfg!(test)
             && let Err(error) = self.project_preferences.save()
         {
-            self.error = Some(error.to_string());
+            self.report_error(error.to_string());
         }
         cx.notify();
     }
@@ -3133,7 +3259,7 @@ impl AppState {
             self.project_drafts(&path)
         };
         if drafts.iter().any(|key| self.starting.contains(key)) {
-            self.error = Some("Wait for this project's session to finish starting.".into());
+            self.report_error("Wait for this project's session to finish starting.");
             cx.notify();
             return;
         }
@@ -3248,7 +3374,7 @@ impl AppState {
         if !cfg!(test)
             && let Err(e) = self.project_preferences.save()
         {
-            self.error = Some(e.to_string());
+            self.report_error(e.to_string());
         }
         cx.notify();
     }
@@ -3272,7 +3398,7 @@ impl AppState {
         if !cfg!(test)
             && let Err(error) = self.project_preferences.save()
         {
-            self.error = Some(error.to_string());
+            self.report_error(error.to_string());
         }
         cx.notify();
     }
@@ -3661,11 +3787,14 @@ pub(crate) mod tests {
             project_renaming: None,
             show_archived: false,
             error: None,
+            notices: Default::default(),
             first_prompts: HashMap::new(),
             pending_prompts: HashMap::new(),
             tabs: vec![Tab::Draft(0)],
             preview_tab: None,
             uids: HashMap::from([(Tab::Draft(0), 0)]),
+            tab_opened: HashMap::new(),
+            row_reveals: HashMap::new(),
             next_uid: 1,
             ghosts: vec![],
             starting: Default::default(),
@@ -5170,20 +5299,20 @@ pub(crate) mod tests {
                 Some(terminal.id.clone()),
             ));
             s.delete_account(&chat.id, cx);
-            assert!(s.error.take().unwrap().contains("used by existing chats"));
+            assert!(s.take_notices()[0].message.contains("used by existing chats"));
             s.delete_account(&terminal.id, cx);
-            assert!(s.error.take().unwrap().contains("used by existing chats"));
+            assert!(s.take_notices()[0].message.contains("used by existing chats"));
             assert_eq!(s.accounts.len(), 3);
             // Nothing is deleted while an account switch or a startup using it is in flight.
             s.switching_accounts
                 .insert(del_agent::SessionId::new("switching"));
             s.delete_account(&free.id, cx);
-            assert!(s.error.take().is_some());
+            assert!(!s.take_notices().is_empty());
             s.switching_accounts.clear();
             s.draft_accounts.insert(0, free.id.clone());
             s.starting.insert(0);
             s.delete_account(&free.id, cx);
-            assert!(s.error.take().is_some());
+            assert!(!s.take_notices().is_empty());
             s.starting.clear();
             // Or while that provider's sign-in is running.
             s.signin = Some(Provider::Codex);
@@ -5196,7 +5325,7 @@ pub(crate) mod tests {
                 vec![&chat.id, &terminal.id]
             );
             assert!(!s.draft_accounts.values().any(|id| id == &free.id));
-            assert!(s.error.is_none());
+            assert!(s.take_notices().is_empty());
         });
     }
 

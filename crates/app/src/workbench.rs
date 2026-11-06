@@ -1,7 +1,7 @@
 //! Harp workbench chrome around Del's page: back/forward navigation in the
 //! title bar, the bottom terminal panel (⌘J) and the status bar.
 use crate::animated_icons::Glyph;
-use crate::appearance::{ActionTone, rgb, rgba, shell_surface};
+use crate::appearance::{ActionTone, rgba, shell_surface};
 use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::state::{AppState, Panel, Selection, Tab};
@@ -63,6 +63,10 @@ mod navigation_layout_tests {
 pub struct BottomPanel {
     pub open: bool,
     pub maximized: bool,
+    /// Height reveal for opening and closing (220 ms, like the side panels).
+    motion: crate::panel_motion::Reveal,
+    /// Reveal between the normal and maximized heights.
+    max_motion: crate::panel_motion::Reveal,
     terminals: HashMap<PathBuf, Entity<TerminalHost>>,
     error: Option<String>,
     /// A root whose shell failed to start; not retried on every frame.
@@ -95,7 +99,7 @@ pub fn chrome_button(
         .rounded(zpx(6.0))
         .text_color(crate::appearance::secondary_text())
         .when(enabled, |b| {
-            b.cursor_pointer().hover(|b| b.bg(rgba(0xffffff0a)))
+            b.cursor_pointer().hover(|b| b.bg(crate::ui::row_hover()))
         })
         .when(!enabled, |b| b.opacity(0.35))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -379,7 +383,8 @@ impl AppShell {
                 chrome_button("toggle-sidebar", "Toggle left sidebar", true)
                     .w(button_width)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Toggle left sidebar (⌘B)")
+                        gpui_kit::component::tooltip::Tooltip::new("Toggle left sidebar")
+                            .action(&crate::ToggleSidebar, None)
                             .build(window, cx)
                     })
                     .when(settings, |button| button.invisible())
@@ -392,8 +397,15 @@ impl AppShell {
             .child(
                 chrome_button("nav-back", "Back", back)
                     .w(button_width)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Back (⌘[)").build(window, cx)
+                    // Disabled at the start of history; the tooltip says why.
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(if back {
+                            "Back"
+                        } else {
+                            "Back · no earlier session"
+                        })
+                        .action(&crate::NavigateBack, None)
+                        .build(window, cx)
                     })
                     .when(back, |b| {
                         b.on_click(cx.listener(|this, _, window, cx| this.navigate(-1, window, cx)))
@@ -403,8 +415,14 @@ impl AppShell {
             .child(
                 chrome_button("nav-forward", "Forward", forward)
                     .w(button_width)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Forward (⌘])").build(window, cx)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(if forward {
+                            "Forward"
+                        } else {
+                            "Forward · no later session"
+                        })
+                        .action(&crate::NavigateForward, None)
+                        .build(window, cx)
                     })
                     .when(forward, |b| {
                         b.on_click(cx.listener(|this, _, window, cx| this.navigate(1, window, cx)))
@@ -423,6 +441,10 @@ impl AppShell {
             return;
         }
         self.bottom.open = !self.bottom.open;
+        let now = std::time::Instant::now();
+        self.bottom
+            .motion
+            .set(self.bottom.open, cx.reduce_motion(), now);
         if self.bottom.open {
             self.ensure_panel_terminal(window, cx);
             let root = self.panel_root(cx);
@@ -431,9 +453,20 @@ impl AppShell {
             }
         } else {
             self.bottom.maximized = false;
+            self.bottom
+                .max_motion
+                .set(false, cx.reduce_motion(), now);
             self.focus_composer(window, cx);
         }
         cx.notify();
+    }
+
+    /// The panel's reveal and maximize fractions, and whether either moves.
+    pub(super) fn bottom_panel_progress(&self) -> (f32, f32, bool) {
+        let now = std::time::Instant::now();
+        let (open, opening) = self.bottom.motion.sample(now);
+        let (max, maximizing) = self.bottom.max_motion.sample(now);
+        (open, max, opening || maximizing)
     }
 
     /// The panel's shell for the selected project, started on first use.
@@ -468,18 +501,39 @@ impl AppShell {
         self.sidebar_widths.bottom =
             (drag.height + delta).clamp(PANEL_MIN_HEIGHT, (viewport - 160.0).max(PANEL_MIN_HEIGHT));
         self.bottom.maximized = false;
+        self.bottom.max_motion.settle(false);
         self.save_sidebar_widths_soon(cx);
         cx.notify();
     }
 
     /// The bottom terminal panel, framed like the page beneath it.
-    pub(super) fn render_bottom_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.bottom.open || self.state.read(cx).panel != Panel::Chat {
+    /// The panel grows from the bottom edge with its contents pinned at the
+    /// target height, so the shell is laid out (and resized) once rather than
+    /// on every frame of the reveal.
+    pub(super) fn render_bottom_panel(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (progress, max_progress, animating) = self.bottom_panel_progress();
+        if progress <= 0. || self.state.read(cx).panel != Panel::Chat {
             return None;
+        }
+        if animating {
+            window.request_animation_frame();
         }
         let root = self.panel_root(cx);
         let project = self.state.read(cx).project_name(&root);
         let height = self.sidebar_widths.bottom.max(PANEL_MIN_HEIGHT);
+        // The column the page and panel share: below the title bar, above the
+        // status bar and the page's bottom inset.
+        let column = del_core::zoom::unscaled(window.viewport_size().height.as_f32())
+            - self.metrics.topbar_height
+            - STATUS_BAR_HEIGHT
+            - self.metrics.page_inset;
+        let normal = height + PANEL_HEADER_HEIGHT;
+        let full = normal + (column.max(normal) - normal) * max_progress;
+        let settled_max = self.bottom.maximized && max_progress >= 1. && !animating;
         let drag = PanelResize {
             start_y: self.bottom.resize_origin.clone(),
             height,
@@ -488,55 +542,39 @@ impl AppShell {
         let shell = cx.entity();
         let maximized = self.bottom.maximized;
         Some(
+            div()
+                .id("bottom-panel-frame")
+                .relative()
+                .w_full()
+                .min_h_0()
+                .when(settled_max, |panel| panel.flex_1())
+                .when(!settled_max, |panel| panel.flex_none().h(zpx(full * progress)))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .overflow_hidden()
+                        .child(
             v_flex()
                 .id("bottom-panel")
                 .relative()
                 .w_full()
-                .min_h_0()
-                .when(maximized, |panel| panel.flex_1())
-                .when(!maximized, |panel| {
-                    panel.flex_none().h(zpx(height + PANEL_HEADER_HEIGHT))
-                })
-                .child(
-                    div()
-                        .id("resize-bottom-panel")
-                        .absolute()
-                        .top(zpx(-3.0))
-                        .left_0()
-                        .right_0()
-                        .h(zpx(6.0))
-                        .cursor_row_resize()
-                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                            start_y.set(event.position.y.as_f32());
-                            cx.stop_propagation();
-                        })
-                        .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                            if event.click_count() == 2 {
-                                this.sidebar_widths.bottom = PANEL_DEFAULT_HEIGHT;
-                                this.bottom.maximized = false;
-                                this.save_sidebar_widths_soon(cx);
-                                cx.notify();
-                            }
-                        }))
-                        .on_drag(drag, move |drag, _, window, cx| {
-                            shell.update(cx, |this, cx| this.resize_bottom_panel(drag, window, cx));
-                            cx.new(|_| ResizePreview)
-                        }),
-                )
+                .when(settled_max, |panel| panel.h_full())
+                .when(!settled_max, |panel| panel.h(zpx(full)))
                 .child(
                     h_flex()
                         .flex_none()
                         .h(zpx(PANEL_HEADER_HEIGHT))
                         .items_center()
-                        .gap_2()
+                        .gap(zpx(crate::ui::SPACE_SM))
                         .text_size(zpx(TEXT_SM))
                         .child(
                             div()
-                                .px_2()
+                                .px(zpx(crate::ui::SPACE_SM))
                                 .py(zpx(3.0))
                                 .rounded(zpx(6.0))
-                                .bg(rgba(0xffffff14))
-                                .text_color(rgb(0xf5f5f5))
+                                .bg(crate::ui::row_selected())
+                                .text_color(crate::ui::primary_text())
                                 .child("Terminal"),
                         )
                         .child(
@@ -569,6 +607,11 @@ impl AppShell {
                             .size(zpx(24.0))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.bottom.maximized = !this.bottom.maximized;
+                                this.bottom.max_motion.set(
+                                    this.bottom.maximized,
+                                    cx.reduce_motion(),
+                                    std::time::Instant::now(),
+                                );
                                 cx.notify();
                             }))
                             .child(crate::icons::icon(if maximized {
@@ -580,7 +623,8 @@ impl AppShell {
                         .child(
                             chrome_button("bottom-close", "Close panel", true)
                                 .tooltip(|window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new("Close panel (⌘J)")
+                                    gpui_kit::component::tooltip::Tooltip::new("Close panel")
+                                        .action(&crate::ToggleTerminalPanel, None)
                                         .build(window, cx)
                                 })
                                 .size(zpx(24.0))
@@ -598,7 +642,7 @@ impl AppShell {
                         .overflow_hidden()
                         .bg(crate::appearance::page_surface())
                         .when_some(self.bottom.error.clone(), |body, error| {
-                            body.child(div().p_2().text_size(zpx(TEXT_SM)).child(error))
+                            body.child(div().p(zpx(crate::ui::SPACE_SM)).text_size(zpx(TEXT_SM)).child(error))
                         })
                         .when_some(
                             self.bottom.terminals.get(&root).cloned(),
@@ -608,6 +652,36 @@ impl AppShell {
                                 body.child(terminal)
                             },
                         ),
+                ),
+                        ),
+                )
+                // Outside the clip, so the sash keeps its full 6 px target.
+                .child(
+                    div()
+                        .id("resize-bottom-panel")
+                        .absolute()
+                        .top(zpx(-3.0))
+                        .left_0()
+                        .right_0()
+                        .h(zpx(6.0))
+                        .cursor_row_resize()
+                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                            start_y.set(event.position.y.as_f32());
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                            if event.click_count() == 2 {
+                                this.sidebar_widths.bottom = PANEL_DEFAULT_HEIGHT;
+                                this.bottom.maximized = false;
+                                this.bottom.max_motion.settle(false);
+                                this.save_sidebar_widths_soon(cx);
+                                cx.notify();
+                            }
+                        }))
+                        .on_drag(drag, move |drag, _, window, cx| {
+                            shell.update(cx, |this, cx| this.resize_bottom_panel(drag, window, cx));
+                            cx.new(|_| ResizePreview)
+                        }),
                 )
                 .into_any_element(),
         )
@@ -668,25 +742,14 @@ impl AppShell {
                     .is_none_or(|owner| p.owner.as_ref() == Some(owner))
             })
             .count();
-        let process_label = if !self.processes.ready {
-            "Processes …".into()
-        } else if self.processes.error.is_some() {
-            "Processes —".into()
-        } else {
-            format!(
-                "{process_count} {}",
-                if process_count == 1 {
-                    "process"
-                } else {
-                    "processes"
-                }
-            )
-        };
+        // Like Context, Limits and Cost: shown only once known.
+        let processes_known = self.processes.ready && self.processes.error.is_none();
+        let process_label = format!("{process_count} running");
         let process_snapshot = self.processes.clone();
-        // Not read yet is unknown; only a finished read can say there is no repository.
-        let branch_name: String = if !state.project_info.contains_key(&cwd) {
-            "—".into()
-        } else if git.current.is_empty() {
+        // Not read yet is unknown, so the branch stays hidden; only a finished
+        // read can say there is no repository.
+        let branch_known = state.project_info.contains_key(&cwd);
+        let branch_name: String = if git.current.is_empty() {
             "No repository".into()
         } else {
             git.current.clone()
@@ -699,7 +762,7 @@ impl AppShell {
                 match git.changed_files {
                     Some(0) => String::new(),
                     Some(n) => format!("{n} {}", if n == 1 { "file" } else { "files" }),
-                    None => "changes unavailable".into(),
+                    None => "Changes unavailable".into(),
                 },
                 if git.ahead > 0 {
                     format!("↑{}", git.ahead)
@@ -763,7 +826,7 @@ impl AppShell {
                         .child(div().min_w_0().truncate().child(crate::sessions::folder_name(&state.project_root(&cwd)))))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenFiles), cx)),
             )
-            .child(
+            .when(branch_known, |row| row.child(
                 status_item("status-branch")
                     .min_w_0()
                     .max_w(zpx(390.))
@@ -833,7 +896,8 @@ impl AppShell {
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::OpenChanges), cx)
                     }),
-            )
+            ))
+            // The right-hand metrics keep their places as items load in.
             .child(div().flex_1().min_w(zpx(4.)))
             .when(!terminal && usage.context_tokens.is_some() && usage.context_window.is_some_and(|n| n > 0), |row| row.child(
                 status_item("status-context")
@@ -855,7 +919,14 @@ impl AppShell {
                                         "Remaining",
                                         format!("{:.0}%", 100. - percent.min(100.)),
                                     ))
-                                    .item(status_row("Tokens", format!("{used} / {limit}")))
+                                    .item(status_row(
+                                        "Tokens",
+                                        format!(
+                                            "{} / {}",
+                                            crate::ui::group_digits(used),
+                                            crate::ui::group_digits(limit)
+                                        ),
+                                    ))
                                     .separator()
                                     .item(status_note(
                                         "Includes the conversation carried by the active model",
@@ -865,7 +936,7 @@ impl AppShell {
                                     ))
                             }
                             (Some(used), None) => menu
-                                .item(status_row("Tokens", used.to_string()))
+                                .item(status_row("Tokens", crate::ui::group_digits(used)))
                                 .item(status_note(
                                     "This provider has not reported a context capacity",
                                 )),
@@ -921,7 +992,7 @@ impl AppShell {
                         for (provider, cost) in &cost_rows {
                             let name = match provider.as_str() {
                                 "claude" => "Claude",
-                                "codex" => "OpenAI / Codex",
+                                "codex" => "Codex",
                                 "opencode" => "OpenCode",
                                 other => other,
                             };
@@ -940,7 +1011,7 @@ impl AppShell {
                             ))
                     }),
             ))
-            .child(
+            .when(processes_known, |row| row.child(
                 status_item("status-processes")
                     .accessibility_label(process_label.clone())
                     .tooltip(if process_owner.is_some() {
@@ -990,7 +1061,7 @@ impl AppShell {
                         }
                         menu
                     }),
-            )
+            ))
             .child(
                 status_item("status-mode")
                     .accessibility_label(if terminal {

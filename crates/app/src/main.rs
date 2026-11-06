@@ -79,7 +79,7 @@ mod workspace_files;
 mod workspace_tabs;
 mod zoom;
 
-use crate::appearance::{page_surface, rgb, rgba, shell_surface};
+use crate::appearance::{page_surface, rgb, shell_surface};
 use chat::ChatView;
 use composer_ui::ComposerCard;
 use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
@@ -146,12 +146,12 @@ impl Render for DraggedTab {
                 .w(width)
                 .overflow_hidden()
                 .h(zpx(TAB_HEIGHT))
-                .px_2()
-                .gap_2()
+                .px(zpx(crate::ui::SPACE_SM))
+                .gap(zpx(crate::ui::SPACE_SM))
                 .items_center()
                 .rounded(zpx(8.0))
                 .bg(appearance::dragged_tab_surface())
-                .text_color(rgb(0xf5f5f5))
+                .text_color(crate::ui::primary_text())
                 .text_size(zpx(TEXT_MD))
                 .shadow_md()
                 .child(if self.terminal {
@@ -175,14 +175,76 @@ fn tab_title(title: String) -> Div {
         .child(sidebar::fading_title(title))
 }
 
+/// Top-tab drag shifts use the sidebar's 90 ms quint.
+const TAB_SHIFT_MOTION: Duration = Duration::from_millis(90);
+/// The close slot opens and closes at the fill speed.
+const CLOSE_SLOT_MOTION: Duration = Duration::from_millis(ui::FILL_MS);
+
+/// A value easing toward a target. Retargeting starts from the current
+/// presentation, so rapid input never jumps back.
+#[derive(Clone, Copy, Debug)]
+struct Tween {
+    from: f32,
+    to: f32,
+    started: Option<std::time::Instant>,
+    duration: Duration,
+}
+
+impl Tween {
+    fn settled(value: f32, duration: Duration) -> Self {
+        Self {
+            from: value,
+            to: value,
+            started: None,
+            duration,
+        }
+    }
+
+    /// Reduce Motion settles at once.
+    fn retarget(&mut self, to: f32, now: std::time::Instant, reduce_motion: bool) {
+        if reduce_motion {
+            *self = Self::settled(to, self.duration);
+        } else if to != self.to {
+            self.from = self.sample(now).0;
+            self.to = to;
+            self.started = Some(now);
+        }
+    }
+
+    fn sample(&self, now: std::time::Instant) -> (f32, bool) {
+        let Some(started) = self.started else {
+            return (self.to, false);
+        };
+        let t = (now.saturating_duration_since(started).as_secs_f32()
+            / self.duration.as_secs_f32().max(f32::EPSILON))
+        .min(1.);
+        let eased = 1. - (1. - t).powi(5);
+        (self.from + (self.to - self.from) * eased, t < 1.)
+    }
+}
+
 /// The keyboard hint and hover close glyph share the reserved trailing slot.
 /// Keeping both inside it prevents the hint from covering the close button.
+/// `hint_fade` restarts the hint's fade-in for each fresh appearance; `None`
+/// (Reduce Motion) shows it at once.
+#[cfg(test)]
 fn tab_action_content(
     group: SharedString,
     shortcut: Option<usize>,
     color: Hsla,
     working: bool,
     focused: bool,
+) -> impl IntoElement {
+    tab_action_content_with_fade(group, shortcut, color, working, focused, None)
+}
+
+fn tab_action_content_with_fade(
+    group: SharedString,
+    shortcut: Option<usize>,
+    color: Hsla,
+    working: bool,
+    focused: bool,
+    hint_fade: Option<u64>,
 ) -> impl IntoElement {
     let glyph_group = group.clone();
     div()
@@ -224,14 +286,22 @@ fn tab_action_content(
                     .justify_center()
                     .when(focused, |hint| hint.opacity(0.0))
                     .group_hover(group, |hint| hint.opacity(0.0))
-                    .child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(rgb(0x303033))
-                            .text_size(zpx(del_core::typography::TEXT_XS))
-                            .child(format!("⌘{number}")),
-                    ),
+                    .child({
+                        let badge = ui::kbd(format!("⌘{number}"))
+                            .h(zpx(crate::icons::TAB_CLOSE_SIZE))
+                            .min_w(zpx(crate::icons::TAB_CLOSE_SIZE));
+                        match hint_fade {
+                            Some(epoch) => badge
+                                .with_animation(
+                                    SharedString::from(format!("hint-fade-{epoch}")),
+                                    Animation::new(Duration::from_millis(ui::FILL_MS))
+                                        .with_easing(ui::ease_out),
+                                    |badge, t| badge.opacity(t),
+                                )
+                                .into_any_element(),
+                            None => badge.into_any_element(),
+                        }
+                    }),
             )
         })
         .motion_child(true, move |feedback| {
@@ -248,6 +318,45 @@ fn tab_action_content(
         })
 }
 
+/// Identifies Del's toasts, so a repeat of one still on screen replaces it.
+struct NoticeToast;
+
+/// One toast for a queued notice: errors stay until dismissed; warnings and
+/// information hide on their own.
+fn push_notice(
+    notice: state::notices::Notice,
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_kit::component::notification::Notification;
+    use state::notices::{Severity, Undo};
+    let mut toast = match notice.severity {
+        Severity::Error => Notification::error(notice.message.clone()),
+        Severity::Warning => Notification::warning(notice.message.clone()),
+        Severity::Info => Notification::info(notice.message.clone()),
+    }
+    .id1::<NoticeToast>(SharedString::from(notice.key()))
+    .autohide(!notice.severity.sticky());
+    if let Some(title) = notice.title.clone() {
+        toast = toast.title(title);
+    }
+    if let Some(Undo::Unarchive(id)) = notice.undo.clone() {
+        let state = state.clone();
+        toast = toast.action(move |_, _, _| {
+            let state = state.clone();
+            let id = id.clone();
+            Button::new("notice-undo")
+                .small()
+                .label("Undo")
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |state, cx| state.restore(id.clone(), cx));
+                })
+        });
+    }
+    window.push_notification(toast, cx);
+}
+
 /// Shared timing for the left and right sidebar width transitions.
 const PANEL_ANIM: Duration = Duration::from_millis(220);
 
@@ -260,7 +369,7 @@ fn new_tab_group() -> Div {
     h_flex()
         .flex_none()
         .h(zpx(32.0))
-        .px_1()
+        .px(zpx(crate::ui::SPACE_XS))
         .items_center()
         .rounded(zpx(8.0))
         .bg(crate::appearance::composer_surface())
@@ -315,6 +424,12 @@ actions!(
         NavigateBack,
         NavigateForward,
         ToggleTerminalPanel,
+        About,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
     ]
 );
 
@@ -492,6 +607,9 @@ struct AppShell {
     project_renaming_loaded: Option<std::path::PathBuf>,
     sidebar_widths: SidebarWidths,
     sidebar_widths_generation: u64,
+    window_bounds_generation: u64,
+    /// The Command hold behind the tab-number hints.
+    hint_hold: keybinds::HintHold,
     /// A one-second repaint runs only while the open chat has an active goal.
     goal_ticking: bool,
     resize_origin: std::rc::Rc<std::cell::Cell<f32>>,
@@ -560,7 +678,11 @@ struct AppShell {
     caffeinate: Option<std::process::Child>,
     dragging_tab: Option<u64>,
     drag_target: Option<usize>,
-    previous_drag_target: Option<usize>,
+    /// Drag shifts of the top tabs, by uid; each retargets from where it is.
+    tab_shifts: std::cell::RefCell<HashMap<u64, Tween>>,
+    /// Width of each top tab's close slot, by uid.
+    close_slots: std::cell::RefCell<HashMap<u64, Tween>>,
+    hovered_tab: Option<u64>,
     /// Visited sessions and tabs, for back/forward and the recent menu.
     nav: nav_history::NavHistory,
     /// The directory whose Git state was last refreshed for the status bar.
@@ -701,7 +823,7 @@ impl AppShell {
                 Ok(child) => self.caffeinate = Some(child),
                 Err(error) => self.state.update(cx, |state, cx| {
                     state.caffeine_enabled = false;
-                    state.error = Some(format!("Could not keep the Mac awake: {error}"));
+                    state.report_error(format!("Could not keep the Mac awake: {error}"));
                     cx.notify();
                 }),
             }
@@ -722,7 +844,6 @@ impl AppShell {
         };
         self.dragging_tab = Some(uid);
         self.drag_target = Some(index);
-        self.previous_drag_target = Some(index);
         cx.notify();
     }
 
@@ -730,7 +851,6 @@ impl AppShell {
         if self.drag_target == Some(target) {
             return;
         }
-        self.previous_drag_target = self.drag_target;
         self.drag_target = Some(target);
         crate::haptics::tick();
         cx.notify();
@@ -749,7 +869,8 @@ impl AppShell {
         }
         self.dragging_tab = None;
         self.drag_target = None;
-        self.previous_drag_target = None;
+        // The reorder already moved the tabs; shifts must not ease back.
+        self.tab_shifts.borrow_mut().clear();
         cx.notify();
     }
 
@@ -778,7 +899,7 @@ impl AppShell {
         }
         if let Err(error) = self.terminal_store.save(&TerminalStore::path()) {
             self.state.update(cx, |state, cx| {
-                state.error = Some(format!("Could not save terminal history: {error}"));
+                state.report(state::notices::Severity::Warning, format!("Could not save terminal history: {error}"));
                 cx.notify();
             });
         }
@@ -899,7 +1020,7 @@ impl AppShell {
                 .collect();
             s.sort_terminal_rows();
             if let Some(error) = &terminal_store.error {
-                s.error = Some(error.clone());
+                s.report_error(error);
             }
         });
         state.update(cx, |s, cx| s.restore_spaces(cx));
@@ -967,6 +1088,8 @@ impl AppShell {
             project_renaming_loaded: None,
             sidebar_widths: SidebarWidths::load(),
             sidebar_widths_generation: 0,
+            window_bounds_generation: 0,
+            hint_hold: Default::default(),
             goal_ticking: false,
             resize_origin: Default::default(),
             tab_drag_origin: Default::default(),
@@ -1031,7 +1154,9 @@ impl AppShell {
             caffeinate: None,
             dragging_tab: None,
             drag_target: None,
-            previous_drag_target: None,
+            tab_shifts: Default::default(),
+            close_slots: Default::default(),
+            hovered_tab: None,
             nav: Default::default(),
             git_refreshed: None,
             processes: Default::default(),
@@ -1039,6 +1164,24 @@ impl AppShell {
             bottom: Default::default(),
         };
         shell.sidebar_motion.settle(true);
+        // State-driven housekeeping runs when state changes, not on every
+        // frame: spinners and steam repaint the shell at display rate.
+        cx.observe(&shell.state, |this, _, cx| {
+            this.sync_caffeine(cx);
+            this.sync_terminal_sidebar_actions(cx);
+        })
+        .detach();
+        // Memory usage asks for terminal roots when it reads, instead of the
+        // shell rebuilding the list every frame.
+        let source = cx.weak_entity();
+        shell.usage.update(cx, |usage, _| {
+            usage.terminal_source = Some(Box::new(move |cx: &App| {
+                source
+                    .upgrade()
+                    .map(|shell| shell.read(cx).terminal_processes(cx))
+                    .unwrap_or_default()
+            }));
+        });
         shell.start_modes(window, cx);
         shell.watch_terminal_titles(cx);
         shell.watch_right(cx);
@@ -1071,7 +1214,14 @@ impl AppShell {
         shell.state.update(cx, |state, cx| {
             state.window_activation_changed(window.is_window_active(), cx)
         });
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.save_window_bounds_soon(window, cx);
+        })
+        .detach();
         cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.hide_shortcut_hints(cx);
+            }
             if window.is_window_active() {
                 this.updater
                     .update(cx, |updater, cx| updater.check(false, cx));
@@ -1148,6 +1298,61 @@ impl AppShell {
         .detach();
     }
 
+    /// Terminal process roots for Memory usage.
+    fn terminal_processes(&self, cx: &App) -> Vec<(Tab, u32)> {
+        self.terminals
+            .iter()
+            .map(|(id, host)| (Tab::Terminal(id.clone()), host.read(cx).snapshot().pid))
+            .chain(self.mode_terminals.iter().map(|(id, terminal)| {
+                (
+                    Tab::Session(id.clone()),
+                    terminal.host.read(cx).snapshot().pid,
+                )
+            }))
+            .collect()
+    }
+
+    /// Moving or resizing reports bounds every frame; write the settled frame
+    /// once, off the UI thread.
+    fn save_window_bounds_soon(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(path) = state::window_bounds::path() else {
+            return;
+        };
+        let display = window
+            .display(cx)
+            .and_then(|display| display.uuid().ok())
+            .map(|uuid| uuid.to_string());
+        let saved = state::window_bounds::Saved::from_window(window.window_bounds(), display);
+        self.window_bounds_generation += 1;
+        let generation = self.window_bounds_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            if this
+                .update(cx, |this, _| this.window_bounds_generation == generation)
+                .unwrap_or(false)
+            {
+                let _ = cx
+                    .background_executor()
+                    .spawn(async move { state::window_bounds::write(&path, &saved) })
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Hides the tab-number hints at once and cancels a pending hold.
+    fn hide_shortcut_hints(&mut self, cx: &mut Context<Self>) {
+        self.hint_hold.cancel();
+        if self.state.read(cx).shortcut_hints {
+            self.state.update(cx, |state, cx| {
+                state.shortcut_hints = false;
+                cx.notify();
+            });
+        }
+    }
+
     /// Divider drags update widths every frame; coalesce disk writes like the right panel.
     fn save_sidebar_widths_soon(&mut self, cx: &mut Context<Self>) {
         self.sidebar_widths_generation += 1;
@@ -1161,7 +1366,7 @@ impl AppShell {
                     && let Err(error) = this.sidebar_widths.save()
                 {
                     this.state.update(cx, |state, cx| {
-                        state.error = Some(format!("Could not save sidebar widths: {error}"));
+                        state.report(state::notices::Severity::Warning, format!("Could not save sidebar widths: {error}"));
                         cx.notify();
                     });
                 }
@@ -1222,7 +1427,7 @@ impl AppShell {
                 }
                 chat::links::LinkTarget::External(url) => cx.open_url(&url),
                 chat::links::LinkTarget::Blocked => this.state.update(cx, |state, cx| {
-                    state.error = Some(format!(
+                    state.report_error(format!(
                         "Del did not open {}. Only web (http, https) and mail links open outside Del.",
                         event.0.chars().take(200).collect::<String>()
                     ));
@@ -1300,7 +1505,7 @@ impl AppShell {
             .iter()
             .any(|r| r.id == event.parent)
         {
-            self.state.update(cx, |state, cx| { state.error = Some("The main conversation is no longer available. Copy the side reply before closing it.".into()); cx.notify(); });
+            self.state.update(cx, |state, cx| { state.report_error("The main conversation is no longer available. Copy the side reply before closing it."); cx.notify(); });
             return;
         }
         self.state
@@ -1401,7 +1606,7 @@ impl AppShell {
     fn persist_right(&self, cx: &mut Context<Self>) {
         if let Err(error) = self.right_store.save(&self.right_store_path) {
             self.state.update(cx, |state, cx| {
-                state.error = Some(format!("Could not save sidebar state: {error}"));
+                state.report(state::notices::Severity::Warning, format!("Could not save sidebar state: {error}"));
                 cx.notify();
             });
         }
@@ -1410,7 +1615,7 @@ impl AppShell {
     fn delete_browser_profile(&mut self, profile: String, cx: &mut Context<Self>) {
         if let Err(error) = crate::browser::record_deletion(&profile, true) {
             self.state.update(cx, |state, cx| {
-                state.error = Some(format!("Could not schedule browser data deletion: {error}"));
+                state.report(state::notices::Severity::Warning, format!("Could not schedule browser data deletion: {error}"));
                 cx.notify();
             });
             return;
@@ -1431,8 +1636,9 @@ impl AppShell {
             }
             let _ = this.update(cx, |this, cx| {
                 this.state.update(cx, |state, cx| {
-                    state.error = Some(
-                        "Browser data cleanup is pending; Del will retry at next launch.".into(),
+                    state.report(
+                        state::notices::Severity::Info,
+                        "Browser data cleanup is pending; Del will retry at next launch.",
                     );
                     cx.notify();
                 })
@@ -2064,7 +2270,18 @@ impl AppShell {
         }
         let dragging_tab = self.dragging_tab;
         let drag_target = self.drag_target;
-        let previous_drag_target = self.previous_drag_target;
+        let now = std::time::Instant::now();
+        let reduce_motion = cx.reduce_motion();
+        let tab_moving = std::cell::Cell::new(false);
+        let hint_epoch = self.hint_hold.epoch();
+        if dragging_tab.is_none() {
+            self.tab_shifts.borrow_mut().clear();
+        }
+        {
+            let live: HashSet<u64> = tabs.iter().map(|(_, uid, _, _)| *uid).collect();
+            self.close_slots.borrow_mut().retain(|uid, _| live.contains(uid));
+            self.tab_shifts.borrow_mut().retain(|uid, _| live.contains(uid));
+        }
         let drag_source = dragging_tab.and_then(|uid| {
             tabs.iter()
                 .position(|(tab, tab_uid, _, _)| tab.is_some() && *tab_uid == uid)
@@ -2075,20 +2292,20 @@ impl AppShell {
                 .group(id)
                 // The close target must fit inside the tab's animated clip.
                 .h(zpx(TAB_HEIGHT))
-                .pl_2()
-                .pr_1()
-                .gap_2()
+                .pl(zpx(crate::ui::SPACE_SM))
+                .pr(zpx(crate::ui::SPACE_XS))
+                .gap(zpx(crate::ui::SPACE_SM))
                 .items_center()
                 .rounded(zpx(8.0))
                 .cursor_pointer()
                 .text_size(zpx(TEXT_MD))
-                .text_color(if active { rgb(0xf5f5f5) } else { muted })
-                .when(active, |t| t.bg(rgba(0xffffff14)))
-                .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
+                .text_color(if active { crate::ui::primary_text() } else { muted })
+                .when(active, |t| t.bg(crate::ui::row_selected()))
+                .when(!active, |t| t.hover(|t| t.bg(crate::ui::row_hover())))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
 
-        TitleBar::new()
+        let bar = TitleBar::new()
             .h(zpx(self.metrics.topbar_height))
             .min_h(zpx(self.metrics.topbar_height))
             .flex_none()
@@ -2252,6 +2469,23 @@ impl AppShell {
                                                 let tab_focus = self.state.read(cx).control_focus.control(&format!("tab-{name}"), cx);
                                                 // Keyboard focus shows the close glyph as hover does.
                                                 let tab_focused = keyboard_control::keyboard_within(&tab_focus, window, cx);
+                                                // The close slot eases between closed, hint/spinner and close widths,
+                                                // so the title's fade edge glides instead of jumping.
+                                                let slot_target = if tab_focused || self.hovered_tab == Some(uid) {
+                                                    crate::icons::TAB_CLOSE_SIZE
+                                                } else if shortcut_hint || working {
+                                                    crate::icons::BUTTON_SIZE
+                                                } else {
+                                                    0.
+                                                };
+                                                let slot_width = {
+                                                    let mut slots = self.close_slots.borrow_mut();
+                                                    let tween = slots.entry(uid).or_insert_with(|| Tween::settled(slot_target, CLOSE_SLOT_MOTION));
+                                                    tween.retarget(slot_target, now, reduce_motion);
+                                                    let (width, moving) = tween.sample(now);
+                                                    if moving { tab_moving.set(true); }
+                                                    width
+                                                };
                                                 el = el.keyboard_control_with(&tab_focus).when(tab_focused, |tab| {
                                                     tab.child(keyboard_control::reveal_when_focused(self.tab_scroll.clone(), false))
                                                 });
@@ -2267,6 +2501,14 @@ impl AppShell {
                                                 };
                                                 let start_x = drag.start_pointer_x.clone();
                                                 el = el
+                                                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                                        if *hovered {
+                                                            this.hovered_tab = Some(uid);
+                                                        } else if this.hovered_tab == Some(uid) {
+                                                            this.hovered_tab = None;
+                                                        }
+                                                        cx.notify();
+                                                    }))
                                                     .on_mouse_down(
                                                         MouseButton::Left,
                                                         move |event, _, _| {
@@ -2299,7 +2541,8 @@ impl AppShell {
                                                     .child(if title_loading {
                                                         div().flex_1().min_w_0().truncate().child(
                                                             gpui_kit::component::shimmer::ShimmerText::new(title)
-                                                                .id(SharedString::from(format!("title-shimmer-{name}"))))
+                                                                .id(SharedString::from(format!("title-shimmer-{name}")))
+                                                                .duration(ui::SHIMMER_PERIOD))
                                                     } else { tab_title(title).when(preview, |title| title.italic().opacity(0.65)) })
                                                     .when_some(indicator_id.as_ref().filter(|id| { let (from, target, start) = self.state.read(cx).unread_motion(id); !working && (target > 0. || (from > 0. && start.is_some_and(|start| start.elapsed().as_millis() < 180))) }), |tab, id| tab.child(sidebar::unread_dot(id, self.state.read(cx), cx)))
                                                     .child(
@@ -2308,11 +2551,10 @@ impl AppShell {
                                                                 "close-{name}"
                                                             )))
                                                             .keyboard_control()
-                                                            .rounded_sm()
+                                                            .rounded(zpx(crate::ui::RADIUS_XS))
                                                             .h(zpx(crate::icons::TAB_CLOSE_SIZE))
-                                                            .w(if tab_focused { zpx(crate::icons::TAB_CLOSE_SIZE) } else if shortcut_hint || working { crate::icons::button_size() } else { zpx(0.) })
+                                                            .w(zpx(slot_width))
                                                             .overflow_hidden()
-                                                            .group_hover(group.clone(), |slot| slot.w(zpx(crate::icons::TAB_CLOSE_SIZE)))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
@@ -2329,12 +2571,13 @@ impl AppShell {
                                                                 });
                                                             })
                                                             .child(
-                                                                tab_action_content(
+                                                                tab_action_content_with_fade(
                                                                     group.clone(),
                                                                     shortcut_number.filter(|_| shortcut_hint),
                                                                     muted.into(),
                                                                     working,
                                                                     tab_focused,
+                                                                    (!reduce_motion).then_some(hint_epoch),
                                                                 ),
                                                             ),
                                                     );
@@ -2343,7 +2586,7 @@ impl AppShell {
                                                 el = el
                                                     .child(mode_ui::tab_mark(provider))
                                                     .child(tab_title(title))
-                                                    .child(div().size(crate::icons::button_size()).flex_none());
+                                                    .child(div().size(zpx(crate::icons::TAB_CLOSE_SIZE)).flex_none());
                                             }
                                             // The tab keeps its full size inside a clip whose width
                                             // (tab plus the gap after it) animates from 0 on open and
@@ -2381,29 +2624,30 @@ impl AppShell {
                                                     0.0
                                                 }
                                             };
-                                            let old_offset = offset_for(previous_drag_target);
-                                            let new_offset = offset_for(drag_target);
+                                            // Interruptible: a new target eases on from where the
+                                            // tab is now, never from the previous slot.
+                                            let shift = if dragging_tab.is_some() {
+                                                let target = offset_for(drag_target);
+                                                let mut shifts = self.tab_shifts.borrow_mut();
+                                                let tween = shifts.entry(uid).or_insert_with(|| Tween::settled(target, TAB_SHIFT_MOTION));
+                                                tween.retarget(target, now, reduce_motion);
+                                                let (value, moving) = tween.sample(now);
+                                                if moving { tab_moving.set(true); }
+                                                value
+                                            } else {
+                                                0.
+                                            };
                                             let shifted = div()
                                                 .flex_none()
                                                 .when(dragging_tab == Some(uid), |tab| {
                                                     tab.opacity(0.0)
                                                 })
                                                 .child(clip)
-                                                .with_animation(
-                                                    SharedString::from(format!(
-                                                        "tab-shift-{uid}-{old_offset}-{new_offset}"
-                                                    )),
-                                                    Animation::new(Duration::from_millis(if cx.reduce_motion() {
-                                                        0
-                                                    } else {
-                                                        90
-                                                    }))
-                                                        .with_easing(ease_out_quint()),
-                                                    move |tab, t| {
-                                                        tab.relative().left(zpx(old_offset
-                                                            + (new_offset - old_offset) * t))
-                                                    },
-                                                );
+                                                .relative()
+                                                .left(zpx(shift));
+                                            let ghost = (!live).then(|| {
+                                                self.state.read(cx).ghosts.iter().find(|g| g.uid == uid).cloned()
+                                            }).flatten();
                                             // This stable slot owns width animation. A new drag
                                             // target may restart the child's position animation,
                                             // but must never restart the tab's opening animation.
@@ -2420,7 +2664,13 @@ impl AppShell {
                                                     Animation::new(if live { tab_motion::ENTER } else { tab_motion::EXIT })
                                                         .with_easing(|t| 1. - (1. - t).powi(3)),
                                                     move |slot, t| {
-                                                        let t = if live { if animate_open { t } else { 1.0 } } else { 1.0 - t };
+                                                        // A closing tab shrinks from how open it was, so one
+                                                        // closed mid-opening never jumps to full width first.
+                                                        let t = match &ghost {
+                                                            Some(ghost) => ghost.fraction(std::time::Instant::now()),
+                                                            None if !live => 1.0 - t,
+                                                            None => if animate_open { t } else { 1.0 },
+                                                        };
                                                         slot.w(zpx((TAB_WIDTH + TAB_GAP) * t)).opacity(t)
                                                     },
                                                 )
@@ -2442,9 +2692,9 @@ impl AppShell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_md()
+                                    .rounded(zpx(crate::ui::RADIUS_ROW))
                                     .cursor_pointer()
-                                    .hover(|plus| plus.bg(rgba(0xffffff0a)))
+                                    .hover(|plus| plus.bg(crate::ui::row_hover()))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
@@ -2505,18 +2755,18 @@ impl AppShell {
                             .role(gpui::Role::Button)
                             .aria_label("Toggle right sidebar")
                             .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar (⌘\\)").build(window, cx)
+                                gpui_kit::component::tooltip::Tooltip::new("Toggle right sidebar").action(&ToggleFiles, None).build(window, cx)
                             })
                             .flex_none()
                             .size(crate::icons::button_size())
-                            .mr_2()
+                            .mr(zpx(crate::ui::SPACE_SM))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(zpx(crate::ui::RADIUS_ROW))
                             .cursor_pointer()
-                            .hover(|b| b.bg(rgba(0xffffff0a)))
-                            .when(self.right_open, |b| b.bg(rgba(0xffffff14)))
+                            .hover(|b| b.bg(crate::ui::row_hover()))
+                            .when(self.right_open, |b| b.bg(crate::ui::row_selected()))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .when(self.state.read(cx).panel == Panel::Providers, |button| button.invisible())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2526,7 +2776,11 @@ impl AppShell {
                                 .text_color(muted)),
                         ),
                     ),
-            )
+            );
+        if tab_moving.get() {
+            window.request_animation_frame();
+        }
+        bar
     }
 
     fn render_page(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2600,8 +2854,8 @@ impl AppShell {
                             v_flex()
                                 .w_full()
                                 .items_center()
-                                .px_3()
-                                .pb_3()
+                                .px(zpx(crate::ui::SPACE_MD))
+                                .pb(zpx(crate::ui::SPACE_MD))
                                 .child(self.render_composer(cx)),
                         ),
                 ),
@@ -2636,8 +2890,8 @@ impl AppShell {
                                 v_flex()
                                     .w_full()
                                     .items_center()
-                                    .px_3()
-                                    .pb_3()
+                                    .px(zpx(crate::ui::SPACE_MD))
+                                    .pb(zpx(crate::ui::SPACE_MD))
                                     .child(self.render_composer(cx)),
                             ),
                     )
@@ -2651,13 +2905,13 @@ impl AppShell {
                             .inset_0()
                             .items_center()
                             .justify_center()
-                            .px_3()
+                            .px(zpx(crate::ui::SPACE_MD))
                             .child(
                                 v_flex()
                                     .w_full()
                                     .max_w(zpx(COMPOSER_MAX_WIDTH))
                                     .items_start()
-                                    .gap_2()
+                                    .gap(zpx(crate::ui::SPACE_SM))
                                     .child(
                                         div().relative().w_full().child(self.render_composer(cx)),
                                     )
@@ -2670,7 +2924,7 @@ impl AppShell {
                                             .w_full()
                                             .items_center()
                                             .justify_between()
-                                            .gap_2()
+                                            .gap(zpx(crate::ui::SPACE_SM))
                                             .child(
                                                 new_tab_group()
                                                     .relative()
@@ -2736,34 +2990,27 @@ impl Render for AppShell {
         if self.dragging_tab.is_some() && !cx.has_active_drag() {
             self.dragging_tab = None;
             self.drag_target = None;
-            self.previous_drag_target = None;
+            self.tab_shifts.borrow_mut().clear();
         }
         if !window.is_window_active() && self.state.read(cx).shortcut_hints {
+            self.hint_hold.cancel();
             self.state
                 .update(cx, |state, _| state.shortcut_hints = false);
         }
-        if let Some(error) = self.state.update(cx, |state, _| state.error.take()) {
-            window.defer(cx, move |window, cx| {
-                window.push_notification(
-                    gpui_kit::component::notification::Notification::error(error)
-                        .title("Something went wrong")
-                        .autohide(false),
-                    cx,
-                );
-            });
-        }
+        let mut notices = self.state.update(cx, |state, _| state.take_notices());
         for chat in self.chats.values() {
             let errors = chat.update(cx, |chat, _| std::mem::take(&mut chat.pending_errors));
-            for error in errors {
-                window.defer(cx, move |window, cx| {
-                    window.push_notification(
-                        gpui_kit::component::notification::Notification::error(error)
-                            .title("Session error")
-                            .autohide(false),
-                        cx,
-                    );
-                });
-            }
+            notices.extend(errors.iter().map(|error| {
+                state::notices::Notice::new(state::notices::Severity::Error, error)
+            }));
+        }
+        if !notices.is_empty() {
+            let state = self.state.clone();
+            window.defer(cx, move |window, cx| {
+                for notice in notices {
+                    push_notice(notice, &state, window, cx);
+                }
+            });
         }
         if self.dictation.as_ref().is_some_and(|voice| {
             voice.owner != self.composer_owner(cx) || self.state.read(cx).panel != Panel::Chat
@@ -2835,7 +3082,7 @@ impl Render for AppShell {
                                     .w(zpx(150.))
                                     .h_full()
                                     .flex_none()
-                                    .p_3()
+                                    .p(zpx(crate::ui::SPACE_MD))
                                     .border_r_1()
                                     .border_color(appearance::separator())
                                     .child(signin::navigation(&state, cx)),
@@ -2877,21 +3124,7 @@ impl Render for AppShell {
         if self.settings_closing.is_some() {
             window.request_animation_frame();
         }
-        self.sync_caffeine(cx);
-        let terminal_processes = self
-            .terminals
-            .iter()
-            .map(|(id, host)| (Tab::Terminal(id.clone()), host.read(cx).snapshot().pid))
-            .chain(self.mode_terminals.iter().map(|(id, terminal)| {
-                (
-                    Tab::Session(id.clone()),
-                    terminal.host.read(cx).snapshot().pid,
-                )
-            }))
-            .collect();
-        self.usage
-            .update(cx, |usage, _| usage.terminal_processes = terminal_processes);
-        self.sync_terminal_sidebar_actions(cx);
+
         // Settings navigation stays available without changing chat's collapse preference.
         let sidebar_visible = self.sidebar_visible || settings_open;
         if !cx.reduce_motion()
@@ -2974,6 +3207,11 @@ impl Render for AppShell {
         }
         let right_visible = self.right_visible && self.state.read(cx).panel == Panel::Chat;
         let inset = zpx(self.metrics.page_inset);
+        // A maximized bottom panel hides the page once its reveal has settled.
+        let page_hidden = {
+            let (open, max, moving) = self.bottom_panel_progress();
+            self.bottom.open && self.bottom.maximized && open >= 1. && max >= 1. && !moving
+        };
         let viewport = del_core::zoom::unscaled(window.viewport_size().width.as_f32());
         let left_width = sidebar_width(
             self.sidebar_widths.left,
@@ -3015,6 +3253,11 @@ impl Render for AppShell {
         ));
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
+        // Terminals hold their PTY size while a sidebar or the bottom panel
+        // animates and resize once when it settles.
+        del_terminal::set_layout_animating(
+            animating || left_animating || self.bottom_panel_progress().2,
+        );
         if animating || left_animating {
             window.request_animation_frame();
         }
@@ -3167,11 +3410,38 @@ impl Render for AppShell {
                     window.prevent_default();
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                this.state.update(cx, |state, cx| {
-                    state.shortcut_hints = event.modifiers.platform && !this.search_open;
-                    cx.notify();
-                });
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                let modifiers = event.modifiers;
+                let command_only = modifiers.platform
+                    && !modifiers.shift
+                    && !modifiers.alt
+                    && !modifiers.control
+                    && !modifiers.function
+                    && !this.search_open;
+                match this.hint_hold.modifiers_changed(command_only) {
+                    Some(generation) => {
+                        cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor()
+                                .timer(ui::SHORTCUT_HINT_DELAY)
+                                .await;
+                            let _ = this.update(cx, |this, cx| {
+                                if this.hint_hold.delay_elapsed(generation) && !this.search_open {
+                                    this.state.update(cx, |state, cx| {
+                                        state.shortcut_hints = true;
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                        })
+                        .detach();
+                    }
+                    None if !command_only => this.hide_shortcut_hints(cx),
+                    None => {}
+                }
+            }))
+            // Any key, including the second half of ⌘N or ⌘K, ends the hold.
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                this.hide_shortcut_hints(cx);
             }))
             .on_action(cx.listener(|this, _: &SelectProvider, window, cx| {
                 this.open_composer_picker(keybinds::Picker::Provider, window, cx);
@@ -3415,17 +3685,11 @@ impl Render for AppShell {
                                             .w_full()
                                             .min_h_0()
                                             .overflow_hidden()
-                                            .when(
-                                                self.bottom.open && self.bottom.maximized,
-                                                |page| page.h(zpx(0.0)).flex_none(),
-                                            )
-                                            .when(
-                                                !(self.bottom.open && self.bottom.maximized),
-                                                |page| page.flex_1(),
-                                            )
+                                            .when(page_hidden, |page| page.h(zpx(0.0)).flex_none())
+                                            .when(!page_hidden, |page| page.flex_1())
                                             .child(self.render_page(window, cx)),
                                     )
-                                    .children(self.render_bottom_panel(cx)),
+                                    .children(self.render_bottom_panel(window, cx)),
                             )
                             .when(SIDEBAR_ENABLED && sidebar_visible, |page| {
                                 // Paint the target above both neighboring surfaces
@@ -3453,16 +3717,25 @@ impl Render for AppShell {
                                 .flex_none()
                                 .overflow_hidden()
                                 .child(
-                                    // Fills whatever width the animation gives it: the panel
-                                    // grows out of the page's own space and lays out at the
-                                    // current width instead of sliding in from offscreen.
-                                    div().size_full().pr(inset).pb(inset).child(
-                                        div()
-                                            .size_full()
-                                            .overflow_hidden()
-                                            .bg(appearance::shell_surface())
-                                            .child(self.right.clone()),
-                                    ),
+                                    // Laid out once at its full width and clipped by the
+                                    // animated slot, like the left sidebar: the reveal slides
+                                    // the panel in instead of reflowing it (and resizing its
+                                    // terminals) on every frame.
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .left_0()
+                                        .w(zpx(full))
+                                        .pr(inset)
+                                        .pb(inset)
+                                        .child(
+                                            div()
+                                                .size_full()
+                                                .overflow_hidden()
+                                                .bg(appearance::shell_surface())
+                                                .child(self.right.clone()),
+                                        ),
                                 )
                                 .child(
                                     self.resize_handle(
@@ -3521,6 +3794,83 @@ impl Render for AppShell {
     }
 }
 
+/// The menu bar: the app menu with About, Settings, Hide and Quit; Edit for
+/// text fields; Window with Minimize and Zoom.
+fn app_menus() -> Vec<Menu> {
+    use gpui_kit::component::input;
+    vec![
+        Menu {
+            name: "Del".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("About Del", About),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", ToggleProviders),
+                MenuItem::separator(),
+                MenuItem::action("Hide Del", Hide),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
+                MenuItem::action("Quit Del", Quit),
+                MenuItem::action("Quit Del Completely", QuitCompletely),
+            ],
+        },
+        Menu {
+            name: "Edit".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+            ],
+        },
+    ]
+}
+
+/// The saved window frame clamped onto a connected display, or the centred
+/// default (70% × 76% of the primary display) when there is none or it no
+/// longer fits anywhere.
+fn initial_window_bounds(cx: &App) -> (Option<DisplayId>, WindowBounds) {
+    let saved = state::window_bounds::path().and_then(|path| state::window_bounds::read(&path));
+    if let Some(saved) = saved {
+        let displays = cx.displays();
+        let by_uuid = saved.display.as_ref().and_then(|uuid| {
+            displays
+                .iter()
+                .find(|display| display.uuid().is_ok_and(|id| &id.to_string() == uuid))
+                .cloned()
+        });
+        if let Some(display) = by_uuid.or_else(|| cx.primary_display())
+            && let Some(bounds) = saved.restore_on(display.visible_bounds())
+        {
+            return (Some(display.id()), bounds);
+        }
+    }
+    let window_size = cx.primary_display().map_or(WINDOW_SIZE, |display| {
+        let available = display.visible_bounds().size;
+        size(
+            (available.width * 0.70).max(px(state::window_bounds::MIN_SIZE.0)),
+            (available.height * 0.76).max(px(state::window_bounds::MIN_SIZE.1)),
+        )
+    });
+    (
+        None,
+        WindowBounds::Windowed(Bounds::centered(None, window_size, cx)),
+    )
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--mcp-stdio") {
         let (Ok(url), Ok(token)) = (std::env::var("DEL_MCP_URL"), std::env::var("DEL_MCP_TOKEN"))
@@ -3577,6 +3927,9 @@ fn main() {
             KeyBinding::new("cmd-9", Tab9, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
             KeyBinding::new("alt-cmd-q", QuitCompletely, None),
             KeyBinding::new("ctrl-tab", NextWorkspaceTab, None),
             KeyBinding::new("cmd-shift-]", NextSession, None),
@@ -3595,16 +3948,21 @@ fn main() {
         }
         cx.on_action(|_: &Quit, cx| session_lifecycle::request_quit(cx));
         cx.on_action(|_: &QuitCompletely, cx| session_lifecycle::quit_completely(cx));
-        cx.set_menus(vec![Menu {
-            name: "Del".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("Settings…", ToggleProviders),
-                MenuItem::separator(),
-                MenuItem::action("Quit Del", Quit),
-                MenuItem::action("Quit Del Completely", QuitCompletely),
-            ],
-        }]);
+        cx.on_action(|_: &About, _| session_lifecycle::show_about());
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &Minimize, cx| {
+            if let Some(window) = cx.active_window() {
+                let _ = window.update(cx, |_, window, _| window.minimize_window());
+            }
+        });
+        cx.on_action(|_: &Zoom, cx| {
+            if let Some(window) = cx.active_window() {
+                let _ = window.update(cx, |_, window, _| window.zoom_window());
+            }
+        });
+        cx.set_menus(app_menus());
         // Closing the window quits, which also runs the shutdown hook.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -3616,27 +3974,21 @@ fn main() {
         let metrics = ShellMetrics::default();
         let (light_x, light_y) = metrics.traffic_light_origin();
 
-        let window_size = cx.primary_display().map_or(WINDOW_SIZE, |display| {
-            let available = display.visible_bounds().size;
-            size(
-                (available.width * 0.70).max(px(960.)),
-                (available.height * 0.76).max(px(640.)),
-            )
-        });
+        let (display_id, window_bounds) = initial_window_bounds(cx);
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("del".into()),
+                title: Some("Del".into()),
                 traffic_light_position: Some(point(px(light_x), px(light_y))),
                 // Hides the system title bar so the top bar below is drawn
                 // entirely by us.
                 ..TitleBar::title_bar_options()
             }),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                window_size,
-                cx,
-            ))),
-            window_min_size: Some(size(px(960.0), px(640.0))),
+            window_bounds: Some(window_bounds),
+            display_id,
+            window_min_size: Some(size(
+                px(state::window_bounds::MIN_SIZE.0),
+                px(state::window_bounds::MIN_SIZE.1),
+            )),
             window_background: WindowBackgroundAppearance::Blurred,
             ..TitleBar::window_options()
         };
