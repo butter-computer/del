@@ -22,6 +22,9 @@ use crate::{
 };
 
 pub static ANIMATION_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs_f64(0.25));
+/// How long a closed dialog and its backdrop take to fade out. Focus and input
+/// return to the window the moment it closes; only the picture lingers.
+pub const DIALOG_EXIT: Duration = Duration::from_millis(140);
 pub use gpui_base::actions::{Cancel, Confirm};
 
 type OkHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>;
@@ -317,6 +320,8 @@ pub struct Dialog {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) layer_ix: usize,
     pub(crate) selection_scope: TextSelectionScopeId,
+    /// Set while a closed dialog fades out: the opacity of this frame.
+    pub(crate) exit: Option<f32>,
 }
 
 pub(crate) fn overlay_color(overlay: bool, cx: &App) -> Hsla {
@@ -363,6 +368,7 @@ impl Dialog {
             layer_ix: 0,
             selection_scope: TextSelectionScopeId::default(),
             button_props: DialogButtonProps::default(),
+            exit: None,
         }
     }
 
@@ -519,7 +525,7 @@ impl Dialog {
         self
     }
 
-    /// Sets how the dialog enters, defaulting to [`DialogEntrance::SlideDown`].
+    /// Sets how the dialog enters, defaulting to [`DialogEntrance::FadeSlide`].
     ///
     /// This controls the surface and backdrop together. Reduced motion skips
     /// the entrance and immediately shows the final state. Closing remains immediate.
@@ -597,6 +603,12 @@ impl RenderOnce for Dialog {
         }
 
         let layer_ix = self.layer_ix;
+        let exit = self.exit;
+        if exit.is_some() {
+            // The fade owns opacity; the builder's own value was folded into it.
+            self.style.opacity = None;
+            self.props.close_button = false;
+        }
         let selection_scope = self.selection_scope;
         let on_close = self.button_props.close_handler();
         let on_ok = self.button_props.ok_handler();
@@ -618,7 +630,8 @@ impl RenderOnce for Dialog {
         let y = self.props.margin_top.unwrap_or(view_size.height / 10.) + layer_offset;
         let entrance = self.props.entrance;
         let motion = cx.theme().motion_tokens();
-        let animated = entrance != DialogEntrance::None
+        let animated = exit.is_none()
+            && entrance != DialogEntrance::None
             && !cx.reduce_motion()
             && (entrance == DialogEntrance::SlideDown || !motion.duration_normal.is_zero());
         let travel = motion.distance_short.to_pixels(window.rem_size());
@@ -664,6 +677,189 @@ impl RenderOnce for Dialog {
                 .with_easing(move |delta| easing.sample(delta).clamp(0., 1.))
         };
 
+        let popup = gpui_base::Positioner::corner(
+            Anchor::TopLeft,
+            point(window_paddings.left + x, window_paddings.top + y),
+        )
+        .margin(margin)
+        .child(
+            v_flex()
+                .id(layer_ix)
+                .test_support()
+                .debug_selector(move || {
+                    if exit.is_some() {
+                        "dialog-closing".into()
+                    } else {
+                        format!("dialog-{layer_ix}")
+                    }
+                })
+                .bg(cx.theme().tokens.background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded(cx.theme().radius_lg)
+                .min_h_24()
+                .pt(paddings.top)
+                .pb(paddings.bottom)
+                .gap(paddings.top.max(px(8.)))
+                .refine_style(&self.style)
+                .px_0()
+                .when(exit.is_none(), |this| this.occlude())
+                .w(width)
+                .when_some(self.props.max_width, |this, w| this.max_w(w))
+                .max_h(max_height)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .overflow_hidden()
+                        .gap_y_2()
+                        .when_some(self.header, |this, header| {
+                            this.child(
+                                div()
+                                    .pl(paddings.left)
+                                    .pr(paddings.right)
+                                    .child(header),
+                            )
+                        })
+                        .when_some(self.title, |this, title| {
+                            this.child(
+                                DialogTitle::new()
+                                    .pl(paddings.left)
+                                    .pr(paddings.right)
+                                    .child(title),
+                            )
+                        })
+                        .when_some(self.content_builder, |this, builder| {
+                            this.child(builder(
+                                DialogContent::new()
+                                    .gap(paddings.bottom)
+                                    .pl(paddings.left)
+                                    .pr(paddings.right),
+                                window,
+                                cx,
+                            ))
+                        })
+                        .when(!self.children.is_empty(), |this| {
+                            this.child(
+                                div().flex_1().overflow_hidden().child(
+                                    // Body
+                                    v_flex()
+                                        .size_full()
+                                        .overflow_y_scrollbar()
+                                        .pl(paddings.left)
+                                        .pr(paddings.right)
+                                        .children(self.children),
+                                ),
+                            )
+                        }),
+                )
+                .when_some(self.footer, |this, footer| {
+                    this.child(
+                        div()
+                            .pl(paddings.left)
+                            .pr(paddings.right)
+                            .child(footer),
+                    )
+                })
+                .children(self.props.close_button.then(|| {
+                    let top = (paddings.top - px(10.)).max(px(8.));
+                    let right = (paddings.right - px(10.)).max(px(8.));
+
+                    gpui_base::DialogClose::new()
+                        .absolute()
+                        .top(top)
+                        .right(right)
+                        .trigger(|button| {
+                            Button::new("close")
+                                .with_base(button)
+                                .small()
+                                .ghost()
+                                .icon(IconName::Close)
+                        })
+                }))
+                .map(|surface| {
+                    if animated {
+                        surface
+                            .with_animation(
+                                "slide-down-shadow",
+                                animation.clone(),
+                                |surface, delta| {
+                                    surface.shadow(dialog_shadow(delta))
+                                },
+                            )
+                            .text_selection_scope(selection_scope)
+                            .into_any_element()
+                    } else {
+                        surface
+                            .shadow(dialog_shadow(1.))
+                            .text_selection_scope(selection_scope)
+                            .into_any_element()
+                    }
+                })
+                .map(|surface| {
+                    if animated && entrance == DialogEntrance::FadeSlide {
+                        EntranceSurface::new(
+                            surface,
+                            travel,
+                            window_paddings.top + margin,
+                        )
+                        .with_animation(
+                            "dialog-settle",
+                            animation.clone(),
+                            |mut surface, delta| {
+                                surface.progress = delta;
+                                surface
+                            },
+                        )
+                        .into_any_element()
+                    } else {
+                        surface
+                    }
+                }),
+        )
+        .map(|positioner| {
+            if animated && entrance == DialogEntrance::SlideDown {
+                positioner
+                    .with_animation(
+                        "slide-down",
+                        animation.clone(),
+                        move |this, delta| {
+                            this.position(point(
+                                window_paddings.left + x,
+                                window_paddings.top + y * delta,
+                            ))
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                positioner.into_any_element()
+            }
+        });
+        if let Some(alpha) = exit {
+            // A closed dialog fading out: the same surface and backdrop, without
+            // the modal host, so focus, Escape and the backdrop press are already
+            // back with the window underneath.
+            let overlay = self.props.overlay && self.props.overlay_visible;
+            return anchored()
+                .position(point(window_paddings.left, window_paddings.top))
+                .snap_to_window()
+                .child(
+                    div()
+                        .w(view_size.width)
+                        .h(view_size.height)
+                        .opacity(alpha)
+                        .when(overlay, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .size_full()
+                                    .bg(overlay_color(true, cx)),
+                            )
+                        })
+                        .child(popup),
+                )
+                .into_any_element();
+        }
+
         anchored()
             .position(point(window_paddings.left, window_paddings.top))
             .snap_to_window()
@@ -708,159 +904,7 @@ impl RenderOnce for Dialog {
                                     window.close_dialog(cx);
                                 }
                             })
-                            .popup(
-                                gpui_base::Positioner::corner(
-                                    Anchor::TopLeft,
-                                    point(window_paddings.left + x, window_paddings.top + y),
-                                )
-                                .margin(margin)
-                                .child(
-                                    v_flex()
-                                        .id(layer_ix)
-                                        .test_support()
-                                        .debug_selector(move || format!("dialog-{layer_ix}"))
-                                        .bg(cx.theme().tokens.background)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .rounded(cx.theme().radius_lg)
-                                        .min_h_24()
-                                        .pt(paddings.top)
-                                        .pb(paddings.bottom)
-                                        .gap(paddings.top.max(px(8.)))
-                                        .refine_style(&self.style)
-                                        .px_0()
-                                        .occlude()
-                                        .w(width)
-                                        .when_some(self.props.max_width, |this, w| this.max_w(w))
-                                        .max_h(max_height)
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .gap_y_2()
-                                                .when_some(self.header, |this, header| {
-                                                    this.child(
-                                                        div()
-                                                            .pl(paddings.left)
-                                                            .pr(paddings.right)
-                                                            .child(header),
-                                                    )
-                                                })
-                                                .when_some(self.title, |this, title| {
-                                                    this.child(
-                                                        DialogTitle::new()
-                                                            .pl(paddings.left)
-                                                            .pr(paddings.right)
-                                                            .child(title),
-                                                    )
-                                                })
-                                                .when_some(self.content_builder, |this, builder| {
-                                                    this.child(builder(
-                                                        DialogContent::new()
-                                                            .gap(paddings.bottom)
-                                                            .pl(paddings.left)
-                                                            .pr(paddings.right),
-                                                        window,
-                                                        cx,
-                                                    ))
-                                                })
-                                                .when(!self.children.is_empty(), |this| {
-                                                    this.child(
-                                                        div().flex_1().overflow_hidden().child(
-                                                            // Body
-                                                            v_flex()
-                                                                .size_full()
-                                                                .overflow_y_scrollbar()
-                                                                .pl(paddings.left)
-                                                                .pr(paddings.right)
-                                                                .children(self.children),
-                                                        ),
-                                                    )
-                                                }),
-                                        )
-                                        .when_some(self.footer, |this, footer| {
-                                            this.child(
-                                                div()
-                                                    .pl(paddings.left)
-                                                    .pr(paddings.right)
-                                                    .child(footer),
-                                            )
-                                        })
-                                        .children(self.props.close_button.then(|| {
-                                            let top = (paddings.top - px(10.)).max(px(8.));
-                                            let right = (paddings.right - px(10.)).max(px(8.));
-
-                                            gpui_base::DialogClose::new()
-                                                .absolute()
-                                                .top(top)
-                                                .right(right)
-                                                .trigger(|button| {
-                                                    Button::new("close")
-                                                        .with_base(button)
-                                                        .small()
-                                                        .ghost()
-                                                        .icon(IconName::Close)
-                                                })
-                                        }))
-                                        .map(|surface| {
-                                            if animated {
-                                                surface
-                                                    .with_animation(
-                                                        "slide-down-shadow",
-                                                        animation.clone(),
-                                                        |surface, delta| {
-                                                            surface.shadow(dialog_shadow(delta))
-                                                        },
-                                                    )
-                                                    .text_selection_scope(selection_scope)
-                                                    .into_any_element()
-                                            } else {
-                                                surface
-                                                    .shadow(dialog_shadow(1.))
-                                                    .text_selection_scope(selection_scope)
-                                                    .into_any_element()
-                                            }
-                                        })
-                                        .map(|surface| {
-                                            if animated && entrance == DialogEntrance::FadeSlide {
-                                                EntranceSurface::new(
-                                                    surface,
-                                                    travel,
-                                                    window_paddings.top + margin,
-                                                )
-                                                .with_animation(
-                                                    "dialog-settle",
-                                                    animation.clone(),
-                                                    |mut surface, delta| {
-                                                        surface.progress = delta;
-                                                        surface
-                                                    },
-                                                )
-                                                .into_any_element()
-                                            } else {
-                                                surface
-                                            }
-                                        }),
-                                )
-                                .map(|positioner| {
-                                    if animated && entrance == DialogEntrance::SlideDown {
-                                        positioner
-                                            .with_animation(
-                                                "slide-down",
-                                                animation.clone(),
-                                                move |this, delta| {
-                                                    this.position(point(
-                                                        window_paddings.left + x,
-                                                        window_paddings.top + y * delta,
-                                                    ))
-                                                },
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        positioner.into_any_element()
-                                    }
-                                }),
-                            ),
+                            .popup(popup),
                     )
                     .map(|layer| {
                         if animated {
@@ -1015,7 +1059,7 @@ pub(crate) mod tests {
     fn test_dialog_entrance_builder(cx: &mut TestAppContext) {
         cx.update(crate::init);
         cx.update(|cx| {
-            assert_eq!(Dialog::new(cx).props.entrance, DialogEntrance::SlideDown);
+            assert_eq!(Dialog::new(cx).props.entrance, DialogEntrance::FadeSlide);
             for entrance in [
                 DialogEntrance::SlideDown,
                 DialogEntrance::Fade,

@@ -21,15 +21,17 @@ use gpui_base::{
 
 use crate::{
     ActiveTheme as _, Edges, Icon, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT,
-    animation::cubic_bezier,
+    animation::ease_out_cubic,
     button::{Button, ButtonVariants as _},
     styled::toast_shadow,
     v_flex,
 };
 
-const NOTIFICATION_TRANSITION_DURATION: Duration = Duration::from_millis(400);
-const NOTIFICATION_EXIT_DURATION: Duration = Duration::from_millis(200);
-const NOTIFICATION_TRANSITION_OFFSET: Pixels = px(96.);
+/// A toast settles quickly on an ease-out curve and travels only a short way:
+/// it reports something that already happened, so it should not perform.
+const NOTIFICATION_TRANSITION_DURATION: Duration = Duration::from_millis(200);
+const NOTIFICATION_EXIT_DURATION: Duration = Duration::from_millis(150);
+const NOTIFICATION_TRANSITION_OFFSET: Pixels = px(16.);
 const DEFAULT_NOTIFICATION_WIDTH: Pixels = px(382.);
 const NOTIFICATION_ADVANCE_INTERVAL: Duration = Duration::from_millis(50);
 struct DismissRequest;
@@ -488,7 +490,7 @@ impl Render for Notification {
                 } else {
                     NOTIFICATION_TRANSITION_DURATION
                 })
-                .with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.)),
+                .with_easing(ease_out_cubic),
                 move |this, delta| {
                     if closing {
                         let opacity = 1. - delta;
@@ -712,7 +714,11 @@ pub struct NotificationList {
 impl NotificationList {
     pub fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
-            notifications: ToastManager::new(ToastMotion::sonner()),
+            notifications: ToastManager::new(ToastMotion {
+                duration: NOTIFICATION_TRANSITION_DURATION,
+                exit_duration: NOTIFICATION_EXIT_DURATION,
+                ..ToastMotion::sonner()
+            }),
             stacks: Vec::new(),
             focus_handle: cx.focus_handle().tab_stop(true),
             autohide_ids: HashSet::new(),

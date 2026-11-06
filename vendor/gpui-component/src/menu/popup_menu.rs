@@ -1590,6 +1590,11 @@ impl Render for PopupMenu {
             .shadow(crate::styled::popover_shadow(crate::styled::popover_ring(cx), opacity.powi(3)))
             .text_color(cx.theme().popover_foreground)
             .relative()
+            // Opening, the surface rises the last 4 pt into place on the same
+            // curve as its fade; closing only fades.
+            .when(self.closing_at.is_none() && !cx.reduce_motion(), |this| {
+                this.top(crate::styled::popover_lift(cx) * (1. - opacity))
+            })
             .occlude()
             .child(
                 v_flex()

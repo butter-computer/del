@@ -8,6 +8,9 @@ use instant::Duration;
 
 use crate::{ActiveTheme as _, Colorize as _, StyledExt as _};
 
+/// One sweep, shared by every shimmer that keeps the default, so bands on
+/// screen together move in step (sweeps are phase-locked to the app clock).
+pub const SHIMMER_PERIOD: Duration = Duration::from_millis(1600);
 const SHIMMER_LAYER_COUNT: usize = 12;
 const DEFAULT_SHIMMER_SPREAD: f32 = 0.3;
 /// Lightness difference below which a highlight would be indistinguishable from the text.
@@ -47,7 +50,7 @@ impl From<Pixels> for ShimmerSpread {
 /// The appearance and timing of a reusable text shimmer.
 ///
 /// By default, the highlight's half-width spans 30% of the text width and
-/// completes one left-to-right sweep every two seconds. Its color follows the
+/// completes one left-to-right sweep every [`SHIMMER_PERIOD`]. Its color follows the
 /// current text color and active theme.
 #[derive(Clone, Copy, Debug)]
 pub struct ShimmerStyle {
@@ -117,7 +120,7 @@ impl ShimmerStyle {
 impl Default for ShimmerStyle {
     fn default() -> Self {
         Self {
-            duration: Duration::from_secs(2),
+            duration: SHIMMER_PERIOD,
             highlight_color: None,
             spread: ShimmerSpread::default(),
             reverse: false,

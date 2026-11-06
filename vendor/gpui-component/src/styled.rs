@@ -8,10 +8,37 @@ pub use gpui_base::{FocusableExt, RoleOverride, StyledExt, box_shadow, h_flex, v
 
 use crate::ActiveTheme as _;
 
-const FOCUS_RING_WIDTH: Pixels = px(3.);
-const FOCUS_RING_OPACITY: f32 = 0.5;
+/// Width of the focus ring, drawn *inside* the element's border box: an outer
+/// band is clipped by every scrolling list and overflow-hidden card, and this
+/// matches the 1.5 pt inset accent ring of Del's hand-built controls.
+const FOCUS_RING_WIDTH: Pixels = px(1.5);
 /// Gap between a borderless element's edge and a focus line drawn off it, in rem.
 const FOCUS_LINE_GAP: f32 = 0.125;
+
+/// How long a popover, picker or menu takes to settle in, and to fade out.
+pub const POPOVER_ENTER: std::time::Duration = std::time::Duration::from_millis(180);
+pub const POPOVER_EXIT: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// One logical point at the theme's text scale. Del's base text size is 13 pt,
+/// so this keeps whole-point metrics (radii, travel) in step with zoom.
+fn theme_pt(cx: &App) -> Pixels {
+    cx.theme().font_size / 13.
+}
+
+/// Corner radius of every floating surface: popovers, pickers, menus and
+/// hover cards (10 pt). A theme that squares its corners squares these too.
+pub fn popover_radius(cx: &App) -> Pixels {
+    if cx.theme().radius <= Pixels::ZERO {
+        Pixels::ZERO
+    } else {
+        theme_pt(cx) * 10.
+    }
+}
+
+/// How far a floating surface rises into place as it opens (4 pt).
+pub fn popover_lift(cx: &App) -> Pixels {
+    theme_pt(cx) * 4.
+}
 
 /// Ink every layer of a surface's shadow carries — the `rgb(0 0 0 / 0.1)`
 /// shadcn/ui spends at each elevation.
@@ -140,9 +167,8 @@ pub trait ThemeStyled: Styled + Sized {
     /// that decide whether the control shows one at all — its focus state,
     /// [`FocusableExt::focus_ring`], appearance, and so on.
     ///
-    /// The ring sits outside the element's border, so an ancestor that clips
-    /// its content will cut it off — leave it a few pixels of room, or don't
-    /// clip.
+    /// The ring is drawn just inside the element's outer edge, over its
+    /// border, so a clipping ancestor cannot cut it off.
     fn focus_ring_style(self, window: &Window, cx: &App) -> Self
     where
         Self: ParentElement;
@@ -173,9 +199,8 @@ impl<T: Styled + Sized> ThemeStyled for T {
     /// that decide whether the control shows one at all — its focus state,
     /// [`crate::FocusableExt::focus_ring`], appearance, and so on.
     ///
-    /// The ring sits outside the element's border, so an ancestor that clips
-    /// its content will cut it off — leave it a few pixels of room, or don't
-    /// clip.
+    /// The ring is drawn just inside the element's outer edge, over its
+    /// border, so a clipping ancestor cannot cut it off.
     fn focus_ring_style(self, window: &Window, cx: &App) -> Self
     where
         Self: ParentElement,
@@ -190,7 +215,7 @@ impl<T: Styled + Sized> ThemeStyled for T {
         self.bg(theme.popover)
             .text_color(theme.popover_foreground)
             .shadow(popover_shadow(popover_ring(cx), 1.))
-            .rounded(theme.radius)
+            .rounded(popover_radius(cx))
     }
 }
 
@@ -255,11 +280,7 @@ pub(crate) fn focus_style<T: Styled + ParentElement>(
 ) -> T {
     let theme = cx.theme();
     if theme.focus_ring {
-        return focus_ring(
-            element.border_color(theme.ring),
-            window,
-            theme.ring.alpha(FOCUS_RING_OPACITY),
-        );
+        return focus_ring(element.border_color(theme.ring), window, theme.ring);
     }
 
     // The ring is painted outside the border, so a clipping ancestor cuts it
@@ -297,7 +318,9 @@ pub(crate) fn focus_style<T: Styled + ParentElement>(
     )
 }
 
-/// Paint only the outside band, preserving translucent control backgrounds.
+/// Paint a ring just inside the element's outer edge, over its border, so a
+/// clipping ancestor (a scroll list, an overflow-hidden card) never cuts it
+/// off. Only the ring is painted, preserving translucent control backgrounds.
 pub(crate) fn focus_ring<T: Styled + ParentElement>(
     mut element: T,
     window: &Window,
@@ -305,9 +328,9 @@ pub(crate) fn focus_ring<T: Styled + ParentElement>(
 ) -> T {
     let rem_size = window.rem_size();
     let border_widths = border_widths(element.style(), rem_size);
-    let radius = corner_radii(element.style(), rem_size).map(|value| *value + FOCUS_RING_WIDTH);
-    let ring_style = corner_radii_refinement(radius);
-    let inset = FOCUS_RING_WIDTH;
+    // Absolute children are placed inside the border, so step back over it to
+    // put the ring on the outer edge, sharing the element's own corners.
+    let ring_style = corner_radii_refinement(corner_radii(element.style(), rem_size));
 
     element.child(
         div()
@@ -316,10 +339,10 @@ pub(crate) fn focus_ring<T: Styled + ParentElement>(
             })
             .flex_none()
             .absolute()
-            .top(-(inset + border_widths.top))
-            .left(-(inset + border_widths.left))
-            .right(-(inset + border_widths.right))
-            .bottom(-(inset + border_widths.bottom))
+            .top(-border_widths.top)
+            .left(-border_widths.left)
+            .right(-border_widths.right)
+            .bottom(-border_widths.bottom)
             .border(FOCUS_RING_WIDTH)
             .border_color(color)
             .refine_style(&ring_style),

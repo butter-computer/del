@@ -81,11 +81,11 @@ fn plot_appear_easing(t: f32) -> f32 {
 /// How long the scrollbar stays visible after the last scroll, drag, or hover.
 const SCROLLBAR_IDLE: Duration = Duration::from_secs(2);
 /// How long the scrollbar takes to appear.
-const SCROLLBAR_ENTER: Duration = Duration::from_millis(300);
+const SCROLLBAR_ENTER: Duration = Duration::from_millis(140);
 /// How long the scrollbar takes to fade away once the idle hold expires.
 const SCROLLBAR_EXIT: Duration = Duration::from_millis(500);
 /// How long the thumb takes to reach its hovered or resting width.
-const SCROLLBAR_EXPAND: Duration = Duration::from_millis(300);
+const SCROLLBAR_EXPAND: Duration = Duration::from_millis(140);
 
 /// The resting thumb width on iOS and Android, matching the 3pt indicator
 /// those platforms draw. Hover and drag keep Base's desktop widths, so a
