@@ -752,16 +752,16 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             content.child(
                 settings_card().child(
                     settings_row(
-                        "Keep sessions running after quitting Del",
+                        "Keep sessions running when the window closes",
                         Some(
-                            "Quit hides Del while chats, Side chats, and terminals keep running. Open Del to return to them."
+                            "Closing the window keeps chats, Side chats, and terminals running. Open Del to return. Quit Del stops the app."
                                 .into(),
                         ),
                     )
                     .child(
                         gpui_kit::component::switch::Switch::new("keep-sessions-running")
                             .checked(crate::session_lifecycle::keep_running())
-                            .accessibility_label("Keep sessions running after quitting Del")
+                            .accessibility_label("Keep sessions running when the window closes")
                             .on_click(|enabled, window, cx| {
                                 if let Err(error) =
                                     crate::session_lifecycle::set_keep_running(*enabled)

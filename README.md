@@ -6,11 +6,11 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.51` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.52` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.51 source update notes](docs/releases/0.1.51.md).
+See the [0.1.52 source update notes](docs/releases/0.1.52.md).
 
-This update adds expandable historical commit diffs, friendly commit dates, and
+Del includes expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
 scrolls independently within a bounded height.
 
@@ -25,11 +25,12 @@ to reveal a compact Side history card attached below its right edge, matching th
 new-session Chat/Terminal card. History shows each chat’s first prompt and last-prompt age,
 newest first. **Option-Shift-Command-S** opens the same tab.
 
-Chats, Side chats, and integrated terminals keep running after normal
-Quit by default. Change **Settings → Sessions → Keep sessions running after quitting
-Del** to restore full shutdown. Reopen Del to return to the live workspace, or use
-**Quit Del Completely** (**Option-Command-Q**) to stop everything. Force Quit,
-crashes, logout, and restarting the Mac are outside this persistence guarantee.
+**Quit Del** (**Command-Q**) and Dock → Quit save the workspace and exit the app.
+**Del → Run in Background** keeps chats, Side chats, and integrated terminals live;
+reopen Del to return to them. Closing the window also keeps sessions running by
+default, controlled by **Settings → Sessions → Keep sessions running when the
+window closes**. **Option-Command-Q** remains an alias for full Quit. Force Quit,
+crashes, logout, and restarting the Mac are outside the live-session guarantee.
 
 The agreed UI and behavior rules are documented in
 [docs/neverfuckingchange.md](docs/neverfuckingchange.md). Preserve these decisions
@@ -59,7 +60,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.51-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.52-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

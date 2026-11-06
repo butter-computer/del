@@ -1054,13 +1054,15 @@ activity bar. It supersedes earlier rules where they conflict.
 
 ## Session lifetime
 
-- Normal Quit, including Dock Quit and closing the window, keeps main chats, Side
-  chats, and terminals alive by default. Reopening returns to the existing live
-  runtime. Settings → Sessions exposes the saved opt-out switch.
-- Quit Del Completely (Option-Command-Q), app-update restarts, and macOS shutdown
-  stop the runtime. Force Quit/crash/reboot survival is not promised.
-- Hiding on Quit stops dictation, but preserves drafts, queued work, provider
-  processes, Side chat identities, and terminal PTYs.
+- Quit Del (Command-Q), Dock Quit, Option-Command-Q, app-update restarts, and
+  macOS shutdown save the workspace and stop the runtime. Quit must never silently
+  hide the app, even with the background-session preference enabled.
+- Del → Run in Background keeps main chats, Side chats, and terminals alive.
+  Closing the window also preserves them by default; Settings → Sessions exposes
+  the saved opt-out switch specifically for window close. Reopening returns to
+  the live runtime. Force Quit/crash/reboot survival is not promised.
+- Running in the background stops dictation, but preserves drafts, queued work,
+  provider processes, Side chat identities, and terminal PTYs.
 
 ## Provider progress checklists
 
