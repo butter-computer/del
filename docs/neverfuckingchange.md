@@ -955,7 +955,9 @@ activity bar. It supersedes earlier rules where they conflict.
   right-aligned to the sidebar's padding. Back and Forward step through visited
   sessions and tabs, disable at the ends, and use ⌘[ / ⌘]; a new visit drops the
   forward history; entries that no longer exist are skipped.
-- Session tabs start at the chat page's left edge (0 px), are 144 × 26 with an
+- Session tabs stay aligned with the chat page’s left edge at the minimum sidebar
+  width and every supported zoom. Compact the navigation controls within the
+  available width rather than pushing tabs past the page. Tabs are 144 × 26 with an
   8 px radius and active fill, and show the working spinner. The new-tab `+`
   (24 px) sits 8.5 px after the last tab, not at the far edge. With the sidebar
   hidden the tabs follow the navigation buttons. There is no search pill in the
@@ -1075,3 +1077,6 @@ activity bar. It supersedes earlier rules where they conflict.
 
 - The Space picker uses a compact, rounded-stroke selection check with balanced
   proportions, keeping selected-state semantics and aligned labels.
+
+- Hide unavailable Context, Limits, and Cost footer metrics rather than showing
+  dash placeholders. Preserve reported zero values and known usage.

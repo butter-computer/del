@@ -3003,13 +3003,15 @@ impl Render for AppShell {
         } else {
             0.0
         };
-        let nav_width = (zpx(left_extent)
-            - gpui::px(if cfg!(target_os = "macos") {
+        let nav_width = gpui::px(workbench::navigation_width(
+            left_extent,
+            del_core::zoom::scaled(1.0),
+            if cfg!(target_os = "macos") {
                 80.0
             } else {
                 12.0
-            }))
-        .max(zpx(workbench::NAV_MIN_WIDTH));
+            },
+        ));
         let (progress, animating) = self.right_motion.sample(std::time::Instant::now());
         let right_progress = if right_visible { progress } else { 0. };
         if animating || left_animating {

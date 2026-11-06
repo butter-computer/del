@@ -26,7 +26,37 @@ pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Title-bar control size, matching the sidebar's header buttons.
 const NAV_BUTTON: f32 = 28.0;
 /// Narrowest navigation zone: toggle, back and forward with their gaps.
-pub const NAV_MIN_WIDTH: f32 = NAV_BUTTON * 3.0 + 2.0 * 2.0 + 12.0 + 8.0;
+const NAV_MIN_WIDTH: f32 = NAV_BUTTON * 3.0 + 3.0 * 2.0 + 12.0 + 8.0;
+
+pub(super) fn navigation_width(sidebar_extent: f32, scale: f32, reserved: f32) -> f32 {
+    // macOS traffic-light space is physical pixels, while the sidebar zooms.
+    // Never reserve more than the minimum sidebar can actually provide.
+    let minimum = (crate::LEFT_SIDEBAR_MIN * scale - reserved).min(NAV_MIN_WIDTH * scale);
+    (sidebar_extent * scale - reserved).max(minimum)
+}
+
+fn navigation_button_width(width: Pixels) -> Pixels {
+    ((width - zpx(8.0 + 3.0 * 2.0)) / 3.0).min(zpx(NAV_BUTTON))
+}
+
+#[cfg(test)]
+mod navigation_layout_tests {
+    #[test]
+    fn first_tab_tracks_the_page_at_minimum_sidebar_width() {
+        for scale in [0.7, 1.0, 1.4, 2.0] {
+            for reserved in [80.0, 12.0] {
+                for width in [crate::LEFT_SIDEBAR_MIN, 264.0, crate::LEFT_SIDEBAR_MAX] {
+                    let tab_start = reserved + super::navigation_width(width, scale, reserved);
+                    assert!(
+                        (tab_start - width * scale).abs() < 0.01,
+                        "tab {tab_start} must align with page {} at scale {scale}",
+                        width * scale
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// The bottom panel: one shell per project, kept alive while hidden.
 #[derive(Default)]
@@ -337,6 +367,7 @@ impl AppShell {
         let back = self.nav.can_step(-1, reachable(state));
         let forward = self.nav.can_step(1, reachable(state));
         let settings = state.panel == Panel::Providers;
+        let button_width = navigation_button_width(width);
         h_flex()
             .flex_none()
             .w(width)
@@ -346,6 +377,7 @@ impl AppShell {
             .pr(zpx(8.0))
             .child(
                 chrome_button("toggle-sidebar", "Toggle left sidebar", true)
+                    .w(button_width)
                     .tooltip(|window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new("Toggle left sidebar (⌘B)")
                             .build(window, cx)
@@ -356,9 +388,10 @@ impl AppShell {
                     )
                     .motion_child(true, |feedback| feedback.glyph(Glyph::PanelLeft)),
             )
-            .child(div().flex_1().min_w(zpx(12.0)))
+            .child(div().flex_1().min_w_0())
             .child(
                 chrome_button("nav-back", "Back", back)
+                    .w(button_width)
                     .tooltip(|window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new("Back (⌘[)").build(window, cx)
                     })
@@ -369,6 +402,7 @@ impl AppShell {
             )
             .child(
                 chrome_button("nav-forward", "Forward", forward)
+                    .w(button_width)
                     .tooltip(|window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new("Forward (⌘])").build(window, cx)
                     })
@@ -790,7 +824,7 @@ impl AppShell {
                     }),
             )
             .child(div().flex_1().min_w(zpx(4.)))
-            .child(
+            .when(!terminal && usage.context_tokens.is_some() && usage.context_window.is_some_and(|n| n > 0), |row| row.child(
                 status_item("status-context")
                     .accessibility_label(context_label.clone())
                     .tooltip(
@@ -829,8 +863,8 @@ impl AppShell {
                             )),
                         }
                     }),
-            )
-            .child(
+            ))
+            .when(remaining.is_some(), |row| row.child(
                 status_item("status-limits")
                     .accessibility_label(limits_label.clone())
                     .tooltip(format!(
@@ -865,8 +899,8 @@ impl AppShell {
                         }
                         menu
                     }),
-            )
-            .child(
+            ))
+            .when(total_cost.is_some(), |row| row.child(
                 status_item("status-cost")
                     .accessibility_label(cost_label.clone())
                     .tooltip(cost_breakdown)
@@ -894,7 +928,7 @@ impl AppShell {
                                 "Estimates may exclude unreported or Terminal usage",
                             ))
                     }),
-            )
+            ))
             .child(
                 status_item("status-processes")
                     .accessibility_label(process_label.clone())
