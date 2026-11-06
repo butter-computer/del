@@ -449,8 +449,10 @@ pub fn search_until(
         } else {
             ranges(&document.source.title, &query).into_iter().next()
         };
+        let mut title_hit = None;
         if let Some(range) = title_match {
             let (snippet, snippet_range) = snippet(&document.source.title, &range);
+            title_hit = Some((hits.len(), range.clone()));
             hits.push(Hit {
                 document: document.clone(),
                 message: None,
@@ -466,6 +468,21 @@ pub fn search_until(
         for (index, (message, folded)) in document.messages.iter().zip(folded).enumerate() {
             for range in folded.find(&needle) {
                 let (snippet, snippet_range) = snippet(&message.text, &range);
+                // An automatic title starts as the first prompt, so a title hit
+                // and that prompt's hit would read as the same row twice. Keep
+                // one, the message hit, which also opens at the message.
+                if let Some((ix, _)) = title_hit.take_if(|(_, title_range)| {
+                    repeats_title(&document.source.title, title_range, &message.text, &range)
+                }) {
+                    hits[ix] = Hit {
+                        document: document.clone(),
+                        message: Some(index),
+                        range,
+                        snippet,
+                        snippet_range,
+                    };
+                    continue;
+                }
                 hits.push(Hit {
                     document: document.clone(),
                     message: Some(index),
@@ -477,6 +494,28 @@ pub fn search_until(
         }
     }
     Some(hits)
+}
+
+/// Whether a message match shows the same text, at the same place, as the
+/// title match: the message begins with the title (an automatic title is the
+/// first prompt, possibly shortened) and the match sits at the same offset.
+fn repeats_title(
+    title: &str,
+    title_range: &std::ops::Range<usize>,
+    message: &str,
+    range: &std::ops::Range<usize>,
+) -> bool {
+    let title_lead = title.len() - title.trim_start().len();
+    let title = title.trim().trim_end_matches('…').trim_end();
+    let body = message.trim_start();
+    let lead = message.len() - body.len();
+    !title.is_empty()
+        && body.starts_with(title)
+        && title_range
+            .start
+            .checked_sub(title_lead)
+            .is_some_and(|start| range.start == lead + start)
+        && range.end <= lead + title.len()
 }
 
 #[cfg(test)]
@@ -569,6 +608,26 @@ mod tests {
         assert_eq!(search(&docs, "/c saved").len(), 1);
         assert_eq!(search(&docs, "/t/path").len(), 1);
         assert_eq!(search(&docs, "hello").len(), 2);
+    }
+
+    #[test]
+    fn title_matching_the_first_prompt_is_one_result() {
+        let mut doc = (*document(false, false, "fix the login bug please")).clone();
+        doc.source.title = "fix the login bug please".into();
+        let docs = [Arc::new(doc)];
+        let hits = search(&docs, "login");
+        assert_eq!(hits.len(), 1, "title and first prompt read as one row");
+        assert_eq!(hits[0].message, Some(0), "the kept hit opens at the message");
+
+        // A shortened automatic title still repeats the prompt.
+        let mut doc = (*document(false, false, "fix the login bug please and add tests")).clone();
+        doc.source.title = "fix the login bug please…".into();
+        assert_eq!(search(&[Arc::new(doc)], "login").len(), 1);
+
+        // A later match in the same prompt, or a different title, stays separate.
+        let mut doc = (*document(false, false, "login first, then login again")).clone();
+        doc.source.title = "Login flow".into();
+        assert_eq!(search(&[Arc::new(doc)], "login").len(), 3);
     }
 
     #[test]

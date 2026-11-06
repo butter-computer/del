@@ -1,9 +1,10 @@
-//! Cmd-K actions, recent conversations, and navigation into chat/terminal transcripts.
+//! Cmd-K actions, recent sessions, and navigation into chat/terminal transcripts.
 use crate::{
     AppShell,
-    appearance::{rgb, rgba},
+    appearance::rgba,
     conversation_search as search,
     state::Tab,
+    ui,
     zoom::px as zpx,
 };
 use gpui_kit::{
@@ -63,8 +64,8 @@ impl PaletteAction {
         match self {
             Self::NewConversation => "New session",
             Self::Settings => "Open settings",
-            Self::Files => "Toggle files",
-            Self::Terminal => "Open terminal",
+            Self::Files => "Open files",
+            Self::Terminal => "New terminal",
         }
     }
     fn icon(self) -> &'static str {
@@ -75,20 +76,22 @@ impl PaletteAction {
             Self::Terminal => "icons/square-terminal.svg",
         }
     }
+    /// The same bindings as the Keybinds table in Settings (`keybinds.rs`):
+    /// each action runs exactly what its shortcut runs.
     fn shortcut(self) -> &'static str {
         match self {
-            Self::NewConversation => "⌘ N",
-            Self::Settings => "⌘ ,",
-            Self::Files => "⇧ ⌘ B",
-            Self::Terminal => "⌘ J",
+            Self::NewConversation => "⌘N",
+            Self::Settings => "⌘,",
+            Self::Files => "⌘P",
+            Self::Terminal => "⌃`",
         }
     }
     fn keywords(self) -> &'static str {
         match self {
             Self::NewConversation => "new conversation chat session draft",
-            Self::Settings => "open settings preferences appearance opacity accounts providers",
-            Self::Files => "toggle files folder sidebar panel",
-            Self::Terminal => "open terminal shell console panel",
+            Self::Settings => "open settings preferences appearance accounts providers",
+            Self::Files => "open files folder tree right sidebar",
+            Self::Terminal => "new open terminal shell console right sidebar",
         }
     }
 }
@@ -107,7 +110,7 @@ impl EventEmitter<PaletteEvent> for Palette {}
 impl Palette {
     fn new(runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search commands and conversations…")
+            InputState::new(window, cx).placeholder("Search commands and sessions…")
         });
         cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -251,6 +254,14 @@ impl Palette {
         (results, chrome + results)
     }
 
+    /// The tallest the palette can grow in this window. Its top is placed
+    /// from this, so the panel never moves while results come and go.
+    fn max_height(window: &Window) -> Pixels {
+        let chrome = zpx(42. + 30. + 4. + 24. + 20.);
+        let available = (window.viewport_size().height - zpx(40.) - chrome).max(px(0.));
+        chrome + zpx(300.).min(available)
+    }
+
     fn action_row(&self, action: PaletteAction, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .id(("palette-action", ix))
@@ -258,17 +269,19 @@ impl Palette {
             .aria_label(action.label())
             .w_full()
             .h(zpx(ACTION_HEIGHT))
-            .px(zpx(8.))
-            .gap(zpx(8.))
+            .px(zpx(ui::SPACE_MD))
+            .gap(zpx(ui::SPACE_MD))
             .items_center()
-            .rounded(zpx(5.))
+            .rounded(zpx(ui::RADIUS_ROW))
             .cursor_pointer()
-            .bg(if ix == self.selected {
-                rgba(0xffffff0c)
-            } else {
-                rgba(0xffffff00)
-            })
-            .hover(|row| row.bg(rgba(0xffffff09)))
+            // One highlight: pointing at a row selects it, as the arrow keys do.
+            .when(ix == self.selected, |row| row.bg(ui::row_selected()))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && this.selected != ix {
+                    this.selected = ix;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -293,7 +306,7 @@ impl Palette {
                     .text_size(zpx(del_core::typography::TEXT_MD))
                     .child(action.label()),
             )
-            .child(key_badge(action.shortcut()))
+            .child(ui::kbd(action.shortcut()))
             .into_any_element()
     }
 
@@ -311,9 +324,9 @@ impl Palette {
         }
         if ix == 0 {
             return section_label(if self.input.read(cx).value().trim().is_empty() {
-                "Recent conversations"
+                "Recent sessions"
             } else {
-                "Conversations"
+                "Sessions"
             })
             .into_any_element();
         }
@@ -401,19 +414,23 @@ impl Palette {
                 "{kind}: {} · {}: {}",
                 source.title, source.project_name, hit.snippet
             ))
-            .px(zpx(8.))
+            .px(zpx(ui::SPACE_MD))
             .h(zpx(RESULT_HEIGHT))
-            .gap(zpx(8.))
+            .gap(zpx(ui::SPACE_MD))
             .items_center()
             .overflow_hidden()
-            .rounded(zpx(5.))
+            .rounded(zpx(ui::RADIUS_ROW))
             .cursor_pointer()
-            .bg(if action_count + ix == self.selected {
-                rgba(0xffffff0c)
-            } else {
-                rgba(0xffffff00)
+            .when(action_count + ix == self.selected, |row| {
+                row.bg(ui::row_selected())
             })
-            .hover(|row| row.bg(rgba(0xffffff09)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let selected = this.actions(cx).len() + ix;
+                if *hovered && this.selected != selected {
+                    this.selected = selected;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -455,7 +472,7 @@ impl Palette {
                                     .min_w_0()
                                     .truncate()
                                     .text_size(zpx(del_core::typography::TEXT_MD))
-                                    .text_color(rgb(0xeeeeef))
+                                    .text_color(ui::primary_text())
                                     .child(source.title.clone()),
                             )
                             .when(!recent, |row| {
@@ -497,7 +514,7 @@ impl Palette {
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgba(0xffffff60))
+                    .text_color(ui::faint_text())
                     .child(crate::icons::path("icons/return.svg")),
             )
             .into_any_element()
@@ -521,7 +538,7 @@ impl Render for Palette {
             .h(panel_height)
             .min_h_0()
             .overflow_hidden()
-            .text_color(rgb(0xeeeeef))
+            .text_color(ui::primary_text())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke;
                 if key.key == "escape" || (key.modifiers.platform && key.key == "k") {
@@ -606,16 +623,16 @@ impl Render for Palette {
                                 .text_color(crate::appearance::secondary_text())
                                 .child(if self.loading {
                                     if empty {
-                                        "Loading recent conversations…"
+                                        "Loading recent sessions…"
                                     } else {
-                                        "Searching conversations…"
+                                        "Searching sessions…"
                                     }
                                 } else if empty {
-                                    "Your recent conversations will appear here."
+                                    "Your recent sessions will appear here."
                                 } else if actions > 0 {
-                                    "No matching conversations."
+                                    "No matching sessions."
                                 } else {
-                                    "No matching commands or conversations."
+                                    "No matching commands or sessions."
                                 }),
                         )
                     }),
@@ -628,8 +645,8 @@ impl Render for Palette {
                         .text_size(zpx(del_core::typography::TEXT_XS))
                         .text_color(rgba(0xe8b04aff))
                         .child(format!(
-                            "{} transcript(s) could not be read. Other results are available.",
-                            self.errors.len()
+                            "{} could not be read. Other results are available.",
+                            ui::plural(self.errors.len(), "transcript", "transcripts")
                         )),
                 )
             })
@@ -641,7 +658,7 @@ impl Render for Palette {
                     .gap(zpx(12.))
                     .items_center()
                     .border_t_1()
-                    .border_color(rgba(0xffffff0a))
+                    .border_color(crate::appearance::separator())
                     .bg(crate::appearance::popup_surface())
                     .rounded_b(zpx(11.))
                     .text_size(zpx(12.))
@@ -650,8 +667,8 @@ impl Render for Palette {
                         h_flex()
                             .items_center()
                             .gap(zpx(4.))
-                            .child(key_badge("↑"))
-                            .child(key_badge("↓"))
+                            .child(ui::kbd("↑"))
+                            .child(ui::kbd("↓"))
                             .child(div().ml(zpx(3.)).child("Navigate")),
                     )
                     .child(key_hint("Enter", "Select"))
@@ -663,37 +680,16 @@ impl Render for Palette {
 }
 
 fn section_label(label: &'static str) -> impl IntoElement {
-    div()
+    ui::section_label(label)
         .h(zpx(SECTION_HEIGHT))
-        .px(zpx(8.))
-        .flex()
-        .items_center()
-        .text_size(zpx(12.))
-        .text_color(crate::appearance::secondary_text())
-        .child(label)
-}
-
-fn key_badge(label: &'static str) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px(zpx(5.))
-        .min_w(zpx(18.))
-        .h(zpx(18.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(zpx(4.))
-        .bg(rgba(0xffffff0d))
-        .text_size(zpx(del_core::typography::TEXT_XS))
-        .text_color(rgb(0xd4d4d6))
-        .child(label)
+        .px(zpx(ui::SPACE_MD))
 }
 
 fn key_hint(key: &'static str, label: &'static str) -> impl IntoElement {
     h_flex()
         .items_center()
-        .gap(zpx(7.))
-        .child(key_badge(key))
+        .gap(zpx(ui::SPACE_SM))
+        .child(ui::kbd(key))
         .child(label)
 }
 
@@ -724,36 +720,37 @@ impl AppShell {
         if !self.search_open || self.search_closing.is_some() {
             return;
         }
-        if cx.reduce_motion() {
-            window.close_dialog(cx);
-            self.search_open = false;
-            if let Some(hit) = hit {
-                self.open_search_hit(hit, window, cx);
-            }
-            if let Some(action) = action {
-                self.run_palette_action(action, window, cx);
-            }
-            cx.notify();
-            return;
+        // Close at once, so focus is back and the choice runs on this frame.
+        // The dialog layer fades the closed palette out on its own; a dialog
+        // the action opens (Settings) stacks above that, not under it.
+        window.close_dialog(cx);
+        self.search_open = false;
+        if let Some(hit) = hit {
+            self.open_search_hit(hit, window, cx);
         }
-        self.search_closing = Some(std::time::Instant::now());
+        let opens_settings = matches!(action, Some(PaletteAction::Settings));
+        if let Some(action) = action {
+            self.run_palette_action(action, window, cx);
+        }
+        // The workspace dim and blur fade with the palette. Settings keeps
+        // them, so its backdrop carries straight on.
+        if !cx.reduce_motion() && !opens_settings {
+            let started = std::time::Instant::now();
+            self.search_open = true;
+            self.search_closing = Some(started);
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(EXIT_DURATION).await;
+                let _ = this.update_in(cx, |this, _, cx| {
+                    if this.search_closing == Some(started) {
+                        this.search_open = false;
+                        this.search_closing = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(EXIT_DURATION).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                window.close_dialog(cx);
-                this.search_open = false;
-                this.search_closing = None;
-                if let Some(hit) = hit {
-                    this.open_search_hit(hit, window, cx);
-                }
-                if let Some(action) = action {
-                    this.run_palette_action(action, window, cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn run_palette_action(
@@ -780,13 +777,17 @@ impl AppShell {
                         state.toggle_providers(cx);
                     }
                 });
-                if matches!(action, PaletteAction::Files) {
-                    self.set_right(!self.right_open, cx);
-                    self.focus_composer(window, cx);
+                // What ⌘P and ⌃` run.
+                let pane = if matches!(action, PaletteAction::Files) {
+                    crate::right_panel::Pane::Files
                 } else {
-                    if !self.right_open {
-                        self.set_right(true, cx);
-                    }
+                    crate::right_panel::Pane::Terminal
+                };
+                if self.workspace(cx).is_some() {
+                    self.open_inner_tool(pane, window, cx);
+                } else if matches!(action, PaletteAction::Terminal) {
+                    // No session workspace to host it: the sidebar's own shell.
+                    self.set_right(true, cx);
                     self.right
                         .update(cx, |right, cx| right.show_terminal(window, cx));
                 }
@@ -846,6 +847,10 @@ impl AppShell {
     }
 
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ⌘K during the fade-out opens a fresh palette straight away.
+        if self.search_closing.take().is_some() {
+            self.search_open = false;
+        }
         if self.search_open {
             self.close_search(None, window, cx);
             return;
@@ -914,13 +919,14 @@ impl AppShell {
             let shell = shell.clone();
             let viewport = window.viewport_size();
             let width = zpx(500.).min((viewport.width - zpx(32.)).max(px(0.)));
-            let height = content.read(cx).layout_height(window, cx).1 + px(2.);
+            // Anchored to the tallest the palette can be, so typing never moves it.
+            let height = Palette::max_height(window) + px(2.);
             dialog
                 .bg(crate::appearance::popup_surface())
                 .p_0()
                 .rounded(zpx(12.))
                 .border_1()
-                .border_color(rgba(0xffffff14))
+                .border_color(crate::appearance::separator())
                 .overflow_hidden()
                 .entrance(if closing.is_some() {
                     DialogEntrance::None
