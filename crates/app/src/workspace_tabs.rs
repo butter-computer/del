@@ -661,18 +661,21 @@ impl WorkspaceTabs {
         let Some(index) = self.tabs.iter().position(|t| t.id == id) else {
             return;
         };
-        if self.tabs[index]
+        if let Some(panel) = self.tabs[index]
             .panel
-            .as_ref()
-            .is_some_and(|panel| panel.read(cx).has_unsaved_edits())
+            .clone()
+            .filter(|panel| panel.read(cx).has_unsaved_edits())
         {
-            window.push_notification(
-                gpui_kit::component::notification::Notification::info(
-                    "Save or revert your file edits before closing this tab.",
-                ),
-                cx,
-            );
-            return;
+            let (title, saving) = panel.read(cx).close_guard();
+            let this = cx.entity().downgrade();
+            let close: crate::right_panel::CloseTab = std::rc::Rc::new(move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.close(id, window, cx));
+            });
+            if crate::right_panel::RightPanel::confirm_close_with_edits(
+                &panel, title, saving, close, window, cx,
+            ) {
+                return;
+            }
         }
         let tab = self.tabs.remove(index);
         if let Some(panel) = tab.panel {
