@@ -219,7 +219,7 @@ pub fn recent_commits(root: &Path) -> Result<Vec<Commit>, String> {
         "--no-ext-diff",
         "--no-textconv",
         "--diff-merges=first-parent",
-        "--format=%x00%H%x00%h%x00%s%x00%an%x00%cs",
+        "--format=%x00%H%x00%h%x00%s%x00%an%x00%cI",
         "HEAD",
         "--",
     ]
@@ -231,6 +231,136 @@ pub fn recent_commits(root: &Path) -> Result<Vec<Commit>, String> {
         return Err("Commit history is too large to load line totals.".into());
     }
     parse_commits(&String::from_utf8_lossy(&output))
+}
+
+/// Commit objects are immutable; never compare historical reviews with the worktree.
+fn validate_commit(id: &str) -> Result<(), String> {
+    if matches!(id.len(), 40 | 64) && id.bytes().all(|c| c.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err("Invalid commit ID".into())
+    }
+}
+
+pub fn commit_files(root: &Path, id: &str) -> Result<Vec<ChangedFile>, String> {
+    validate_commit(id)?;
+    let args: Vec<_> = [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "-r",
+        "-z",
+        "--name-status",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--diff-merges=first-parent",
+        id,
+        "--",
+    ]
+    .into_iter()
+    .map(std::ffi::OsStr::new)
+    .collect();
+    let (bytes, truncated) = git_bounded(root, &args, MAX_STATUS_BYTES)?;
+    if truncated {
+        return Err("Commit file list is too large to display.".into());
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|_| "Git paths contain unsupported text encoding")?;
+    let mut fields = text.split_terminator('\0');
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let first = fields.next().ok_or("Missing commit file path")?;
+        let (previous, path) = if status.starts_with(['R', 'C']) {
+            (
+                Some(PathBuf::from(first)),
+                fields.next().ok_or("Missing renamed path")?,
+            )
+        } else {
+            (None, first)
+        };
+        files.push(ChangedFile {
+            path: path.into(),
+            previous,
+            status: status.into(),
+        });
+    }
+    Ok(files)
+}
+
+pub fn commit_diff(root: &Path, id: &str, file: &ChangedFile) -> Result<String, String> {
+    validate_commit(id)?;
+    let paths: Vec<_> = std::iter::once(&file.path)
+        .chain(file.previous.iter())
+        .map(|path| format!(":(literal){}", path.to_string_lossy()))
+        .collect();
+    let mut args: Vec<_> = [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "-r",
+        "-p",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--diff-merges=first-parent",
+        id,
+        "--",
+    ]
+    .into_iter()
+    .map(std::ffi::OsStr::new)
+    .collect();
+    args.extend(paths.iter().map(std::ffi::OsStr::new));
+    let (bytes, truncated) = git_bounded(root, &args, MAX_PREVIEW_BYTES)?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.is_empty() {
+        text = "No textual changes (file metadata only).".into();
+    }
+    if truncated {
+        if let Some(end) = text.rfind('\n') {
+            text.truncate(end + 1);
+        }
+        text.push_str("… Diff preview truncated.\n");
+    }
+    Ok(text)
+}
+
+pub fn commit_date_label<T: chrono::TimeZone>(date: &str, now: chrono::DateTime<T>) -> String {
+    use chrono::Datelike;
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(date) else {
+        return date.into();
+    };
+    let at = at.with_timezone(&now.timezone());
+    let day = at.date_naive();
+    let today = now.date_naive();
+    if day == today {
+        let hours = (now - at).num_hours();
+        return if hours < 1 {
+            "Today".into()
+        } else if hours == 1 {
+            "1 hr ago".into()
+        } else {
+            format!("{hours} hrs ago")
+        };
+    }
+    if today.pred_opt() == Some(day) {
+        return "Yesterday".into();
+    }
+    let d = day.day();
+    let suffix = match (d % 100, d % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    let year = if day.year() == today.year() {
+        String::new()
+    } else {
+        format!(" {}", day.year())
+    };
+    format!("{d}{suffix} {}{year}", day.format("%b"))
 }
 
 fn parse_commits(output: &str) -> Result<Vec<Commit>, String> {
@@ -456,6 +586,117 @@ pub fn review_lines(text: &str) -> Vec<ReviewLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn friendly_commit_dates_follow_local_calendar_days() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-06T16:30:00+05:30").unwrap();
+        for (date, expected) in [
+            ("2026-11-06T16:00:00+05:30", "Today"),
+            ("2026-11-06T15:30:00+05:30", "1 hr ago"),
+            ("2026-11-06T12:30:00+05:30", "4 hrs ago"),
+            ("2026-11-05T23:59:00+05:30", "Yesterday"),
+            ("2026-11-05T23:30:00-05:00", "6 hrs ago"),
+            ("2026-10-05T12:00:00+05:30", "5th Oct"),
+            ("2026-10-01T12:00:00+05:30", "1st Oct"),
+            ("2026-10-02T12:00:00+05:30", "2nd Oct"),
+            ("2026-10-03T12:00:00+05:30", "3rd Oct"),
+            ("2026-10-11T12:00:00+05:30", "11th Oct"),
+            ("2026-10-12T12:00:00+05:30", "12th Oct"),
+            ("2026-10-13T12:00:00+05:30", "13th Oct"),
+            ("2025-11-06T12:00:00+05:30", "6th Nov 2025"),
+        ] {
+            assert_eq!(commit_date_label(date, now), expected, "{date}");
+        }
+    }
+
+    #[test]
+    fn historical_reviews_handle_roots_renames_deletions_binary_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]).unwrap();
+        git(root, &["config", "user.name", "Tester"]).unwrap();
+        git(root, &["config", "user.email", "test@example.invalid"]).unwrap();
+        let commit = |message: &str| {
+            git(root, &["add", "."]).unwrap();
+            git(root, &["commit", "--allow-empty", "-qm", message]).unwrap();
+            head_id(root).unwrap()
+        };
+        let unusual = ":(glob)*.txt";
+        std::fs::write(root.join(unusual), "before\n").unwrap();
+        std::fs::write(root.join("old\tname\n.txt"), "rename me\n").unwrap();
+        std::fs::write(root.join("delete.txt"), "gone\n").unwrap();
+        std::fs::write(root.join("binary"), b"old\0binary").unwrap();
+        let initial = commit("initial");
+        let files = commit_files(root, &initial).unwrap();
+        assert_eq!(files.len(), 4);
+        assert!(files.iter().all(|f| f.status == "A"));
+        let file = files.iter().find(|f| f.path == Path::new(unusual)).unwrap();
+        assert!(
+            commit_diff(root, &initial, file)
+                .unwrap()
+                .contains("+before")
+        );
+        git(root, &["mv", "old\tname\n.txt", "new name.txt"]).unwrap();
+        let rename = commit("rename");
+        let files = commit_files(root, &rename).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].previous.as_deref(),
+            Some(Path::new("old\tname\n.txt"))
+        );
+        assert!(
+            commit_diff(root, &rename, &files[0])
+                .unwrap()
+                .contains("rename to new name.txt")
+        );
+        std::fs::write(root.join(unusual), "after\n").unwrap();
+        std::fs::remove_file(root.join("delete.txt")).unwrap();
+        std::fs::write(root.join("binary"), b"new\0binary").unwrap();
+        let changed = commit("changes");
+        let empty = commit("empty");
+        assert!(commit_files(root, &empty).unwrap().is_empty());
+        // Current disk/index changes must never leak into an older commit's diff.
+        std::fs::write(root.join(unusual), "uncommitted\n").unwrap();
+        let files = commit_files(root, &changed).unwrap();
+        for file in &files {
+            let diff = commit_diff(root, &changed, file).unwrap();
+            assert!(!diff.contains("uncommitted"));
+            if file.path == Path::new(unusual) {
+                assert!(diff.contains("-before") && diff.contains("+after"));
+                assert!(
+                    !diff.contains("gone"),
+                    "literal path must not expand as a glob"
+                );
+            } else if file.path == Path::new("delete.txt") {
+                assert_eq!(file.status, "D");
+                assert!(diff.contains("-gone"));
+            } else {
+                assert!(diff.contains("Binary files"));
+            }
+        }
+        git(root, &["checkout", "-qb", "side"]).unwrap();
+        std::fs::write(root.join("side.txt"), "side\n").unwrap();
+        commit("side");
+        git(root, &["checkout", "-q", "-"]).unwrap();
+        git(root, &["merge", "--no-ff", "-qm", "merge", "side"]).unwrap();
+        let merge = head_id(root).unwrap();
+        let files = commit_files(root, &merge).unwrap();
+        assert!(files.iter().any(|f| f.path == Path::new("side.txt")));
+        assert!(
+            commit_diff(
+                root,
+                &merge,
+                files
+                    .iter()
+                    .find(|f| f.path == Path::new("side.txt"))
+                    .unwrap()
+            )
+            .unwrap()
+            .contains("+side")
+        );
+        assert!(commit_files(root, "--all").is_err());
+        assert!(commit_files(root, &"0".repeat(40)).is_err());
+    }
+
     #[test]
     fn commit_line_totals_handle_roots_renames_binary_and_empty_commits() {
         let dir = tempfile::tempdir().unwrap();
