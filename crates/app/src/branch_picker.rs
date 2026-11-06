@@ -1,5 +1,5 @@
 //! Searchable starting-branch selection for new sessions.
-use crate::{appearance, state::AppState, zoom::px as zpx};
+use crate::{appearance, state::AppState, ui, zoom::px as zpx};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
@@ -128,7 +128,7 @@ impl Render for BranchPicker {
                     .open(self.open)
                     .appearance(false)
                     .anchor(Anchor::TopLeft)
-                    .offset(zpx(6.))
+                    .offset(zpx(ui::SPACE_SM))
                     .trigger(
                         Button::new("session-branch")
                             .ghost()
@@ -149,11 +149,11 @@ impl Render for BranchPicker {
                                 h_flex()
                                     .min_w_0()
                                     .items_center()
-                                    .gap_1()
+                                    .gap(zpx(ui::SPACE_XS))
                                     .child(
                                         crate::icons::path("icons/git-branch.svg")
                                             .with_size(zpx(crate::icons::MARK_SIZE))
-                                            .text_color(appearance::rgba(0xffffff8c)),
+                                            .text_color(ui::secondary_text()),
                                     )
                                     .when(!compact, |row| {
                                         row.child(div().min_w_0().truncate().child(selected))
@@ -243,12 +243,12 @@ impl Render for BranchPanel {
         self.highlighted = self.highlighted.min(choices.len().saturating_sub(1));
         let bounds = self.bounds.get();
         let available = window.viewport_size().height - bounds.bottom();
-        let content_height = zpx(choices.len().max(1) as f32 * 28.);
-        let limit = (available - zpx(58.)).clamp(zpx(28.), zpx(224.));
+        let content_height = zpx(choices.len().max(1) as f32 * ui::ROW_MENU);
+        let limit = (available - zpx(58.)).clamp(zpx(ui::ROW_MENU), zpx(224.));
         // End on a partial row so overflow is visible before the first scroll.
         let height = if content_height > limit {
-            let rows = ((limit / zpx(28.)) - 0.65).floor().max(0.);
-            zpx((rows + 0.65) * 28.).min(limit)
+            let rows = ((limit / zpx(ui::ROW_MENU)) - 0.65).floor().max(0.);
+            zpx((rows + 0.65) * ui::ROW_MENU).min(limit)
         } else {
             content_height
         };
@@ -272,7 +272,7 @@ impl Render for BranchPanel {
                     }
                     "up" | "down" | "pageup" | "pagedown" => {
                         let step = if key.key.starts_with("page") {
-                            (this.scroll.bounds().size.height / zpx(28.))
+                            (this.scroll.bounds().size.height / zpx(ui::ROW_MENU))
                                 .floor()
                                 .max(1.) as usize
                         } else {
@@ -294,12 +294,11 @@ impl Render for BranchPanel {
                 cx.stop_propagation();
             }))
             .w(zpx(320.).min(window.viewport_size().width - zpx(24.)))
-            .p_2()
-            .gap_1()
-            .rounded_lg()
-            .bg(appearance::popup_surface())
-            .border_1()
-            .border_color(appearance::separator())
+            .p(zpx(ui::SPACE_SM))
+            .gap(zpx(ui::SPACE_XS))
+            // The one floating surface: popover fill, ring, shadow and radius.
+            .popover_style(cx)
+            .rounded(zpx(ui::RADIUS_POPOVER))
             .overflow_hidden()
             .child(
                 Input::new(&self.search)
@@ -322,14 +321,7 @@ impl Render for BranchPanel {
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
                             .when(choices.is_empty(), |list| {
-                                list.child(
-                                    div()
-                                        .h(zpx(28.))
-                                        .px_2()
-                                        .text_size(zpx(12.))
-                                        .text_color(appearance::rgba(0xffffff80))
-                                        .child("No branches found"),
-                                )
+                                list.child(ui::empty_note("No branches found"))
                             })
                             .children(choices.into_iter().enumerate().map(|(index, branch)| {
                                 let checked = branch == self.selected;
@@ -337,29 +329,32 @@ impl Render for BranchPanel {
                                     .debug_selector(move || format!("branch-choice-{index}"))
                                     .ghost()
                                     .w_full()
-                                    .h(zpx(28.))
+                                    .h(zpx(ui::ROW_MENU))
                                     .flex_none()
-                                    .px_2()
+                                    .px(zpx(ui::SPACE_MD))
+                                    .gap(zpx(ui::SPACE_MD))
                                     .justify_start()
                                     .text_size(zpx(del_core::typography::TEXT_MD))
                                     .accessibility_label(branch.clone())
                                     .when(index == self.highlighted, |button| {
-                                        button.bg(appearance::rgba(0xffffff14))
+                                        button.bg(ui::row_selected())
                                     })
+                                    // Leading, in a fixed slot, as in the model picker.
+                                    .child(div().size(zpx(crate::icons::MARK_SIZE)).flex_none().when(
+                                        checked,
+                                        |slot| {
+                                            slot.child(
+                                                crate::icons::icon(IconName::Check)
+                                                    .with_size(zpx(crate::icons::MARK_SIZE)),
+                                            )
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .child(crate::sidebar::fading_title(branch.clone())),
                                     )
-                                    // Trailing, so names line up with the search text.
-                                    .when(checked, |row| {
-                                        row.child(
-                                            crate::icons::icon(IconName::Check)
-                                                .with_size(zpx(12.))
-                                                .flex_none(),
-                                        )
-                                    })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(BranchChosen(Some(branch.clone())))
                                     }))

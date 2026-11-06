@@ -259,7 +259,12 @@ impl Render for ModelPicker {
                     } else {
                         Anchor::TopLeft
                     })
-                    .offset(zpx(20.))
+                    // The same gap as every other picker.
+                    .offset(zpx(crate::ui::SPACE_SM))
+                    // Side chat's picker closes without the fade for now: its
+                    // regression test (side_chat.rs) checks the picker is gone
+                    // on the frame after Escape.
+                    .exit_motion(matches!(self.state, ModelSource::Main(_)))
                     .trigger(
                         Button::new("model-picker-trigger")
                             .ghost()
@@ -272,7 +277,19 @@ impl Render for ModelPicker {
                             .text_size(zpx(13.))
                             .text_color(rgba(crate::composer_ui::CONTROL_TEXT))
                             .disabled(state.locked)
-                            .tooltip_with_action("Select model", &crate::SelectModel, None)
+                            .tooltip_with_action(
+                                match (&self.state, state.locked) {
+                                    (_, false) => "Select model",
+                                    (ModelSource::Main(_), true) => {
+                                        "Can’t change the model while the session starts"
+                                    }
+                                    (ModelSource::Side(_), true) => {
+                                        "Can’t change the model while a reply is running"
+                                    }
+                                },
+                                &crate::SelectModel,
+                                None,
+                            )
                             .accessibility_label(format!(
                                 "Select model: {label}{}",
                                 effort
@@ -283,7 +300,7 @@ impl Render for ModelPicker {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .gap_1()
+                                    .gap(zpx(crate::ui::SPACE_XS))
                                     .items_center()
                                     .child(div().min_w_0().truncate().child(label))
                                     .when_some(effort, |row, effort| {
@@ -337,7 +354,6 @@ struct ModelPanel {
     models: bool,
     levels: Vec<EffortOption>,
     effort_index: usize,
-    previous_effort_index: usize,
     trigger_bottom: Rc<Cell<Pixels>>,
     model_scroll: ScrollHandle,
     search: Entity<InputState>,
@@ -367,7 +383,6 @@ impl ModelPanel {
             return;
         }
         let effort = Some(level.id.clone());
-        self.previous_effort_index = self.effort_index;
         self.effort_index = index;
         self.state.apply(ModelChange::Effort(effort), cx);
         crate::haptics::tick();
@@ -395,7 +410,6 @@ impl ModelPanel {
             models: true,
             levels: vec![],
             effort_index: 0,
-            previous_effort_index: 0,
             trigger_bottom,
             model_scroll: ScrollHandle::new(),
             search,
@@ -408,8 +422,6 @@ impl ModelPanel {
 
 impl Render for ModelPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let effort_motion =
-            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 180 });
         let state = self.state.read(cx);
         let available_height = if state.above {
             self.trigger_bottom.get() - zpx(28.)
@@ -428,7 +440,7 @@ impl Render for ModelPanel {
         let fast = state.tier.is_some();
         let supports_fast = info.as_ref().is_some_and(|m| m.fast_tier.is_some());
         let locked = state.locked;
-        let muted = rgba(0xffffff80);
+        let muted = crate::ui::secondary_text();
         let models = self.models;
         let root = v_flex()
             .id("model-panel")
@@ -467,13 +479,11 @@ impl Render for ModelPanel {
                 }
             }))
             .w(zpx(278.))
-            .p_3()
-            .gap_3()
-            .rounded(zpx(10.))
-            .bg(crate::appearance::popup_surface())
-            .border_1()
-            .border_color(crate::appearance::separator())
-            .shadow_lg()
+            .p(zpx(crate::ui::SPACE_LG))
+            .gap(zpx(crate::ui::SPACE_LG))
+            // The one floating surface: popover fill, ring and shadow.
+            .popover_style(cx)
+            .rounded(zpx(crate::ui::RADIUS_POPOVER))
             .text_size(zpx(13.));
         if self.models {
             let query = self.search.read(cx).value().to_string();
@@ -499,14 +509,14 @@ impl Render for ModelPanel {
                 .collect();
             let model_count = self.choices.len();
             self.highlighted = self.highlighted.filter(|index| *index < model_count);
-            let catalog_notice = if catalog.loading {
-                Some("Loading available models…")
-            } else if catalog.error.is_some() {
-                Some("Couldn’t load models. Refresh to try again.")
+            let catalog_notice: Option<SharedString> = if catalog.loading {
+                Some("Loading available models…".into())
+            } else if let Some(error) = &catalog.error {
+                Some(catalog_error_notice(provider, error).into())
             } else if catalog.loaded && catalog.models.is_empty() {
-                Some("No models returned. Use Automatic or Refresh to try again.")
+                Some("No models returned. Use Automatic or Refresh to try again.".into())
             } else if model_count == 0 {
-                Some("No matching models. Try another search.")
+                Some("No matching models. Try another search.".into())
             } else {
                 None
             };
@@ -514,14 +524,14 @@ impl Render for ModelPanel {
             let list_height = zpx(model_count.max(1) as f32 * 42.)
                 .min((available_height - zpx(84. + notice_height)).clamp(zpx(42.), zpx(240.)));
             let scroll = self.model_scroll.clone();
-            let mut list = v_flex().gap_0p5().when(show_default, |list| {
+            let mut list = v_flex().gap(zpx(crate::ui::SPACE_2XS)).when(show_default, |list| {
                 list.child(
                     Button::new("model-default")
                         .size(crate::icons::button_size())
                         .p_0()
                         .accessibility_label(format!("{default_label} (automatic)"))
                         .when(self.highlighted == Some(0), |button| {
-                            button.bg(rgba(0xffffff14))
+                            button.bg(crate::ui::row_selected())
                         })
                         .ghost()
                         .w_full()
@@ -541,7 +551,7 @@ impl Render for ModelPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
-                                .gap_0p5()
+                                .gap(zpx(crate::ui::SPACE_2XS))
                                 .child(div().w_full().truncate().child(default_label.clone()))
                                 // "Automatic" keeps this distinct from choosing the same model
                                 // explicitly, without repeating itself when nothing resolved.
@@ -575,7 +585,7 @@ impl Render for ModelPanel {
                         .p_0()
                         .accessibility_label(model.name.clone())
                         .when(self.highlighted == Some(choice_index), |button| {
-                            button.bg(rgba(0xffffff14))
+                            button.bg(crate::ui::row_selected())
                         })
                         .ghost()
                         .w_full()
@@ -599,7 +609,7 @@ impl Render for ModelPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
-                                .gap_0p5()
+                                .gap(zpx(crate::ui::SPACE_2XS))
                                 .child(div().w_full().truncate().child(model.name.clone()))
                                 .when(!model.description.is_empty(), |col| {
                                     col.child(
@@ -663,22 +673,27 @@ impl Render for ModelPanel {
                         _ => {}
                     }
                 }))
-                .p_2p5()
-                .gap_2()
-                .text_size(zpx(12.))
+                .p(zpx(crate::ui::SPACE_MD))
+                .gap(zpx(crate::ui::SPACE_MD))
                 .child(
                     h_flex()
                         .justify_between()
                         .items_center()
-                        .gap_2()
+                        .gap(zpx(crate::ui::SPACE_MD))
                         .child(
+                            // The same search field as Cmd-K: 13 pt text and a
+                            // secondary-text lens.
                             div().flex_1().min_w_0().child(
                                 Input::new(&self.search)
                                     .small()
+                                    .text_size(zpx(13.))
                                     .appearance(false)
                                     .bordered(false)
                                     .cleanable(true)
-                                    .prefix(crate::icons::icon(IconName::Search).text_color(muted)),
+                                    .prefix(
+                                        crate::icons::icon(IconName::Search)
+                                            .text_color(crate::ui::secondary_text()),
+                                    ),
                             ),
                         )
                         .child({
@@ -756,7 +771,7 @@ impl Render for ModelPanel {
                             .id("model-catalog-notice")
                             .debug_selector(|| "model-catalog-notice".into())
                             .role(Role::Status)
-                            .px_2()
+                            .px(zpx(crate::ui::SPACE_MD))
                             .text_size(zpx(del_core::typography::TEXT_SM))
                             .line_height(relative(1.4))
                             .text_color(crate::appearance::secondary_text())
@@ -774,10 +789,7 @@ impl Render for ModelPanel {
             .and_then(|e| self.levels.iter().position(|v| &v.id == e));
         let index = selected_index.unwrap_or(0);
         let max = self.levels.len().saturating_sub(1).max(1) as f32;
-        if self.effort_index != index {
-            self.previous_effort_index = self.effort_index;
-            self.effort_index = index;
-        }
+        self.effort_index = index;
         let effort_label = effort_label(effort.as_deref(), info.as_ref());
         let model_name = model_label(selected.as_deref(), info.as_ref());
         root.child(
@@ -807,7 +819,7 @@ impl Render for ModelPanel {
                         .child(crate::icons::path("icons/zap.svg").text_color(if fast {
                             accent
                         } else {
-                            rgba(0xffffff70)
+                            crate::ui::secondary_text()
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.apply(ModelChange::Fast(!fast), cx);
@@ -826,7 +838,7 @@ impl Render for ModelPanel {
                                 .w_full()
                                 .min_w_0()
                                 .items_center()
-                                .gap_1()
+                                .gap(zpx(crate::ui::SPACE_XS))
                                 .child(div().flex_1().min_w_0().truncate().child(model_name))
                                 .when_some(effort_label, |row, effort| {
                                     row.child(
@@ -839,7 +851,7 @@ impl Render for ModelPanel {
                                 .child(
                                     crate::icons::icon(IconName::ChevronRight)
                                         .flex_none()
-                                        .text_color(rgba(0xffffff62)),
+                                        .text_color(crate::ui::faint_text()),
                                 ),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -857,7 +869,7 @@ impl Render for ModelPanel {
                         .p_0()
                         .accessibility_label("Reset model settings and refresh")
                         .tooltip("Reset model settings and refresh")
-                        .text_color(rgba(0xffffff70))
+                        .text_color(crate::ui::secondary_text())
                         .disabled(locked || catalog.loading)
                         .on_click(
                             cx.listener(|this, _, _, cx| this.state.apply(ModelChange::Reset, cx)),
@@ -866,7 +878,11 @@ impl Render for ModelPanel {
                         "reset-effort-motion",
                         !locked && !catalog.loading,
                         move |motion| {
-                            button.child(motion.glyph(Glyph::Refresh).text_color(rgba(0xffffff70)))
+                            button.child(
+                                motion
+                                    .glyph(Glyph::Refresh)
+                                    .text_color(crate::ui::secondary_text()),
+                            )
                         },
                     )
                 }),
@@ -884,10 +900,17 @@ impl Render for ModelPanel {
                     travel * value as f32 / max
                 }
             };
-            let old_position = position(self.previous_effort_index.min(self.levels.len() - 1));
-            let new_position = position(self.effort_index);
-            let old_fill = old_position + TRACK_INSET;
-            let new_fill = new_position + TRACK_INSET;
+            // One interruptible value: a new level eases on from wherever the
+            // thumb is now, so rapid clicks, drags and arrow keys never jump back.
+            let thumb = gpui_kit::base::transition(
+                "effort-thumb",
+                position(self.effort_index),
+                gpui_kit::base::Transition::new(std::time::Duration::from_millis(180))
+                    .ease(ease_out_quint()),
+                window,
+                cx,
+            );
+            let fill_width = thumb + TRACK_INSET;
             let stops = self.levels.len();
 
             col.child(
@@ -933,15 +956,7 @@ impl Render for ModelPanel {
                                     .rounded(zpx(12.))
                                     .bg(accent)
                                     .opacity(if selected_index.is_some() { 1.0 } else { 0.0 })
-                                    .with_animation(
-                                        SharedString::from(format!(
-                                            "effort-fill-{old_fill}-{new_fill}"
-                                        )),
-                                        Animation::new(effort_motion).with_easing(ease_out_quint()),
-                                        move |fill, t| {
-                                            fill.w(zpx(old_fill + (new_fill - old_fill) * t))
-                                        },
-                                    ),
+                                    .w(zpx(fill_width)),
                             ),
                     )
                     .child(
@@ -968,16 +983,7 @@ impl Render for ModelPanel {
                             .bg(rgb(0xf4f4f4))
                             .opacity(if selected_index.is_some() { 1.0 } else { 0.0 })
                             .shadow_md()
-                            .with_animation(
-                                SharedString::from(format!(
-                                    "effort-thumb-{old_position}-{new_position}"
-                                )),
-                                Animation::new(effort_motion).with_easing(ease_out_quint()),
-                                move |thumb, t| {
-                                    thumb
-                                        .left(zpx(old_position + (new_position - old_position) * t))
-                                },
-                            ),
+                            .left(zpx(thumb)),
                     )
                     .children((0..stops).map(|stop| {
                         div()
@@ -1007,6 +1013,54 @@ impl Render for ModelPanel {
             ))
         })
         .into_any_element()
+    }
+}
+
+/// A short, actionable reason for a failed model list. Signed-out and missing
+/// CLIs say so, because Refresh cannot fix them; anything else shows its first
+/// line, clipped, and offers Refresh.
+fn catalog_error_notice(provider: Provider, error: &str) -> String {
+    let name = crate::providers::display_name(provider);
+    let lower = error.to_lowercase();
+    let signed_out = [
+        "not signed in",
+        "not logged in",
+        "sign in",
+        "log in",
+        "login",
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "401",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if signed_out {
+        return format!("Sign in to {name} to load its models.");
+    }
+    let missing = [
+        "not installed",
+        "not found",
+        "no such file",
+        "could not find",
+        "executable",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if missing {
+        return format!("{name} is not installed. Install its CLI to load models.");
+    }
+    let reason = error.lines().map(str::trim).find(|line| !line.is_empty());
+    match reason {
+        Some(reason) => {
+            let mut reason: String = reason.chars().take(80).collect();
+            if reason.chars().count() < error.trim().chars().count() && reason.len() >= 80 {
+                reason.push('…');
+            }
+            let reason = reason.trim_end_matches('.');
+            format!("Could not load models: {reason}. Refresh to try again.")
+        }
+        None => "Could not load models. Refresh to try again.".into(),
     }
 }
 
@@ -1260,6 +1314,28 @@ mod tests {
                 assert_eq!(state.model.as_deref(), saved); // Display never pins the model.
             }
         }
+    }
+
+    #[test]
+    fn catalog_errors_explain_what_refresh_cannot_fix() {
+        use super::catalog_error_notice;
+        use del_agent::Provider;
+        assert_eq!(
+            catalog_error_notice(Provider::Claude, "Error: not logged in. Run claude login"),
+            "Sign in to Claude to load its models."
+        );
+        assert_eq!(
+            catalog_error_notice(Provider::Codex, "spawn codex: No such file or directory"),
+            "Codex is not installed. Install its CLI to load models."
+        );
+        assert_eq!(
+            catalog_error_notice(Provider::OpenCode, "\nrequest timed out.\nmore detail"),
+            "Could not load models: request timed out. Refresh to try again."
+        );
+        assert_eq!(
+            catalog_error_notice(Provider::Codex, "  "),
+            "Could not load models. Refresh to try again."
+        );
     }
 
     #[test]
