@@ -18,6 +18,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+#[path = "commit_review.rs"]
+mod commit_review;
+use commit_review::{CommitReview, render_review};
+
 pub const PANEL_MIN_WIDTH: f32 = 320.0;
 pub const PANEL_WIDTH: f32 = 360.0;
 const MONO: &str = del_core::typography::MONO_FONT;
@@ -66,6 +70,9 @@ fn history_skeleton_bar(key: u32, width: f32, height: f32, animate: bool) -> Any
 
 /// A file's diff parsed once per load, not on every render.
 struct ChangeReview {
+    files: Vec<gpui_kit::component::diff::DiffFile>,
+    viewer: std::cell::RefCell<Option<Entity<gpui_kit::component::diff::DiffState>>>,
+    scroll: ScrollHandle,
     lines: Vec<crate::workspace_files::ReviewLine>,
     added: usize,
     removed: usize,
@@ -77,6 +84,9 @@ impl ChangeReview {
         let added = lines.iter().filter(|line| line.kind == '+').count();
         let removed = lines.iter().filter(|line| line.kind == '-').count();
         Self {
+            files: gpui_kit::component::diff::DiffFile::parse(text).unwrap_or_default(),
+            viewer: Default::default(),
+            scroll: ScrollHandle::new(),
             lines,
             added,
             removed,
@@ -485,6 +495,7 @@ pub struct RightPanel {
     file_error: Option<String>,
     change_files: Vec<crate::workspace_files::ChangedFile>,
     change_commits: Vec<crate::workspace_files::Commit>,
+    commit_reviews: HashMap<String, CommitReview>,
     change_root: PathBuf,
     change_diffs: HashMap<PathBuf, String>,
     change_reviews: HashMap<PathBuf, Rc<ChangeReview>>,
@@ -493,6 +504,7 @@ pub struct RightPanel {
     change_expanded: HashSet<PathBuf>,
     change_error: Option<String>,
     change_request: u64,
+    change_date_minute: i64,
     changes_loading: bool,
     changes_watch: Option<Task<()>>,
 
@@ -2110,6 +2122,7 @@ impl RightPanel {
             file_error: None,
             change_files: Vec::new(),
             change_commits: Vec::new(),
+            commit_reviews: HashMap::new(),
             change_root: PathBuf::new(),
             change_diffs: HashMap::new(),
             change_reviews: HashMap::new(),
@@ -2117,6 +2130,7 @@ impl RightPanel {
             change_expanded: HashSet::new(),
             change_error: None,
             change_request: 0,
+            change_date_minute: 0,
             changes_loading: false,
             changes_watch: None,
             browser: None,
@@ -2152,6 +2166,7 @@ impl RightPanel {
             self.change_request += 1;
             self.change_files.clear();
             self.change_commits.clear();
+            self.commit_reviews.clear();
             self.change_diffs.clear();
             self.change_reviews.clear();
             self.change_omitted = 0;
@@ -2838,6 +2853,69 @@ impl RightPanel {
             )
     }
 
+    fn render_dotfiles_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_hidden = self.show_hidden;
+        h_flex()
+            .id("show-hidden-files")
+            .debug_selector(|| "files-dotfiles-toggle".into())
+            .keyboard_control()
+            .role(Role::Button)
+            .aria_label(if show_hidden {
+                "Hide dotfiles"
+            } else {
+                "Show dotfiles"
+            })
+            .ml_auto()
+            .gap(zpx(5.0))
+            .items_center()
+            .cursor_pointer()
+            .hover(|control| control.opacity(0.85))
+            .text_size(zpx(TEXT_SM))
+            .text_color(crate::appearance::secondary_text())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_hidden = !this.show_hidden;
+                this.directory_entries.clear();
+                this.refresh_tree(cx);
+                cx.notify();
+            }))
+            .child("Dotfiles")
+            .child(
+                div()
+                    .relative()
+                    .w(zpx(22.0))
+                    .h(zpx(12.0))
+                    .rounded_full()
+                    .bg(if show_hidden {
+                        ActionTone::Accent.foreground()
+                    } else {
+                        rgba(0xffffff20)
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(zpx(2.0))
+                            .size(zpx(8.0))
+                            .rounded_full()
+                            .bg(rgba(0xffffffe6))
+                            .with_animation(
+                                SharedString::from(format!("hidden-files-thumb-{}", show_hidden)),
+                                Animation::new(std::time::Duration::from_millis(
+                                    if cx.reduce_motion() { 0 } else { 120 },
+                                ))
+                                .with_easing(ease_out_quint()),
+                                move |thumb, t| {
+                                    let (from, to) = if show_hidden {
+                                        (2.0, 12.0)
+                                    } else {
+                                        (12.0, 2.0)
+                                    };
+                                    thumb.left(zpx(from + (to - from) * t))
+                                },
+                            ),
+                    ),
+            )
+    }
+
     fn render_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_editor(window, cx);
         let rows = self.rows.clone();
@@ -3167,7 +3245,7 @@ impl RightPanel {
         let start_y = split_drag.start_y.clone();
         let start_height = split_drag.start_height.clone();
         let measured_start = measured_tree_height.clone();
-        v_flex()
+        let layout = v_flex()
             .debug_selector(|| "files-layout".into())
             .size_full()
             .on_children_prepainted(move |bounds, _, _| {
@@ -3231,7 +3309,21 @@ impl RightPanel {
                     .min_w_0()
                     .overflow_hidden()
                     .child(preview),
+            );
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .debug_selector(|| "files-toolbar".into())
+                    .w_full()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .items_center()
+                    .child(self.render_dotfiles_toggle(cx)),
             )
+            .child(div().flex_1().min_h_0().child(layout))
     }
 
     fn ensure_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3485,7 +3577,10 @@ impl RightPanel {
                 }
                 this.changes_loading = false;
                 // "Loading changes…" shows only while the list is empty.
-                let mut changed = this.change_files.is_empty() && this.change_commits.is_empty();
+                let minute = chrono::Local::now().timestamp() / 60;
+                let mut changed = (this.change_files.is_empty() && this.change_commits.is_empty())
+                    || (!this.change_commits.is_empty() && this.change_date_minute != minute);
+                this.change_date_minute = minute;
                 match result {
                     Ok((root, files, omitted, diffs, commits)) => {
                         if this.change_error.is_none()
@@ -3514,6 +3609,12 @@ impl RightPanel {
                                     )
                                 })
                                 .collect();
+                            if this.change_root != root {
+                                this.commit_reviews.clear();
+                            } else if !commits.is_empty() {
+                                this.commit_reviews
+                                    .retain(|id, _| commits.iter().any(|c| &c.id == id));
+                            }
                             this.change_root = root;
                             this.change_error = None;
                             this.change_expanded.retain(|path| diffs.contains_key(path));
@@ -3604,58 +3705,12 @@ impl RightPanel {
                                 .child("Recent commits")
                                 .child(format!("{} total", self.change_commits.len())),
                         )
-                        .children(self.change_commits.iter().map(|commit| {
-                            v_flex()
-                                .id(SharedString::from(commit.id.clone()))
-                                .w_full()
-                                .min_w_0()
-                                .flex_none()
-                                .px_3()
-                                .py_2()
-                                .gap_1()
-                                .border_t_1()
-                                .border_color(rgba(0xffffff14))
-                                .child(
-                                    div()
-                                        .text_size(zpx(TEXT_MD))
-                                        .whitespace_normal()
-                                        .child(commit.subject.clone()),
-                                )
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .gap_2()
-                                        .items_baseline()
-                                        .text_size(zpx(TEXT_SM))
-                                        .text_color(crate::appearance::secondary_text())
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(ActionTone::Success.foreground())
-                                                .child(format!("+{}", commit.added)),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(ActionTone::Danger.foreground())
-                                                .child(format!("−{}", commit.removed)),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(commit.author.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_family(MONO)
-                                                .flex_none()
-                                                .child(commit.short_id.clone()),
-                                        )
-                                        .child(div().flex_none().child(commit.date.clone())),
-                                )
-                        })),
+                        .children(
+                            self.change_commits
+                                .iter()
+                                .enumerate()
+                                .map(|(index, commit)| self.render_commit(commit, index, cx)),
+                        ),
                 )
             })
             .when(!self.change_files.is_empty(), |view| {
@@ -3721,6 +3776,7 @@ impl RightPanel {
                                 .with_size(zpx(11.))
                                 .text_color(rgba(0xffffff66)),
                             )
+                            .child(commit_review::file_icon(&path))
                             .child(
                                 div()
                                     .flex_1()
@@ -3753,70 +3809,7 @@ impl RightPanel {
                             })),
                     )
                     .when_some(review.filter(|_| expanded), |view, review| {
-                        let hidden = review.lines.len().saturating_sub(MAX_REVIEW_LINES);
-                        view.child(
-                            v_flex()
-                                .id(("file-diff", index))
-                                .overflow_x_scroll()
-                                .max_h(zpx(600.))
-                                .overflow_y_scroll()
-                                .children(review.lines.iter().take(MAX_REVIEW_LINES).map(|line| {
-                                    let fill = match line.kind {
-                                        '+' => 0x45cf7845,
-                                        '-' => 0xff6b6b45,
-                                        _ => 0x00000000,
-                                    };
-                                    h_flex()
-                                        .px_2()
-                                        .gap_2()
-                                        .flex_none()
-                                        .bg(rgba(fill))
-                                        .font_family(MONO)
-                                        .text_size(zpx(TEXT_SM))
-                                        .line_height(relative(1.6))
-                                        .child(
-                                            div()
-                                                .w(zpx(32.))
-                                                .flex_none()
-                                                .text_color(rgba(0xffffff70))
-                                                .child(
-                                                    line.old
-                                                        .map(|n| n.to_string())
-                                                        .unwrap_or_default(),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .w(zpx(32.))
-                                                .flex_none()
-                                                .text_color(rgba(0xffffff70))
-                                                .child(
-                                                    line.new
-                                                        .map(|n| n.to_string())
-                                                        .unwrap_or_default(),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .child(format!("{} {}", line.kind, line.text)),
-                                        )
-                                }))
-                                .when(hidden > 0, |list| {
-                                    list.child(
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .flex_none()
-                                            .text_size(zpx(TEXT_SM))
-                                            .text_color(crate::appearance::secondary_text())
-                                            .child(format!(
-                                                "{hidden} more {} not shown",
-                                                if hidden == 1 { "line" } else { "lines" }
-                                            )),
-                                    )
-                                }),
-                        )
+                        view.child(render_review(("file-diff", index).into(), review))
                     })
             }))
             .when(self.change_omitted > 0, |view| {
@@ -3875,7 +3868,6 @@ impl RightPanel {
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
-        let show_hidden = self.show_hidden;
         let transfer_bounds = self.transfer_bounds.clone();
         let mut tab_elements = Vec::new();
         let keys = self.sidebar_keys();
@@ -4050,67 +4042,6 @@ impl RightPanel {
                     .hover(|button| button.bg(rgba(0xffffff14)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
                     .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),
-            )
-            .when(
-                self.pane == Pane::Files && self.active_hosted.is_none(),
-                |row| {
-                    row.child(
-                        h_flex()
-                            .id("show-hidden-files")
-                            .ml_auto()
-                            .gap(zpx(5.0))
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|control| control.opacity(0.85))
-                            .text_size(zpx(TEXT_SM))
-                            .text_color(crate::appearance::secondary_text())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_hidden = !this.show_hidden;
-                                this.directory_entries.clear();
-                                this.refresh_tree(cx);
-                                cx.notify();
-                            }))
-                            .child("Dotfiles")
-                            .child(
-                                div()
-                                    .relative()
-                                    .w(zpx(22.0))
-                                    .h(zpx(12.0))
-                                    .rounded_full()
-                                    .bg(if show_hidden {
-                                        ActionTone::Accent.foreground()
-                                    } else {
-                                        rgba(0xffffff20)
-                                    })
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .top(zpx(2.0))
-                                            .size(zpx(8.0))
-                                            .rounded_full()
-                                            .bg(rgba(0xffffffe6))
-                                            .with_animation(
-                                                SharedString::from(format!(
-                                                    "hidden-files-thumb-{}",
-                                                    show_hidden
-                                                )),
-                                                Animation::new(std::time::Duration::from_millis(
-                                                    if cx.reduce_motion() { 0 } else { 120 },
-                                                ))
-                                                .with_easing(ease_out_quint()),
-                                                move |thumb, t| {
-                                                    let (from, to) = if show_hidden {
-                                                        (2.0, 12.0)
-                                                    } else {
-                                                        (12.0, 2.0)
-                                                    };
-                                                    thumb.left(zpx(from + (to - from) * t))
-                                                },
-                                            ),
-                                    ),
-                            ),
-                    )
-                },
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
@@ -5513,6 +5444,86 @@ mod tests {
                 (1, 0)
             );
         });
+        let copy = cx.debug_bounds("history-copy-0").unwrap();
+        cx.simulate_mouse_down(copy.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(copy.center(), MouseButton::Left, Default::default());
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(panel.change_commits[0].id.as_str())
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("history-file-0-0").is_none(),
+            "copy does not expand the commit"
+        );
+        // Exercise both disclosure levels through the rendered click targets.
+        let commit_row = cx.debug_bounds("history-commit-0").unwrap();
+        cx.simulate_mouse_down(commit_row.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(commit_row.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        let file_row = cx.debug_bounds("history-file-0-0").unwrap();
+        assert!(
+            file_row.origin.x > commit_row.origin.x,
+            "files are indented under the commit"
+        );
+        assert!(cx.debug_bounds("history-diff-0-0").is_none());
+        cx.simulate_mouse_down(file_row.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(file_row.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        let diff = cx.debug_bounds("history-diff-0-0").unwrap();
+        assert!(
+            diff.origin.x > file_row.origin.x,
+            "diff is nested under the file"
+        );
+        panel.update(cx, |panel, cx| panel.refresh_changes(cx));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        assert!(
+            cx.debug_bounds("history-diff-0-0").is_some(),
+            "polling retains expanded history"
+        );
+        cx.simulate_mouse_down(commit_row.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(commit_row.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("history-file-0-0").is_none());
+        cx.simulate_mouse_down(commit_row.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(commit_row.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        assert!(
+            cx.debug_bounds("history-diff-0-0").is_some(),
+            "reopening retains file disclosure"
+        );
         // Untracked files, unstaged changes, and staged-only changes all hide history.
         for kind in ["untracked", "unstaged", "staged"] {
             if kind == "untracked" {
@@ -5823,6 +5834,39 @@ mod tests {
                 panel.file_tree_height
             )
         });
+    }
+
+    #[::gpui::test]
+    fn dotfiles_toggle_lives_in_files_content_and_still_filters(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".hidden"), "hidden").unwrap();
+        let (panel, cx) =
+            cx.add_window_view(|window, cx| legacy_panel(dir.path().into(), window, cx));
+        cx.run_until_parked();
+        let toolbar = cx.debug_bounds("files-toolbar").unwrap();
+        let toggle = cx.debug_bounds("files-dotfiles-toggle").unwrap();
+        let tabs = cx.debug_bounds("sidebar-tool-tabs").unwrap();
+        assert!(toolbar.origin.y >= tabs.bottom());
+        assert!(toggle.origin.y >= toolbar.origin.y && toggle.bottom() <= toolbar.bottom());
+        cx.simulate_mouse_down(toggle.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(toggle.center(), MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.show_hidden);
+            assert!(
+                panel
+                    .rows
+                    .iter()
+                    .any(|(path, _, _)| path.ends_with(".hidden"))
+            );
+        });
+        panel.update(cx, |panel, cx| {
+            panel.pane = Pane::Changes;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("files-dotfiles-toggle").is_none());
     }
 
     #[::gpui::test]
