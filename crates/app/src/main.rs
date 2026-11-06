@@ -3096,26 +3096,26 @@ impl Render for AppShell {
                     "Shell"
                 },
             )
-            .capture_action(
-                cx.listener(|this, _: &gpui_kit::component::input::MoveDown, _, cx| {
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
                     if this
                         .command_menu
-                        .update(cx, |menu, cx| menu.navigate(1, cx))
+                        .update(cx, |menu, cx| menu.navigate(1, window, cx))
                     {
                         cx.stop_propagation();
                     }
-                }),
-            )
-            .capture_action(
-                cx.listener(|this, _: &gpui_kit::component::input::MoveUp, _, cx| {
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
                     if this
                         .command_menu
-                        .update(cx, |menu, cx| menu.navigate(-1, cx))
+                        .update(cx, |menu, cx| menu.navigate(-1, window, cx))
                     {
                         cx.stop_propagation();
                     }
-                }),
-            )
+                },
+            ))
             .capture_action(cx.listener(
                 |this, action: &gpui_kit::component::input::Enter, window, cx| {
                     if !action.shift
@@ -3140,18 +3140,20 @@ impl Render for AppShell {
                     }
                 },
             ))
-            .capture_action(
-                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, window, cx| {
                     if this.state.read(cx).project_renaming.is_some()
                         || this.state.read(cx).renaming.is_some()
                     {
                         this.state.update(cx, |s, cx| s.finish_rename(None, cx));
                         cx.stop_propagation();
-                    } else if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
+                    } else if this.composer.read(cx).focus_handle(cx).is_focused(window)
+                        && this.command_menu.update(cx, |menu, cx| menu.dismiss(cx))
+                    {
                         cx.stop_propagation();
                     }
-                }),
-            )
+                },
+            ))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && this.state.read(cx).panel == Panel::Providers
                 {

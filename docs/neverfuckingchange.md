@@ -292,6 +292,14 @@ This records the final decisions, including corrections to earlier experiments.
   the active slash word when choosing a completion; preserve surrounding text,
   selected skill identities, and trailing instructions. Already selected skills
   remain excluded from suggestions.
+- Side chats use that same slash menu, including mid-prompt completion and
+  Up/Down, Enter, Tab, and Escape. Catalog discovery uses the Side chat's own
+  provider, account, and directory, refreshing on settings changes. Omit `/chat`
+  and `/terminal`; preserve the other provider-advertised commands. Selecting a
+  completion never sends a message. Skills and goal mode survive draft restoration
+  and queued-message editing. Fast controls affect only the Side chat and report
+  unsupported or locked changes without sending or discarding the draft. Main
+  and Side menus must not intercept each other's keyboard input.
 - Inserted skill tokens retain their original blue (`#579FFF`) text and icon.
 - Remove argument-placeholder hints such as `AREA=<value>` from all command
   suggestion footers. Preserve command descriptions and navigation hints.

@@ -17,6 +17,11 @@ impl EventEmitter<GoalSelected> for CommandMenu {}
 pub struct ModeSelected;
 impl EventEmitter<ModeSelected> for CommandMenu {}
 
+pub struct ControlError(pub String);
+impl EventEmitter<ControlError> for CommandMenu {}
+
+pub(crate) type CommandContext = (Provider, Option<String>, PathBuf);
+
 fn local_commands(provider: Provider) -> Vec<ComposerCommand> {
     if provider == Provider::Acp {
         return vec![];
@@ -42,8 +47,10 @@ fn local_commands(provider: Provider) -> Vec<ComposerCommand> {
 
 pub struct CommandMenu {
     input: Entity<TextareaState>,
-    state: Entity<AppState>,
-    context: Option<(Provider, Option<String>, PathBuf)>,
+    state: Option<Entity<AppState>>,
+    backend: crate::chat::Backend,
+    selection: Option<CommandContext>,
+    context: Option<CommandContext>,
     commands: Vec<ComposerCommand>,
     chosen: Option<ComposerCommand>,
     matches: Vec<usize>,
@@ -151,6 +158,27 @@ impl CommandMenu {
         state: Entity<AppState>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let backend = state.read(cx).backend();
+        let (provider, _, cwd) = state.read(cx).effective();
+        let selection = (provider, state.read(cx).selected_account(), cwd);
+        let mut menu = Self::for_side_chat(input, backend, cx);
+        menu.state = Some(state.clone());
+        menu.selection = Some(selection);
+        cx.observe(&state, |this, state, cx| {
+            let (provider, _, cwd) = state.read(cx).effective();
+            this.set_context(Some((provider, state.read(cx).selected_account(), cwd)), cx);
+        })
+        .detach();
+        menu
+    }
+
+    /// Side chats supply their own settings snapshot rather than consulting the
+    /// selected main tab or borrowing their owner during a completion callback.
+    pub fn for_side_chat(
+        input: Entity<TextareaState>,
+        backend: crate::chat::Backend,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.changed(cx);
@@ -161,22 +189,11 @@ impl CommandMenu {
             }
         })
         .detach();
-        cx.observe(&state, |this, _, cx| {
-            let (provider, _, cwd) = this.state.read(cx).effective();
-            if this.context.as_ref().is_some_and(|context| {
-                context != &(provider, this.state.read(cx).selected_account(), cwd)
-            }) {
-                this.context = None;
-                this.commands.clear();
-                this.chosen = None;
-                this.generation += 1;
-                this.changed(cx);
-            }
-        })
-        .detach();
         Self {
             input,
-            state,
+            state: None,
+            backend,
+            selection: None,
             context: None,
             commands: vec![],
             chosen: None,
@@ -190,23 +207,61 @@ impl CommandMenu {
         }
     }
 
+    pub fn set_context(&mut self, selection: Option<CommandContext>, cx: &mut Context<Self>) {
+        if self.selection == selection {
+            return;
+        }
+        self.selection = selection;
+        self.context = None;
+        self.commands.clear();
+        self.chosen = None;
+        self.loading = false;
+        self.generation += 1;
+        self.changed(cx);
+    }
+
+    fn catalog(
+        &self,
+        provider: Provider,
+        mut commands: Vec<ComposerCommand>,
+    ) -> Vec<ComposerCommand> {
+        if self.state.is_some() {
+            let local = local_commands(provider);
+            commands.retain(|command| !local.iter().any(|local| local.name == command.name));
+            commands.extend(local);
+        } else {
+            commands.retain(|command| !matches!(command.name.as_str(), "chat" | "terminal"));
+        }
+        commands.sort_by_key(|command| {
+            (
+                match command.kind {
+                    CommandKind::Skill => 0,
+                    CommandKind::Fast | CommandKind::Goal => 1,
+                    CommandKind::Action => 2,
+                },
+                command.name.clone(),
+            )
+        });
+        commands
+    }
+
     fn changed(&mut self, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
-        let open = query_range(&input.content(), input.selected_range()).is_some();
+        let open = self.selection.is_some()
+            && query_range(&input.content(), input.selected_range()).is_some();
         if open && !self.open && !self.loading {
             self.context = None;
         }
         self.open = open;
         if self.open && self.context.is_none() {
-            let (provider, _, cwd) = self.state.read(cx).effective();
-            let account = self.state.read(cx).selected_account();
-            self.commands = local_commands(provider);
+            let (provider, account, cwd) = self.selection.clone().unwrap();
+            self.commands = self.catalog(provider, Vec::new());
             self.context = Some((provider, account.clone(), cwd.clone()));
             self.loading = true;
             self.error = None;
             self.generation += 1;
             let generation = self.generation;
-            let backend = self.state.read(cx).backend();
+            let backend = self.backend.clone();
             let task = backend.runtime.spawn(async move {
                 backend
                     .manager
@@ -221,21 +276,8 @@ impl CommandMenu {
                     }
                     this.loading = false;
                     match result {
-                        Ok(Ok(mut commands)) => {
-                            let local = local_commands(provider);
-                            commands.retain(|c| !local.iter().any(|l| l.name == c.name));
-                            commands.extend(local);
-                            commands.sort_by_key(|command| {
-                                (
-                                    match command.kind {
-                                        CommandKind::Skill => 0,
-                                        CommandKind::Fast | CommandKind::Goal => 1,
-                                        CommandKind::Action => 2,
-                                    },
-                                    command.name.clone(),
-                                )
-                            });
-                            this.commands = commands;
+                        Ok(Ok(commands)) => {
+                            this.commands = this.catalog(provider, commands);
                         }
                         Ok(Err(error)) => this.error = Some(error.to_string()),
                         Err(error) => this.error = Some(error.to_string()),
@@ -287,8 +329,8 @@ impl CommandMenu {
         cx.notify();
     }
 
-    pub fn navigate(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
-        if !self.open {
+    pub fn navigate(&mut self, delta: i32, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.open || !self.input.read(cx).focus_handle(cx).is_focused(window) {
             return false;
         }
         if !self.matches.is_empty() {
@@ -301,7 +343,7 @@ impl CommandMenu {
     }
 
     pub fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.open {
+        if !self.open || !self.input.read(cx).focus_handle(cx).is_focused(window) {
             return false;
         }
         if !self.matches.is_empty() {
@@ -396,8 +438,10 @@ impl CommandMenu {
 
     fn row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let command = &self.commands[self.matches[ix]];
+        let selector = format!("composer-command-{}", command.name);
         h_flex()
             .id(("composer-command", ix))
+            .debug_selector(move || selector.clone())
             .role(Role::Button)
             .aria_label(format!("/{}: {}", command.name, command.description))
             .h(zpx(44.))
@@ -481,11 +525,14 @@ impl CommandMenu {
         if name != "fast" {
             return false;
         }
-        if self.state.read(cx).is_starting() {
+        let Some(state) = self.state.clone() else {
+            return false;
+        };
+        if state.read(cx).is_starting() {
             return true;
         }
         let enabled = match arguments {
-            "" => self.state.read(cx).service_tier().is_none(),
+            "" => state.read(cx).service_tier().is_none(),
             "on" => true,
             "off" => false,
             _ => {
@@ -494,8 +541,7 @@ impl CommandMenu {
             }
         };
         if enabled
-            && self
-                .state
+            && state
                 .read(cx)
                 .model_info()
                 .and_then(|model| model.fast_tier)
@@ -507,8 +553,7 @@ impl CommandMenu {
             );
             return true;
         }
-        self.state
-            .update(cx, |state, cx| state.set_fast_mode(enabled, cx));
+        state.update(cx, |state, cx| state.set_fast_mode(enabled, cx));
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.open = false;
@@ -516,10 +561,14 @@ impl CommandMenu {
     }
 
     fn control_error(&self, message: &str, cx: &mut Context<Self>) {
-        self.state.update(cx, |state, cx| {
-            state.error = Some(message.into());
-            cx.notify();
-        });
+        if let Some(state) = &self.state {
+            state.update(cx, |state, cx| {
+                state.error = Some(message.into());
+                cx.notify();
+            });
+        } else {
+            cx.emit(ControlError(message.into()));
+        }
     }
 }
 
@@ -539,6 +588,7 @@ impl Render for CommandMenu {
         });
         v_flex()
             .id("composer-commands")
+            .debug_selector(|| "composer-commands".into())
             .w_full()
             .p_1()
             .rounded_xl()
@@ -612,8 +662,7 @@ mod tests {
             let mut menu = CommandMenu::new(input, state, cx);
             // Supply the catalog locally; this test exercises menu filtering and
             // completion without launching or authenticating a provider CLI.
-            let (provider, _, cwd) = menu.state.read(cx).effective();
-            menu.context = Some((provider, menu.state.read(cx).selected_account(), cwd));
+            menu.context = menu.selection.clone();
             menu.loading = true;
             menu.commands = commands;
             menu.changed(cx);

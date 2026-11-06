@@ -6,13 +6,14 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.44` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.45` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.44 source update notes](docs/releases/0.1.44.md).
+See the [0.1.45 source update notes](docs/releases/0.1.45.md).
 
-This update opens slash suggestions anywhere in a prompt, including after existing
-text and on later lines. Skills, goals, and commands remain available at the cursor;
-selecting a completion preserves the surrounding text and selected skill tokens.
+This update brings the shared slash menu to Side chats, including mid-prompt
+suggestions, keyboard navigation, skill tokens, goals, and Fast controls. Each
+Side chat uses its own provider, account, and folder. `/chat` and `/terminal`
+are excluded from Side chat suggestions.
 
 Side history is available in a right-sidebar tab. Hover the Side chat launcher
 to reveal a compact Side history card attached below its right edge, matching the
@@ -53,7 +54,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.44-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.45-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -660,6 +661,15 @@ Selections survive queued-message editing too. Claude Code supports up to six
 skills per message; Codex sends every selected skill as a native input item.
 The bounded menu shows descriptions, with skills first.
 `/skills` narrows the menu to skills. Reopening it refreshes discovery.
+
+Side chats use the same menu and keyboard behavior, including suggestions in the
+middle of a prompt. Their catalog follows their own provider, account, and folder,
+and refreshes when those settings change. `/chat` and `/terminal` are omitted.
+Selecting a skill or goal preserves the draft and does not send a message. Skill
+identities and goal mode survive saved drafts and queued-message editing. `/fast`
+changes only the Side chat's model settings; unsupported or locked changes leave
+the draft intact and show an error. Main and Side menus handle keys only while
+their own composer is focused.
 
 - **Codex:** uses app-server `skills/list`, including enabled global, project,
   system, and plugin skills returned by the CLI. Selected skills are sent as

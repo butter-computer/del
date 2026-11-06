@@ -116,6 +116,8 @@ pub struct SideChat {
     parent: Option<SessionId>,
     chat: Option<Entity<ChatView>>,
     input: Entity<TextareaState>,
+    command_menu: Entity<crate::command_menu::CommandMenu>,
+    goal_mode: Option<del_agent::ComposerCommand>,
     attachments: Vec<del_agent::Attachment>,
     models: Vec<del_agent::ModelInfo>,
     model_picker: Entity<crate::model_picker::ModelPicker>,
@@ -313,6 +315,30 @@ impl SideChat {
         let owner = cx.entity().downgrade();
         let model_picker =
             cx.new(|cx| crate::model_picker::ModelPicker::for_side_chat(owner, window, cx));
+        let command_menu = cx.new(|cx| {
+            crate::command_menu::CommandMenu::for_side_chat(
+                input.clone(),
+                context.backend.clone(),
+                cx,
+            )
+        });
+        cx.observe(&command_menu, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &command_menu,
+            window,
+            |this, _, event: &crate::command_menu::GoalSelected, window, cx| {
+                this.set_goal_mode(Some(event.0.clone()), window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &command_menu,
+            |this, _, event: &crate::command_menu::ControlError, cx| {
+                this.error = Some(event.0.clone());
+                cx.notify();
+            },
+        )
+        .detach();
         let mut view = Self {
             context,
             storage_id,
@@ -321,6 +347,8 @@ impl SideChat {
             parent: None,
             chat: None,
             input,
+            command_menu,
+            goal_mode: None,
             attachments: vec![],
             models: vec![],
             model_picker,
@@ -374,6 +402,16 @@ impl SideChat {
             )
         });
         view.attachments = view.saved.draft.attachments.clone();
+        view.set_goal_mode(
+            view.saved
+                .draft
+                .command
+                .clone()
+                .filter(|command| command.kind == del_agent::CommandKind::Goal),
+            window,
+            cx,
+        );
+        view.sync_commands(cx);
         for item in &mut view.saved.queue {
             item.sending = false;
             item.error = Some("Restored after reopening. Review before sending.".into());
@@ -424,10 +462,7 @@ impl SideChat {
                 .as_ref()
                 .and_then(|s| s.parent().cloned())
         });
-        self.saved.draft = UserInput::text(self.input.read(cx).value().to_string());
-        self.saved.draft.attachments = self.attachments.clone();
-        self.saved.draft.skills =
-            crate::command_menu::selected_skills(&self.input.read(cx).content());
+        self.saved.draft = self.draft_input(cx);
         if let Some(chat) = &self.chat {
             self.saved.queue = chat.read(cx).queue.items.clone();
         }
@@ -566,6 +601,7 @@ impl SideChat {
                         this.load_models(cx);
                     }
                 }
+                this.sync_commands(cx);
                 cx.notify();
                 true
             });
@@ -602,6 +638,46 @@ impl SideChat {
                 .map(|record| (record.config(), record.account_id)),
             ForkSource::New { config, account_id } => Some((config.clone(), account_id.clone())),
         }
+    }
+
+    fn sync_commands(&self, cx: &mut gpui::Context<Self>) {
+        let selection = self
+            .configuration()
+            .map(|(config, account)| (config.provider, account, config.cwd));
+        self.command_menu
+            .update(cx, |menu, cx| menu.set_context(selection, cx));
+    }
+
+    fn draft_input(&self, cx: &App) -> UserInput {
+        let text = self.input.read(cx).value().to_string();
+        UserInput {
+            command: self
+                .goal_mode
+                .clone()
+                .or_else(|| self.command_menu.read(cx).selected_command(&text, cx)),
+            text,
+            attachments: self.attachments.clone(),
+            skills: crate::command_menu::selected_skills(&self.input.read(cx).content()),
+        }
+    }
+
+    fn set_goal_mode(
+        &mut self,
+        command: Option<del_agent::ComposerCommand>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.goal_mode = command;
+        let placeholder = if self.goal_mode.is_some() {
+            "Describe your goal, define measurable outcomes for best results"
+        } else {
+            "Ask anything…"
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx)
+        });
+        self.save_soon(cx);
+        cx.notify();
     }
     fn load_models(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(record) = self.record() else {
@@ -680,6 +756,8 @@ impl SideChat {
         }
         self.save(cx);
         self.loading = true;
+        self.command_menu
+            .update(cx, |menu, cx| menu.set_context(None, cx));
         self.error = None;
         self.models.clear();
         self.model_generation += 1;
@@ -712,9 +790,73 @@ impl SideChat {
         self.submit_with_mode(false, window, cx);
     }
 
+    fn submit_fast_control(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let Some(("fast", arguments)) = del_agent::split_command(text) else {
+            return false;
+        };
+        if self.settings_locked(cx) {
+            self.error = Some(
+                "Finish the current response and queued work before changing Fast mode.".into(),
+            );
+            cx.notify();
+            return true;
+        }
+        let Some((mut config, account)) = self.configuration() else {
+            return true;
+        };
+        let enabled = match arguments {
+            "" => config.service_tier.is_none(),
+            "on" => true,
+            "off" => false,
+            _ => {
+                self.error = Some("Use /fast on or /fast off".into());
+                cx.notify();
+                return true;
+            }
+        };
+        let info = self.models.iter().find(|model| {
+            config
+                .model
+                .as_deref()
+                .filter(|id| *id != "default")
+                .map_or(model.is_default, |id| model.id == id)
+        });
+        if enabled {
+            let Some(tier) = info.and_then(|model| model.fast_tier.clone()) else {
+                self.error = Some("Fast mode is unavailable for the selected model. Choose a supported model first.".into());
+                cx.notify();
+                return true;
+            };
+            config.service_tier = Some(tier);
+        } else {
+            config.service_tier = None;
+        }
+        self.error = None;
+        self.change_settings(config, account, cx);
+        if self.error.is_none() {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.command_menu.update(cx, |menu, cx| menu.dismiss(cx));
+            self.save(cx);
+        }
+        true
+    }
+
     fn submit_with_mode(&mut self, steer: bool, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
         if self.loading || self.importing {
+            return;
+        }
+        if self
+            .command_menu
+            .update(cx, |menu, cx| menu.submit_control(window, cx))
+            || self.submit_fast_control(&text, window, cx)
+        {
             return;
         }
         let Some(chat) = &self.chat else {
@@ -738,8 +880,13 @@ impl SideChat {
             return;
         }
         self.error = None;
-        let mut input = UserInput::text(text);
-        input.skills = crate::command_menu::selected_skills(&self.input.read(cx).content());
+        if self.goal_mode.is_some() && !self.attachments.is_empty() {
+            self.error = Some("Send attachments in a message before setting a goal.".into());
+            cx.notify();
+            return;
+        }
+        let mut input = self.draft_input(cx);
+        input.text = text;
         input.attachments = std::mem::take(&mut self.attachments);
         chat.update(cx, |chat, cx| {
             chat.submit_input(input, steer, cx);
@@ -747,6 +894,7 @@ impl SideChat {
         self.report_activity(true, cx);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.set_goal_mode(None, window, cx);
         self.save(cx);
         cx.notify();
     }
@@ -758,18 +906,21 @@ impl SideChat {
         let Some(input) = chat.update(cx, |chat, cx| chat.take_queued(id, cx)) else {
             return;
         };
-        let current = UserInput {
-            text: self.input.read(cx).value().to_string(),
-            attachments: std::mem::take(&mut self.attachments),
-            skills: crate::command_menu::selected_skills(&self.input.read(cx).content()),
-            command: None,
-        };
+        let current = self.draft_input(cx);
         if !current.text.trim().is_empty() || !current.attachments.is_empty() {
             chat.update(cx, |chat, cx| {
                 chat.enqueue(current, cx);
             });
         }
         let content = crate::command_menu::restore_skill_tokens(&input);
+        self.set_goal_mode(
+            input
+                .command
+                .clone()
+                .filter(|command| command.kind == del_agent::CommandKind::Goal),
+            window,
+            cx,
+        );
         self.attachments = input.attachments;
         self.input.update(cx, |state, cx| {
             state.set_value(content, window, cx);
@@ -1199,6 +1350,7 @@ impl Render for SideChat {
         let stop = send.clone();
         let attach = send.clone();
         let paste = send.clone();
+        let cancel_goal = send.clone();
         let settings = self.settings(cx);
         let attachments =
             h_flex()
@@ -1231,6 +1383,10 @@ impl Render for SideChat {
             running,
         )
         .settings(settings)
+        .goal_mode(self.goal_mode.is_some())
+        .on_cancel_goal(move |window, cx| {
+            cancel_goal.update(cx, |this, cx| this.set_goal_mode(None, window, cx))
+        })
         .show_folder(false)
         .starting(!ready)
         .attachments(!self.attachments.is_empty())
@@ -1258,6 +1414,55 @@ impl Render for SideChat {
             .min_h_0()
             .overflow_hidden()
             .whitespace_normal()
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.navigate(1, window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.navigate(-1, window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, action: &gpui_kit::component::input::Enter, window, cx| {
+                    if !action.shift
+                        && !action.secondary
+                        && this
+                            .command_menu
+                            .update(cx, |menu, cx| menu.accept(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
+                    if this
+                        .command_menu
+                        .update(cx, |menu, cx| menu.accept(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Escape, _, cx| {
+                    if this.command_menu.update(cx, |menu, cx| menu.dismiss(cx)) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .when_some(self.error.clone(), |v, error| {
                 v.child(
                     v_flex()
@@ -1336,17 +1541,91 @@ impl Render for SideChat {
                             .max_w(zpx(640.))
                             .min_w_0()
                             .children(queue)
-                            .child(composer),
+                            .child(
+                                div().relative().child(composer).child(
+                                    deferred(
+                                        div()
+                                            .absolute()
+                                            .bottom_full()
+                                            .mb_2()
+                                            .left_0()
+                                            .w_full()
+                                            .child(self.command_menu.clone()),
+                                    )
+                                    .with_priority(10),
+                                ),
+                            ),
                     ),
             )
     }
 }
 
 #[cfg(test)]
+#[path = "side_chat_slash_tests.rs"]
+mod slash_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ::core::prelude::v1::test;
     use std::{sync::Arc, time::Duration};
+
+    #[::gpui::test]
+    fn side_slash_menu_opens_after_prose_and_consumes_enter(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn del_agent::AgentBackend> =
+            Arc::new(del_agent::MockBackend::new(Provider::Codex));
+        let manager = del_agent::SessionManager::new(dir.path().join("index"), [backend]).unwrap();
+        let context = Context {
+            activity_owner: None,
+            backend: Backend {
+                runtime: runtime.handle().clone(),
+                manager,
+            },
+            source: ForkSource::New {
+                config: SessionConfig {
+                    cwd: dir.path().into(),
+                    provider: Provider::Codex,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    permission_mode: del_agent::PermissionMode::Plan,
+                },
+                account_id: None,
+            },
+            accounts: vec![],
+        };
+        let (side, cx) = cx.add_window_view(|window, cx| SideChat::new(context, window, cx));
+        cx.update(|window, cx| {
+            side.update(cx, |side, cx| {
+                side.input.update(cx, |input, cx| {
+                    input.set_value("please check /", window, cx);
+                    input.set_selected_range(14..14, cx);
+                    input.focus(window, cx);
+                    cx.emit(InputEvent::Change);
+                });
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("composer-commands").is_some(),
+            "Side chat must render slash suggestions"
+        );
+        cx.simulate_keystrokes("enter");
+        side.read_with(cx, |side, cx| {
+            assert_eq!(side.input.read(cx).value().as_ref(), "please check /")
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("composer-commands").is_none());
+    }
 
     #[test]
     fn side_history_scopes_legacy_snapshots_and_keeps_provider_switches() {
