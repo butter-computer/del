@@ -6,11 +6,15 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.48` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.49` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.48 source update notes](docs/releases/0.1.48.md).
+See the [0.1.49 source update notes](docs/releases/0.1.49.md).
 
-This update adds live provider progress checklists to main and Side chats.
+This update adds expandable historical commit diffs, friendly commit dates, and
+a project-folder footer. Commit hashes copy with hover feedback, and each diff
+scrolls independently within a bounded height.
+
+Live provider progress checklists are available in main and Side chats.
 Codex, Claude, and OpenCode report their actual task states; Del shows pending,
 active, completed, and cancelled work with subtle, reduced-motion-aware
 transitions. Recorded progress survives reopening a conversation. See
@@ -55,7 +59,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.48-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.49-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,

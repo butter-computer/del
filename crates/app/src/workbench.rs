@@ -753,6 +753,17 @@ impl AppShell {
             .text_size(zpx(TEXT_XS))
             .text_color(crate::appearance::secondary_text())
             .child(
+                status_item("status-folder")
+                    .min_w_0()
+                    .max_w(zpx(160.))
+                    .accessibility_label(format!("Project folder: {}", crate::sessions::folder_name(&state.project_root(&cwd))))
+                    .tooltip(cwd.display().to_string())
+                    .child(h_flex().min_w_0().gap(zpx(6.)).items_center()
+                        .child(crate::icons::icon(IconName::Folder).with_size(zpx(crate::icons::MARK_SIZE)))
+                        .child(div().min_w_0().truncate().child(crate::sessions::folder_name(&state.project_root(&cwd)))))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenFiles), cx)),
+            )
+            .child(
                 status_item("status-branch")
                     .min_w_0()
                     .max_w(zpx(390.))

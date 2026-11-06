@@ -26,7 +26,12 @@ gpui_kit::assets::icon_assets!(
         ChevronDown,
         ChevronUp,
         FolderGit,
-        GitFork
+        GitFork,
+        FileCode,
+        FileCog,
+        FileImage,
+        FileTerminal,
+        FileText
     ]
 );
 

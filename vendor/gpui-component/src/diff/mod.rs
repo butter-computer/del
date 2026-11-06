@@ -206,6 +206,7 @@ pub struct Diff {
     line_number: bool,
     syntax_highlight: bool,
     header_visible: bool,
+    horizontal_scrollbar: bool,
     hover_highlight: DiffHoverHighlight,
     hunk_separator: DiffHunkSeparator,
     change_indicator: DiffChangeIndicator,
@@ -235,6 +236,7 @@ impl Diff {
             line_number: true,
             syntax_highlight: true,
             header_visible: true,
+            horizontal_scrollbar: true,
             hover_highlight: DiffHoverHighlight::default(),
             hunk_separator: DiffHunkSeparator::default(),
             change_indicator: DiffChangeIndicator::default(),
@@ -261,6 +263,11 @@ impl Diff {
     /// Shows a header above each file. Default is true.
     pub fn header_visible(mut self, visible: bool) -> Self {
         self.header_visible = visible;
+        self
+    }
+    /// Shows the horizontal scrollbar without changing horizontal scrolling.
+    pub fn horizontal_scrollbar(mut self, visible: bool) -> Self {
+        self.horizontal_scrollbar = visible;
         self
     }
     /// Emphasizes the line, its number, or both under the pointer. Default is none.
@@ -581,7 +588,7 @@ fn render_diff(
         })
         .when(has_rows, |this| {
             this.child(Scrollbar::vertical(&scrollbar))
-                .when(!soft_wrap, |this| {
+                .when(!soft_wrap && props.horizontal_scrollbar, |this| {
                     this.child(Scrollbar::horizontal(&horizontal))
                 })
         })
