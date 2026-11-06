@@ -29,7 +29,9 @@ pub fn path(value: impl Into<SharedString>) -> Icon {
     icon(Icon::default().path(value))
 }
 pub fn spinner() -> gpui_kit::component::spinner::Spinner {
-    gpui_kit::component::spinner::Spinner::new().with_size(size())
+    gpui_kit::component::spinner::Spinner::new()
+        .with_size(size())
+        .period(crate::ui::SPINNER_PERIOD)
 }
 
 /// Thin continuous ring with a fading tail for session activity.
@@ -42,11 +44,13 @@ pub fn unread_mark() -> impl gpui::IntoElement {
         .bg(crate::appearance::rgb(0x4a9eff))
 }
 
+/// Linear and phase-locked to the shared clock, so a session's sidebar row and
+/// its top tab turn together. Reduce Motion shows a static dot instead.
 pub fn working_spinner() -> gpui_kit::component::spinner::Spinner {
     gpui_kit::component::spinner::Spinner::new()
         .icon(Icon::default().path("icons/working-ring.svg"))
-        .with_size(zpx(14.))
-        .ease(|t| t)
+        .with_size(zpx(MARK_SIZE))
+        .period(crate::ui::SPINNER_PERIOD)
 }
 
 // Source asset name -> public SF Symbols name. This also covers component
