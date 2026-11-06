@@ -29,8 +29,7 @@ fn line(width: f32, sweep: Option<(f32, Column)>) -> impl IntoElement {
                     };
                     let column = column.get();
                     let band = column.size.width * 0.3;
-                    let center =
-                        column.left() - band + (column.size.width + band * 2.) * *phase;
+                    let center = column.left() - band + (column.size.width + band * 2.) * *phase;
                     let mask = ContentMask { bounds };
                     window.with_content_mask(Some(mask), |window| {
                         for (left, direction) in [(center - band, 90.), (center, 270.)] {
@@ -80,11 +79,14 @@ fn transcript(phase: Option<f32>, column: Column) -> impl IntoElement {
                         .child(line(width, sweep())),
                 )
                 .child(
-                    v_flex().px(zpx(ui::SPACE_SM)).gap(zpx(ui::SPACE_MD)).children(
-                        [0.95, 0.87, 0.62]
-                            .into_iter()
-                            .map(|width| line(width, sweep())),
-                    ),
+                    v_flex()
+                        .px(zpx(ui::SPACE_SM))
+                        .gap(zpx(ui::SPACE_MD))
+                        .children(
+                            [0.95, 0.87, 0.62]
+                                .into_iter()
+                                .map(|width| line(width, sweep())),
+                        ),
                 )
         }))
 }
@@ -109,7 +111,8 @@ impl RenderOnce for ConversationLoading {
             window.request_animation_frame();
             body.into_any_element()
         } else if reduce_motion {
-            body.child(transcript(None, column.clone())).into_any_element()
+            body.child(transcript(None, column.clone()))
+                .into_any_element()
         } else {
             body.with_animation(
                 "conversation-shimmer",

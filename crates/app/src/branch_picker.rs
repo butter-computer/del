@@ -340,15 +340,17 @@ impl Render for BranchPanel {
                                         button.bg(ui::row_selected())
                                     })
                                     // Leading, in a fixed slot, as in the model picker.
-                                    .child(div().size(zpx(crate::icons::MARK_SIZE)).flex_none().when(
-                                        checked,
-                                        |slot| {
-                                            slot.child(
-                                                crate::icons::icon(IconName::Check)
-                                                    .with_size(zpx(crate::icons::MARK_SIZE)),
-                                            )
-                                        },
-                                    ))
+                                    .child(
+                                        div().size(zpx(crate::icons::MARK_SIZE)).flex_none().when(
+                                            checked,
+                                            |slot| {
+                                                slot.child(
+                                                    crate::icons::icon(IconName::Check)
+                                                        .with_size(zpx(crate::icons::MARK_SIZE)),
+                                                )
+                                            },
+                                        ),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()

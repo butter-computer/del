@@ -524,58 +524,60 @@ impl Render for ModelPanel {
             let list_height = zpx(model_count.max(1) as f32 * 42.)
                 .min((available_height - zpx(84. + notice_height)).clamp(zpx(42.), zpx(240.)));
             let scroll = self.model_scroll.clone();
-            let mut list = v_flex().gap(zpx(crate::ui::SPACE_2XS)).when(show_default, |list| {
-                list.child(
-                    Button::new("model-default")
-                        .size(crate::icons::button_size())
-                        .p_0()
-                        .accessibility_label(format!("{default_label} (automatic)"))
-                        .when(self.highlighted == Some(0), |button| {
-                            button.bg(crate::ui::row_selected())
-                        })
-                        .ghost()
-                        .w_full()
-                        .h_auto()
-                        .flex_none()
-                        .px(zpx(8.))
-                        .py(zpx(6.))
-                        .text_size(zpx(del_core::typography::TEXT_MD))
-                        .justify_start()
-                        .disabled(locked)
-                        .child(div().size(crate::icons::size()).flex_none().when(
-                            selected.is_none() || selected.as_deref() == Some("default"),
-                            |slot| slot.child(crate::icons::icon(IconName::Check)),
-                        ))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .items_start()
-                                .gap(zpx(crate::ui::SPACE_2XS))
-                                .child(div().w_full().truncate().child(default_label.clone()))
-                                // "Automatic" keeps this distinct from choosing the same model
-                                // explicitly, without repeating itself when nothing resolved.
-                                .child(
-                                    div()
-                                        .text_size(zpx(del_core::typography::TEXT_SM))
-                                        .text_color(muted)
-                                        .w_full()
-                                        .truncate()
-                                        .child(if default_label == "Automatic" {
-                                            "Follows provider settings"
-                                        } else {
-                                            "Automatic · follows provider settings"
-                                        }),
-                                ),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.state.apply(ModelChange::Model(None), cx);
-                            this.focus.focus(window, cx);
-                            this.models = false;
-                            cx.notify();
-                        })),
-                )
-            });
+            let mut list = v_flex()
+                .gap(zpx(crate::ui::SPACE_2XS))
+                .when(show_default, |list| {
+                    list.child(
+                        Button::new("model-default")
+                            .size(crate::icons::button_size())
+                            .p_0()
+                            .accessibility_label(format!("{default_label} (automatic)"))
+                            .when(self.highlighted == Some(0), |button| {
+                                button.bg(crate::ui::row_selected())
+                            })
+                            .ghost()
+                            .w_full()
+                            .h_auto()
+                            .flex_none()
+                            .px(zpx(8.))
+                            .py(zpx(6.))
+                            .text_size(zpx(del_core::typography::TEXT_MD))
+                            .justify_start()
+                            .disabled(locked)
+                            .child(div().size(crate::icons::size()).flex_none().when(
+                                selected.is_none() || selected.as_deref() == Some("default"),
+                                |slot| slot.child(crate::icons::icon(IconName::Check)),
+                            ))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_start()
+                                    .gap(zpx(crate::ui::SPACE_2XS))
+                                    .child(div().w_full().truncate().child(default_label.clone()))
+                                    // "Automatic" keeps this distinct from choosing the same model
+                                    // explicitly, without repeating itself when nothing resolved.
+                                    .child(
+                                        div()
+                                            .text_size(zpx(del_core::typography::TEXT_SM))
+                                            .text_color(muted)
+                                            .w_full()
+                                            .truncate()
+                                            .child(if default_label == "Automatic" {
+                                                "Follows provider settings"
+                                            } else {
+                                                "Automatic · follows provider settings"
+                                            }),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.state.apply(ModelChange::Model(None), cx);
+                                this.focus.focus(window, cx);
+                                this.models = false;
+                                cx.notify();
+                            })),
+                    )
+                });
             for (visible_index, (i, model)) in models.into_iter().enumerate() {
                 let choice_index = visible_index + usize::from(show_default);
                 let id = model.id.clone();

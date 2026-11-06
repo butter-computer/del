@@ -377,7 +377,10 @@ mod tests {
         let halfway = feedback.get().hover;
         assert!(halfway > 0. && halfway < 1.);
         let fill = feedback.get().fill(rgba(0xffffff0a), rgba(0xffffff1a));
-        assert!(fill.a > 0. && fill.a < rgba(0xffffff0a).a, "the fill eases with the glyph");
+        assert!(
+            fill.a > 0. && fill.a < rgba(0xffffff0a).a,
+            "the fill eases with the glyph"
+        );
         assert_eq!(bounds, cx.debug_bounds("motion-target").unwrap());
 
         let outside = point(px(150.), px(150.));

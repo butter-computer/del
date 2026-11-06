@@ -617,7 +617,11 @@ mod tests {
         let docs = [Arc::new(doc)];
         let hits = search(&docs, "login");
         assert_eq!(hits.len(), 1, "title and first prompt read as one row");
-        assert_eq!(hits[0].message, Some(0), "the kept hit opens at the message");
+        assert_eq!(
+            hits[0].message,
+            Some(0),
+            "the kept hit opens at the message"
+        );
 
         // A shortened automatic title still repeats the prompt.
         let mut doc = (*document(false, false, "fix the login bug please and add tests")).clone();

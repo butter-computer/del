@@ -1,11 +1,6 @@
 //! Cmd-K actions, recent sessions, and navigation into chat/terminal transcripts.
 use crate::{
-    AppShell,
-    appearance::rgba,
-    conversation_search as search,
-    state::Tab,
-    ui,
-    zoom::px as zpx,
+    AppShell, appearance::rgba, conversation_search as search, state::Tab, ui, zoom::px as zpx,
 };
 use gpui_kit::{
     component::{
@@ -109,9 +104,8 @@ impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
     fn new(runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search commands and sessions…")
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands and sessions…"));
         cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search(cx);
