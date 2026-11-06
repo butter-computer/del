@@ -71,6 +71,7 @@ mod terminal_conversation;
 #[allow(dead_code)]
 mod terminal_host;
 mod terminal_store;
+mod ui;
 mod usage;
 mod voice_ui;
 mod workbench;
