@@ -97,7 +97,7 @@ impl AppShell {
                                 .manager
                                 .set_browser_tools(tools),
                             Err(error) => this.state.update(cx, |state, _| {
-                                state.error = Some(format!("Browser tools unavailable: {error}"))
+                                state.report_error(format!("Browser tools unavailable: {error}"))
                             }),
                         }
                         this.state.update(cx, |state, cx| {
@@ -111,7 +111,7 @@ impl AppShell {
                 result => {
                     let _ = this.update_in(cx, |this, _, cx| {
                         this.state.update(cx, |s, cx| {
-                            s.error = Some(format!(
+                            s.report_error(format!(
                                 "Agent tools could not start: {}",
                                 match result {
                                     Ok(Err(e)) => e.to_string(),
@@ -872,7 +872,7 @@ impl AppShell {
 
     pub(super) fn set_mode_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.error = Some(error);
+            s.report_error(error);
             cx.notify();
         });
     }

@@ -71,7 +71,7 @@ impl AppShell {
                 this.goal_controls.remove(&id);
                 if let Err(error) = result {
                     this.state.update(cx, |s, cx| {
-                        s.error = Some(error);
+                        s.report_error(error);
                         cx.notify();
                     });
                 }

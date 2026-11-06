@@ -614,7 +614,7 @@ impl CommandMenu {
     fn control_error(&self, message: &str, cx: &mut Context<Self>) {
         if let Some(state) = &self.state {
             state.update(cx, |state, cx| {
-                state.error = Some(message.into());
+                state.report_error(message);
                 cx.notify();
             });
         } else {

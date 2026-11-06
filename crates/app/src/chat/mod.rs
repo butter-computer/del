@@ -20,5 +20,5 @@ pub use view::{
 };
 
 pub use blocks::{FirstPromptRetry, pending_prompt};
-pub use work_history::elapsed_label;
 pub use loading::conversation_loading;
+pub use work_history::elapsed_label;

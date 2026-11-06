@@ -86,6 +86,7 @@ use del_agent::{AgentBackend, MockBackend, Provider, SessionId};
 use del_core::ShellMetrics;
 use del_core::typography::TEXT_MD;
 use del_mcp::SessionMode;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
@@ -2036,7 +2037,7 @@ impl AppShell {
             .unwrap_or_default();
         if self.goal_modes.contains_key(&owner) && !attachments.is_empty() {
             self.state.update(cx, |state, cx| {
-                state.error = Some("Send attachments in a message before setting a goal.".into());
+                state.report_error("Send attachments in a message before setting a goal.");
                 cx.notify();
             });
             return;
@@ -2192,23 +2193,25 @@ impl AppShell {
         // The failed first prompt offers Retry in its own status row, so the
         // composer never moves; this is what that Retry does.
         if self.state.read(cx).pending_error().is_some() {
-            cx.set_global(chat::FirstPromptRetry(std::rc::Rc::new(move |window, cx| {
-                retry_shell.update(cx, |this, cx| {
-                    if this.state.read(cx).mode() == SessionMode::Terminal {
-                        let input = this.state.read(cx).pending_input().cloned();
-                        if let Some(input) = input {
-                            this.submit_terminal_prompt(
-                                &input.text,
-                                &input.attachments,
-                                window,
-                                cx,
-                            );
+            cx.set_global(chat::FirstPromptRetry(std::rc::Rc::new(
+                move |window, cx| {
+                    retry_shell.update(cx, |this, cx| {
+                        if this.state.read(cx).mode() == SessionMode::Terminal {
+                            let input = this.state.read(cx).pending_input().cloned();
+                            if let Some(input) = input {
+                                this.submit_terminal_prompt(
+                                    &input.text,
+                                    &input.attachments,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        } else {
+                            this.state.update(cx, |state, cx| state.retry_pending(cx));
                         }
-                    } else {
-                        this.state.update(cx, |state, cx| state.retry_pending(cx));
-                    }
-                });
-            })));
+                    });
+                },
+            )));
         }
         v_flex()
             .w_full()

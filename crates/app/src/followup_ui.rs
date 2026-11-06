@@ -411,7 +411,7 @@ impl AppShell {
                 // Report only this import's failures; never clear another error.
                 if let Some(error) = error {
                     this.state.update(cx, |s, cx| {
-                        s.error = Some(format!("Could not attach {error}"));
+                        s.report_error(format!("Could not attach {error}"));
                         cx.notify();
                     });
                 }

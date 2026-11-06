@@ -1,4 +1,5 @@
 //! Local /terminal and /chat commands, with exclusive native conversation ownership.
+use crate::zoom::px as zpx;
 use crate::{
     AppShell,
     state::{Selection, Tab},
@@ -12,7 +13,6 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use crate::zoom::px as zpx;
 use std::time::Duration;
 
 struct HandoffLease {
