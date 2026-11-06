@@ -139,13 +139,7 @@ impl SessionUsage {
     pub fn cost_breakdown(&self) -> String {
         let mut lines = vec!["Main + side chats · all provider switches".into()];
         for (provider, cost) in self.provider_costs() {
-            let name = match provider.as_str() {
-                "claude" => "Claude",
-                "codex" => "OpenAI / Codex",
-                "opencode" => "OpenCode",
-                other => other,
-            };
-            lines.push(format!("{name}  {}", money(Some(cost))));
+            lines.push(format!("{}  {}", provider_name(&provider), money(Some(cost))));
         }
         if let Some(total) = self.cost_summary() {
             lines.push(format!("Total  {}", money(Some(total))));
@@ -170,14 +164,29 @@ impl SessionUsage {
         }
     }
 }
+/// A provider's cost-ledger key as people know it: `codex` is "Codex".
+pub fn provider_name(binary: &str) -> &str {
+    match binary {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
+/// "$1,234.56", with " est." when any part is estimated.
 pub fn money(cost: Option<(f64, bool)>) -> String {
     match cost {
         Some((value, estimated)) => {
-            let suffix = if estimated { " (est)" } else { "" };
+            let suffix = if estimated { " est." } else { "" };
             if value > 0. && value < 0.01 {
                 format!("<$0.01{suffix}")
             } else {
-                format!("${value:.2}{suffix}")
+                let cents = (value.max(0.) * 100.).round() as u64;
+                format!(
+                    "${}.{:02}{suffix}",
+                    crate::ui::group_digits(cents / 100),
+                    cents % 100
+                )
             }
         }
         None => "—".into(),
@@ -239,6 +248,20 @@ fn save_cost_at(path: &std::path::Path, scope: &str, cost: f64) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn costs_read_as_money_with_grouped_dollars() {
+        assert_eq!(money(Some((1234.564, true))), "$1,234.56 est.");
+        assert_eq!(money(Some((1234567.5, false))), "$1,234,567.50");
+        assert_eq!(money(Some((0.999, false))), "$1.00");
+        assert_eq!(money(Some((0., false))), "$0.00");
+        assert_eq!(money(Some((0.004, true))), "<$0.01 est.");
+        assert_eq!(money(None), "—");
+        assert_eq!(provider_name("codex"), "Codex");
+        let mut usage = SessionUsage::default();
+        merge_cost(&mut usage.costs, "codex:thread", 2.);
+        assert!(usage.cost_breakdown().contains("Codex  $2.00"));
+        assert!(!usage.cost_breakdown().contains("OpenAI"));
+    }
     #[test]
     fn family_costs_add_siblings_and_provider_switches_without_cross_chat_floors() {
         let main = SessionUsage {

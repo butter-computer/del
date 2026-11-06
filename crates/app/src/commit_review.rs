@@ -114,7 +114,7 @@ impl RightPanel {
                 "Copy commit hash"
             })
             .flex_none()
-            .gap_1()
+            .gap(zpx(crate::ui::SPACE_XS))
             .items_center()
             .font_family(MONO)
             .cursor_pointer()
@@ -143,11 +143,11 @@ impl RightPanel {
                         .timer(std::time::Duration::from_millis(1500))
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(review) = this.commit_reviews.get_mut(&id) {
-                            if review.copied_at == Some(at) {
-                                review.copied_at = None;
-                                cx.notify();
-                            }
+                        if let Some(review) = this.commit_reviews.get_mut(&id)
+                            && review.copied_at == Some(at)
+                        {
+                            review.copied_at = None;
+                            cx.notify();
                         }
                     });
                 })
@@ -222,7 +222,7 @@ impl RightPanel {
             .min_w_0()
             .flex_none()
             .border_t_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(crate::appearance::separator())
             .child(
                 v_flex()
                     .id(SharedString::from(format!("commit-{}", commit.id)))
@@ -235,25 +235,29 @@ impl RightPanel {
                         commit.short_id,
                         commit.subject
                     ))
-                    .px_3()
-                    .py_2()
-                    .gap_1()
+                    .px(zpx(crate::ui::SPACE_MD))
+                    .py(zpx(crate::ui::SPACE_SM))
+                    .gap(zpx(crate::ui::SPACE_XS))
                     .cursor_pointer()
-                    .hover(|row| row.bg(rgba(0xffffff0a)))
+                    .hover(|row| row.bg(crate::ui::row_hover()))
                     .child(
-                        h_flex().min_w_0().gap_2().items_start().child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(zpx(TEXT_MD))
-                                .whitespace_normal()
-                                .child(commit.subject.clone()),
-                        ),
+                        h_flex()
+                            .min_w_0()
+                            .gap(zpx(crate::ui::SPACE_SM))
+                            .items_start()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(zpx(TEXT_MD))
+                                    .whitespace_normal()
+                                    .child(commit.subject.clone()),
+                            ),
                     )
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_2()
+                            .gap(zpx(crate::ui::SPACE_SM))
                             .items_baseline()
                             .text_size(zpx(TEXT_SM))
                             .text_color(crate::appearance::secondary_text())
@@ -296,12 +300,15 @@ impl RightPanel {
                     ),
             )
             .map(|view| {
-                let body = v_flex().w_full().pl(zpx(22.)).pr_2().pb_2().min_w_0();
+                let body = v_flex()
+                    .w_full()
+                    .pl(zpx(22.))
+                    .pr(zpx(crate::ui::SPACE_SM))
+                    .pb(zpx(crate::ui::SPACE_SM))
+                    .min_w_0();
                 let content = match &review.files {
                     None => body.child(review_note("Loading files…")),
-                    Some(Err(error)) => {
-                        body.child(review_note(format!("{error} Close and reopen to retry.")))
-                    }
+                    Some(Err(error)) => body.child(review_error("this commit’s files", error)),
                     Some(Ok(files)) => body
                         .when(files.is_empty(), |body| {
                             body.child(review_note("No files changed in this commit."))
@@ -362,13 +369,13 @@ impl RightPanel {
                         path,
                         file.status
                     ))
-                    .px_2()
-                    .py_2()
-                    .gap_2()
+                    .px(zpx(crate::ui::SPACE_SM))
+                    .py(zpx(crate::ui::SPACE_SM))
+                    .gap(zpx(crate::ui::SPACE_SM))
                     .items_center()
                     .cursor_pointer()
                     .text_size(zpx(TEXT_SM))
-                    .hover(|row| row.bg(rgba(0xffffff0a)))
+                    .hover(|row| row.bg(crate::ui::row_hover()))
                     .child(
                         Icon::new(if expanded {
                             IconName::ChevronDown
@@ -426,9 +433,7 @@ impl RightPanel {
                             .debug_selector(move || format!("history-diff-{commit_index}-{index}"))
                             .child(match result {
                                 None => review_note("Loading diff…"),
-                                Some(Err(error)) => {
-                                    review_note(format!("{error} Close and reopen to retry."))
-                                }
+                                Some(Err(error)) => review_error("this diff", error),
                                 Some(Ok(diff)) => render_review(
                                     SharedString::from(format!(
                                         "commit-diff-{commit_index}-{index}"
@@ -472,12 +477,33 @@ pub(super) fn file_icon(path: &Path) -> AnyElement {
 
 fn review_note(text: impl Into<SharedString>) -> AnyElement {
     div()
-        .px_2()
-        .py_2()
+        .px(zpx(crate::ui::SPACE_SM))
+        .py(zpx(crate::ui::SPACE_SM))
         .text_size(zpx(TEXT_SM))
         .text_color(crate::appearance::secondary_text())
         .whitespace_normal()
         .child(text.into())
+        .into_any_element()
+}
+
+/// A plain sentence for a failed history load; Git's own words are on hover.
+fn review_error(what: &str, raw: &str) -> AnyElement {
+    let problem = crate::workspace_files::explain_git_error(raw);
+    let summary = if problem.details.is_some() || problem.quiet {
+        format!("Could not load {what}. Close and reopen to retry.")
+    } else {
+        format!("{} Close and reopen to retry.", problem.summary)
+    };
+    let details: SharedString = raw.to_owned().into();
+    div()
+        .id(SharedString::from(format!("review-error-{what}")))
+        .px(zpx(crate::ui::SPACE_SM))
+        .py(zpx(crate::ui::SPACE_SM))
+        .whitespace_normal()
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
+        })
+        .child(crate::ui::inline_error(summary))
         .into_any_element()
 }
 
@@ -553,8 +579,8 @@ fn render_plain_review(id: ElementId, review: Rc<ChangeReview>) -> AnyElement {
             };
             h_flex()
                 .min_w_full()
-                .px_2()
-                .gap_2()
+                .px(zpx(crate::ui::SPACE_SM))
+                .gap(zpx(crate::ui::SPACE_SM))
                 .flex_none()
                 .whitespace_nowrap()
                 .bg(rgba(fill))
@@ -565,14 +591,14 @@ fn render_plain_review(id: ElementId, review: Rc<ChangeReview>) -> AnyElement {
                     div()
                         .w(zpx(32.))
                         .flex_none()
-                        .text_color(rgba(0xffffff70))
+                        .text_color(crate::ui::faint_text())
                         .child(line.old.map(|n| n.to_string()).unwrap_or_default()),
                 )
                 .child(
                     div()
                         .w(zpx(32.))
                         .flex_none()
-                        .text_color(rgba(0xffffff70))
+                        .text_color(crate::ui::faint_text())
                         .child(line.new.map(|n| n.to_string()).unwrap_or_default()),
                 )
                 .child(

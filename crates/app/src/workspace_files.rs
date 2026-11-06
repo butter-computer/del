@@ -17,29 +17,99 @@ pub struct FileDraft {
     pub text: String,
 }
 
+/// Saves an edit. An error is a plain reason that reads after "Could not save <name>: ".
 pub fn save_file(path: &Path, original: &str, text: &str) -> Result<(), String> {
     // Resolve symlinks so saving edits their target rather than replacing the link.
-    let target = path.canonicalize().map_err(|e| e.to_string())?;
-    let current = std::fs::read_to_string(&target).map_err(|e| e.to_string())?;
+    let target = path.canonicalize().map_err(save_reason)?;
+    let current = std::fs::read_to_string(&target).map_err(save_reason)?;
     if current != original {
-        return Err("File changed on disk. Your edits are kept. Copy them before using Revert, then Reload to read the new version.".into());
+        return Err("it changed on disk. Your edits are kept: copy them before using Revert, then Reload to read the new version.".into());
     }
     let permissions = std::fs::metadata(&target)
-        .map_err(|e| e.to_string())?
+        .map_err(save_reason)?
         .permissions();
-    let mut file = tempfile::NamedTempFile::new_in(target.parent().ok_or("File has no parent")?)
-        .map_err(|e| e.to_string())?;
+    let folder = target.parent().ok_or("its folder could not be found.")?;
+    let mut file = tempfile::NamedTempFile::new_in(folder).map_err(save_reason)?;
     file.as_file()
         .set_permissions(permissions)
-        .map_err(|e| e.to_string())?;
-    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
+        .map_err(save_reason)?;
+    file.write_all(text.as_bytes()).map_err(save_reason)?;
+    file.as_file().sync_all().map_err(save_reason)?;
     // Check again after preparing the replacement, before touching the original.
-    if std::fs::read_to_string(&target).map_err(|e| e.to_string())? != original {
-        return Err("File changed on disk while saving. Your edits are kept.".into());
+    if std::fs::read_to_string(&target).map_err(save_reason)? != original {
+        return Err("it changed on disk while saving. Your edits are kept.".into());
     }
-    file.persist(&target).map_err(|e| e.to_string())?;
+    file.persist(&target)
+        .map_err(|error| save_reason(error.error))?;
     Ok(())
+}
+
+/// A plain reason for a failed save, without paths or OS error codes.
+pub(crate) fn save_reason(error: std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::NotFound => "the file no longer exists.",
+        ErrorKind::PermissionDenied => "you don't have permission to change it.",
+        ErrorKind::StorageFull => "the disk is full.",
+        ErrorKind::ReadOnlyFilesystem => "the disk is read-only.",
+        ErrorKind::InvalidData => "it is no longer UTF-8 text.",
+        _ => "something went wrong while writing it.",
+    }
+    .into()
+}
+
+/// A Git failure explained for people. `details` keeps Git's own words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitProblem {
+    pub summary: String,
+    pub details: Option<String>,
+    /// An informational state rather than a failure, shown in quiet text.
+    pub quiet: bool,
+}
+
+pub(crate) const NO_REPOSITORY: &str = "No Git repository";
+const GIT_MISSING: &str = "Git is not installed.";
+const GIT_TIMED_OUT: &str = "Git timed out";
+
+/// Maps raw Git errors, often `fatal: …` stderr, to a sentence.
+pub fn explain_git_error(raw: &str) -> GitProblem {
+    let raw = raw.trim();
+    let lower = raw.to_lowercase();
+    let plain = |summary: &str, quiet: bool| GitProblem {
+        summary: summary.into(),
+        details: None,
+        quiet,
+    };
+    if raw == NO_REPOSITORY || lower.contains("not a git repository") {
+        return plain("This folder isn't a Git repository.", true);
+    }
+    if raw == GIT_MISSING {
+        return plain(
+            "Git isn't installed. Install the Xcode Command Line Tools to review changes.",
+            false,
+        );
+    }
+    if raw == GIT_TIMED_OUT {
+        return plain(
+            "Could not read changes: Git took too long to respond.",
+            false,
+        );
+    }
+    if lower.contains("too large") {
+        return plain(raw, false);
+    }
+    let summary = if lower.contains("dubious ownership") {
+        "Could not read changes: Git doesn't trust this folder's owner."
+    } else if lower.contains(".lock") {
+        "Could not read changes: another Git process is using the repository."
+    } else {
+        "Could not read changes."
+    };
+    GitProblem {
+        summary: summary.into(),
+        details: (!raw.is_empty()).then(|| raw.to_owned()),
+        quiet: false,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +123,7 @@ pub struct ChangedFile {
 /// take `index.lock` (an agent's concurrent commit would fail) or run commands
 /// named by repository config such as `core.fsmonitor`.
 fn git_command(root: &Path) -> Result<Command, String> {
-    let program = crate::projects::git_program().ok_or("Git is not installed.")?;
+    let program = crate::projects::git_program().ok_or(GIT_MISSING)?;
     let mut command = Command::new(program);
     command
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -130,7 +200,7 @@ fn git_bounded(
     let timed_out = watchdog.join().unwrap_or(false);
     let stderr = stderr.join().unwrap_or_default();
     if timed_out {
-        return Err("Git timed out".into());
+        return Err(GIT_TIMED_OUT.into());
     }
     read.map_err(|e| e.to_string())?;
     if truncated {
@@ -161,8 +231,14 @@ pub fn head_id(root: &Path) -> Option<String> {
 }
 
 pub fn changes(root: &Path) -> Result<(PathBuf, Vec<ChangedFile>), String> {
-    let base = git(root, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "No Git repository".to_string())?;
+    let base = git(root, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+        // Missing or hung Git is not the same as a folder outside a repository.
+        if error == GIT_MISSING || error == GIT_TIMED_OUT {
+            error
+        } else {
+            NO_REPOSITORY.to_string()
+        }
+    })?;
     let base = PathBuf::from(
         String::from_utf8(base)
             .map_err(|e| e.to_string())?
@@ -788,6 +864,58 @@ mod tests {
         std::fs::write(&path, "external edit").unwrap();
         assert!(save_file(&path, &edited, "my edit").is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "external edit");
+    }
+
+    #[test]
+    fn save_errors_are_plain_reasons_without_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.txt");
+        let error = save_file(&missing, "a", "b").unwrap_err();
+        assert_eq!(error, "the file no longer exists.");
+        assert!(!error.contains("os error"));
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "external").unwrap();
+        assert!(
+            save_file(&path, "mine", "edit")
+                .unwrap_err()
+                .starts_with("it changed on disk.")
+        );
+    }
+
+    #[test]
+    fn git_errors_read_as_sentences_and_keep_details() {
+        let outside = explain_git_error(NO_REPOSITORY);
+        assert_eq!(outside.summary, "This folder isn't a Git repository.");
+        assert!(outside.quiet && outside.details.is_none());
+        let fatal = explain_git_error(
+            "fatal: not a git repository (or any of the parent directories): .git",
+        );
+        assert_eq!(fatal, outside);
+        let missing = explain_git_error(GIT_MISSING);
+        assert!(missing.summary.starts_with("Git isn't installed."));
+        assert!(!missing.quiet);
+        assert_eq!(
+            explain_git_error(GIT_TIMED_OUT).summary,
+            "Could not read changes: Git took too long to respond."
+        );
+        let owner = explain_git_error("fatal: detected dubious ownership in repository at '/x'");
+        assert_eq!(
+            owner.summary,
+            "Could not read changes: Git doesn't trust this folder's owner."
+        );
+        assert!(owner.details.unwrap().starts_with("fatal:"));
+        let other = explain_git_error("fatal: bad object HEAD");
+        assert_eq!(other.summary, "Could not read changes.");
+        assert_eq!(other.details.as_deref(), Some("fatal: bad object HEAD"));
+    }
+
+    #[test]
+    fn missing_git_is_not_reported_as_a_missing_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        // A plain folder outside any repository reads as informational.
+        if let Err(error) = changes(dir.path()) {
+            assert!(error == NO_REPOSITORY || error == GIT_MISSING);
+        }
     }
     #[test]
     fn symlink_save_keeps_the_link_and_executable_permissions() {
