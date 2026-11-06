@@ -1955,7 +1955,7 @@ impl AppShell {
         .on_voice(move |window, cx| {
             shell_voice.update(cx, |this, cx| this.toggle_dictation(window, cx))
         })
-        .show_folder(locked || self.state.read(cx).pending_prompt().is_some())
+        .show_folder(false)
         .starting(
             self.state.read(cx).is_starting()
                 || chat.as_ref().is_some_and(|chat| chat.read(cx).is_loading()),

@@ -3551,12 +3551,6 @@ impl RightPanel {
             .fold((0usize, 0usize), |(added, removed), review| {
                 (added + review.added, removed + review.removed)
             });
-        let (commit_added, commit_removed) = self
-            .change_commits
-            .iter()
-            .fold((0u64, 0u64), |(added, removed), commit| {
-                (added + commit.added, removed + commit.removed)
-            });
         let shown = self.change_files.len();
         let total_files = shown + self.change_omitted;
         v_flex()
@@ -3598,32 +3592,17 @@ impl RightPanel {
                         .w_full()
                         .min_w_0()
                         .child(
-                            v_flex()
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
                                 .px_3()
                                 .py_2()
-                                .gap_1()
+                                .gap_2()
                                 .text_size(zpx(TEXT_SM))
                                 .text_color(crate::appearance::secondary_text())
                                 .child("Recent commits")
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_baseline()
-                                        .child(format!(
-                                            "{} commits · Total",
-                                            self.change_commits.len()
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_color(ActionTone::Success.foreground())
-                                                .child(format!("+{commit_added}")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(ActionTone::Danger.foreground())
-                                                .child(format!("−{commit_removed}")),
-                                        ),
-                                ),
+                                .child(format!("{} total", self.change_commits.len())),
                         )
                         .children(self.change_commits.iter().map(|commit| {
                             v_flex()

@@ -9,7 +9,11 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 pub struct GoalSelected(pub ComposerCommand);
 impl EventEmitter<GoalSelected> for CommandMenu {}
@@ -52,6 +56,8 @@ pub struct CommandMenu {
     selection: Option<CommandContext>,
     context: Option<CommandContext>,
     commands: Vec<ComposerCommand>,
+    cached: HashMap<CommandContext, (Vec<ComposerCommand>, Instant)>,
+    last_refresh: Option<Instant>,
     chosen: Option<ComposerCommand>,
     matches: Vec<usize>,
     selected: usize,
@@ -163,7 +169,7 @@ impl CommandMenu {
         let selection = (provider, state.read(cx).selected_account(), cwd);
         let mut menu = Self::for_side_chat(input, backend, cx);
         menu.state = Some(state.clone());
-        menu.selection = Some(selection);
+        menu.set_context(Some(selection), cx);
         cx.observe(&state, |this, state, cx| {
             let (provider, _, cwd) = state.read(cx).effective();
             this.set_context(Some((provider, state.read(cx).selected_account(), cwd)), cx);
@@ -196,6 +202,8 @@ impl CommandMenu {
             selection: None,
             context: None,
             commands: vec![],
+            cached: HashMap::new(),
+            last_refresh: None,
             chosen: None,
             matches: vec![],
             selected: 0,
@@ -214,9 +222,20 @@ impl CommandMenu {
         self.selection = selection;
         self.context = None;
         self.commands.clear();
+        self.last_refresh = None;
+        self.error = None;
         self.chosen = None;
         self.loading = false;
         self.generation += 1;
+        if let Some((commands, refreshed)) =
+            self.selection.as_ref().and_then(|key| self.cached.get(key))
+        {
+            self.commands = commands.clone();
+            self.last_refresh = Some(*refreshed);
+            self.context = self.selection.clone();
+        }
+        // Warm the selected provider/account/project before the first slash.
+        self.preload(cx);
         self.changed(cx);
     }
 
@@ -249,45 +268,69 @@ impl CommandMenu {
         let input = self.input.read(cx);
         let open = self.selection.is_some()
             && query_range(&input.content(), input.selected_range()).is_some();
-        if open && !self.open && !self.loading {
-            self.context = None;
-        }
         self.open = open;
-        if self.open && self.context.is_none() {
-            let (provider, account, cwd) = self.selection.clone().unwrap();
-            self.commands = self.catalog(provider, Vec::new());
-            self.context = Some((provider, account.clone(), cwd.clone()));
-            self.loading = true;
-            self.error = None;
-            self.generation += 1;
-            let generation = self.generation;
-            let backend = self.backend.clone();
-            let task = backend.runtime.spawn(async move {
-                backend
-                    .manager
-                    .account_commands(provider, account.as_deref(), &cwd)
-                    .await
-            });
-            cx.spawn(async move |this, cx| {
-                let result = task.await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
-                    }
-                    this.loading = false;
-                    match result {
-                        Ok(Ok(commands)) => {
-                            this.commands = this.catalog(provider, commands);
-                        }
-                        Ok(Err(error)) => this.error = Some(error.to_string()),
-                        Err(error) => this.error = Some(error.to_string()),
-                    }
-                    this.filter(cx);
-                });
-            })
-            .detach();
+        if self.open {
+            self.preload(cx);
         }
         self.filter(cx);
+    }
+
+    fn preload(&mut self, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection.clone() else {
+            return;
+        };
+        let retry_after = if self.error.is_some() {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(60)
+        };
+        if self.loading
+            || (self.context.as_ref() == Some(&selection)
+                && self
+                    .last_refresh
+                    .is_some_and(|at| at.elapsed() < retry_after))
+        {
+            return;
+        }
+        let (provider, account, cwd) = selection.clone();
+        if self.context.is_none() {
+            self.commands = self.catalog(provider, Vec::new());
+        }
+        self.context = Some(selection.clone());
+        self.loading = true;
+        self.error = None;
+        self.generation += 1;
+        let generation = self.generation;
+        let backend = self.backend.clone();
+        let task = backend.runtime.spawn(async move {
+            backend
+                .manager
+                .account_commands(provider, account.as_deref(), &cwd)
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.loading = false;
+                let refreshed = Instant::now();
+                this.last_refresh = Some(refreshed);
+                match result {
+                    Ok(Ok(commands)) => {
+                        this.commands = this.catalog(provider, commands);
+                        this.cached
+                            .insert(selection, (this.commands.clone(), refreshed));
+                    }
+                    Ok(Err(error)) => this.error = Some(error.to_string()),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                // Refresh in place; keep usable cached suggestions on failure.
+                this.filter(cx);
+            });
+        })
+        .detach();
     }
 
     fn filter(&mut self, cx: &mut Context<Self>) {
@@ -629,6 +672,52 @@ impl Render for CommandMenu {
 
 #[cfg(test)]
 mod tests {
+
+    #[gpui::test]
+    fn main_catalog_preloads_and_reopening_keeps_ready_suggestions(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        cx.update(gpui_kit::init);
+        let state = crate::state::tests::draft(cx);
+        let (menu, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            CommandMenu::new(input, state, cx)
+        });
+        cx.update(|window, cx| {
+            menu.update(cx, |menu, cx| {
+                assert!(!menu.open);
+                assert!(
+                    menu.loading,
+                    "main catalog must load before a slash is typed"
+                );
+                assert_eq!(menu.context, menu.selection);
+                // Complete the parked provider request with a ready catalog.
+                menu.loading = false;
+                menu.last_refresh = Some(Instant::now());
+                menu.commands = local_commands(Provider::Codex);
+                let generation = menu.generation;
+                for _ in 0..2 {
+                    menu.input.update(cx, |input, cx| {
+                        input.set_value("please /", window, cx);
+                        input.set_selected_range(8..8, cx);
+                    });
+                    menu.changed(cx);
+                    assert!(menu.open);
+                    assert!(!menu.loading, "opening must reuse the warm catalog");
+                    assert_eq!(menu.matches.len(), 2);
+                    assert_eq!(menu.generation, generation);
+                    menu.dismiss(cx);
+                }
+                menu.last_refresh = Some(Instant::now() - Duration::from_secs(61));
+                menu.changed(cx);
+                assert!(menu.loading, "stale catalogs refresh in the background");
+                assert_eq!(
+                    menu.matches.len(),
+                    2,
+                    "refresh must retain ready suggestions"
+                );
+            })
+        });
+    }
 
     #[gpui::test]
     fn inline_completion_preserves_prompt_and_skill_metadata(cx: &mut gpui::TestAppContext) {

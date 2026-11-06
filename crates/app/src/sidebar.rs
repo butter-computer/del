@@ -1802,6 +1802,9 @@ pub(crate) fn space_switch_menu(
         menu = menu.item(
             PopupMenuItem::new(space.name)
                 .checked(space.id == active)
+                .when(space.id == active, |item| {
+                    item.icon(crate::icons::path("icons/selection-check.svg"))
+                })
                 .on_click(move |_, _, cx| state.update(cx, |s, cx| s.switch_space(&id, cx))),
         );
     }

@@ -291,7 +291,10 @@ This records the final decisions, including corrections to earlier experiments.
   skills, goals, and commands regardless of the query's position. Replace only
   the active slash word when choosing a completion; preserve surrounding text,
   selected skill identities, and trailing instructions. Already selected skills
-  remain excluded from suggestions.
+  remain excluded from suggestions. Preload catalogs when a main or Side composer
+  opens or changes provider/account/project. Reuse ready suggestions on reopening;
+  refresh stale catalogs in the background without clearing them. Cache entries
+  stay scoped to that provider, account, and directory.
 - Side chats use that same slash menu, including mid-prompt completion and
   Up/Down, Enter, Tab, and Escape. Catalog discovery uses the Side chat's own
   provider, account, and directory, refreshing on settings changes. Omit `/chat`
@@ -608,8 +611,9 @@ This records the final decisions, including corrections to earlier experiments.
 - Reasoning headers use shimmering Thinking while active and static Thought when
   finished. Click the header to expand/collapse; no spinner or show/hide text.
   Respect Reduce Motion.
-- Do not show the token-usage line above the composer. Existing session folder
-  labels show the project name only, with the branch in the hover tooltip.
+- Do not show the token-usage line above the composer. Do not duplicate the
+  project folder icon/name inside the composer; project and branch context remain
+  in the footer, with folder selection below new-session composers.
 
 - Stop must survive provider resume/send preparation: retain the request and
   interrupt a subsequently starting turn. Pause automatic queued follow-ups after
@@ -638,8 +642,10 @@ This records the final decisions, including corrections to earlier experiments.
   symlinks and file permissions. Changes is a read-only Git review pane that
   refreshes automatically while visible. Show only pending changes whenever staged,
   unstaged, or untracked files exist; otherwise show recent commits on the current
-  branch. Include added/removed lines per commit and totals for the displayed
-  commits; ignore binary line counts and compare merges against their first parent.
+  branch. Put “Recent commits” and “N total” on one header row, with the count
+  aligned right. Include added/removed lines per commit, without aggregate line
+  counts in the header; ignore binary line counts and compare merges against their
+  first parent.
   Switch automatically, with no mode toggle or redundant clean-state message.
   No Refresh, Edit file, or Ask about this
   buttons; no Ask about this buttons in Files or Terminal either.
@@ -1066,3 +1072,6 @@ activity bar. It supersedes earlier rules where they conflict.
   narrow Side chats. Use quiet progress motion with a static Reduced Motion path.
 - This display is separate from the Plan permission mode. Enable required task
   tools only in Del's own provider processes or threads, preserving user settings.
+
+- The Space picker uses a compact, rounded-stroke selection check with balanced
+  proportions, keeping selected-state semantics and aligned labels.

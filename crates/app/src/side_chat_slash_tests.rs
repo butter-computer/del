@@ -130,6 +130,17 @@ fn side_catalog_keyboard_goals_and_fast_are_scoped_to_the_side_chat(cx: &mut gpu
         }
         runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
     }
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if !folders.lock().unwrap().is_empty() {
+            break;
+        }
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
+    }
+    assert!(
+        !folders.lock().unwrap().is_empty(),
+        "preload the Side catalog before the user types a slash"
+    );
     cx.update(|window, cx| {
         side.update(cx, |side, cx| {
             side.input.update(cx, |input, cx| {
