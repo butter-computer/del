@@ -238,40 +238,197 @@ fn reachable(state: &AppState) -> impl Fn(&Tab) -> bool + '_ {
     }
 }
 
+/// A live menu: an open list follows snapshots and stop completion, rather than
+/// keeping the clone captured when the popover first opened.
+struct ProcessMenu {
+    shell: WeakEntity<AppShell>,
+    owner: Option<String>,
+    hovered: Option<(bool, u32)>,
+    focus: crate::keyboard_control::FocusHandles,
+    _subscription: Subscription,
+}
+impl ProcessMenu {
+    fn new(shell: Entity<AppShell>, owner: Option<String>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&shell, |_, _, cx| cx.notify());
+        Self {
+            shell: shell.downgrade(),
+            owner,
+            hovered: None,
+            focus: Default::default(),
+            _subscription: subscription,
+        }
+    }
+}
+impl Render for ProcessMenu {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = v_flex()
+            .id("process-list")
+            .w(zpx(STATUS_POPOVER_WIDTH))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation());
+        let Some(shell) = self.shell.upgrade() else {
+            return list;
+        };
+        let snapshot = shell.read(cx).processes.clone();
+        let stopping = shell.read(cx).stopping_processes.clone();
+        if let Some(error) = &snapshot.error {
+            return list.child(error.clone());
+        }
+        let sections = self
+            .owner
+            .iter()
+            .map(|owner| (true, Some(owner.as_str())))
+            .chain(std::iter::once((false, None)));
+        for (current, owner) in sections {
+            list = list.child(
+                div()
+                    .py(zpx(6.))
+                    .text_size(zpx(TEXT_XS))
+                    .text_color(crate::appearance::secondary_text())
+                    .child(if current {
+                        "This session"
+                    } else {
+                        "All sessions"
+                    }),
+            );
+            let rows: Vec<_> = snapshot.commands(owner).cloned().collect();
+            if rows.is_empty() {
+                list = list.child(div().text_size(zpx(TEXT_SM)).child("0 running"));
+            }
+            for process in rows {
+                let key = (current, process.pid);
+                let focus = self
+                    .focus
+                    .control(&format!("{}-{}", current, process.pid), cx);
+                let show = self.hovered == Some(key)
+                    || crate::keyboard_control::keyboard_within(&focus, window, cx);
+                let busy = stopping.contains(&process.pid);
+                let detail = if process.ports.is_empty() {
+                    format!("PID {}", process.pid)
+                } else {
+                    format!("localhost:{}", process.ports.join(", :"))
+                };
+                let target = process.clone();
+                let shell = self.shell.clone();
+                list = list.child(
+                    h_flex()
+                        .id((
+                            if current {
+                                "current-process"
+                            } else {
+                                "all-process"
+                            },
+                            process.pid as u64,
+                        ))
+                        .debug_selector(move || format!("process-row-{}-{}", current, key.1))
+                        .w_full()
+                        .h(zpx(30.))
+                        .gap(zpx(8.))
+                        .rounded(zpx(4.))
+                        .hover(|s| s.bg(crate::ui::row_hover()))
+                        .on_hover(cx.listener(move |this, entered, _, cx| {
+                            if *entered {
+                                this.hovered = Some(key);
+                            } else if this.hovered == Some(key) {
+                                this.hovered = None;
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(zpx(TEXT_SM))
+                                .child(process.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(zpx(TEXT_XS))
+                                .text_color(crate::appearance::secondary_text())
+                                .child(if busy { "Stopping…".into() } else { detail }),
+                        )
+                        .child(
+                            div()
+                                .id(("stop-process", process.pid as u64))
+                                .keyboard_control_with(&focus)
+                                .aria_label(format!("Stop {} (PID {})", process.name, process.pid))
+                                .debug_selector(move || {
+                                    format!("stop-process-{}-{}", current, key.1)
+                                })
+                                .size(zpx(22.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(zpx(4.))
+                                .when(show && !busy, |button| {
+                                    button.child(div().motion_child(true, |feedback| {
+                                        feedback.glyph(Glyph::Close).with_size(zpx(12.))
+                                    }))
+                                })
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Stop process")
+                                        .build(window, cx)
+                                })
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    if show
+                                        && !busy
+                                        && let Some(shell) = shell.upgrade()
+                                    {
+                                        shell.update(cx, |shell, cx| {
+                                            shell.stop_process(target.clone(), cx)
+                                        });
+                                    }
+                                }),
+                        ),
+                );
+            }
+        }
+        list
+    }
+}
+
 impl AppShell {
     pub(super) fn start_status_ticker(&mut self, cx: &mut Context<Self>) {
         if cfg!(test) {
             return;
         }
         cx.spawn(async move |this, cx| {
+            let mut tick = 0u64;
             loop {
                 if this
                     .update(cx, |this, cx| {
                         if this.state.read(cx).window_active {
-                            this.refresh_status(cx);
+                            this.refresh_status(tick.is_multiple_of(5), cx);
                         }
                     })
                     .is_err()
                 {
                     break;
                 }
+                tick = tick.wrapping_add(1);
                 cx.background_executor()
-                    .timer(std::time::Duration::from_secs(10))
+                    .timer(std::time::Duration::from_secs(2))
                     .await;
             }
         })
         .detach();
     }
 
-    fn refresh_status(&mut self, cx: &mut Context<Self>) {
+    fn refresh_status(&mut self, refresh_git: bool, cx: &mut Context<Self>) {
         if self.status_refreshing {
             return;
         }
         self.status_refreshing = true;
-        self.state.update(cx, |state, cx| {
-            state.refresh_git(state.effective().2);
-            state.refresh_selected_usage(cx);
-        });
+        if refresh_git {
+            self.state.update(cx, |state, cx| {
+                state.refresh_git(state.effective().2);
+                state.refresh_selected_usage(cx);
+            });
+        }
         let backend = self.state.read(cx).backend();
         let mut roots: Vec<crate::status_processes::Root> =
             self.terminals
@@ -287,11 +444,24 @@ impl AppShell {
                     }
                 }))
                 .collect();
+        roots.extend(
+            self.bottom
+                .terminals
+                .values()
+                .map(|host| crate::status_processes::Root {
+                    pid: host.read(cx).snapshot().pid,
+                    owner: None,
+                }),
+        );
+        let mut side_owners = HashMap::new();
         for (panel, owner) in std::iter::once((&self.right, &self.right_key)).chain(
             self.right_cache
                 .values()
                 .map(|entry| (&entry.panel, &entry.key)),
         ) {
+            for id in panel.read(cx).process_sessions(cx) {
+                side_owners.insert(id, owner.clone());
+            }
             roots.extend(panel.read(cx).process_roots(cx).into_iter().map(|pid| {
                 crate::status_processes::Root {
                     pid,
@@ -299,27 +469,36 @@ impl AppShell {
                 }
             }));
         }
+        let previous = self.processes.clone();
         let job = backend.runtime.spawn(async move {
+            let mut tags = std::collections::BTreeMap::new();
             // Include reconnectable provider servers that may outlive their original parent.
-            for session in backend
-                .manager
-                .list_sessions()
-                .into_iter()
-                .filter(|s| backend.manager.is_live(&s.id))
-            {
+            for id in backend.manager.live_session_ids() {
+                let parent = backend
+                    .manager
+                    .peer_parent(&id)
+                    .unwrap_or_else(|| id.clone());
+                let owner = side_owners
+                    .get(&id)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| format!("chat:{}", parent.as_str()));
+                if let Some(tag) = backend.manager.process_tag(&id) {
+                    tags.insert(tag, owner.clone());
+                }
                 if let Ok(Some((pid, shared))) = tokio::time::timeout(
                     std::time::Duration::from_millis(200),
-                    backend.manager.session_process(&session.id),
+                    backend.manager.session_process(&id),
                 )
                 .await
                 {
                     roots.push(crate::status_processes::Root {
                         pid,
-                        owner: (!shared).then(|| format!("chat:{}", session.id.as_str())),
+                        owner: (!shared).then_some(owner),
                     });
                 }
             }
-            crate::status_processes::read(roots).await
+            crate::status_processes::read(roots, tags, previous).await
         });
         cx.spawn(async move |this, cx| {
             let result = job.await;
@@ -328,6 +507,41 @@ impl AppShell {
                 if let Ok(snapshot) = result {
                     this.processes = snapshot;
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn stop_process(&mut self, process: crate::status_processes::Process, cx: &mut Context<Self>) {
+        if !self.stopping_processes.insert(process.pid) {
+            return;
+        }
+        let job = self
+            .state
+            .read(cx)
+            .backend()
+            .runtime
+            .spawn(crate::status_processes::stop(process.clone()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.stopping_processes.remove(&process.pid);
+                match result {
+                    Ok(Ok(())) => this
+                        .processes
+                        .rows
+                        .retain(|p| p.pid != process.pid || p.identity != process.identity),
+                    other => this.state.update(cx, |state, _| {
+                        state.report_error(match other {
+                            Ok(Err(error)) => error,
+                            Err(error) => format!("Could not stop process: {error}"),
+                            _ => unreachable!(),
+                        })
+                    }),
+                }
+                this.refresh_status(false, cx);
                 cx.notify();
             });
         })
@@ -734,25 +948,11 @@ impl AppShell {
             Selection::Terminal(id) => Some(format!("terminal:{}", id.as_str())),
             Selection::Draft(_) => None,
         };
-        let process_rows: Vec<_> = self
-            .processes
-            .rows
-            .iter()
-            .filter(|p| !p.background)
-            .cloned()
-            .collect();
-        let process_count = process_rows
-            .iter()
-            .filter(|p| {
-                process_owner
-                    .as_ref()
-                    .is_none_or(|owner| p.owner.as_ref() == Some(owner))
-            })
-            .count();
+        let process_count = self.processes.commands(process_owner.as_deref()).count();
         // Like Context, Limits and Cost: shown only once known.
         let processes_known = self.processes.ready && self.processes.error.is_none();
         let process_label = format!("{process_count} running");
-        let process_snapshot = self.processes.clone();
+        let process_shell = cx.entity().downgrade();
         // Not read yet is unknown, so the branch stays hidden; only a finished
         // read can say there is no repository.
         let branch_known = state.project_info.contains_key(&cwd);
@@ -1027,46 +1227,13 @@ impl AppShell {
                         "Commands and servers · all sessions"
                     })
                     .child(div().text_size(zpx(TEXT_XS)).child(process_label))
-                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                        let mut menu = menu.scrollable(true).max_h(zpx(320.));
-                        if let Some(error) = &process_snapshot.error {
-                            return menu.item(status_note(error.clone()));
-                        }
-                        let row = |process: &crate::status_processes::Process| {
-                            let ports = if process.ports.is_empty() {
-                                String::new()
-                            } else {
-                                format!(":{}  ", process.ports.join(", :"))
-                            };
-                            status_row(process.name.clone(), format!("{ports}PID {}", process.pid))
-                        };
-                        let empty = if process_snapshot.ready {
-                            "0 running"
-                        } else {
-                            "Reading processes…"
-                        };
-                        if let Some(owner) = &process_owner {
-                            menu = menu.item(status_heading("This session"));
-                            let current = process_rows
-                                .iter()
-                                .filter(|p| p.owner.as_ref() == Some(owner))
-                                .collect::<Vec<_>>();
-                            if current.is_empty() {
-                                menu = menu.item(status_note(empty));
-                            }
-                            for process in current {
-                                menu = menu.item(row(process));
-                            }
-                            menu = menu.separator();
-                        }
-                        menu = menu.item(status_heading("All sessions"));
-                        if process_rows.is_empty() {
-                            menu = menu.item(status_note(empty));
-                        }
-                        for process in &process_rows {
-                            menu = menu.item(row(process));
-                        }
-                        menu
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, cx| {
+                        let Some(shell) = process_shell.upgrade() else { return menu; };
+                        let owner = process_owner.clone();
+                        let list = cx.new(|cx| ProcessMenu::new(shell, owner, cx));
+                        menu.scrollable(true).max_h(zpx(320.)).item(
+                            PopupMenuItem::element(move |_, _| list.clone()).custom_highlight()
+                        )
                     }),
             ))
             .child(

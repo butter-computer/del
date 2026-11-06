@@ -689,6 +689,7 @@ struct AppShell {
     /// The directory whose Git state was last refreshed for the status bar.
     git_refreshed: Option<std::path::PathBuf>,
     processes: status_processes::Snapshot,
+    stopping_processes: HashSet<u32>,
     status_refreshing: bool,
     bottom: workbench::BottomPanel,
 }
@@ -1164,6 +1165,7 @@ impl AppShell {
             nav: Default::default(),
             git_refreshed: None,
             processes: Default::default(),
+            stopping_processes: Default::default(),
             status_refreshing: false,
             bottom: Default::default(),
         };

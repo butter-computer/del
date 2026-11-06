@@ -124,10 +124,19 @@ pub struct BrowserTools {
     pub question: Option<QuestionHandler>,
 }
 
+/// Non-secret, per-execution marker inherited by agent commands. It is not a credential.
+pub const PROCESS_TAG_ENV: &str = "DEL_PROCESS_TAG";
+pub fn new_process_tag() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[async_trait]
 pub trait AgentBackend: Send + Sync {
     fn set_browser_tools(&self, _tools: BrowserTools) {}
     fn provider(&self) -> Provider;
+    fn process_tag(&self, _id: &SessionId) -> Option<String> {
+        None
+    }
     /// Live process root and whether its memory is shared across sessions.
     async fn session_process(&self, _id: &SessionId) -> Option<(u32, bool)> {
         None

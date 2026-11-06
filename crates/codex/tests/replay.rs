@@ -1143,6 +1143,12 @@ async fn native_fork_requests_ephemeral_context_without_replaying_parent_turns()
         .unwrap();
     assert_eq!(child.id.as_str(), "child");
     assert!(child.history().is_empty());
+    let parent_tag = backend.process_tag(&SessionId::new("parent")).unwrap();
+    let child_tag = backend.process_tag(&child.id).unwrap();
+    assert_ne!(
+        parent_tag, child_tag,
+        "fork commands must have their own owner"
+    );
     backend.shutdown().await.unwrap();
     server.await.unwrap().unwrap();
 }

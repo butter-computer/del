@@ -69,12 +69,35 @@ pub fn replay_with(
                         .await
                         .map_err(|e| e.to_string())?
                         .ok_or(format!("line {n}: client closed, expected {body}"))?;
-                    let got: Value = serde_json::from_str(&got).map_err(|e| e.to_string())?;
+                    let mut got: Value = serde_json::from_str(&got).map_err(|e| e.to_string())?;
                     if msg.get("method").is_some() {
                         if got["method"] != msg["method"] {
                             return Err(format!("line {n}: expected {} got {got}", msg["method"]));
                         }
                         let m = msg["method"].as_str().unwrap();
+                        if matches!(m, "thread/start" | "thread/resume" | "thread/fork") {
+                            // This one per-execution field is random; keep every other
+                            // fork parameter subject to the exact transcript comparison.
+                            let key = "shell_environment_policy.set.DEL_PROCESS_TAG";
+                            if let Some(tag) = got["params"]["config"]
+                                .as_object_mut()
+                                .and_then(|config| config.remove(key))
+                            {
+                                let valid = tag.as_str().is_some_and(|tag| {
+                                    tag.len() == 36
+                                        && tag.bytes().enumerate().all(|(i, byte)| {
+                                            if matches!(i, 8 | 13 | 18 | 23) {
+                                                byte == b'-'
+                                            } else {
+                                                byte.is_ascii_hexdigit()
+                                            }
+                                        })
+                                });
+                                if !valid {
+                                    return Err(format!("line {n}: invalid process tag"));
+                                }
+                            }
+                        }
                         if !LOOSE.contains(&m) && got.get("params") != msg.get("params") {
                             return Err(format!(
                                 "line {n}: params differ\n want {}\n got  {}",

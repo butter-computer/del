@@ -115,6 +115,7 @@ struct Live {
     child: AsyncMutex<Child>,
     /// Leader of the process group `claude` and its tools run in.
     pid: Option<u32>,
+    process_tag: String,
     closing: std::sync::atomic::AtomicBool,
 }
 
@@ -283,6 +284,8 @@ impl ClaudeBackend {
         // Opt this child process into task tools on newer models: Del renders
         // their structured progress. Global user settings remain untouched.
         command.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
+        let process_tag = del_agent::backend::new_process_tag();
+        command.env(del_agent::backend::PROCESS_TAG_ENV, &process_tag);
         let mut args = self.args(config, session_flag);
         if !persist {
             args.push("--no-session-persistence".into());
@@ -346,6 +349,7 @@ impl ClaudeBackend {
             translator: Mutex::new(Translator::new()),
             child: AsyncMutex::new(child),
             pid,
+            process_tag,
             closing: Default::default(),
         });
 
@@ -551,6 +555,9 @@ async fn input_line(input: &UserInput) -> Result<String> {
 
 #[async_trait]
 impl AgentBackend for ClaudeBackend {
+    fn process_tag(&self, id: &SessionId) -> Option<String> {
+        Some(self.live(id).ok()?.process_tag.clone())
+    }
     async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
         self.live(id).ok()?.pid.map(|pid| (pid, false))
     }

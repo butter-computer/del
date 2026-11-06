@@ -33,6 +33,7 @@ pub struct Server {
     /// The leader was reaped, so `pid` must no longer be signalled.
     reaped: std::sync::atomic::AtomicBool,
     pub(crate) pid: u32,
+    pub(crate) process_tag: String,
     client: reqwest::Client,
     url: String,
     password: String,
@@ -85,7 +86,9 @@ impl Server {
             ))
         })?;
         let password = uuid::Uuid::new_v4().to_string();
+        let process_tag = del_agent::backend::new_process_tag();
         let mut command = Command::new(binary);
+        command.env(del_agent::backend::PROCESS_TAG_ENV, &process_tag);
         command.envs(environment.iter().cloned());
         command.arg("serve");
         if stdio {
@@ -175,6 +178,7 @@ impl Server {
             _stdin: stdin,
             reaped: Default::default(),
             pid,
+            process_tag,
             client: reqwest::Client::builder()
                 .no_proxy()
                 .connect_timeout(Duration::from_secs(10))

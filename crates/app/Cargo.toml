@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 tempfile = "3"
+libc = "0.2"
 del-core.workspace = true
 del-agent.workspace = true
 async-trait = "0.1"
@@ -38,6 +39,7 @@ del-terminal = { path = "../terminal" }
 del-mcp.workspace = true
 
 [dev-dependencies]
+futures = "0.3"
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

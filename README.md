@@ -6,14 +6,15 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.54` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.55` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.54 source update notes](docs/releases/0.1.54.md).
+See the [0.1.55 release notes](docs/releases/0.1.55.md).
 
-This update keeps sends waiting on attachments tied to their original main or Side
-chat, preserves the original message and Steer choice, and prevents deleted queues
-from being recreated by a background save. Tool details retain full output in a
-height-limited scrolling view. It builds on the [0.1.53 polish pass](docs/releases/0.1.53.md).
+This release fixes session ownership in the Processes menu for Claude, Codex and
+OpenCode, including detached servers and Side chats. Hover a process row to stop
+that command and its children; both This session and All sessions update live.
+It also includes the earlier [0.1.54 reliability fixes](docs/releases/0.1.54.md)
+and [0.1.53 interface polish](docs/releases/0.1.53.md).
 
 Del includes expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
@@ -43,9 +44,9 @@ when making future changes.
 
 ## Download and install
 
-The latest downloadable release remains **0.1.25**; see its [release notes](docs/releases/0.1.25.md)
-and [validation record](docs/releases/0.1.25-validation.md).
-Download **Del-0.1.25-arm64.dmg** from the [0.1.25 release](https://github.com/butter-computer/del/releases/tag/v0.1.25),
+The latest downloadable release is **0.1.55**; see its [release notes](docs/releases/0.1.55.md)
+and [validation record](docs/releases/0.1.55-validation.md).
+Download **Del-0.1.55-arm64.dmg** from the [0.1.55 release](https://github.com/butter-computer/del/releases/tag/v0.1.55),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -65,7 +66,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.54-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.55-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -393,8 +394,17 @@ page's edge. The 22 px status bar shows session metrics and the Chat/Terminal to
 - **Context**: active conversation context (history, instructions, tools and current output), shown as percent used. Capacity comes from provider telemetry or an exact known model specification; unknown capacities stay unavailable. This is not cumulative lifetime token traffic. It resets on provider switches; Terminal mode shows unavailable.
 - **Limits**: the selected provider/account's most constrained allowance, with individual windows and local reset times in the menu. Claude and Codex report these; unsupported accounts show unavailable. Refreshes at most once a minute while active.
 - **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the total for the main chat plus all its side chats, including closed side chats. Hover or click for each provider’s combined cost across repeated switches. Each chat is reconciled independently before summing, so sibling chats cannot mask or duplicate one another’s usage. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
-- **Processes**: commands and servers for the current session, with PIDs and listening TCP ports. The menu also lists all sessions; empty drafts count all sessions. Empty sections say **0 running**. Background provider connections, shells and helpers are hidden. Commands under shared provider servers without verifiable ownership appear only under all sessions. Refreshes every ten seconds while active; command arguments are never collected.
+- **Processes**: commands and servers for the current session, including its Side chats and sidebar terminals, with PIDs and listening TCP ports. **All sessions** includes commands from other sessions and shared project terminals; empty drafts count all sessions. Empty sections say **0 running**. Provider connections, shell wrappers, Del housekeeping and known REPL helpers are hidden. Claude, Codex and OpenCode commands carry a per-execution marker, so shared Codex servers and detached commands retain exact ownership. Older untagged commands with unverifiable ownership stay in All sessions. Snapshots refresh every two seconds while active, including while the menu is open. Hover a row, or focus its trailing control with the keyboard, to reveal **Stop process**. Stopping shows **Stopping…**, signals only that command and its descendants, and force-stops remaining processes after a two-second grace period. Each signal verifies the process's birth time so an old row cannot target a reused PID. It never signals the provider's shared process group.
+
 - **Chat / Terminal**: switch the active conversation between its chat and native terminal UI.
+
+Process markers are local, non-secret launch identifiers. On macOS Del reads only
+its exact marker from the native process environment; it skips arguments without
+decoding them and discards the temporary buffer. Arguments and unrelated environment
+values are never displayed, logged or persisted. Marker ownership lasts for this Del
+launch; commands that deliberately remove their marker and detach before being
+observed cannot be attributed. Provider switching routes new markers to the same
+Del conversation, and Side chat commands stay with their parent workspace.
 
 Unknown values appear as **—**, not zero. Limits identify the selected account by full email where available, including the default CLI account. Provider/model controls remain in the composer; keep-awake stays in the sidebar. ⌘J opens a terminal panel below the page.
 

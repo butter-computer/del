@@ -1157,3 +1157,21 @@ activity bar. It supersedes earlier rules where they conflict.
   Hide Others, Show All, Run in Background and Quit, plus Edit and Window menus.
 - User-facing copy says "session", "Could not", uses real plurals, 24-hour times,
   `~`-abbreviated paths and grouped numbers. Disabled controls explain why in their tooltip.
+
+## Session process controls
+
+- Processes shows This session and All sessions. This session includes the main
+  chat, its temporary Side chats, and its sidebar terminals; shared project shells
+  belong only in All sessions. Never attribute by directory or current selection.
+- Include only registered provider/terminal trees or commands with a known launch
+  marker. Hide shell wrappers, provider connections, Del housekeeping and known REPL
+  helpers. Tagged Claude, Codex and OpenCode commands retain their owner after
+  detaching; unverified shared commands remain in All sessions.
+- Refresh the process snapshot every two seconds while active and update open menus.
+  Keep Git polling at ten seconds and preserve account usage throttling.
+- A trailing close control appears on row hover or keyboard focus. Stop only that
+  command and its descendants, show Stopping…, allow two seconds for graceful exit,
+  then force-stop verified survivors. Never kill a shared provider group. Recheck
+  process birth time before every signal; stale PIDs must not target replacements.
+- Native marker extraction skips argv without decoding it and discards its buffer.
+  Never retain, display or log arguments or unrelated environment values.

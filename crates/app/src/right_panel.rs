@@ -634,6 +634,20 @@ impl EventEmitter<crate::chat::OpenLink> for RightPanel {}
 impl EventEmitter<crate::chat::OpenPeer> for RightPanel {}
 
 impl RightPanel {
+    pub(crate) fn process_sessions(&self, cx: &App) -> Vec<del_agent::SessionId> {
+        let mut sessions = self
+            .side_chat
+            .as_ref()
+            .and_then(|side| side.read(cx).session_id())
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for tab in &self.hosted {
+            sessions.extend(tab.panel.read(cx).process_sessions(cx));
+        }
+        sessions
+    }
+
     pub(crate) fn process_roots(&self, cx: &App) -> Vec<u32> {
         let mut roots = self
             .terminals

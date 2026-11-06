@@ -58,6 +58,7 @@ struct SessionState {
     /// Parameters the thread was opened with (minus `threadId`), so it can be
     /// re-attached to a replacement app-server with `thread/resume`.
     open_params: Option<serde_json::Map<String, Value>>,
+    process_tag: Option<String>,
     /// The app-server this thread lived on died; the next request must
     /// `thread/resume` it on the new one first.
     detached: bool,
@@ -422,6 +423,14 @@ impl CodexBackend {
             .as_object_mut()
             .ok_or_else(|| be("Invalid thread configuration"))?
             .insert("thread_unload_delay_secs".into(), json!(0));
+        let process_tag = del_agent::backend::new_process_tag();
+        params["config"].as_object_mut().unwrap().insert(
+            format!(
+                "shell_environment_policy.set.{}",
+                del_agent::backend::PROCESS_TAG_ENV
+            ),
+            json!(process_tag),
+        );
         let conn = self.connection().await?;
         // The browser credential is bound to the thread. A new thread's id is
         // known only from the reply, so it starts on a provisional id.
@@ -475,6 +484,7 @@ impl CodexBackend {
                     .or_else(|| open_params.get("model").and_then(Value::as_str)),
             );
             st.open_params = Some(open_params);
+            st.process_tag = Some(process_tag);
             st.detached = false;
             if thread.is_some() {
                 // A throwaway mapper: replaying persisted turns must not touch
@@ -507,6 +517,15 @@ impl CodexBackend {
 
 #[async_trait]
 impl AgentBackend for CodexBackend {
+    fn process_tag(&self, id: &SessionId) -> Option<String> {
+        self.session(id)
+            .ok()?
+            .state
+            .lock()
+            .unwrap()
+            .process_tag
+            .clone()
+    }
     async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
         let _ = id;
         let conn = self.conn.lock().unwrap().live.clone()?;

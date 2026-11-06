@@ -1248,6 +1248,11 @@ mod tests {
             &[config(), config()]
         );
         assert_eq!(manager.list_sessions().len(), 1);
+        assert_eq!(
+            manager.live_session_ids().len(),
+            2,
+            "process tracking includes temporary Side chats"
+        );
         manager
             .send_prompt(&child.handle.id, UserInput::text("side question"))
             .await

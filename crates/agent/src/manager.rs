@@ -1494,6 +1494,14 @@ impl SessionManager {
         removed
     }
 
+    /// Includes temporary Side chats, which intentionally stay out of list_sessions.
+    pub fn live_session_ids(&self) -> Vec<SessionId> {
+        self.shared.live.lock().unwrap().keys().cloned().collect()
+    }
+    pub fn process_tag(&self, id: &SessionId) -> Option<String> {
+        self.session_backend(id).ok()?.process_tag(id)
+    }
+
     pub async fn session_process(&self, id: &SessionId) -> Option<(u32, bool)> {
         self.live_provider(id).ok()?;
         self.session_backend(id).ok()?.session_process(id).await

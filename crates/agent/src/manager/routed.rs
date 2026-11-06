@@ -25,6 +25,9 @@ impl AgentBackend for RoutedBackend {
     fn provider(&self) -> Provider {
         self.inner.provider()
     }
+    fn process_tag(&self, _: &SessionId) -> Option<String> {
+        self.inner.process_tag(&self.native)
+    }
     async fn session_process(&self, _: &SessionId) -> Option<(u32, bool)> {
         self.inner.session_process(&self.native).await
     }
