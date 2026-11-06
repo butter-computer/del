@@ -234,13 +234,13 @@ async fn output(program: &Path, args: &[String], timeout: Duration) -> Result<St
             Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned())
         }
         Ok(Ok(result)) => Err(format!(
-            "Update failed: {}",
+            "Could not update: {}",
             String::from_utf8_lossy(&result.stderr)
                 .chars()
                 .take(800)
                 .collect::<String>()
         )),
-        Ok(Err(error)) => Err(format!("Update failed: {error}")),
+        Ok(Err(error)) => Err(format!("Could not update: {error}")),
         Err(_) => {
             if let Some(pid) = pid {
                 del_agent::procgroup::signal_group(pid, true);
