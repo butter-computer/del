@@ -10,7 +10,7 @@ mod view;
 
 pub use colors::TerminalTheme;
 
-pub use view::{ChatRequested, TerminalView, init};
+pub use view::{ChatRequested, TerminalView, init, set_layout_animating};
 
 pub use session::{
     TerminalEvent, TerminalSession, TerminalShutdown, TerminalSize, TerminalSpec, shutdown_all,

@@ -271,7 +271,7 @@ impl AlertDialog {
         self
     }
 
-    /// Sets how the alert dialog enters, defaulting to [`DialogEntrance::SlideDown`].
+    /// Sets how the alert dialog enters, defaulting to [`DialogEntrance::FadeSlide`].
     ///
     /// Shares the surface, backdrop, and reduced-motion policy of [`Dialog::entrance`].
     pub fn entrance(mut self, entrance: DialogEntrance) -> Self {

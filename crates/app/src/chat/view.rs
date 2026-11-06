@@ -1,7 +1,7 @@
 //! `ChatView`: session plumbing and the message list. The composer is shared
 //! with the new-chat page and lives in the app shell.
 
-use super::model::{Block, Change, ChatModel, Phase};
+use super::model::{Block, Change, ChatModel};
 use crate::appearance::rgba;
 use crate::keyboard_control::KeyboardControl as _;
 use crate::zoom::px as zpx;
@@ -30,10 +30,45 @@ impl Backend {
     }
 }
 
+/// Where an eased scroll lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JumpTarget {
+    /// A row's top, `inset` pixels below the viewport's top edge.
+    Row(usize),
+    /// The end of the transcript; tail-following resumes on arrival.
+    End,
+}
+
 struct MessageJump {
-    target: usize,
+    target: JumpTarget,
+    /// Space left above a row target so it does not sit flush against the edge.
+    inset: f32,
     from: f32,
     started: std::time::Instant,
+}
+
+/// Duration of every eased transcript scroll: rail ticks, search hits, jump to latest.
+const JUMP_SECONDS: f32 = 0.22;
+/// Search hits land this far below the top so the match has context above it.
+const SEARCH_INSET: f32 = 16.;
+/// A disclosure's spring has settled well within this; remeasure until then.
+const DISCLOSURE_SETTLE: std::time::Duration = std::time::Duration::from_millis(520);
+
+/// Automatic delivery (after a turn, replay, or peer work) must not pull a
+/// reader back down; only the person's own send scrolls to the new message.
+fn scrolls_on_delivery(by_user: bool, following_tail: bool) -> bool {
+    by_user || following_tail
+}
+
+/// The jump-to-latest pill shows only while the reader is above the end and
+/// something new is there or still arriving.
+fn shows_jump_to_latest(
+    following_tail: bool,
+    scrolled_to_end: Option<bool>,
+    unseen: bool,
+    running: bool,
+) -> bool {
+    !following_tail && scrolled_to_end == Some(false) && (unseen || running)
 }
 
 fn active_prompt(prompts: &[usize], top: usize, at_end: bool) -> Option<usize> {
@@ -49,28 +84,6 @@ pub(super) struct SearchFlash {
     pub text_view: Entity<gpui_kit::component::text::TextViewState>,
     pub range: std::ops::Range<usize>,
     pub applied: bool,
-}
-
-fn escaped_search_text(
-    text: &str,
-    range: std::ops::Range<usize>,
-) -> (String, std::ops::Range<usize>) {
-    let mut out = String::new();
-    let mut start = 0;
-    let mut end = 0;
-    for (ix, ch) in text.char_indices() {
-        if ix == range.start {
-            start = out.len();
-        }
-        if ch.is_ascii_punctuation() {
-            out.push('\\');
-        }
-        out.push(ch);
-        if ix + ch.len_utf8() == range.end {
-            end = out.len();
-        }
-    }
-    (out, start..end)
 }
 
 /// Combine only adjacent, already-received chunks for the same turn. Never wait
@@ -143,13 +156,27 @@ pub struct ChatView {
     pub(super) scroller: ListState,
     jump: Option<MessageJump>,
     rail_hover: Option<usize>,
-    rail_previous_hover: Option<usize>,
+    /// Rows changed while the reader was scrolled up: the jump-to-latest pill shows.
+    unseen: bool,
+    /// Rows whose height animates (disclosure springs), remeasured every frame
+    /// until the deadline so the virtual list follows the reveal.
+    settling: Vec<(std::ops::Range<usize>, std::time::Instant)>,
+    /// A final answer whose work is folding: keep its top where the reader saw it.
+    answer_anchor: Option<(usize, Pixels)>,
+    /// Peer receipt names and providers, resolved when the receipt arrives.
+    pub(super) peer_rows: std::collections::HashMap<String, super::blocks::PeerRow>,
+    /// When each live approval request arrived, for its entrance reveal.
+    pub(super) approval_entered: std::collections::HashMap<String, std::time::Instant>,
+    /// Expanded tool details, built once per change rather than every frame.
+    pub(super) tool_details: std::cell::RefCell<
+        std::collections::HashMap<usize, (usize, usize, super::blocks::ToolDetails)>,
+    >,
     /// Rows holding user messages, in order: the message rail's ticks.
     prompt_rows: Vec<usize>,
     /// Cached `search_messages`; cleared whenever the transcript changes.
     search_messages:
         std::cell::RefCell<Option<std::sync::Arc<Vec<crate::conversation_search::Message>>>>,
-    /// Consecutive tool rows shown as one group; refreshed once per render.
+    /// Consecutive tool rows shown as one group; refreshed when the model changes.
     pub(super) tool_groups: Vec<std::ops::Range<usize>>,
     /// History is folded without per-event list updates; one reset follows.
     replaying: bool,
@@ -178,6 +205,12 @@ pub struct ChatView {
     pub(super) work_elapsed: std::collections::HashMap<usize, std::time::Duration>,
     pub(super) assistant_text: std::collections::HashMap<usize, Entity<text::TextViewState>>,
     pub pending_errors: Vec<String>,
+    /// Messages sent while history loaded, delivered once it has.
+    held_until_loaded: Vec<(String, bool)>,
+    /// The last message delivered, so a failed turn can send it again.
+    last_input: Option<UserInput>,
+    /// The error row left by a failed opening load, which offers Retry.
+    load_failed: Option<usize>,
     pub(super) search_pending: Option<crate::conversation_search::Hit>,
     pub(super) search_flash: Option<SearchFlash>,
 }
@@ -213,8 +246,10 @@ impl ChatView {
         scroller.set_scroll_handler(move |_, _, cx| {
             let view = view.clone();
             cx.defer(move |cx| {
+                // The reader's own scroll wins over any eased jump or anchor.
                 let _ = view.update(cx, |this, cx| {
                     this.jump = None;
+                    this.answer_anchor = None;
                     cx.notify();
                 });
             });
@@ -230,7 +265,12 @@ impl ChatView {
             scroller,
             jump: None,
             rail_hover: None,
-            rail_previous_hover: None,
+            unseen: false,
+            settling: Vec::new(),
+            answer_anchor: None,
+            peer_rows: Default::default(),
+            approval_entered: Default::default(),
+            tool_details: Default::default(),
             prompt_rows: Vec::new(),
             search_messages: Default::default(),
             tool_groups: Vec::new(),
@@ -257,6 +297,9 @@ impl ChatView {
             work_elapsed: Default::default(),
             assistant_text: Default::default(),
             pending_errors: Vec::new(),
+            held_until_loaded: Vec::new(),
+            last_input: None,
+            load_failed: None,
             search_pending: None,
             search_flash: None,
         };
@@ -267,6 +310,12 @@ impl ChatView {
         if let Some(id) = session {
             view.follow(id, cx);
         }
+        // Queue writes run in the background; let them land before the app exits.
+        cx.on_app_quit(|_, _| {
+            crate::sessions::flush_pending_writes();
+            async {}
+        })
+        .detach();
         view
     }
 
@@ -344,7 +393,7 @@ impl ChatView {
         };
         let source_range = offset + hit.range.start..offset + hit.range.end;
         let (source, range) = if message.role == "You" {
-            escaped_search_text(&text, source_range)
+            super::blocks::literal_markdown(&text, source_range)
         } else {
             super::citations::with_range(&text, source_range)
         };
@@ -358,10 +407,14 @@ impl ChatView {
             applied: false,
         });
         self.reveal_work_row(ix);
-        self.scroller.scroll_to(ListOffset {
-            item_ix: ix,
-            offset_in_item: zpx(0.),
+        // The same eased scroll as a rail jump, landing just below the top edge.
+        self.jump = Some(MessageJump {
+            target: JumpTarget::Row(ix),
+            inset: SEARCH_INSET,
+            from: self.scroller.scroll_px_offset_for_scrollbar().y.as_f32(),
+            started: cx.background_executor().now(),
         });
+        cx.notify();
     }
 
     pub(super) fn copy_response(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -479,13 +532,10 @@ impl ChatView {
                     let write = cx
                         .background_executor()
                         .spawn(async move { super::reply_times::append(&id, &entry) });
-                    cx.spawn(async move |this, cx| {
+                    // Housekeeping: a lost timestamp is not worth interrupting anyone.
+                    cx.spawn(async move |_, _| {
                         if let Err(error) = write.await {
-                            let _ = this.update(cx, |this, cx| {
-                                this.pending_errors
-                                    .push(format!("Could not save reply time: {error}"));
-                                cx.notify();
-                            });
+                            eprintln!("Could not save reply time: {error}");
                         }
                     })
                     .detach();
@@ -493,10 +543,25 @@ impl ChatView {
                 self.scroller.remeasure_items(ix..ix + 1);
             }
         }
+        // A recoverable error has no row of its own, so it becomes a toast. A
+        // fatal one fails the turn, whose inline row already says why.
         if !self.loading
-            && let AgentEvent::Error { message, .. } = event
+            && let AgentEvent::Error {
+                message,
+                recoverable: true,
+            } = event
         {
             self.pending_errors.push(message.clone());
+        }
+        if !self.loading
+            && let AgentEvent::TurnCompleted {
+                status: del_agent::TurnStatus::Failed,
+                ..
+            } = event
+            && let Some(shown) = super::blocks::failed_turn_error(&self.model.blocks)
+        {
+            // Not shown yet: the failed row carries it instead of a toast.
+            self.pending_errors.retain(|message| *message != shown);
         }
         let change = self.model.apply(event);
         if !self.loading
@@ -533,6 +598,45 @@ impl ChatView {
         self.work_sections
             .iter()
             .any(|section| section.answer == ix)
+    }
+
+    /// Recompute what depends on the whole transcript: tool groups and folded
+    /// work. Runs when the model changes, never per frame.
+    fn refresh_layout(&mut self, cx: &mut Context<Self>) {
+        self.tool_groups = super::activity::tool_groups(&self.model.blocks);
+        let before: std::collections::HashSet<usize> =
+            self.work_sections.iter().map(|s| s.start).collect();
+        self.refresh_work_sections();
+        if self.loading || self.replaying || cx.reduce_motion() {
+            return;
+        }
+        // A final answer just folded its work under Worked: close it with the
+        // same reveal as a click, keeping the answer where the reader sees it.
+        let now = std::time::Instant::now();
+        let folded: Vec<_> = self
+            .work_sections
+            .iter()
+            .filter(|section| {
+                !before.contains(&section.start)
+                    && section.end - section.start > 1
+                    && !self.expanded_work.contains(&section.start)
+            })
+            .cloned()
+            .collect();
+        for section in folded {
+            self.work_reveals.insert(
+                section.start,
+                super::work_history::Reveal::new(1., false, now),
+            );
+            if !self.scroller.is_following_tail()
+                && let Some(bounds) = self.scroller.bounds_for_item(section.answer)
+            {
+                let top = bounds.top() - self.scroller.viewport_bounds().top();
+                if top >= zpx(0.) {
+                    self.answer_anchor = Some((section.answer, top));
+                }
+            }
+        }
     }
 
     fn refresh_work_sections(&mut self) {
@@ -582,39 +686,11 @@ impl ChatView {
         if cx.reduce_motion() {
             self.work_reveals.remove(&range.start);
         } else {
+            // Render samples the reveal and remeasures each frame until it settles.
             self.work_reveals.insert(
                 range.start,
                 super::work_history::Reveal::new(from, !was_open, now),
             );
-            let range = range.clone();
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    let keep_going = this
-                        .update(cx, |this, cx| {
-                            let Some(motion) = this.work_reveals.get(&range.start) else {
-                                return false;
-                            };
-                            if motion.started != now {
-                                return false;
-                            }
-                            let done = motion.sample(std::time::Instant::now()).1;
-                            if done {
-                                this.work_reveals.remove(&range.start);
-                            }
-                            this.scroller.remeasure_items(range.clone());
-                            cx.notify();
-                            !done
-                        })
-                        .unwrap_or(false);
-                    if !keep_going {
-                        break;
-                    }
-                }
-            })
-            .detach();
         }
         self.scroller.remeasure_items(range);
         cx.notify();
@@ -625,12 +701,10 @@ impl ChatView {
             return None;
         }
         let seconds = self.working_since?.elapsed().as_secs();
-        let elapsed = if seconds >= 60 {
-            format!("{}m", seconds / 60)
-        } else {
-            format!("{seconds}s")
-        };
-        Some(format!("Working for {elapsed}"))
+        Some(format!(
+            "Working for {}",
+            super::work_history::elapsed_label(seconds)
+        ))
     }
 
     /// Keep the virtual list's rows in step with the model.
@@ -681,6 +755,24 @@ impl ChatView {
             let ix = match change {
                 Change::Pushed(ix) | Change::Updated(ix) => ix,
             };
+            if let Some(Block::Peer(message)) = self.model.blocks.get(ix) {
+                let row = super::blocks::PeerRow::resolve(
+                    &self.backend.manager,
+                    self.session.as_ref(),
+                    message,
+                );
+                self.peer_rows.insert(message.id.clone(), row);
+            }
+            self.tool_details.get_mut().remove(&ix);
+            if let (Change::Pushed(_), Some(Block::Approval(approval))) =
+                (change, self.model.blocks.get(ix))
+                && !self.loading
+                && !self.replaying
+            {
+                self.approval_entered
+                    .insert(approval.id.clone(), std::time::Instant::now());
+                self.settle(ix..ix + 1, cx);
+            }
             if let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) {
                 if let Some(view) = self.assistant_text.get(&ix) {
                     view.update(cx, |view, cx| {
@@ -692,23 +784,9 @@ impl ChatView {
                             view.set_text(&super::citations::markdown(text), cx);
                         }
                     });
-                } else {
-                    let view = cx.new(|cx| {
-                        text::TextViewState::markdown(&super::citations::markdown(text), cx)
-                    });
-                    // Look the row up on each notification: rows shift when one is removed.
-                    cx.observe(&view, |this, view, cx| {
-                        if let Some(ix) = this
-                            .assistant_text
-                            .iter()
-                            .find_map(|(ix, text)| (*text == view).then_some(*ix))
-                        {
-                            this.scroller.remeasure_items(ix..ix + 1);
-                        }
-                        cx.notify();
-                    })
-                    .detach();
-                    self.assistant_text.insert(ix, view);
+                } else if !self.replaying {
+                    // Replayed history parses lazily, when a row is first drawn.
+                    self.ensure_assistant_text(ix, cx);
                 }
             }
             if self.replaying {
@@ -764,7 +842,42 @@ impl ChatView {
                 self.scroller.remeasure_items(ix..ix + 1);
             }
         }
+        if change.is_some() && !self.loading && !self.scroller.is_following_tail() {
+            self.unseen = true;
+        }
+        self.refresh_layout(cx);
         cx.notify();
+    }
+
+    /// The reply's Markdown view, created on first use. Opening a long
+    /// conversation parses only the replies that are actually drawn.
+    pub(super) fn ensure_assistant_text(
+        &mut self,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<text::TextViewState>> {
+        if let Some(view) = self.assistant_text.get(&ix) {
+            return Some(view.clone());
+        }
+        let Some(Block::Assistant { text, .. }) = self.model.blocks.get(ix) else {
+            return None;
+        };
+        let markdown = super::citations::markdown(text);
+        let view = cx.new(|cx| text::TextViewState::markdown(&markdown, cx));
+        // Look the row up on each notification: rows shift when one is removed.
+        cx.observe(&view, |this, view, cx| {
+            if let Some(ix) = this
+                .assistant_text
+                .iter()
+                .find_map(|(ix, text)| (*text == view).then_some(*ix))
+            {
+                this.scroller.remeasure_items(ix..ix + 1);
+            }
+            cx.notify();
+        })
+        .detach();
+        self.assistant_text.insert(ix, view.clone());
+        Some(view)
     }
 
     pub fn remeasure_for_zoom(&mut self, cx: &mut Context<Self>) {
@@ -797,8 +910,10 @@ impl ChatView {
         self.loading
     }
 
+    /// Persist the queue on the background writer: Enter, edit, delete and
+    /// reorder paint first, and the coalesced write keeps the last snapshot.
     pub fn save_queue(&self) {
-        let _ = self.queue.save();
+        self.queue.save_later();
     }
 
     pub fn enqueue(&mut self, input: UserInput, cx: &mut Context<Self>) -> String {
@@ -832,7 +947,11 @@ impl ChatView {
                     .as_ref()
                     .is_some_and(|id| self.backend.manager.peer_blocks_user_queue(id)));
         let id = self.enqueue(input, cx);
-        if !self.is_running() || steer {
+        if self.loading {
+            // History is still loading: hold the message (it shows in the
+            // queue) and send it as soon as the transcript is ready.
+            self.held_until_loaded.push((id, steer));
+        } else if !self.is_running() || steer {
             self.deliver_queued(id, steer, cx);
         }
     }
@@ -846,11 +965,16 @@ impl ChatView {
             )
             && let Some(id) = self.queue.next()
         {
-            self.deliver_queued(id, false, cx);
+            self.deliver(id, false, false, cx);
         }
     }
 
+    /// Deliver a queued item the person chose to send now (Enter, Steer).
     pub fn deliver_queued(&mut self, item_id: String, steer: bool, cx: &mut Context<Self>) {
+        self.deliver(item_id, steer, true, cx);
+    }
+
+    fn deliver(&mut self, item_id: String, steer: bool, by_user: bool, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
@@ -924,12 +1048,52 @@ impl ChatView {
             });
         })
         .detach();
+        self.last_input = Some(displayed_input.clone());
+        let following = self.scroller.is_following_tail();
         let change = self.model.push_input(&displayed_input, steer);
         if let Change::Pushed(row) = change {
             self.optimistic_rows.insert(queued_id, row);
         }
         self.sync(Some(change), cx);
-        self.scroller.scroll_to_end();
+        if scrolls_on_delivery(by_user, following) {
+            self.scroller.scroll_to_end();
+            self.unseen = false;
+        }
+    }
+
+    /// Send the failed turn's message again, exactly as it was delivered.
+    pub(super) fn retry_last(&mut self, cx: &mut Context<Self>) {
+        if self.is_running() {
+            return;
+        }
+        if let Some(input) = self.last_input.clone() {
+            self.submit_input(input, false, cx);
+        }
+    }
+
+    /// The opening load failed; reattach and replay from the start.
+    pub(super) fn retry_load(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.session.clone() else {
+            return;
+        };
+        if let Some(row) = self.load_failed.take()
+            && matches!(self.model.blocks.get(row), Some(Block::Error { .. }))
+        {
+            self.remove_row(row);
+        }
+        self.loading = true;
+        self.follow(id, cx);
+        cx.notify();
+    }
+
+    /// Whether `ix` is the opening load's failure row.
+    pub(super) fn is_load_failure(&self, ix: usize) -> bool {
+        self.load_failed == Some(ix)
+    }
+
+    /// Whether the failed turn ending at row `ix` can be sent again.
+    pub(super) fn can_retry_turn(&self, ix: usize) -> bool {
+        self.last_input.is_some() && !self.is_running() && ix + 1 == self.model.blocks.len()
     }
 
     /// Remove one transcript row, moving every row-keyed piece of view state
@@ -972,9 +1136,16 @@ impl ChatView {
             Some(flash)
         });
         self.jump = self.jump.take().and_then(|mut jump| {
-            jump.target = shift(jump.target, ix)?;
+            if let JumpTarget::Row(target) = jump.target {
+                jump.target = JumpTarget::Row(shift(target, ix)?);
+            }
             Some(jump)
         });
+        self.load_failed = self.load_failed.and_then(|row| shift(row, ix));
+        self.settling.clear();
+        self.answer_anchor = None;
+        self.tool_details.get_mut().clear();
+        self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         self.refresh_prompt_rows();
     }
 
@@ -1031,9 +1202,34 @@ impl ChatView {
         });
     }
 
+    /// Expand or collapse one row. The row stays under the pointer: growing
+    /// content never drags the list to the end while tail-following.
     pub(super) fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.scroller.pause_following_tail();
         let change = self.model.toggle(ix);
+        self.settle(ix..ix + 2, cx);
         self.sync(change, cx);
+    }
+
+    /// An eased scroll is still moving the list.
+    pub(super) fn jump_in_flight(&self) -> bool {
+        self.jump.is_some()
+    }
+
+    /// Whether row `ix` is still moving, so a closing body stays mounted.
+    pub(super) fn is_settling(&self, ix: usize) -> bool {
+        self.settling.iter().any(|(range, _)| range.contains(&ix))
+    }
+
+    /// Remeasure `range` on every frame while a disclosure spring moves it.
+    pub(super) fn settle(&mut self, range: std::ops::Range<usize>, cx: &App) {
+        let end = range.end.min(self.model.blocks.len());
+        let range = range.start.min(end)..end;
+        self.scroller.remeasure_items(range.clone());
+        if !cx.reduce_motion() {
+            self.settling
+                .push((range, std::time::Instant::now() + DISCLOSURE_SETTLE));
+        }
     }
 
     /// Reattach the session if it is not live, replay its history into the
@@ -1074,6 +1270,11 @@ impl ChatView {
         self.optimistic_rows.clear();
         self.search_flash = None;
         self.jump = None;
+        self.settling.clear();
+        self.answer_anchor = None;
+        self.peer_rows.clear();
+        self.tool_details.get_mut().clear();
+        self.load_failed = None;
         self.working_since = None;
         self.working_message = None;
         self.refresh_prompt_rows();
@@ -1104,8 +1305,8 @@ impl ChatView {
         cx.spawn(async move |this, cx| {
             let ((history, mut rx), times, costs) = match attached.await {
                 Ok(Ok(attached)) => attached,
-                Ok(Err(err)) => return report(&this, cx, err.to_string()),
-                Err(err) => return report(&this, cx, err.to_string()),
+                Ok(Err(err)) => return report_load(&this, cx, err.to_string()),
+                Err(err) => return report_load(&this, cx, err.to_string()),
             };
             let replayed = this.update(cx, |this, cx| {
                 let scroll = (resync && !this.scroller.is_following_tail())
@@ -1164,6 +1365,12 @@ impl ChatView {
                     this.stop(cx);
                 }
                 this.sync(None, cx);
+                // Messages sent while loading go out now, as the person sent them.
+                for (id, steer) in std::mem::take(&mut this.held_until_loaded) {
+                    if steer || !this.is_running() {
+                        this.deliver_queued(id, steer, cx);
+                    }
+                }
                 if this.model.last_status.is_none()
                     || this.model.last_status == Some(del_agent::TurnStatus::Completed)
                 {
@@ -1242,50 +1449,194 @@ impl ChatView {
         .detach();
     }
 
-    fn render_status(&self) -> AnyElement {
-        let muted = rgba(0xffffff8c);
-        let waiting = self.model.has_pending_approval();
-        let label = match (self.model.phase, self.model.last_status) {
-            (Phase::Running, _) if self.interrupt_requested => "Stopping…",
-            (Phase::Running, _) if waiting => "Waiting for your approval",
-            (Phase::Running, _) => "",
-            // Finished turns report themselves in the transcript, once.
-            (Phase::Idle, _) => "",
-        };
-        if label.is_empty() {
-            return div().into_any_element();
+    /// Per-frame motion bookkeeping, driven by the frame clock instead of
+    /// timers: folding work, disclosure springs, and the anchored answer.
+    fn advance_motion(&mut self, window: &mut Window, cx: &App) {
+        let now = std::time::Instant::now();
+        let mut moving = false;
+        let finished: Vec<usize> = self
+            .work_reveals
+            .iter()
+            .filter_map(|(start, reveal)| reveal.sample(now).1.then_some(*start))
+            .collect();
+        let ranges: Vec<_> = self
+            .work_sections
+            .iter()
+            .filter(|section| self.work_reveals.contains_key(&section.start))
+            .map(|section| section.range())
+            .collect();
+        for range in ranges {
+            self.scroller.remeasure_items(range);
+            moving = true;
         }
+        for start in finished {
+            self.work_reveals.remove(&start);
+        }
+        self.settling.retain(|(range, until)| {
+            let end = range.end.min(self.scroller.item_count());
+            self.scroller.remeasure_items(range.start.min(end)..end);
+            now < *until
+        });
+        moving |= !self.settling.is_empty();
+        if let Some((answer, top)) = self.answer_anchor {
+            // Pin the answer's top to where it was while its work folds above it.
+            self.scroller.scroll_to(ListOffset {
+                item_ix: answer,
+                offset_in_item: zpx(0.),
+            });
+            self.scroller.scroll_by(-top);
+            if self.work_reveals.is_empty() {
+                self.answer_anchor = None;
+            }
+        }
+        if moving && !cx.reduce_motion() {
+            window.request_animation_frame();
+        }
+    }
 
-        h_flex()
-            .id("status")
-            .w_full()
-            .max_w(zpx(COLUMN_MAX_WIDTH))
-            .h(zpx(20.0))
-            .px(if self.model.goal.is_some() {
-                zpx(crate::goal_ui::GOAL_INSET + 10.)
-            } else {
-                zpx(12.)
+    /// One pill over the bottom of the transcript, so nothing shifts the
+    /// composer: Stopping…, the approval waiting below, or a jump to the latest.
+    fn render_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let approval = self
+            .model
+            .blocks
+            .iter()
+            .rposition(|b| {
+                matches!(b, Block::Approval(a) if a.state == super::model::ApprovalState::Pending)
             })
-            .mb(zpx(4.))
+            .filter(|_| self.model.is_running());
+        let offscreen = |ix: usize| {
+            self.scroller.item_is_below_viewport(ix) != Some(false)
+                || self.scroller.item_is_above_viewport(ix) == Some(true)
+        };
+        enum Pill {
+            Stopping,
+            Approval(usize),
+            Latest,
+        }
+        let pill = if self.model.is_running() && self.interrupt_requested {
+            Some(Pill::Stopping)
+        } else if let Some(ix) = approval.filter(|ix| offscreen(*ix)) {
+            Some(Pill::Approval(ix))
+        } else if shows_jump_to_latest(
+            self.scroller.is_following_tail(),
+            self.scroller.is_scrolled_to_end(),
+            self.unseen,
+            self.model.is_running(),
+        ) {
+            Some(Pill::Latest)
+        } else {
+            None
+        };
+        let Some(pill) = pill else {
+            return div().into_any_element();
+        };
+        let (key, label, color): (&str, Option<&str>, Rgba) = match pill {
+            Pill::Stopping => ("stopping", Some("Stopping…"), crate::ui::secondary_text()),
+            Pill::Approval(_) => (
+                "approval",
+                Some("Waiting for your approval"),
+                crate::appearance::ActionTone::Warning.foreground(),
+            ),
+            Pill::Latest => ("latest", None, crate::ui::secondary_text()),
+        };
+        let button = h_flex()
+            .id(SharedString::from(format!("transcript-pill-{key}")))
+            .debug_selector(|| "transcript-pill".into())
+            .h(zpx(28.))
+            .when(label.is_none(), |pill| pill.w(zpx(28.)).justify_center())
+            .when(label.is_some(), |pill| pill.px(zpx(crate::ui::SPACE_LG)))
+            .gap(zpx(crate::ui::SPACE_SM))
             .items_center()
-            .justify_between()
+            .rounded_full()
+            .bg(crate::appearance::popup_surface())
+            .border_1()
+            .border_color(crate::appearance::separator())
+            .shadow_md()
             .text_size(zpx(TEXT_SM))
-            .text_color(if waiting {
-                crate::appearance::ActionTone::Warning.foreground()
-            } else {
-                muted
+            .text_color(color)
+            .when(label.is_none(), |pill| {
+                pill.child(
+                    crate::icons::icon(IconName::ArrowDown)
+                        .with_size(zpx(14.))
+                        .text_color(crate::ui::secondary_text()),
+                )
             })
-            .child(label)
+            .when_some(label, |pill, label| pill.child(label));
+        let button = match pill {
+            Pill::Stopping => button.into_any_element(),
+            Pill::Approval(ix) => button
+                .keyboard_control()
+                .role(gpui::Role::Button)
+                .aria_label("Show the approval request")
+                .cursor_pointer()
+                .hover(|pill| pill.bg(crate::appearance::composer_surface()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.jump = Some(MessageJump {
+                        target: JumpTarget::Row(ix),
+                        inset: SEARCH_INSET,
+                        from: this.scroller.scroll_px_offset_for_scrollbar().y.as_f32(),
+                        started: cx.background_executor().now(),
+                    });
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Pill::Latest => button
+                .keyboard_control()
+                .role(gpui::Role::Button)
+                .aria_label("Jump to latest")
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Jump to latest").build(window, cx)
+                })
+                .cursor_pointer()
+                .hover(|pill| pill.bg(crate::appearance::composer_surface()))
+                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
+                .into_any_element(),
+        };
+        h_flex()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(zpx(crate::ui::SPACE_MD))
+            .justify_center()
+            .child(div().child(button).with_animation(
+                SharedString::from(format!("transcript-pill-enter-{key}")),
+                Animation::new(crate::ui::POPOVER_ENTER).with_easing(crate::ui::ease_out),
+                |pill, t| pill.opacity(t).mt(zpx(crate::ui::POPOVER_LIFT * (1. - t))),
+            ))
             .into_any_element()
+    }
+
+    /// Ease to the end of the transcript, then follow new content again.
+    pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.jump = Some(MessageJump {
+            target: JumpTarget::End,
+            inset: 0.,
+            from: self.scroller.scroll_px_offset_for_scrollbar().y.as_f32(),
+            started: cx.background_executor().now(),
+        });
+        cx.notify();
     }
 }
 
-/// Report a backend failure as a toast (and stop the running phase).
+/// Report a failed backend call (Stop, an approval answer) as a toast.
 fn report(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
     let _ = this.update(cx, |this, cx| {
+        this.pending_errors.push(message);
+        this.model.halt();
+        this.sync(None, cx);
+    });
+}
+
+/// The conversation could not be opened: say so in the transcript, with Retry,
+/// instead of leaving it empty. The row is the only place this is reported.
+fn report_load(this: &WeakEntity<ChatView>, cx: &mut AsyncApp, message: String) {
+    let _ = this.update(cx, |this, cx| {
         this.loading = false;
-        this.pending_errors.push(message.clone());
         let change = this.model.push_error(message, false);
+        if let Change::Pushed(row) = change {
+            this.load_failed = Some(row);
+        }
         this.sync(Some(change), cx);
     });
 }
@@ -1295,36 +1646,53 @@ impl Render for ChatView {
         if self.loading && self.model.blocks.is_empty() {
             return super::conversation_loading("Loading conversation…".into(), cx.reduce_motion());
         }
-        self.refresh_work_sections();
         self.apply_search_jump(cx);
-        self.tool_groups = super::activity::tool_groups(&self.model.blocks);
         let view = cx.entity();
+        self.advance_motion(window, cx);
         if let Some(jump) = &self.jump {
             let t = if cx.reduce_motion() {
                 1.0
             } else {
-                (jump.started.elapsed().as_secs_f32() / 0.22).min(1.0)
+                // The executor's clock: real time in the app, controlled in tests.
+                (cx.background_executor()
+                    .now()
+                    .saturating_duration_since(jump.started)
+                    .as_secs_f32()
+                    / JUMP_SECONDS)
+                    .min(1.0)
             };
-            self.scroller.scroll_to(ListOffset {
-                item_ix: jump.target,
-                offset_in_item: zpx(0.0),
-            });
+            let max = self.scroller.max_offset_for_scrollbar().y.as_f32();
+            let target = match jump.target {
+                JumpTarget::Row(ix) => {
+                    self.scroller.scroll_to(ListOffset {
+                        item_ix: ix,
+                        offset_in_item: zpx(0.0),
+                    });
+                    self.scroller.scroll_px_offset_for_scrollbar().y.as_f32() + jump.inset
+                }
+                JumpTarget::End => -max,
+            }
+            .clamp(-max, 0.);
             if t < 1.0 {
-                let target = self
-                    .scroller
-                    .scroll_px_offset_for_scrollbar()
-                    .y
-                    .as_f32()
-                    .max(-self.scroller.max_offset_for_scrollbar().y.as_f32());
-                let eased = 1.0 - (1.0 - t).powi(3);
+                let eased = crate::ui::ease_out(t);
                 self.scroller.set_offset_from_scrollbar(point(
                     zpx(0.0),
                     gpui::px(jump.from + (target - jump.from) * eased),
                 ));
                 window.request_animation_frame();
             } else {
+                if jump.target == JumpTarget::End {
+                    self.scroller.set_follow_mode(FollowMode::Tail);
+                    self.unseen = false;
+                } else if jump.inset > 0. {
+                    self.scroller
+                        .set_offset_from_scrollbar(point(zpx(0.0), gpui::px(target)));
+                }
                 self.jump = None;
             }
+        }
+        if self.scroller.is_following_tail() {
+            self.unseen = false;
         }
         let top = self.scroller.logical_scroll_top().item_ix;
         let prompts = self.prompt_rows.clone();
@@ -1334,12 +1702,13 @@ impl Render for ChatView {
         let active = self
             .jump
             .as_ref()
-            .map(|jump| jump.target)
+            .and_then(|jump| match jump.target {
+                JumpTarget::Row(ix) => Some(ix),
+                JumpTarget::End => None,
+            })
             .or_else(|| active_prompt(&prompts, top, at_end));
-        let rail_motion =
-            std::time::Duration::from_millis(if cx.reduce_motion() { 0 } else { 100 });
         let hover = self.rail_hover;
-        let previous_hover = self.rail_previous_hover;
+        let overlay = self.render_overlay(cx);
         v_flex()
             .size_full()
             .child(
@@ -1365,9 +1734,10 @@ impl Render for ChatView {
                             .w_full()
                             .flex_1()
                             .min_h_0()
-                            .pb_2(),
+                            .pb(zpx(crate::ui::SPACE_MD)),
                         ),
                     )
+                    .child(overlay)
                     // Overlaid so the transcript and the composer share one column.
                     .child(
                         v_flex()
@@ -1379,7 +1749,7 @@ impl Render for ChatView {
                             .w(zpx(if prompts.len() >= 6 { 24.0 } else { 0.0 }))
                             .flex_none()
                             .justify_center()
-                            .py_3()
+                            .py(zpx(crate::ui::SPACE_LG))
                             .children((prompts.len() >= 6).then(|| {
                                 v_flex()
                                     .id("message-ticks")
@@ -1395,12 +1765,38 @@ impl Render for ChatView {
                                                         .max(0.0)
                                                 })
                                             };
-                                            let previous = strength(previous_hover);
-                                            let next = strength(hover);
                                             let selected = hover
                                                 .map_or(active == Some(ix), |hover| {
                                                     hover == position
                                                 });
+                                            // Interruptible: rapid hovers retarget from where
+                                            // each tick is drawn instead of restarting.
+                                            let rail = || {
+                                                gpui_kit::base::Transition::new(
+                                                    std::time::Duration::from_millis(100),
+                                                )
+                                                .ease(crate::ui::ease_out)
+                                            };
+                                            let weight = gpui_kit::base::transition(
+                                                ElementId::NamedInteger(
+                                                    "rail-weight".into(),
+                                                    ix as u64,
+                                                ),
+                                                strength(hover),
+                                                rail(),
+                                                window,
+                                                cx,
+                                            );
+                                            let alpha = gpui_kit::base::transition(
+                                                ElementId::NamedInteger(
+                                                    "rail-alpha".into(),
+                                                    ix as u64,
+                                                ),
+                                                if selected { 0.9 } else { 0.22 },
+                                                rail(),
+                                                window,
+                                                cx,
+                                            );
                                             div()
                                                 .id(("message-jump", ix))
                                                 .keyboard_control()
@@ -1449,8 +1845,6 @@ impl Render for ChatView {
                                                             this.rail_hover
                                                         };
                                                         if next != this.rail_hover {
-                                                            this.rail_previous_hover =
-                                                                this.rail_hover;
                                                             this.rail_hover = next;
                                                             if next.is_some() {
                                                                 crate::haptics::tick();
@@ -1471,47 +1865,30 @@ impl Render for ChatView {
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.reveal_work_row(ix);
                                                     this.jump = Some(MessageJump {
-                                                        target: ix,
+                                                        target: JumpTarget::Row(ix),
+                                                        inset: 0.,
                                                         from: this
                                                             .scroller
                                                             .scroll_px_offset_for_scrollbar()
                                                             .y
                                                             .as_f32(),
-                                                        started: std::time::Instant::now(),
+                                                        started: cx.background_executor().now(),
                                                     });
                                                     cx.notify();
                                                 }))
+                                                // Only the hovered marker (or current message when
+                                                // idle) is bright; neighbors only lengthen. Width and
+                                                // brightness ease together.
                                                 .child(
-                                                    div().h(zpx(2.0)).with_animation(
-                                                        SharedString::from(format!(
-                                                            "rail-{ix}-{previous_hover:?}-{hover:?}"
-                                                        )),
-                                                        Animation::new(rail_motion)
-                                                            .with_easing(ease_out_quint()),
-                                                        move |tick, t| {
-                                                            let weight =
-                                                                previous + (next - previous) * t;
-                                                            let width = 6.0 + 12.0 * weight;
-                                                            // Only the hovered marker (or current message when idle)
-                                                            // is bright. Neighbor magnification changes width only.
-                                                            let alpha =
-                                                                if selected { 0.9 } else { 0.22 };
-                                                            tick.w(zpx(width))
-                                                                .bg(rgba(0xffffffff).opacity(alpha))
-                                                        },
-                                                    ),
+                                                    div()
+                                                        .h(zpx(2.0))
+                                                        .w(zpx(6.0 + 12.0 * weight))
+                                                        .bg(rgba(0xffffffff).opacity(alpha)),
                                                 )
                                         },
                                     ))
                             })),
                     ),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .items_center()
-                    .px_3()
-                    .child(self.render_status()),
             )
             .into_any_element()
     }
@@ -1543,6 +1920,107 @@ mod tests {
         assert_eq!(active_prompt(&[0, 3, 6, 9], 3, false), Some(3));
         assert_eq!(active_prompt(&[0, 3, 6, 9], 8, false), Some(6));
         assert_eq!(active_prompt(&[], 0, true), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn automatic_delivery_never_pulls_a_reader_down() {
+        // The person's own send always shows the new message.
+        assert!(scrolls_on_delivery(true, false));
+        assert!(scrolls_on_delivery(true, true));
+        // Queue draining, replay and peer work only follow an already-followed tail.
+        assert!(!scrolls_on_delivery(false, false));
+        assert!(scrolls_on_delivery(false, true));
+    }
+
+    #[::core::prelude::v1::test]
+    fn jump_to_latest_shows_only_above_new_or_live_content() {
+        assert!(shows_jump_to_latest(false, Some(false), true, false));
+        assert!(shows_jump_to_latest(false, Some(false), false, true));
+        assert!(!shows_jump_to_latest(false, Some(false), false, false));
+        assert!(!shows_jump_to_latest(true, Some(false), true, true));
+        assert!(!shows_jump_to_latest(false, Some(true), true, true));
+        assert!(!shows_jump_to_latest(false, None, true, true));
+    }
+
+    #[gpui::test]
+    fn failed_turn_errors_show_inline_once_and_recoverable_ones_toast(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let manager = SessionManager::new(
+            dir.path().join("sessions.jsonl"),
+            std::iter::empty::<std::sync::Arc<dyn del_agent::AgentBackend>>(),
+        )
+        .unwrap();
+        let backend = Backend {
+            runtime: runtime.handle().clone(),
+            manager,
+        };
+        let view = cx.new(|cx| ChatView::new(backend, None, None, cx));
+        view.update(cx, |view, cx| {
+            for event in [
+                AgentEvent::UserMessage { text: "go".into() },
+                AgentEvent::TurnStarted {
+                    turn_id: "t".into(),
+                },
+                AgentEvent::Error {
+                    message: "rate limited, retrying".into(),
+                    recoverable: true,
+                },
+            ] {
+                view.on_event(&event, cx);
+            }
+            assert_eq!(view.pending_errors, ["rate limited, retrying"]);
+            view.pending_errors.clear();
+            // A fatal error fails the turn; its row says why, so no toast too.
+            for event in [
+                AgentEvent::Error {
+                    message: "model overloaded".into(),
+                    recoverable: false,
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "t".into(),
+                    status: del_agent::TurnStatus::Failed,
+                },
+            ] {
+                view.on_event(&event, cx);
+            }
+            assert!(view.pending_errors.is_empty());
+            assert_eq!(
+                super::super::blocks::failed_turn_error(&view.model.blocks).as_deref(),
+                Some("model overloaded")
+            );
+            // A recoverable error the failed row already shows is not toasted twice.
+            for event in [
+                AgentEvent::UserMessage {
+                    text: "again".into(),
+                },
+                AgentEvent::TurnStarted {
+                    turn_id: "u".into(),
+                },
+                AgentEvent::Error {
+                    message: "connection reset".into(),
+                    recoverable: true,
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "u".into(),
+                    status: del_agent::TurnStatus::Failed,
+                },
+            ] {
+                view.on_event(&event, cx);
+            }
+            assert!(view.pending_errors.is_empty(), "{:?}", view.pending_errors);
+        });
+    }
+
+    #[test]
+    fn user_text_renders_literally_with_breaks_and_mapped_ranges() {
+        let (markdown, range) =
+            super::super::blocks::literal_markdown("# not a heading\n    keep *this*", 25..31);
+        assert!(markdown.starts_with("\\# not a heading\\\n"));
+        assert!(!markdown.contains("    "), "leading spaces never make code");
+        assert_eq!(&markdown[range], "\\*this\\*");
     }
     #[test]
     fn history_replay_skips_only_the_matching_opening_prompt() {
@@ -1923,7 +2401,7 @@ mod tests {
             view.sync(Some(change), cx);
             assert!(view.working_label(0).is_none());
             assert!(view.working_label(1).is_some());
-            view.model.phase = Phase::Idle;
+            view.model.phase = super::super::model::Phase::Idle;
             view.sync(None, cx);
             assert!(view.working_label(1).is_none());
         });
@@ -2131,6 +2609,8 @@ mod tests {
                 cx,
             );
             view.replaying = false;
+            // Replayed replies parse when first drawn.
+            view.ensure_assistant_text(0, cx);
         });
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
@@ -2761,7 +3241,8 @@ mod search_tests {
         let chat = root.read_with(cx, |root, _| root.0.clone());
         chat.update(cx, |chat, cx| {
             chat.jump = Some(MessageJump {
-                target: 0,
+                target: JumpTarget::Row(0),
+                inset: 0.,
                 from: -400.,
                 started: std::time::Instant::now(),
             });
@@ -2796,6 +3277,9 @@ mod search_tests {
         for _ in 0..8 {
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
+            // The eased jump settles first, then the match is revealed inside the row.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(60));
         }
         let chat = root.read_with(cx, |root, _| root.0.clone());
         chat.read_with(cx, |chat, _| {

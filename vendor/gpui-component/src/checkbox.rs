@@ -287,9 +287,6 @@ impl RenderOnce for Checkbox {
                 size => this.input_text_size(size),
             })
             .rounded(cx.theme().radius * 0.5)
-            .when(is_focused && self.focus_ring_enabled, |this| {
-                this.focus_ring_style(window, cx)
-            })
             .refine_style(&self.style)
             .child(
                 CheckboxIndicator::new()
@@ -318,6 +315,11 @@ impl RenderOnce for Checkbox {
                                     .border_color(disabled_indicator_color)
                                     .when(checked, |style| style.bg(disabled_indicator_color))
                             })
+                    })
+                    // The ring hugs the box itself, inside its edge, rather than
+                    // outlining the whole row with its label.
+                    .when(is_focused && self.focus_ring_enabled, |this| {
+                        this.focus_ring_style(window, cx)
                     })
                     .child(checkbox_check_icon(
                         self.id,

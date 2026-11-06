@@ -1,12 +1,13 @@
 //! The right sidebar: files, a workspace PTY, and an embedded browser.
 
 use crate::animated_icons::Glyph;
-use crate::appearance::{ActionTone, rgb, rgba};
+use crate::appearance::{ActionTone, rgba};
 use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
 use crate::terminal_host::{TerminalHost, TerminalLaunchSpec};
 use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
@@ -21,6 +22,9 @@ use std::rc::Rc;
 #[path = "commit_review.rs"]
 mod commit_review;
 use commit_review::{CommitReview, render_review};
+
+/// Repeats a tab close once its unsaved edits are saved or discarded.
+pub(crate) type CloseTab = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub const PANEL_MIN_WIDTH: f32 = 320.0;
 pub const PANEL_WIDTH: f32 = 360.0;
@@ -60,7 +64,7 @@ fn history_skeleton_bar(key: u32, width: f32, height: f32, animate: bool) -> Any
                     )))
                     .with_animation(
                         ("side-history-shimmer", key),
-                        Animation::new(std::time::Duration::from_millis(1500)).repeat(),
+                        Animation::new(crate::ui::SHIMMER_PERIOD).repeat(),
                         |highlight, t| highlight.left(relative(-0.6 + 1.6 * t)),
                     ),
             )
@@ -209,13 +213,14 @@ impl Render for DraggedSidebarTab {
                     .top(rect.top() - raw.y)
                     .w(rect.size.width)
                     .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                    .px_1p5()
-                    .gap_1p5()
-                    .rounded_md()
+                    .px(zpx(crate::ui::SPACE_SM))
+                    .gap(zpx(crate::ui::SPACE_SM))
+                    .items_center()
+                    // The same held look as a dragged top-level session tab.
+                    .rounded(zpx(8.))
+                    .shadow_md()
                     .bg(crate::appearance::dragged_tab_surface())
-                    .border_1()
-                    .border_color(crate::appearance::separator())
-                    .text_color(rgb(0xf5f5f5))
+                    .text_color(crate::ui::primary_text())
                     .text_size(zpx(TEXT_MD))
                     .child(
                         crate::icons::icon(self.pane.icon())
@@ -389,12 +394,25 @@ impl PanelStore {
 
 /// Run only on the background executor: cloud-backed folders can block in
 /// read_dir or file_type even when no file content is being opened.
-fn read_directory(dir: &Path, show_hidden: bool) -> Vec<(PathBuf, bool)> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
+fn read_directory(dir: &Path, show_hidden: bool) -> Listing {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // macOS privacy protection (Desktop, Documents, Downloads) reports EPERM,
+        // which Rust maps to PermissionDenied along with EACCES.
+        Err(error) => {
+            return Listing::Unreadable {
+                denied: error.kind() == std::io::ErrorKind::PermissionDenied,
+            };
+        }
+    };
+    let mut hidden = false;
+    let mut entries: Vec<_> = entries
         .filter_map(Result::ok)
-        .filter(|entry| visible_name(&entry.file_name().to_string_lossy(), show_hidden))
+        .filter(|entry| {
+            let visible = visible_name(&entry.file_name().to_string_lossy(), show_hidden);
+            hidden |= !visible;
+            visible
+        })
         .map(|entry| {
             let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
             (entry.path(), is_dir)
@@ -404,31 +422,107 @@ fn read_directory(dir: &Path, show_hidden: bool) -> Vec<(PathBuf, bool)> {
         b.1.cmp(&a.1)
             .then_with(|| a.0.file_name().cmp(&b.0.file_name()))
     });
-    entries
+    Listing::Entries { entries, hidden }
+}
+
+/// One directory read: its visible entries, or why it could not be read.
+#[derive(Clone, Debug, PartialEq)]
+enum Listing {
+    /// `hidden` records whether anything was filtered out of `entries`.
+    Entries {
+        entries: Vec<(PathBuf, bool)>,
+        hidden: bool,
+    },
+    Unreadable {
+        denied: bool,
+    },
+}
+
+/// A quiet row in place of a folder's children.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TreeNote {
+    /// Shown only once a read has been pending for `ui::LOADING_DELAY`.
+    Loading,
+    Empty,
+    OnlyHidden,
+    Unreadable {
+        denied: bool,
+    },
+}
+
+impl TreeNote {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading…",
+            Self::Empty => "Empty folder",
+            Self::OnlyHidden => "Only hidden files",
+            Self::Unreadable { denied: true } => {
+                "Could not read this folder — allow access in System Settings › Privacy & Security"
+            }
+            Self::Unreadable { denied: false } => "Could not read this folder",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TreeRow {
+    Entry {
+        path: PathBuf,
+        depth: usize,
+        is_dir: bool,
+    },
+    Note {
+        parent: PathBuf,
+        depth: usize,
+        note: TreeNote,
+    },
 }
 
 /// Flatten only cached directories; an unavailable child never blocks siblings.
+/// `slow` holds folders whose first read has outlasted the loading delay.
 fn cached_tree_rows(
     root: &Path,
     expanded: &HashSet<PathBuf>,
-    cache: &HashMap<PathBuf, Vec<(PathBuf, bool)>>,
-) -> Vec<(PathBuf, usize, bool)> {
+    cache: &HashMap<PathBuf, Listing>,
+    slow: &HashSet<PathBuf>,
+) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     let mut pending = vec![(root.to_path_buf(), 0, true)];
     while let Some((path, depth, is_dir)) = pending.pop() {
         if depth > 0 {
-            rows.push((path.clone(), depth - 1, is_dir));
+            rows.push(TreeRow::Entry {
+                path: path.clone(),
+                depth: depth - 1,
+                is_dir,
+            });
             if !is_dir || !expanded.contains(&path) {
                 continue;
             }
         }
-        if let Some(entries) = cache.get(&path) {
-            pending.extend(
-                entries
-                    .iter()
-                    .rev()
-                    .map(|(child, is_dir)| (child.clone(), depth + 1, *is_dir)),
-            );
+        let note = match cache.get(&path) {
+            Some(Listing::Entries { entries, hidden }) if entries.is_empty() => Some(if *hidden {
+                TreeNote::OnlyHidden
+            } else {
+                TreeNote::Empty
+            }),
+            Some(Listing::Entries { entries, .. }) => {
+                pending.extend(
+                    entries
+                        .iter()
+                        .rev()
+                        .map(|(child, is_dir)| (child.clone(), depth + 1, *is_dir)),
+                );
+                None
+            }
+            Some(Listing::Unreadable { denied }) => Some(TreeNote::Unreadable { denied: *denied }),
+            None => slow.contains(&path).then_some(TreeNote::Loading),
+        };
+        if let Some(note) = note {
+            rows.push(TreeRow::Note {
+                parent: path,
+                depth,
+                note,
+            });
         }
     }
     rows
@@ -493,6 +587,8 @@ pub struct RightPanel {
     editors: HashMap<PathBuf, Entity<EditorState>>,
     saving: HashSet<PathBuf>,
     file_error: Option<String>,
+    /// The file being opened outlasted `ui::LOADING_DELAY`, so it may say so.
+    slow_file_load: bool,
     change_files: Vec<crate::workspace_files::ChangedFile>,
     change_commits: Vec<crate::workspace_files::Commit>,
     commit_reviews: HashMap<String, CommitReview>,
@@ -506,6 +602,10 @@ pub struct RightPanel {
     change_request: u64,
     change_date_minute: i64,
     changes_loading: bool,
+    /// The first Changes load outlasted `ui::LOADING_DELAY`, so it may say so.
+    slow_changes_load: bool,
+    /// Git's own words behind the current Changes error are showing.
+    change_error_details: bool,
     changes_watch: Option<Task<()>>,
 
     browser: Option<crate::browser::Browser>,
@@ -519,10 +619,12 @@ pub struct RightPanel {
     file_tree_height: f32,
     file_request: u64,
     tree_request: u64,
-    directory_entries: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
+    directory_entries: HashMap<PathBuf, Listing>,
+    /// Folders whose first read has been pending longer than `ui::LOADING_DELAY`.
+    slow_directories: HashSet<PathBuf>,
     split_origin: Rc<Cell<f32>>,
     split_start_height: Rc<Cell<f32>>,
-    rows: Vec<(PathBuf, usize, bool)>,
+    rows: Vec<TreeRow>,
     markdown_preview: bool,
     markdown_scroll: ScrollHandle,
 }
@@ -695,13 +797,16 @@ impl RightPanel {
             return;
         };
         if self.hosted[index].panel.read(cx).has_unsaved_edits() {
-            window.push_notification(
-                gpui_kit::component::notification::Notification::info(
-                    "Save or revert your file edits before closing this tab.",
-                ),
-                cx,
-            );
-            return;
+            let panel = self.hosted[index].panel.clone();
+            let (title, saving) = panel.read(cx).close_guard();
+            let this = cx.entity().downgrade();
+            let tab = id.to_owned();
+            let close: CloseTab = Rc::new(move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.close_hosted(&tab, window, cx));
+            });
+            if RightPanel::confirm_close_with_edits(&panel, title, saving, close, window, cx) {
+                return;
+            }
         }
         let tab = self.hosted.remove(index);
         tab.panel.update(cx, |panel, cx| {
@@ -1412,13 +1517,15 @@ impl RightPanel {
             return;
         };
         if pane == Pane::Files && self.has_unsaved_edits() {
-            window.push_notification(
-                gpui_kit::component::notification::Notification::info(
-                    "Save or revert your file edits before closing this tab.",
-                ),
-                cx,
-            );
-            return;
+            let (title, saving) = self.close_guard();
+            let this = cx.entity().downgrade();
+            let close: CloseTab = Rc::new(move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.close_tool(Pane::Files, window, cx));
+            });
+            let panel = cx.entity();
+            if RightPanel::confirm_close_with_edits(&panel, title, saving, close, window, cx) {
+                return;
+            }
         }
         match pane {
             Pane::Files => {
@@ -1489,6 +1596,12 @@ impl RightPanel {
             self.close_tool(self.pane, window, cx);
         }
         self.focus_workspace(window, cx);
+    }
+
+    /// What closing this tab must ask about: the unsaved-edits question, and
+    /// whether a save is still in flight.
+    pub(crate) fn close_guard(&self) -> (Option<String>, bool) {
+        (self.unsaved_close_title(), !self.saving.is_empty())
     }
 
     pub fn has_unsaved_edits(&self) -> bool {
@@ -1654,15 +1767,15 @@ impl RightPanel {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .gap_2();
+            .gap(zpx(crate::ui::SPACE_SM));
         match &self.side_history {
             None => {
                 let animate = window.is_window_active() && !cx.reduce_motion();
                 for row in 0..3u32 {
                     list = list.child(
                         h_flex()
-                            .p_3()
-                            .gap_2()
+                            .p(zpx(crate::ui::SPACE_MD))
+                            .gap(zpx(crate::ui::SPACE_SM))
                             .items_start()
                             .child(div().w(zpx(18.)).flex_none().child(history_skeleton_bar(
                                 row * 3,
@@ -1674,7 +1787,7 @@ impl RightPanel {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .gap_2()
+                                    .gap(zpx(crate::ui::SPACE_SM))
                                     .child(history_skeleton_bar(
                                         row * 3 + 1,
                                         0.92 - row as f32 * 0.08,
@@ -1689,35 +1802,35 @@ impl RightPanel {
             Some(Err(error)) => {
                 list = list.child(
                     div()
-                        .p_3()
-                        .child(format!("Could not load Side history: {error}")),
+                        .id("side-history-error")
+                        .tooltip({
+                            let details = error.clone();
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(details.clone())
+                                    .build(window, cx)
+                            }
+                        })
+                        .p(zpx(crate::ui::SPACE_MD))
+                        .whitespace_normal()
+                        .child(crate::ui::inline_error("Could not load Side history.")),
                 )
             }
             Some(Ok(entries)) if entries.is_empty() => {
                 list = list.child(
-                    div()
-                        .p_3()
-                        .text_color(crate::appearance::secondary_text())
-                        .child("No previous Side chats for this session."),
+                    crate::ui::empty_note("No earlier Side chats for this session")
+                        .p(zpx(crate::ui::SPACE_MD))
+                        .whitespace_normal(),
                 )
             }
             Some(Ok(entries)) => {
                 for entry in entries {
                     let id = entry.id.clone();
                     let parent = parent.clone();
-                    let age = crate::sidebar::relative_time(entry.last_prompt_at)
-                        .unwrap_or_else(|| "now".into());
-                    let recency = if entry.estimated_time {
-                        if age == "now" {
-                            "Saved just now".into()
-                        } else {
-                            format!("Saved {age} ago")
-                        }
-                    } else if age == "now" {
-                        "Last prompt just now".into()
-                    } else {
-                        format!("Last prompt {age} ago")
-                    };
+                    let recency = side_history_recency(
+                        crate::sidebar::relative_time(entry.last_prompt_at),
+                        entry.estimated_time,
+                    );
+
                     list = list.child(
                         h_flex()
                             .id(SharedString::from(format!("side-history-{}", entry.id)))
@@ -1726,11 +1839,11 @@ impl RightPanel {
                             .aria_label(format!("Reopen {}. {}", entry.title, recency))
                             .items_start()
                             .min_w_0()
-                            .p_3()
-                            .gap_2()
-                            .rounded(zpx(8.))
+                            .p(zpx(crate::ui::SPACE_MD))
+                            .gap(zpx(crate::ui::SPACE_SM))
+                            .rounded(zpx(crate::ui::RADIUS_CARD))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgba(0xffffff10)))
+                            .hover(|s| s.bg(crate::ui::row_hover()))
                             .child(
                                 h_flex()
                                     .h(zpx(22.))
@@ -1742,7 +1855,7 @@ impl RightPanel {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .gap_1()
+                                    .gap(zpx(crate::ui::SPACE_XS))
                                     .child(
                                         div()
                                             .w_full()
@@ -1776,13 +1889,9 @@ impl RightPanel {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .p_4()
-            .gap_3()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Side history"),
-            )
+            .p(zpx(crate::ui::SPACE_LG))
+            .gap(zpx(crate::ui::SPACE_MD))
+            .child(crate::ui::group_title("Side history"))
             .child(list)
             .into_any_element()
     }
@@ -2120,6 +2229,7 @@ impl RightPanel {
             editors: HashMap::new(),
             saving: HashSet::new(),
             file_error: None,
+            slow_file_load: false,
             change_files: Vec::new(),
             change_commits: Vec::new(),
             commit_reviews: HashMap::new(),
@@ -2132,6 +2242,8 @@ impl RightPanel {
             change_request: 0,
             change_date_minute: 0,
             changes_loading: false,
+            slow_changes_load: false,
+            change_error_details: false,
             changes_watch: None,
             browser: None,
             browser_profile: uuid::Uuid::new_v4().to_string(),
@@ -2145,6 +2257,7 @@ impl RightPanel {
             file_request: 0,
             tree_request: 0,
             directory_entries: HashMap::new(),
+            slow_directories: HashSet::new(),
             split_origin: Default::default(),
             split_start_height: Default::default(),
             rows: Vec::new(),
@@ -2173,7 +2286,7 @@ impl RightPanel {
             self.change_expanded.clear();
             self.changes_loading = false;
             self.root = root;
-            self.directory_entries.clear();
+            self.forget_tree();
             self.rows.clear();
             self.expanded.clear();
             self.document_preview = None;
@@ -2541,14 +2654,8 @@ impl RightPanel {
                 self.terminal_error = None;
             }
             Err(error) => {
-                let message = format!("Could not open terminal: {error}");
-                self.terminal_error = Some(message.clone());
-                window.push_notification(
-                    gpui_kit::component::notification::Notification::error(message)
-                        .title("Terminal unavailable")
-                        .autohide(false),
-                    cx,
-                );
+                // The Terminal tab says so in place, with Retry.
+                self.terminal_error = Some(error.to_string());
             }
         }
     }
@@ -2581,6 +2688,18 @@ impl RightPanel {
         self.file_request += 1;
         let request = self.file_request;
         self.viewer = Viewer::Loading { path: path.clone() };
+        self.slow_file_load = false;
+        let delay = cx.background_executor().timer(crate::ui::LOADING_DELAY);
+        cx.spawn(async move |this, cx| {
+            delay.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.file_request == request {
+                    this.slow_file_load = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.markdown_scroll = ScrollHandle::new();
         let load = cx
             .background_executor()
@@ -2626,6 +2745,25 @@ impl RightPanel {
         paths.insert(self.root.clone());
         self.rebuild_tree();
         for path in paths {
+            // A first read that outlasts the loading delay shows a quiet Loading row;
+            // fast reads never flash one. Re-reads keep the cached rows meanwhile.
+            if !self.directory_entries.contains_key(&path) {
+                let pending = path.clone();
+                let delay = cx.background_executor().timer(crate::ui::LOADING_DELAY);
+                cx.spawn(async move |this, cx| {
+                    delay.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.tree_request == request
+                            && !this.directory_entries.contains_key(&pending)
+                        {
+                            this.slow_directories.insert(pending);
+                            this.rebuild_tree();
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
             let directory = path.clone();
             let load = cx
                 .background_executor()
@@ -2636,6 +2774,7 @@ impl RightPanel {
                     if this.tree_request != request {
                         return;
                     }
+                    this.slow_directories.remove(&path);
                     this.directory_entries.insert(path, entries);
                     this.rebuild_tree();
                     cx.notify();
@@ -2645,8 +2784,18 @@ impl RightPanel {
         }
     }
 
+    fn forget_tree(&mut self) {
+        self.directory_entries.clear();
+        self.slow_directories.clear();
+    }
+
     fn rebuild_tree(&mut self) {
-        self.rows = cached_tree_rows(&self.root, &self.expanded, &self.directory_entries);
+        self.rows = cached_tree_rows(
+            &self.root,
+            &self.expanded,
+            &self.directory_entries,
+            &self.slow_directories,
+        );
     }
 
     fn tab(
@@ -2728,23 +2877,24 @@ impl RightPanel {
             .group(id.clone())
             .role(gpui::Role::Button)
             .aria_label(label.clone())
-            .px_2()
+            .px(zpx(crate::ui::SPACE_SM))
             .w(zpx(crate::icons::TOOL_TAB_WIDTH))
             .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
             .flex()
             .flex_none()
             .whitespace_nowrap()
             .items_center()
-            .rounded_md()
+            // The same corner as top-level session tabs.
+            .rounded(zpx(8.))
             .cursor_pointer()
             .text_size(zpx(TEXT_MD))
             .text_color(if active {
-                rgb(0xf5f5f5)
+                crate::ui::primary_text()
             } else {
-                crate::appearance::secondary_text()
+                crate::ui::secondary_text()
             })
-            .when(active, |t| t.bg(rgba(0xffffff14)))
-            .when(!active, |t| t.hover(|t| t.bg(rgba(0xffffff0a))))
+            .when(active, |t| t.bg(crate::ui::row_selected()))
+            .when(!active, |t| t.hover(|t| t.bg(crate::ui::row_hover())))
             .when(dragging, |tab| tab.opacity(0.))
             .on_mouse_down(MouseButton::Left, move |event, _, cx| {
                 origin.set(event.position);
@@ -2798,7 +2948,7 @@ impl RightPanel {
             }))
             .child(
                 div()
-                    .mr_1p5()
+                    .mr(zpx(crate::ui::SPACE_SM))
                     .flex_none()
                     .child(crate::icons::icon(pane.icon()).with_size(zpx(crate::icons::MARK_SIZE))),
             )
@@ -2816,16 +2966,16 @@ impl RightPanel {
                     .role(gpui::Role::Button)
                     .aria_label(format!("Close {label} sidebar tab"))
                     .flex_none()
-                    .ml_1()
+                    .ml(zpx(crate::ui::SPACE_XS))
                     .size(zpx(crate::icons::TAB_CLOSE_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
+                    .rounded(zpx(crate::ui::RADIUS_XS))
                     .text_color(crate::appearance::secondary_text())
                     .opacity(0.)
                     .group_hover(id, |button| button.opacity(1.))
-                    .hover(|b| b.bg(rgba(0xffffff14)))
+                    .hover(|b| b.bg(crate::ui::row_selected()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -2854,65 +3004,31 @@ impl RightPanel {
     }
 
     fn render_dotfiles_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let show_hidden = self.show_hidden;
-        h_flex()
-            .id("show-hidden-files")
+        // The Settings switch: a stable id keeps its spring state, so opening
+        // Files never replays the slide, and Reduce Motion settles it at once.
+        let panel = cx.entity().downgrade();
+        div()
             .debug_selector(|| "files-dotfiles-toggle".into())
-            .keyboard_control()
-            .role(Role::Button)
-            .aria_label(if show_hidden {
-                "Hide dotfiles"
-            } else {
-                "Show dotfiles"
-            })
             .ml_auto()
-            .gap(zpx(5.0))
-            .items_center()
-            .cursor_pointer()
-            .hover(|control| control.opacity(0.85))
+            .flex_none()
             .text_size(zpx(TEXT_SM))
-            .text_color(crate::appearance::secondary_text())
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.show_hidden = !this.show_hidden;
-                this.directory_entries.clear();
-                this.refresh_tree(cx);
-                cx.notify();
-            }))
-            .child("Dotfiles")
+            .text_color(crate::ui::secondary_text())
             .child(
-                div()
-                    .relative()
-                    .w(zpx(22.0))
-                    .h(zpx(12.0))
-                    .rounded_full()
-                    .bg(if show_hidden {
-                        ActionTone::Accent.foreground()
-                    } else {
-                        rgba(0xffffff20)
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .top(zpx(2.0))
-                            .size(zpx(8.0))
-                            .rounded_full()
-                            .bg(rgba(0xffffffe6))
-                            .with_animation(
-                                SharedString::from(format!("hidden-files-thumb-{}", show_hidden)),
-                                Animation::new(std::time::Duration::from_millis(
-                                    if cx.reduce_motion() { 0 } else { 120 },
-                                ))
-                                .with_easing(ease_out_quint()),
-                                move |thumb, t| {
-                                    let (from, to) = if show_hidden {
-                                        (2.0, 12.0)
-                                    } else {
-                                        (12.0, 2.0)
-                                    };
-                                    thumb.left(zpx(from + (to - from) * t))
-                                },
-                            ),
-                    ),
+                gpui_kit::component::switch::Switch::new("show-hidden-files")
+                    .small()
+                    .checked(self.show_hidden)
+                    .label("Dotfiles")
+                    .accessibility_label("Show dotfiles")
+                    .on_click(move |checked, _, cx| {
+                        let checked = *checked;
+                        let _ = panel.update(cx, |this, cx| {
+                            this.show_hidden = checked;
+                            // Re-read in place: the current rows stay until each
+                            // folder's new listing arrives, so nothing blinks.
+                            this.refresh_tree(cx);
+                            cx.notify();
+                        });
+                    }),
             )
     }
 
@@ -2926,13 +3042,14 @@ impl RightPanel {
             | Viewer::Loading { path } => Some(path.clone()),
             Viewer::None => None,
         };
-        let muted = rgba(0xffffff8c);
+        let muted = crate::ui::faint_text();
 
         let empty_default_split =
             selected.is_none() && self.file_tree_height == DEFAULT_TREE_HEIGHT;
 
-        // Match the tab strip + tab padding, less the row's own quarter-rem inset.
-        let tree_inset = window.rem_size() * 0.75;
+        // Match the tab strip + tab padding, less the row's own inset.
+        let tree_inset = zpx(crate::ui::SPACE_MD);
+        let indent = move |depth: usize| tree_inset + zpx(depth as f32 * 12.0);
         let tree = v_flex()
             .id("file-tree")
             .relative()
@@ -2940,7 +3057,45 @@ impl RightPanel {
             .h_full()
             .overflow_y_scroll()
             .child(self.file_hover.layer(None, rgba(0)))
-            .children(rows.into_iter().map(|(path, depth, is_dir)| {
+            .children(rows.into_iter().map(|row| {
+                let (path, depth, is_dir) = match row {
+                    TreeRow::Entry {
+                        path,
+                        depth,
+                        is_dir,
+                    } => (path, depth, is_dir),
+                    TreeRow::Note {
+                        parent,
+                        depth,
+                        note,
+                    } => {
+                        // Aligned with the names of the folder's would-be children.
+                        let text_inset = zpx(crate::ui::SPACE_XS
+                            + crate::icons::MARK_SIZE
+                            + crate::ui::SPACE_SM);
+                        return h_flex()
+                            .id(SharedString::from(format!(
+                                "tree-note-{}",
+                                parent.display()
+                            )))
+                            .debug_selector(move || format!("tree-note-{note:?}"))
+                            .w_full()
+                            .min_h(zpx(crate::ui::ROW_COMPACT))
+                            .flex_none()
+                            .pl(indent(depth) + text_inset)
+                            .pr(zpx(crate::ui::SPACE_MD))
+                            .py(zpx(crate::ui::SPACE_XS))
+                            .items_center()
+                            .whitespace_normal()
+                            .text_size(zpx(TEXT_SM))
+                            .text_color(match note {
+                                TreeNote::Unreadable { .. } => crate::ui::secondary_text(),
+                                _ => crate::ui::faint_text(),
+                            })
+                            .child(note.text())
+                            .into_any_element();
+                    }
+                };
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -2953,40 +3108,36 @@ impl RightPanel {
                 let marker_key = hover_key.clone();
                 h_flex()
                     .w_full()
-                    .h(zpx(26.0))
+                    .h(zpx(crate::ui::ROW_COMPACT))
                     .flex_none()
-                    .pl(tree_inset + zpx(depth as f32 * 12.0))
-                    .pr_1()
+                    .pl(indent(depth))
+                    .pr(zpx(crate::ui::SPACE_XS))
                     .child(
                         h_flex()
                             .id(SharedString::from(path.display().to_string()))
                             .relative()
                             .flex_1()
-                            .h(zpx(26.0))
+                            .h(zpx(crate::ui::ROW_COMPACT))
                             .min_w_0()
-                            .px_1()
-                            .gap_1p5()
+                            .px(zpx(crate::ui::SPACE_XS))
+                            .gap(zpx(crate::ui::SPACE_SM))
                             .items_center()
-                            .rounded_md()
+                            .rounded(zpx(crate::ui::RADIUS_ROW))
                             .cursor_pointer()
                             .text_size(zpx(TEXT_MD))
-                            .text_color(if is_dir {
-                                rgb(0xf0f0f0)
-                            } else {
-                                rgba(0xffffffcc)
-                            })
-                            .when(is_selected, |r| r.text_color(rgb(0xf5f5f5)))
+                            .text_color(crate::ui::primary_text())
                             .on_hover(move |entered, window, cx| {
                                 hover.hover(&hover_key, *entered, window, cx);
                             })
+                            // The moving hover highlight paints over the selected fill.
                             .child(self.file_hover.marker(
                                 marker_key,
                                 if is_selected {
-                                    rgba(0xffffff14)
+                                    crate::ui::row_selected()
                                 } else {
                                     rgba(0)
                                 },
-                                rgba(0xffffff14),
+                                crate::ui::row_hover(),
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if is_dir {
@@ -3011,15 +3162,16 @@ impl RightPanel {
                                 })
                                 .with_size(zpx(crate::icons::MARK_SIZE))
                                 .text_color(if is_dir && open {
-                                    rgb(0xf5f5f5)
+                                    crate::ui::primary_text()
                                 } else if is_dir {
-                                    rgba(0xffffffa6)
+                                    crate::ui::secondary_text()
                                 } else {
-                                    muted
+                                    crate::ui::faint_text()
                                 }),
                             )
                             .child(div().min_w_0().truncate().child(name)),
                     )
+                    .into_any_element()
             }));
 
         let viewer = match &self.viewer {
@@ -3028,26 +3180,19 @@ impl RightPanel {
                 .as_ref()
                 .filter(|_| self.preview_visible)
                 .map(|preview| preview.element().into_any_element())
-                .unwrap_or_else(|| div().child("Loading document…").into_any_element()),
-            Viewer::None => div()
-                .p_3()
+                .unwrap_or_else(|| {
+                    loading_note("Loading document…", self.slow_file_load).into_any_element()
+                }),
+            Viewer::None => crate::ui::empty_note("Select a file to view it")
+                .p(zpx(crate::ui::SPACE_MD))
                 .whitespace_nowrap()
-                .text_size(zpx(TEXT_MD))
-                .text_color(muted)
-                .child("Select a file to view it")
                 .into_any_element(),
-            Viewer::Loading { .. } => div()
-                .p_3()
-                .text_size(zpx(TEXT_MD))
-                .text_color(muted)
-                .child("Loading file…")
-                .into_any_element(),
-            Viewer::Note { message, .. } => div()
-                .p_3()
-                .whitespace_nowrap()
-                .text_size(zpx(TEXT_MD))
-                .text_color(muted)
-                .child(message.clone())
+            Viewer::Loading { .. } => {
+                loading_note("Loading file…", self.slow_file_load).into_any_element()
+            }
+            Viewer::Note { message, .. } => crate::ui::empty_note(message.clone())
+                .p(zpx(crate::ui::SPACE_MD))
+                .whitespace_normal()
                 .into_any_element(),
             Viewer::Text {
                 markdown: Some(markdown),
@@ -3061,7 +3206,7 @@ impl RightPanel {
                 .track_scroll(&self.markdown_scroll)
                 .child(
                     div()
-                        .p_3()
+                        .p(zpx(crate::ui::SPACE_MD))
                         .w_full()
                         .whitespace_normal()
                         .text_size(zpx(TEXT_MD))
@@ -3123,8 +3268,8 @@ impl RightPanel {
                         .h(zpx(28.0))
                         .rounded_t(zpx(10.0))
                         .flex_none()
-                        .px_2()
-                        .gap_2()
+                        .px(zpx(crate::ui::SPACE_SM))
+                        .gap(zpx(crate::ui::SPACE_SM))
                         .bg(rgba(0xffffff08))
                         .items_center()
                         .child(crate::icons::icon(IconName::File).text_color(muted))
@@ -3141,35 +3286,45 @@ impl RightPanel {
                                 }),
                         )
                         .when(is_markdown, |header| {
-                            header.child(h_flex().gap_0p5().flex_none().children(
-                                [(false, "Markdown"), (true, "Preview")].into_iter().map(
-                                    |(preview, label)| {
-                                        div()
-                                            .id(label)
-                                            .keyboard_control()
-                                            .role(gpui::Role::Button)
-                                            .aria_label(label)
-                                            .h(zpx(22.0))
-                                            .px_2()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_md()
-                                            .text_size(zpx(TEXT_SM))
-                                            .cursor_pointer()
-                                            .text_color(crate::appearance::secondary_text())
-                                            .when(self.markdown_preview == preview, |button| {
-                                                button
-                                                    .bg(rgba(0xffffff14))
-                                                    .text_color(rgb(0xf5f5f5))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.markdown_preview = preview;
-                                                cx.notify();
-                                            }))
-                                            .child(label)
-                                    },
-                                ),
-                            ))
+                            header.child(
+                                h_flex()
+                                    .gap(zpx(crate::ui::SPACE_2XS))
+                                    .flex_none()
+                                    .children(
+                                        [(false, "Markdown"), (true, "Preview")].into_iter().map(
+                                            |(preview, label)| {
+                                                div()
+                                                    .id(label)
+                                                    .keyboard_control()
+                                                    .role(gpui::Role::Button)
+                                                    .aria_label(label)
+                                                    .h(zpx(22.0))
+                                                    .px(zpx(crate::ui::SPACE_SM))
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded(zpx(crate::ui::RADIUS_ROW))
+                                                    .text_size(zpx(TEXT_SM))
+                                                    .cursor_pointer()
+                                                    .text_color(crate::appearance::secondary_text())
+                                                    .when(
+                                                        self.markdown_preview == preview,
+                                                        |button| {
+                                                            button
+                                                                .bg(crate::ui::row_selected())
+                                                                .text_color(
+                                                                    crate::ui::primary_text(),
+                                                                )
+                                                        },
+                                                    )
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.markdown_preview = preview;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(label)
+                                            },
+                                        ),
+                                    ),
+                            )
                         })
                         .child(
                             div()
@@ -3186,9 +3341,9 @@ impl RightPanel {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded_md()
+                                .rounded(zpx(crate::ui::RADIUS_ROW))
                                 .cursor_pointer()
-                                .hover(|button| button.bg(rgba(0xffffff14)))
+                                .hover(|button| button.bg(crate::ui::row_selected()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.file_request += 1;
                                     this.document_preview = None;
@@ -3205,19 +3360,29 @@ impl RightPanel {
                 // Save and Revert only have something to do once there are edits, so
                 // they stay quiet until then and colour never decorates a clean file.
                 let dirty = self.selected_dirty();
+                let saving = self
+                    .selected_path()
+                    .is_some_and(|path| self.saving.contains(&path));
                 preview.child(
                     h_flex()
                         .flex_none()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
+                        .gap(zpx(crate::ui::SPACE_XS))
+                        .px(zpx(crate::ui::SPACE_SM))
+                        .py(zpx(crate::ui::SPACE_XS))
                         .child(
-                            file_action("save-file", "Save", dirty, dirty)
-                                .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
+                            file_action(
+                                "save-file",
+                                if saving { "Saving…" } else { "Save" },
+                                dirty && !saving,
+                                dirty,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx))),
                         )
-                        .child(file_action("revert-file", "Revert", dirty, false).on_click(
-                            cx.listener(|this, _, window, cx| this.revert_selected(window, cx)),
-                        ))
+                        .child(
+                            file_action("revert-file", "Revert", dirty && !saving, false).on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_revert(window, cx)),
+                            ),
+                        )
                         .child(
                             file_action("reload-file", "Reload", true, false)
                                 .on_click(cx.listener(|this, _, _, cx| this.reload_selected(cx))),
@@ -3226,12 +3391,9 @@ impl RightPanel {
             })
             .when_some(self.file_error.clone(), |preview, error| {
                 preview.child(
-                    div()
-                        .p_2()
-                        .text_size(zpx(TEXT_SM))
-                        .whitespace_normal()
-                        .text_color(rgb(0xf08080))
-                        .child(error),
+                    crate::ui::inline_error(error)
+                        .p(zpx(crate::ui::SPACE_SM))
+                        .whitespace_normal(),
                 )
             })
             .child(v_flex().flex_1().min_h_0().overflow_hidden().child(viewer));
@@ -3285,7 +3447,7 @@ impl RightPanel {
                     .h(zpx(8.0))
                     .w_full()
                     .flex_none()
-                    .px_2()
+                    .px(zpx(crate::ui::SPACE_SM))
                     .flex()
                     .items_center()
                     .cursor_row_resize()
@@ -3298,7 +3460,7 @@ impl RightPanel {
                         div()
                             .h(zpx(1.0))
                             .w_full()
-                            .bg(rgba(0xffffff10))
+                            .bg(crate::appearance::separator())
                             .group_hover("file-preview-resize", |line| line.bg(rgba(0xffffff24))),
                     ),
             )
@@ -3318,8 +3480,8 @@ impl RightPanel {
                     .debug_selector(|| "files-toolbar".into())
                     .w_full()
                     .flex_none()
-                    .px_3()
-                    .py_2()
+                    .px(zpx(crate::ui::SPACE_MD))
+                    .py(zpx(crate::ui::SPACE_SM))
                     .items_center()
                     .child(self.render_dotfiles_toggle(cx)),
             )
@@ -3405,14 +3567,39 @@ impl RightPanel {
             .is_some_and(|draft| draft.text != draft.original)
     }
     fn save_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_path() else {
-            return;
-        };
+        if let Some(path) = self.selected_path() {
+            self.save_draft(path, cx).detach();
+        }
+    }
+    /// Resolves to whether the draft is now saved.
+    fn save_draft(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
         let Some(draft) = self.file_drafts.get(&path).cloned() else {
-            return;
+            return Task::ready(true);
         };
-        if draft.text == draft.original || !self.saving.insert(path.clone()) {
-            return;
+        if draft.text == draft.original {
+            return Task::ready(true);
+        }
+        if !self.saving.insert(path.clone()) {
+            // Already saving: wait for that save rather than starting another.
+            return cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    let Ok(done) = this.read_with(cx, |this, _| {
+                        (!this.saving.contains(&path)).then(|| {
+                            this.file_drafts
+                                .get(&path)
+                                .is_none_or(|draft| draft.text == draft.original)
+                        })
+                    }) else {
+                        return false;
+                    };
+                    if let Some(saved) = done {
+                        return saved;
+                    }
+                }
+            });
         }
         self.file_error = None;
         let target = path.clone();
@@ -3420,25 +3607,242 @@ impl RightPanel {
         let save = cx.background_executor().spawn(async move {
             crate::workspace_files::save_file(&target, &draft.original, &draft.text)
         });
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let result = save.await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.saving.remove(&path);
-                match result {
+                let saved = match result {
                     Ok(()) => {
                         if let Some(draft) = this.file_drafts.get_mut(&path) {
                             draft.original = text;
                         }
                         this.file_error = None;
                         this.refresh_changes(cx);
+                        true
                     }
-                    Err(error) => this.file_error = Some(format!("{}: {error}", path.display())),
-                }
+                    Err(reason) => {
+                        this.file_error = Some(save_error(&path, &reason));
+                        false
+                    }
+                };
                 cx.notify();
-            });
-        })
-        .detach();
+                saved
+            })
+            .unwrap_or(false)
+        });
         cx.notify();
+        task
+    }
+    /// Saves every edited file; resolves to whether all of them saved.
+    fn save_all_drafts(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let paths = self.dirty_drafts();
+        let saves = paths
+            .into_iter()
+            .map(|path| self.save_draft(path, cx))
+            .collect::<Vec<_>>();
+        cx.spawn(async move |_, _| {
+            let mut saved = true;
+            for save in saves {
+                saved &= save.await;
+            }
+            saved
+        })
+    }
+    fn dirty_drafts(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .file_drafts
+            .iter()
+            .filter(|(_, draft)| draft.text != draft.original)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+    /// Drops every unsaved edit, as "Don't save" does before a tab closes.
+    fn discard_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for path in self.dirty_drafts() {
+            let Some(draft) = self.file_drafts.get_mut(&path) else {
+                continue;
+            };
+            draft.text = draft.original.clone();
+            if let Some(editor) = self.editors.get(&path) {
+                editor.update(cx, |editor, cx| {
+                    editor.set_value(draft.text.clone(), window, cx)
+                });
+            }
+        }
+        if let Viewer::Text {
+            path,
+            markdown: Some(markdown),
+            ..
+        } = &mut self.viewer
+            && let Some(draft) = self.file_drafts.get(path)
+        {
+            *markdown = draft.text.clone().into();
+        }
+        self.file_error = None;
+        cx.notify();
+    }
+    /// The question a close asks when this tab holds unsaved file edits.
+    fn unsaved_close_title(&self) -> Option<String> {
+        let dirty = self.dirty_drafts();
+        match dirty.as_slice() {
+            [] => None,
+            [path] => Some(format!("Save changes to {}?", file_label(path))),
+            _ => Some(format!(
+                "Save changes to {}?",
+                crate::ui::plural(dirty.len(), "file", "files")
+            )),
+        }
+    }
+    /// Asks before closing a tab with unsaved edits: Save, Don't save or Cancel.
+    /// `close` runs once the edits are saved or discarded, and repeats the close.
+    /// Returns false when the tab may close right away.
+    pub(crate) fn confirm_close_with_edits(
+        panel: &Entity<RightPanel>,
+        title: Option<String>,
+        saving: bool,
+        close: CloseTab,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(title) = title else {
+            if saving {
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::info(
+                        "Wait for the file to finish saving, then close this tab.",
+                    ),
+                    cx,
+                );
+            }
+            return saving;
+        };
+        let panel = panel.downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (save_panel, discard_panel) = (panel.clone(), panel.clone());
+            let (save_close, discard_close) = (close.clone(), close.clone());
+            dialog
+                .title(title.clone())
+                .w(zpx(360.))
+                .close_button(false)
+                .bg(crate::appearance::popup_surface())
+                .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                .child(
+                    div()
+                        .text_color(crate::ui::secondary_text())
+                        .child("Your edits will be lost if you don't save them."),
+                )
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .gap(zpx(crate::ui::SPACE_SM))
+                        .child(
+                            Button::new("unsaved-discard")
+                                .ghost()
+                                .bg(rgba(crate::appearance::QUIET_FILL))
+                                .label("Don't save")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let discarded = discard_panel
+                                        .update(cx, |panel, cx| panel.discard_drafts(window, cx))
+                                        .is_ok();
+                                    if discarded {
+                                        discard_close(window, cx);
+                                    }
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("unsaved-cancel")
+                                .ghost()
+                                .bg(rgba(crate::appearance::QUIET_FILL))
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("unsaved-save")
+                                .primary()
+                                .label("Save")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let Ok(saved) = save_panel
+                                        .update(cx, |panel, cx| panel.save_all_drafts(cx))
+                                    else {
+                                        return;
+                                    };
+                                    let close = save_close.clone();
+                                    // A failed save keeps the tab open with its error showing.
+                                    window
+                                        .spawn(cx, async move |cx| {
+                                            if saved.await {
+                                                let _ = cx.update(|window, cx| close(window, cx));
+                                            }
+                                        })
+                                        .detach();
+                                }),
+                        ),
+                )
+        });
+        true
+    }
+    /// Revert drops every edit to the file, so it asks first.
+    fn confirm_revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        if !self.selected_dirty() || self.saving.contains(&path) {
+            return;
+        }
+        let panel = cx.entity().downgrade();
+        let title = format!("Revert {}?", file_label(&path));
+        window.open_dialog(cx, move |dialog, _, _| {
+            let panel = panel.clone();
+            let reverted = path.clone();
+            dialog
+                .title(title.clone())
+                .w(zpx(360.))
+                .close_button(false)
+                .bg(crate::appearance::popup_surface())
+                .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+                .child(
+                    div()
+                        .text_color(crate::ui::secondary_text())
+                        .child("This discards your unsaved edits to this file."),
+                )
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .gap(zpx(crate::ui::SPACE_SM))
+                        .child(
+                            Button::new("revert-cancel")
+                                .ghost()
+                                .bg(rgba(crate::appearance::QUIET_FILL))
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("revert-confirm")
+                                .danger()
+                                .label("Revert")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(gpui_kit::component::dialog::Confirm {
+                                            secondary: false,
+                                        }),
+                                        cx,
+                                    )
+                                }),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let path = reverted.clone();
+                    let _ = panel.update(cx, |panel, cx| {
+                        // Only the file that was asked about, if it is still showing.
+                        if panel.selected_path() == Some(path) {
+                            panel.revert_selected(window, cx);
+                        }
+                    });
+                    true
+                })
+        });
     }
     fn revert_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.selected_path() else {
@@ -3515,15 +3919,6 @@ impl RightPanel {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .when_some(self.terminal_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .p_2()
-                        .text_size(zpx(TEXT_SM))
-                        .whitespace_normal()
-                        .child(error),
-                )
-            })
             .child(div().flex_1().min_h_0().child(self.terminal_body(cx)))
             .into_any_element()
     }
@@ -3535,6 +3930,19 @@ impl RightPanel {
         self.changes_loading = true;
         self.change_request += 1;
         let request = self.change_request;
+        // Polls that finish quickly never flash "Loading changes…".
+        self.slow_changes_load = false;
+        let delay = cx.background_executor().timer(crate::ui::LOADING_DELAY);
+        cx.spawn(async move |this, cx| {
+            delay.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.change_request == request && this.changes_loading {
+                    this.slow_changes_load = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         let root = self.root.clone();
         let previous_root = self.change_root.clone();
         let previous_commits = self.change_commits.clone();
@@ -3563,7 +3971,7 @@ impl RightPanel {
                     (
                         file.path.clone(),
                         crate::workspace_files::diff(&root, file, head)
-                            .unwrap_or_else(|error| format!("Unable to read diff: {error}")),
+                            .unwrap_or_else(|_| "Could not read this diff.".to_owned()),
                     )
                 })
                 .collect::<HashMap<_, _>>();
@@ -3625,7 +4033,10 @@ impl RightPanel {
                         }
                     }
                     Err(error) => {
-                        changed |= this.change_error.as_ref() != Some(&error);
+                        if this.change_error.as_ref() != Some(&error) {
+                            changed = true;
+                            this.change_error_details = false;
+                        }
                         this.change_error = Some(error);
                         this.change_files.clear();
                         this.change_commits.clear();
@@ -3660,30 +4071,19 @@ impl RightPanel {
             .min_h_0()
             .min_w_0()
             .overflow_y_scroll()
-            .when_some(self.change_error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .p_3()
-                        .whitespace_normal()
-                        .text_size(zpx(TEXT_MD))
-                        .child(error),
-                )
+            .when_some(self.change_error.as_deref(), |view, error| {
+                view.child(self.render_change_error(error, cx))
             })
             .when(
                 self.change_files.is_empty()
                     && self.change_commits.is_empty()
                     && self.change_error.is_none(),
                 |view| {
-                    view.child(
-                        div()
-                            .p_3()
-                            .text_size(zpx(TEXT_MD))
-                            .child(if self.changes_loading {
-                                "Loading changes…"
-                            } else {
-                                "No commits yet"
-                            }),
-                    )
+                    view.child(if self.changes_loading {
+                        loading_note("Loading changes…", self.slow_changes_load)
+                    } else {
+                        crate::ui::empty_note("No commits yet").p(zpx(crate::ui::SPACE_MD))
+                    })
                 },
             )
             .when(!self.change_commits.is_empty(), |view| {
@@ -3697,12 +4097,12 @@ impl RightPanel {
                                 .w_full()
                                 .items_center()
                                 .justify_between()
-                                .px_3()
-                                .py_2()
-                                .gap_2()
+                                .px(zpx(crate::ui::SPACE_MD))
+                                .py(zpx(crate::ui::SPACE_SM))
+                                .gap(zpx(crate::ui::SPACE_SM))
                                 .text_size(zpx(TEXT_SM))
                                 .text_color(crate::appearance::secondary_text())
-                                .child("Recent commits")
+                                .child(crate::ui::section_label("Recent commits"))
                                 .child(format!("{} total", self.change_commits.len())),
                         )
                         .children(
@@ -3717,25 +4117,24 @@ impl RightPanel {
                 view.child(
                     h_flex()
                         .debug_selector(|| "changes-files".into())
-                        .px_3()
-                        .py_2()
-                        .gap_2()
+                        .px(zpx(crate::ui::SPACE_MD))
+                        .py(zpx(crate::ui::SPACE_SM))
+                        .gap(zpx(crate::ui::SPACE_SM))
                         .text_size(zpx(TEXT_SM))
                         .text_color(crate::appearance::secondary_text())
-                        .child(format!(
-                            "{} {}",
-                            total_files,
-                            if total_files == 1 { "file" } else { "files" }
-                        ))
+                        .child(crate::ui::plural(total_files, "file", "files"))
                         .child(
                             div()
                                 .text_color(ActionTone::Success.foreground())
-                                .child(format!("+{total_added}")),
+                                .child(format!("+{}", crate::ui::group_digits(total_added as u64))),
                         )
                         .child(
                             div()
                                 .text_color(ActionTone::Danger.foreground())
-                                .child(format!("−{total_removed}")),
+                                .child(format!(
+                                    "−{}",
+                                    crate::ui::group_digits(total_removed as u64)
+                                )),
                         ),
                 )
             })
@@ -3751,11 +4150,11 @@ impl RightPanel {
                     .child(
                         h_flex()
                             .id(("changed-file", index))
-                            .px_3()
-                            .py_2()
-                            .gap_2()
+                            .px(zpx(crate::ui::SPACE_MD))
+                            .py(zpx(crate::ui::SPACE_SM))
+                            .gap(zpx(crate::ui::SPACE_SM))
                             .border_t_1()
-                            .border_color(rgba(0xffffff14))
+                            .border_color(crate::appearance::separator())
                             .cursor_pointer()
                             .text_size(zpx(TEXT_MD))
                             .role(gpui::Role::Button)
@@ -3766,7 +4165,7 @@ impl RightPanel {
                                 added,
                                 removed
                             ))
-                            .hover(|row| row.bg(rgba(0xffffff0a)))
+                            .hover(|row| row.bg(crate::ui::row_hover()))
                             .child(
                                 crate::icons::icon(if expanded {
                                     IconName::ChevronDown
@@ -3774,7 +4173,7 @@ impl RightPanel {
                                     IconName::ChevronRight
                                 })
                                 .with_size(zpx(11.))
-                                .text_color(rgba(0xffffff66)),
+                                .text_color(crate::ui::faint_text()),
                             )
                             .child(commit_review::file_icon(&path))
                             .child(
@@ -3815,22 +4214,77 @@ impl RightPanel {
             .when(self.change_omitted > 0, |view| {
                 view.child(
                     div()
-                        .px_3()
-                        .py_2()
+                        .px(zpx(crate::ui::SPACE_MD))
+                        .py(zpx(crate::ui::SPACE_SM))
                         .border_t_1()
-                        .border_color(rgba(0xffffff14))
+                        .border_color(crate::appearance::separator())
                         .text_size(zpx(TEXT_SM))
                         .text_color(crate::appearance::secondary_text())
                         .child(format!(
-                            "{} more changed {} not shown",
-                            self.change_omitted,
-                            if self.change_omitted == 1 {
-                                "file"
-                            } else {
-                                "files"
-                            }
+                            "{} not shown",
+                            crate::ui::plural(
+                                self.change_omitted,
+                                "more changed file",
+                                "more changed files"
+                            )
                         )),
                 )
+            })
+            .into_any_element()
+    }
+
+    /// A plain sentence for a Git failure; Git's own words stay behind Details.
+    fn render_change_error(&self, raw: &str, cx: &mut Context<Self>) -> AnyElement {
+        let problem = crate::workspace_files::explain_git_error(raw);
+        if problem.quiet {
+            return crate::ui::empty_note(problem.summary)
+                .p(zpx(crate::ui::SPACE_MD))
+                .whitespace_normal()
+                .into_any_element();
+        }
+        let open = self.change_error_details;
+        v_flex()
+            .debug_selector(|| "changes-error".into())
+            .p(zpx(crate::ui::SPACE_MD))
+            .gap(zpx(crate::ui::SPACE_XS))
+            .whitespace_normal()
+            .child(crate::ui::inline_error(problem.summary))
+            .when_some(problem.details, |view, details| {
+                view.child(
+                    h_flex()
+                        .id("changes-error-details")
+                        .keyboard_control()
+                        .role(gpui::Role::Button)
+                        .aria_label(if open { "Hide details" } else { "Show details" })
+                        .gap(zpx(crate::ui::SPACE_XS))
+                        .items_center()
+                        .cursor_pointer()
+                        .text_size(zpx(TEXT_SM))
+                        .text_color(crate::ui::faint_text())
+                        .hover(|row| row.text_color(crate::ui::secondary_text()))
+                        .child(
+                            crate::icons::icon(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .with_size(zpx(11.)),
+                        )
+                        .child("Details")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change_error_details = !this.change_error_details;
+                            cx.notify();
+                        })),
+                )
+                .when(open, |view| {
+                    view.child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(zpx(TEXT_SM))
+                            .text_color(crate::ui::secondary_text())
+                            .child(details),
+                    )
+                })
             })
             .into_any_element()
     }
@@ -3844,15 +4298,36 @@ impl RightPanel {
             crate::terminal_host::apply_shell_theme(&view, cx);
             return div().size_full().min_h_0().child(view).into_any_element();
         }
-        div()
-            .p_3()
-            .text_size(zpx(TEXT_MD))
-            .text_color(crate::appearance::secondary_text())
-            .child(if self.terminal_error.is_some() {
-                "Terminal unavailable. Switch back to Terminal to retry."
-            } else {
-                "Opening terminal…"
-            })
+        let Some(error) = self.terminal_error.clone() else {
+            return crate::ui::empty_note("Opening terminal…")
+                .p(zpx(crate::ui::SPACE_MD))
+                .into_any_element();
+        };
+        v_flex()
+            .debug_selector(|| "terminal-error".into())
+            .p(zpx(crate::ui::SPACE_MD))
+            .gap(zpx(crate::ui::SPACE_SM))
+            .items_start()
+            .whitespace_normal()
+            .child(crate::ui::inline_error("Could not open a shell"))
+            .child(
+                div()
+                    .text_size(zpx(TEXT_SM))
+                    .text_color(crate::ui::faint_text())
+                    .child(error),
+            )
+            .child(
+                Button::new("retry-terminal")
+                    .small()
+                    .ghost()
+                    .bg(rgba(crate::appearance::QUIET_FILL))
+                    .label("Retry")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.ensure_terminal(window, cx);
+                        this.focus_terminal(window, cx);
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 }
@@ -3974,8 +4449,8 @@ impl RightPanel {
             .h(zpx(crate::icons::TOOL_ROW_HEIGHT))
             .flex_none()
             .overflow_hidden()
-            .px_2()
-            .gap_0p5()
+            .px(zpx(crate::ui::SPACE_SM))
+            .gap(zpx(crate::ui::SPACE_2XS))
             .items_center()
             .child(
                 h_flex()
@@ -4015,7 +4490,7 @@ impl RightPanel {
                             .flex_shrink_1()
                             .min_w_0()
                             .overflow_x_scroll()
-                            .gap_0p5()
+                            .gap(zpx(crate::ui::SPACE_2XS))
                             .children(tab_elements),
                     )
                     .children(crate::tab_transfer::edge_fades(
@@ -4027,19 +4502,24 @@ impl RightPanel {
                 div()
                     .id("new-sidebar-tab")
                     .keyboard_control()
-                    .ml_2()
+                    .ml(zpx(crate::ui::SPACE_SM))
                     .debug_selector(|| "new-sidebar-tab".into())
                     .role(gpui::Role::Button)
                     .aria_label("New sidebar tab")
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("New tab")
+                            .action(&crate::NewWorkspaceTab, None)
+                            .build(window, cx)
+                    })
                     .size(zpx(24.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .flex_none()
-                    .rounded_md()
+                    .rounded(zpx(crate::ui::RADIUS_ROW))
                     .cursor_pointer()
-                    .text_color(rgba(0xffffff8c))
-                    .hover(|button| button.bg(rgba(0xffffff14)))
+                    .text_color(crate::ui::secondary_text())
+                    .hover(|button| button.bg(crate::ui::row_selected()))
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx)))
                     .motion_child(true, move |feedback| feedback.glyph(Glyph::Add)),
             )
@@ -4136,7 +4616,41 @@ impl Render for RightPanel {
     }
 }
 
-/// A file action: a quiet neutral button, green only for a Save with work to keep.
+/// A group title above a list (13 px Medium, primary). Smaller list headings
+/// such as "Recent commits" use `ui::section_label` instead.
+/// "Last prompt 4m ago", "Last prompt just now"; saved-time fallbacks for older
+/// snapshots read "Saved 4m ago", "Saved just now".
+fn side_history_recency(age: Option<String>, estimated: bool) -> String {
+    let label = if estimated { "Saved" } else { "Last prompt" };
+    match age.as_deref() {
+        None => format!("{label} earlier"),
+        Some("now") => format!("{label} just now"),
+        Some(age) => format!("{label} {age} ago"),
+    }
+}
+
+/// A file's name for people: no directories, no OS error codes.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::ui::display_path(&path.to_string_lossy()))
+}
+
+/// "Could not save notes.txt: the file no longer exists."
+fn save_error(path: &Path, reason: &str) -> String {
+    format!("Could not save {}: {reason}", file_label(path))
+}
+
+/// A quiet loading line that appears only once a load outlasts `ui::LOADING_DELAY`.
+fn loading_note(text: &'static str, revealed: bool) -> Div {
+    if revealed {
+        crate::ui::empty_note(text).p(zpx(crate::ui::SPACE_MD))
+    } else {
+        div()
+    }
+}
+
+/// A file action: a quiet neutral button, blue (the action accent) only for a Save with work to keep.
 fn file_action(
     id: &'static str,
     label: &'static str,
@@ -4148,26 +4662,29 @@ fn file_action(
         .when(enabled, |button| button.keyboard_control())
         .role(gpui::Role::Button)
         .aria_label(label)
-        .px_2()
+        .px(zpx(crate::ui::SPACE_SM))
         .h(zpx(24.))
         .flex()
         .items_center()
         .flex_none()
-        .rounded_md()
+        .rounded(zpx(crate::ui::RADIUS_ROW))
         .text_size(zpx(TEXT_SM))
         .map(|button| {
             if primary {
                 button
-                    .bg(ActionTone::Success.surface(false))
-                    .text_color(ActionTone::Success.foreground())
-                    .cursor_pointer()
-                    .hover(|button| button.bg(ActionTone::Success.surface(true)))
+                    .bg(ActionTone::Accent.surface(false))
+                    .text_color(ActionTone::Accent.foreground())
+                    .when(enabled, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|button| button.bg(ActionTone::Accent.surface(true)))
+                    })
             } else if enabled {
                 button
                     .bg(rgba(crate::appearance::QUIET_FILL))
                     .text_color(crate::appearance::secondary_text())
                     .cursor_pointer()
-                    .hover(|button| button.bg(rgba(0xffffff14)))
+                    .hover(|button| button.bg(crate::ui::row_selected()))
             } else {
                 button
                     .text_color(crate::appearance::faint_text())
@@ -4190,7 +4707,10 @@ fn read_viewer(path: PathBuf) -> Viewer {
         },
         Ok(m) if m.len() > MAX_FILE_BYTES => Viewer::Note {
             path,
-            message: format!("{} KB: too large to show", m.len() / 1024),
+            message: format!(
+                "{} KB: too large to show",
+                crate::ui::group_digits(m.len() / 1024)
+            ),
         },
         Ok(_) => match read_capped(&path, MAX_FILE_BYTES) {
             Ok(None) => Viewer::Note {
@@ -5204,8 +5724,82 @@ mod tests {
                 assert!(panel.open_panes.contains(&Pane::Files));
                 assert!(panel.pane == Pane::Files);
                 assert_eq!(panel.file_drafts[&path].text, "unsaved");
+            });
+            // The standard dialog asks instead of a buttonless toast.
+            assert!(window.has_active_dialog(cx));
+        });
+    }
+
+    #[::gpui::test]
+    fn unsaved_close_offers_save_and_dont_save(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let [first, second] = ["notes.txt", "todo.md"].map(|name| dir.path().join(name));
+        std::fs::write(&first, "original").unwrap();
+        std::fs::write(&second, "list").unwrap();
+        let mut panel = None;
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| legacy_panel(dir.path().into(), window, cx));
+            panel = Some(view.clone());
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let panel = panel.unwrap();
+        let draft = |original: &str, text: &str| crate::workspace_files::FileDraft {
+            original: original.into(),
+            text: text.into(),
+        };
+        panel.update(cx, |panel, _| {
+            // No live shell: closing Files must not fall through to a real PTY.
+            panel.open_panes = vec![Pane::Files, Pane::Changes];
+            panel
+                .file_drafts
+                .insert(first.clone(), draft("original", "saved"));
+            assert_eq!(
+                panel.close_guard(),
+                (Some("Save changes to notes.txt?".into()), false)
+            );
+            panel
+                .file_drafts
+                .insert(second.clone(), draft("list", "longer list"));
+            assert_eq!(
+                panel.close_guard().0.as_deref(),
+                Some("Save changes to 2 files?")
+            );
+        });
+        // Save writes every edited file, then the tab may close.
+        let outcome = Rc::new(Cell::new(None));
+        let result = outcome.clone();
+        panel.update(cx, |panel, cx| {
+            let saved = panel.save_all_drafts(cx);
+            cx.spawn(async move |_, _| result.set(Some(saved.await)))
+                .detach();
+        });
+        cx.run_until_parked();
+        assert_eq!(outcome.get(), Some(true));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "saved");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "longer list");
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                assert!(!panel.has_unsaved_edits());
+                panel.close_tool(Pane::Files, window, cx);
+                assert!(!panel.open_panes.contains(&Pane::Files));
+            });
+            assert!(!window.has_active_dialog(cx));
+        });
+        // Don't save drops the edits and leaves the file on disk untouched.
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open_tool(Pane::Files, window, cx);
+                panel
+                    .file_drafts
+                    .insert(first.clone(), draft("saved", "discard me"));
+                panel.discard_drafts(window, cx);
+                assert!(!panel.has_unsaved_edits());
+                panel.close_tool(Pane::Files, window, cx);
+                assert!(!panel.open_panes.contains(&Pane::Files));
             })
         });
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "saved");
     }
 
     #[::gpui::test]
@@ -5328,12 +5922,9 @@ mod tests {
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.rows.len(), 2);
-            assert!(
-                panel
-                    .rows
-                    .iter()
-                    .any(|(path, _, _)| path.ends_with(".hidden"))
-            );
+            assert!(panel.rows.iter().any(
+                |row| matches!(row, TreeRow::Entry { path, .. } if path.ends_with(".hidden"))
+            ));
         });
     }
 
@@ -5344,11 +5935,159 @@ mod tests {
         let file = root.join("file.txt");
         let cache = HashMap::from([(
             root.clone(),
-            vec![(slow.clone(), true), (file.clone(), false)],
+            Listing::Entries {
+                entries: vec![(slow.clone(), true), (file.clone(), false)],
+                hidden: false,
+            },
         )]);
         assert_eq!(
-            cached_tree_rows(&root, &HashSet::from([slow.clone()]), &cache),
-            vec![(slow, 0, true), (file, 0, false)]
+            cached_tree_rows(
+                &root,
+                &HashSet::from([slow.clone()]),
+                &cache,
+                &HashSet::new()
+            ),
+            vec![
+                TreeRow::Entry {
+                    path: slow,
+                    depth: 0,
+                    is_dir: true
+                },
+                TreeRow::Entry {
+                    path: file,
+                    depth: 0,
+                    is_dir: false
+                },
+            ]
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn folders_say_when_they_are_empty_unreadable_or_slow() {
+        let root = PathBuf::from("/work");
+        let [denied, broken, empty, dotted, slow, quick] =
+            ["denied", "broken", "empty", "dotted", "slow", "quick"].map(|name| root.join(name));
+        let folders = [&denied, &broken, &empty, &dotted, &slow, &quick];
+        let cache = HashMap::from([
+            (
+                root.clone(),
+                Listing::Entries {
+                    entries: folders.iter().map(|path| ((*path).clone(), true)).collect(),
+                    hidden: false,
+                },
+            ),
+            (denied.clone(), Listing::Unreadable { denied: true }),
+            (broken.clone(), Listing::Unreadable { denied: false }),
+            (
+                empty.clone(),
+                Listing::Entries {
+                    entries: Vec::new(),
+                    hidden: false,
+                },
+            ),
+            (
+                dotted.clone(),
+                Listing::Entries {
+                    entries: Vec::new(),
+                    hidden: true,
+                },
+            ),
+        ]);
+        let expanded = folders.iter().map(|path| (*path).clone()).collect();
+        let rows = cached_tree_rows(&root, &expanded, &cache, &HashSet::from([slow.clone()]));
+        let notes = rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Note {
+                    parent,
+                    depth,
+                    note,
+                } => Some((parent.clone(), *depth, *note)),
+                TreeRow::Entry { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        // Each note sits directly below its folder, one level in; a read that is
+        // pending but not yet slow shows nothing.
+        assert_eq!(
+            notes,
+            vec![
+                (denied, 1, TreeNote::Unreadable { denied: true }),
+                (broken, 1, TreeNote::Unreadable { denied: false }),
+                (empty, 1, TreeNote::Empty),
+                (dotted, 1, TreeNote::OnlyHidden),
+                (slow, 1, TreeNote::Loading),
+            ]
+        );
+        assert_eq!(rows.len(), 6 + 5);
+        assert!(matches!(
+            &rows[1],
+            TreeRow::Note {
+                note: TreeNote::Unreadable { .. },
+                ..
+            }
+        ));
+        assert!(
+            TreeNote::Unreadable { denied: true }
+                .text()
+                .contains("System Settings › Privacy & Security")
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn unreadable_folders_report_why_instead_of_looking_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_directory(&dir.path().join("missing"), false),
+            Listing::Unreadable { denied: false }
+        );
+        std::fs::write(dir.path().join(".env"), "").unwrap();
+        assert_eq!(
+            read_directory(dir.path(), false),
+            Listing::Entries {
+                entries: Vec::new(),
+                hidden: true
+            }
+        );
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let listing = read_directory(&locked, false);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root can read anything; everyone else is told why the folder is blank.
+        let root = std::env::var("USER").is_ok_and(|user| user == "root");
+        if !root {
+            assert_eq!(listing, Listing::Unreadable { denied: true });
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn side_history_recency_reads_the_same_way_for_both_sources() {
+        assert_eq!(
+            side_history_recency(Some("4m".into()), false),
+            "Last prompt 4m ago"
+        );
+        assert_eq!(
+            side_history_recency(Some("now".into()), false),
+            "Last prompt just now"
+        );
+        assert_eq!(
+            side_history_recency(Some("2h".into()), true),
+            "Saved 2h ago"
+        );
+        assert_eq!(
+            side_history_recency(Some("now".into()), true),
+            "Saved just now"
+        );
+        assert_eq!(side_history_recency(None, true), "Saved earlier");
+    }
+
+    #[::core::prelude::v1::test]
+    fn save_errors_name_the_file_without_its_path() {
+        let path = PathBuf::from("/Users/someone/project/src/notes.txt");
+        assert_eq!(
+            save_error(&path, "the file no longer exists."),
+            "Could not save notes.txt: the file no longer exists."
         );
     }
 
@@ -5854,12 +6593,9 @@ mod tests {
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
             assert!(panel.show_hidden);
-            assert!(
-                panel
-                    .rows
-                    .iter()
-                    .any(|(path, _, _)| path.ends_with(".hidden"))
-            );
+            assert!(panel.rows.iter().any(
+                |row| matches!(row, TreeRow::Entry { path, .. } if path.ends_with(".hidden"))
+            ));
         });
         panel.update(cx, |panel, cx| {
             panel.pane = Pane::Changes;

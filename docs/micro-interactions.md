@@ -37,6 +37,10 @@ in this control system.
 presentation. Initial mounting starts at the correct final state. Frames are
 requested only while transitioning, with no idle animation timer.
 
+Hand-built controls can ease their background fill with the same hover and press
+values through `micro_motion::control`, so the fill and glyph arrive together. The
+shared row highlight fades in over 100 ms and out over 120 ms around its 90 ms slide.
+
 Control bounds, labels, tooltips, focus behavior, and click handlers retain their
 layout and ownership. A separate transparent hover surface avoids replacing the
 native tooltip listener. Releasing outside cancels pressed feedback. Disabled

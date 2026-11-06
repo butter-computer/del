@@ -9,7 +9,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Sliding between rows of the same group.
 const HOVER_DURATION: Duration = Duration::from_millis(90);
+/// The highlight fades in when the pointer first enters the group...
+const FADE_IN: Duration = Duration::from_millis(100);
+/// ...and fades out in place when the pointer leaves it.
+const FADE_OUT: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Default)]
 pub struct HoverMotion(Rc<RefCell<Motion>>);
@@ -30,6 +35,22 @@ struct Motion {
     divider: Option<Bounds<Pixels>>,
     /// Views that paint this group's layer. Hover changes redraw only them.
     owners: std::collections::HashSet<EntityId>,
+    /// Highlight opacity, eased separately from its position.
+    alpha_from: f32,
+    alpha_to: f32,
+    alpha_started: Option<Instant>,
+    alpha_duration: Duration,
+    /// Where the highlight was last painted, so it can fade out in place after
+    /// the pointer leaves.
+    shown: Option<Shown>,
+}
+#[derive(Clone, Copy)]
+struct Shown {
+    left: Pixels,
+    width: Pixels,
+    tint: Rgba,
+    clip: Bounds<Pixels>,
+    opacity: f32,
 }
 struct RowPresentation {
     visible: Bounds<Pixels>,
@@ -43,6 +64,29 @@ impl Motion {
             (s.elapsed().as_secs_f32() / HOVER_DURATION.as_secs_f32()).min(1.0)
         });
         self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3))
+    }
+
+    fn alpha(&self) -> f32 {
+        let t = self.alpha_started.map_or(1.0, |s| {
+            (s.elapsed().as_secs_f32() / self.alpha_duration.as_secs_f32().max(0.001)).min(1.0)
+        });
+        self.alpha_from + (self.alpha_to - self.alpha_from) * crate::ui::ease_out(t)
+    }
+
+    /// Ease the highlight's opacity toward `target` from where it is now.
+    fn fade_to(&mut self, target: f32, duration: Duration, reduce_motion: bool) {
+        if reduce_motion {
+            self.alpha_from = target;
+            self.alpha_started = None;
+            if target == 0. {
+                self.shown = None;
+            }
+        } else {
+            self.alpha_from = self.alpha();
+            self.alpha_started = Some(Instant::now());
+        }
+        self.alpha_to = target;
+        self.alpha_duration = duration;
     }
 }
 impl HoverMotion {
@@ -111,9 +155,11 @@ impl HoverMotion {
                 .presentation
                 .values()
                 .any(|row| row.visible.contains(&mouse));
-            if !over_row {
+            if !over_row && state.current.is_some() {
                 state.current = None;
-                state.started = None;
+                // Fade out in place; a slide still under way keeps easing.
+                state.fade_to(0., FADE_OUT, cx.reduce_motion());
+                state.generation += 1;
                 drop(state);
                 self.refresh(cx);
             }
@@ -126,11 +172,19 @@ impl HoverMotion {
             return;
         };
         let target = bounds.origin.y.as_f32();
-        state.from = if state.current.is_some() && !cx.reduce_motion() {
+        let reduce_motion = cx.reduce_motion();
+        // A highlight that is still visible (moving between rows, or fading out
+        // after a brief exit) slides from where it is. A fresh one fades in on
+        // its row instead of popping in.
+        let visible = state.current.is_some() || (state.shown.is_some() && state.alpha() > 0.);
+        state.from = if visible && !reduce_motion {
             state.y()
         } else {
             target
         };
+        if state.current.is_none() || state.alpha_to < 1. {
+            state.fade_to(1., FADE_IN, reduce_motion);
+        }
         state.to = target;
         state.height = bounds.size.height.as_f32();
         state.current = Some(key.to_owned());
@@ -246,9 +300,16 @@ impl HoverMotion {
                         .as_ref()
                         .is_some_and(|key| !state.bounds.contains_key(key))
                     {
+                        // The row itself went away (a menu closed, a list
+                        // changed): there is nothing left to fade over.
                         state.current = None;
                         state.started = None;
+                        state.shown = None;
+                        state.alpha_from = 0.;
+                        state.alpha_to = 0.;
+                        state.alpha_started = None;
                     }
+                    let alpha = state.alpha();
                     for (key, bounds) in &state.bounds {
                         if let Some(base) = state.bases.get(key).filter(|base| base.a > 0.)
                             && let Some(presentation) = state.presentation.get(key)
@@ -275,40 +336,45 @@ impl HoverMotion {
                             divider,
                         ));
                     }
-                    if let Some((bounds, tint, presentation)) =
-                        state.current.as_ref().and_then(|key| {
-                            Some((
-                                state.bounds.get(key)?,
-                                state.tints.get(key)?,
-                                state.presentation.get(key)?,
-                            ))
+                    let current = state.current.as_ref().and_then(|key| {
+                        let presentation = state.presentation.get(key)?;
+                        Some(Shown {
+                            left: state.bounds.get(key)?.left(),
+                            width: state.bounds.get(key)?.size.width,
+                            tint: *state.tints.get(key)?,
+                            clip: presentation.clip,
+                            opacity: presentation.opacity,
                         })
-                    {
+                    });
+                    if current.is_some() {
+                        state.shown = current;
+                    }
+                    if let Some(shown) = state.shown.filter(|_| alpha > 0.) {
                         let tint = if let Some(base) = background {
                             Rgba {
-                                r: base.r + (tint.r - base.r) * tint.a,
-                                g: base.g + (tint.g - base.g) * tint.a,
-                                b: base.b + (tint.b - base.b) * tint.a,
+                                r: base.r + (shown.tint.r - base.r) * shown.tint.a,
+                                g: base.g + (shown.tint.g - base.g) * shown.tint.a,
+                                b: base.b + (shown.tint.b - base.b) * shown.tint.a,
                                 a: 1.,
                             }
                         } else {
-                            *tint
+                            shown.tint
                         };
                         let highlight = Bounds::new(
-                            point(bounds.left(), gpui::px(state.paint_y)),
-                            size(bounds.size.width, gpui::px(state.height)),
+                            point(shown.left, gpui::px(state.paint_y)),
+                            size(shown.width, gpui::px(state.height)),
                         );
                         window.with_content_mask(
-                            Some(ContentMask {
-                                bounds: presentation.clip,
-                            }),
+                            Some(ContentMask { bounds: shown.clip }),
                             |window| {
                                 window.paint_quad(
-                                    fill(highlight, tint.opacity(presentation.opacity))
+                                    fill(highlight, tint.opacity(shown.opacity * alpha))
                                         .corner_radii(zpx(6.)),
                                 );
                             },
                         );
+                    } else if state.current.is_none() {
+                        state.shown = None;
                     }
                 },
             )
@@ -316,7 +382,8 @@ impl HoverMotion {
             .size_full()
             .with_animation(
                 ("group-hover", generation),
-                Animation::new(HOVER_DURATION),
+                // Frames for the slower of the slide and the fades.
+                Animation::new(FADE_OUT.max(FADE_IN).max(HOVER_DURATION)),
                 |canvas, _| canvas,
             ),
         )
@@ -395,6 +462,42 @@ mod tests {
             cx.simulate_mouse_move(pinned, None, gpui::Modifiers::default());
             cx.run_until_parked();
             assert!(motion.is_hovered("pinned"));
+        }
+    }
+
+    #[gpui::test]
+    fn highlight_fades_in_and_out_instead_of_popping(cx: &mut gpui::TestAppContext) {
+        let motion = HoverMotion::default();
+        let rendered = motion.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| SidebarRows(rendered));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let session = cx.debug_bounds("session").unwrap().center();
+        let outside = gpui::point(px(100.), px(110.));
+        // Start with the pointer off every row.
+        cx.simulate_mouse_move(outside, None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        motion.0.borrow_mut().shown = None;
+        for reduce in [false, true] {
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            cx.simulate_mouse_move(session, None, gpui::Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            {
+                let state = motion.0.borrow();
+                assert_eq!(state.alpha_to, 1.);
+                assert_eq!(state.from, state.to, "a fresh highlight starts on its row");
+                assert!(state.shown.is_some());
+                assert_eq!(state.alpha() < 1., !reduce, "only Reduce Motion pops in");
+            }
+            cx.simulate_mouse_move(outside, None, gpui::Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(!motion.is_hovered("session"));
+            let state = motion.0.borrow();
+            assert_eq!(state.alpha_to, 0.);
+            assert_eq!(
+                state.shown.is_some(),
+                !reduce,
+                "the highlight fades out in place unless motion is reduced"
+            );
         }
     }
 

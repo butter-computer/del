@@ -426,7 +426,8 @@ impl Render for BrowserPreview {
             .w(bounds.size.width)
             .h(bounds.size.height)
             .occlude()
-            .rounded(zpx(10.))
+            // Popover radius and lift, but no ring: the preview has no outer border.
+            .rounded(zpx(crate::ui::RADIUS_POPOVER))
             .overflow_hidden()
             .shadow_lg()
             .cursor_pointer()
@@ -449,7 +450,7 @@ impl Render for BrowserPreview {
                 div()
                     .size_full()
                     .overflow_hidden()
-                    .rounded(zpx(10.))
+                    .rounded(zpx(crate::ui::RADIUS_POPOVER))
                     .when_some(self.image.clone(), |body, image| {
                         body.child(
                             canvas(
@@ -459,7 +460,7 @@ impl Render for BrowserPreview {
                                     let _ = window.paint_image(
                                         bounds,
                                         fitted_image_bounds(bounds, &image.page),
-                                        Corners::all(zpx(10.)),
+                                        Corners::all(zpx(crate::ui::RADIUS_POPOVER)),
                                         image.page.clone(),
                                         0,
                                         false,
@@ -470,14 +471,15 @@ impl Render for BrowserPreview {
                         )
                     })
                     .when(self.image.is_none(), |body| {
-                        body.bg(gpui_kit::rgb(0x080808))
+                        // Theme surfaces, so light themes never show a black card.
+                        body.bg(crate::appearance::popup_surface())
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(
                                 crate::icons::icon(IconName::Globe)
                                     .with_size(zpx(28.))
-                                    .text_color(gpui_kit::rgb(0x888888)),
+                                    .text_color(crate::ui::faint_text()),
                             )
                     }),
             )

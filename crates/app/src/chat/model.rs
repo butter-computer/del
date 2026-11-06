@@ -172,6 +172,7 @@ impl ChatModel {
         };
     }
 
+    #[cfg(test)]
     pub fn has_pending_approval(&self) -> bool {
         self.blocks
             .iter()
@@ -220,6 +221,12 @@ impl ChatModel {
                 .is_some_and(|c| c.kind == del_agent::CommandKind::Goal);
         }
         change
+    }
+
+    /// Leave the running phase after a failed backend call, without a row.
+    pub fn halt(&mut self) {
+        self.seal();
+        self.phase = Phase::Idle;
     }
 
     pub fn push_error(&mut self, message: String, recoverable: bool) -> Change {

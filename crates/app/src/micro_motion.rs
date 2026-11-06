@@ -17,11 +17,37 @@ struct PointerState {
 pub struct Feedback {
     hover: f32,
     press: f32,
+    /// The same timelines for colour, which Reduce Motion keeps (snapped)
+    /// while it holds glyphs still.
+    fill_hover: f32,
+    fill_press: f32,
 }
 
 impl Feedback {
     pub fn glyph(self, kind: Glyph) -> crate::animated_icons::AnimatedIcon {
         crate::animated_icons::AnimatedIcon::new(kind, self.hover, self.press)
+    }
+
+    /// A background that eases in with the glyph's hover and deepens on press,
+    /// instead of a snapped `.hover(|s| s.bg(..))`. Opt in by building the
+    /// control with [`control`] and setting `.bg(feedback.fill(hover, pressed))`
+    /// on it; typically `ui::row_hover()` and `ui::row_pressed()`. At rest it is
+    /// transparent. Under Reduce Motion the fill still shows, without easing.
+    #[allow(dead_code)] // Opt-in: hand-built controls adopt it one by one.
+    pub fn fill(self, hover: impl Into<Rgba>, pressed: impl Into<Rgba>) -> Rgba {
+        let (hover, pressed) = (hover.into(), pressed.into());
+        let rest = Rgba { a: 0., ..hover };
+        let mix = |a: Rgba, b: Rgba, t: f32| Rgba {
+            r: a.r + (b.r - a.r) * t,
+            g: a.g + (b.g - a.g) * t,
+            b: a.b + (b.b - a.b) * t,
+            a: a.a + (b.a - a.a) * t,
+        };
+        mix(
+            mix(rest, hover, self.fill_hover.clamp(0., 1.)),
+            pressed,
+            self.fill_press.clamp(0., 1.),
+        )
     }
 }
 
@@ -79,7 +105,9 @@ where
             let pointer = state.read(cx);
             let hovered = self.enabled && pointer.hovered;
             let pressed = self.enabled && pointer.pressed;
-            let feedback = Feedback {
+            let mut feedback = Feedback {
+                fill_hover: 0.,
+                fill_press: 0.,
                 hover: transition(
                     "hover",
                     if hovered { 1. } else { 0. },
@@ -96,14 +124,13 @@ where
                 ),
             };
             // Reduce Motion keeps color/confirmation feedback, without moving glyphs.
-            let feedback = if cx.reduce_motion() {
-                Feedback {
-                    hover: 0.,
-                    press: 0.,
-                }
-            } else {
-                feedback
-            };
+            // (`transition` already settles instantly then, so fills just snap.)
+            feedback.fill_hover = feedback.hover;
+            feedback.fill_press = feedback.press;
+            if cx.reduce_motion() {
+                feedback.hover = 0.;
+                feedback.press = 0.;
+            }
             let mut element = (self.build)(feedback);
             if self.enabled {
                 let down = state.clone();
@@ -331,6 +358,8 @@ mod tests {
         let feedback = Rc::new(Cell::new(Feedback {
             hover: 0.,
             press: 0.,
+            fill_hover: 0.,
+            fill_press: 0.,
         }));
         let clicks = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view(|_, _| Fixture {
@@ -347,6 +376,11 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let halfway = feedback.get().hover;
         assert!(halfway > 0. && halfway < 1.);
+        let fill = feedback.get().fill(rgba(0xffffff0a), rgba(0xffffff1a));
+        assert!(
+            fill.a > 0. && fill.a < rgba(0xffffff0a).a,
+            "the fill eases with the glyph"
+        );
         assert_eq!(bounds, cx.debug_bounds("motion-target").unwrap());
 
         let outside = point(px(150.), px(150.));
@@ -383,6 +417,8 @@ mod tests {
         let feedback = Rc::new(Cell::new(Feedback {
             hover: 0.,
             press: 0.,
+            fill_hover: 0.,
+            fill_press: 0.,
         }));
         let clicks = Rc::new(Cell::new(0));
         let (root, cx) = cx.add_window_view(|_, _| Fixture {
@@ -408,6 +444,8 @@ mod tests {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             assert_eq!(feedback.get().hover, 0.);
             assert_eq!(feedback.get().press, 0.);
+            // Reduce Motion keeps the colour feedback, snapped; disabled has none.
+            assert_eq!(feedback.get().fill_press, if enabled { 1. } else { 0. });
             cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
             assert_eq!(clicks.get(), usize::from(enabled));
         }

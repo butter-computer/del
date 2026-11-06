@@ -1,5 +1,5 @@
 //! Composer autocomplete driven by the selected harness's command catalog.
-use crate::{appearance::rgba, state::AppState, zoom::px as zpx};
+use crate::{state::AppState, ui, zoom::px as zpx};
 use del_agent::{CommandKind, ComposerCommand, Provider};
 use gpui_kit::{
     component::{
@@ -66,6 +66,10 @@ pub struct CommandMenu {
     loading: bool,
     error: Option<String>,
     generation: u64,
+    /// Open state as last drawn, and a count of openings, so each opening
+    /// replays the fade-in.
+    presented: bool,
+    openings: usize,
 }
 
 pub(super) fn selected_skills(
@@ -212,6 +216,8 @@ impl CommandMenu {
             loading: false,
             error: None,
             generation: 0,
+            presented: false,
+            openings: 0,
         }
     }
 
@@ -487,19 +493,21 @@ impl CommandMenu {
             .debug_selector(move || selector.clone())
             .role(Role::Button)
             .aria_label(format!("/{}: {}", command.name, command.description))
-            .h(zpx(44.))
+            .h(zpx(ui::ROW_TWO_LINE))
             .w_full()
-            .px_2()
-            .gap_2()
+            .px(zpx(ui::SPACE_MD))
+            .gap(zpx(ui::SPACE_MD))
             .items_center()
-            .rounded_md()
+            .rounded(zpx(ui::RADIUS_ROW))
             .cursor_pointer()
-            .bg(if ix == self.selected {
-                rgba(0xffffff16)
-            } else {
-                rgba(0xffffff00)
-            })
-            .hover(|row| row.bg(rgba(0xffffff12)))
+            // One highlight: pointing at a row selects it, as the arrow keys do.
+            .when(ix == self.selected, |row| row.bg(ui::row_selected()))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && this.selected != ix {
+                    this.selected = ix;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -512,10 +520,10 @@ impl CommandMenu {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_px()
+                    .gap(zpx(1.))
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(zpx(ui::SPACE_MD))
                             .child(
                                 div()
                                     .text_size(zpx(13.))
@@ -524,14 +532,14 @@ impl CommandMenu {
                             .child(
                                 div()
                                     .text_size(zpx(del_core::typography::TEXT_XS))
-                                    .text_color(rgba(0xffffff66))
+                                    .text_color(ui::faint_text())
                                     .child(command.source.clone()),
                             ),
                     )
                     .child(
                         div()
                             .text_size(zpx(del_core::typography::TEXT_XS))
-                            .text_color(rgba(0xffffff88))
+                            .text_color(ui::secondary_text())
                             .truncate()
                             .child(command.description.clone()),
                     ),
@@ -606,7 +614,7 @@ impl CommandMenu {
     fn control_error(&self, message: &str, cx: &mut Context<Self>) {
         if let Some(state) = &self.state {
             state.update(cx, |state, cx| {
-                state.error = Some(message.into());
+                state.report_error(message);
                 cx.notify();
             });
         } else {
@@ -618,10 +626,25 @@ impl CommandMenu {
 impl Render for CommandMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.open {
+            self.presented = false;
             return div().into_any_element();
         }
-        let height =
-            zpx(44. * self.matches.len().min(6) as f32).min(window.viewport_size().height * 0.32);
+        if !self.presented {
+            self.presented = true;
+            self.openings += 1;
+        }
+        let target = zpx(ui::ROW_TWO_LINE * self.matches.len().min(6) as f32)
+            .min(window.viewport_size().height * 0.32);
+        // Filtering changes the row count with each keystroke; the list eases
+        // to its new height from wherever it is instead of snapping.
+        let height = gpui_kit::base::transition(
+            (self.openings, "composer-commands-height"),
+            target.as_f32(),
+            gpui_kit::base::Transition::new(std::time::Duration::from_millis(140)),
+            window,
+            cx,
+        );
+        let height = px(height);
         let message = self.error.clone().unwrap_or_else(|| {
             if self.loading {
                 "Loading skills and commands…".into()
@@ -633,19 +656,11 @@ impl Render for CommandMenu {
             .id("composer-commands")
             .debug_selector(|| "composer-commands".into())
             .w_full()
-            .p_1()
-            .rounded_xl()
-            .bg(crate::appearance::popup_surface())
-            .shadow_lg()
+            .p(zpx(ui::SPACE_XS))
+            .popover_style(cx)
+            .rounded(zpx(ui::RADIUS_POPOVER))
             .when(self.matches.is_empty(), |menu| {
-                menu.child(
-                    div()
-                        .px_3()
-                        .py_3()
-                        .text_size(zpx(12.))
-                        .text_color(rgba(0xffffff88))
-                        .child(message),
-                )
+                menu.child(ui::empty_note(message).px(zpx(ui::SPACE_MD)))
             })
             .when(!self.matches.is_empty(), |menu| {
                 menu.child(
@@ -660,11 +675,16 @@ impl Render for CommandMenu {
             .child(
                 h_flex()
                     .justify_end()
-                    .px_2()
-                    .py_1()
+                    .px(zpx(ui::SPACE_MD))
+                    .py(zpx(ui::SPACE_XS))
                     .text_size(zpx(del_core::typography::TEXT_XS))
-                    .text_color(rgba(0xffffff66))
+                    .text_color(ui::faint_text())
                     .child("↑ ↓ Navigate   ↵ Select   Esc Close"),
+            )
+            .with_animation(
+                ("composer-commands-enter", self.openings),
+                Animation::new(ui::POPOVER_ENTER).with_easing(ui::ease_out),
+                |menu, delta| menu.opacity(delta),
             )
             .into_any_element()
     }

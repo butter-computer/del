@@ -31,18 +31,22 @@ impl Reveal {
 
 pub fn duration_label(elapsed: Duration) -> String {
     // A real turn that took under a second did not take no time.
-    let seconds = elapsed.as_secs().max(1);
+    format!("Worked for {}", elapsed_label(elapsed.as_secs().max(1)))
+}
+
+/// "45s", "1m 5s", "1h 2m 5s": the same shape live and when finished.
+pub fn elapsed_label(seconds: u64) -> String {
     if seconds >= 3600 {
         format!(
-            "Worked for {}h {}m {}s",
+            "{}h {}m {}s",
             seconds / 3600,
             seconds % 3600 / 60,
             seconds % 60
         )
     } else if seconds >= 60 {
-        format!("Worked for {}m {}s", seconds / 60, seconds % 60)
+        format!("{}m {}s", seconds / 60, seconds % 60)
     } else {
-        format!("Worked for {seconds}s")
+        format!("{seconds}s")
     }
 }
 

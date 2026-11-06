@@ -72,24 +72,41 @@ impl<K> Slot<K> {
     pub fn ghost(&self, id: SharedString) -> AnyElement {
         self.wrap(
             id,
+            // The live right-sidebar tab's metrics (`right_panel.rs`), so the
+            // label does not jump as the tab turns into its closing ghost: its
+            // rem padding (6.5), icon gap (4.875), radius (4.875) and the 16 pt
+            // close slot, which reserves space even though it is not drawn.
             h_flex()
                 .w(zpx(crate::icons::TOOL_TAB_WIDTH))
                 .h(zpx(crate::icons::TOOL_TAB_HEIGHT))
-                .px_2()
-                .gap_2()
-                .rounded_md()
-                .when(self.visual.active, |tab| {
-                    tab.bg(crate::appearance::rgba(0xffffff14))
+                .px(zpx(6.5))
+                .whitespace_nowrap()
+                .rounded(zpx(4.875))
+                .when(self.visual.active, |tab| tab.bg(crate::ui::row_selected()))
+                .text_color(if self.visual.active {
+                    crate::ui::primary_text()
+                } else {
+                    crate::appearance::secondary_text()
                 })
-                .text_color(crate::appearance::secondary_text())
                 .text_size(zpx(del_core::typography::TEXT_MD))
-                .child(crate::icons::icon(self.visual.icon.clone()).with_size(zpx(15.)))
+                .child(
+                    div().mr(zpx(4.875)).flex_none().child(
+                        crate::icons::icon(self.visual.icon.clone())
+                            .with_size(zpx(crate::icons::MARK_SIZE)),
+                    ),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .child(self.visual.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(zpx(3.25))
+                        .size(zpx(crate::icons::TAB_CLOSE_SIZE)),
                 ),
         )
     }

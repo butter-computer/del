@@ -1,16 +1,22 @@
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, ElementId,
     FocusHandle, InteractiveElement as _, IntoElement, MouseButton, ParentElement, PathBuilder,
-    Pixels, Point, RenderOnce, Stateful, StyleRefinement, Styled, Window, canvas, point,
+    Pixels, Point, RenderOnce, Stateful, StyleRefinement, Styled, Window, canvas, div, point,
     prelude::FluentBuilder as _, px,
 };
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use crate::{ActiveTheme as _, ThemeStyled as _};
+use crate::{ActiveTheme as _, ElementExt as _, ThemeStyled as _};
 use crate::{
     Selectable, StyledExt as _,
     animation::ease_out_cubic,
-    styled::{popover_ring, popover_shadow},
+    styled::{
+        POPOVER_ENTER, POPOVER_EXIT, popover_lift, popover_radius, popover_ring, popover_shadow,
+    },
     v_flex,
 };
 use gpui_base::Placement;
@@ -128,6 +134,8 @@ pub struct Popover {
     mouse_button: MouseButton,
     appearance: bool,
     overlay_closable: bool,
+    motion: bool,
+    exit_motion: bool,
     on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
 }
 
@@ -148,6 +156,8 @@ impl Popover {
             mouse_button: MouseButton::Left,
             appearance: true,
             overlay_closable: true,
+            motion: true,
+            exit_motion: true,
             default_open: false,
             open: None,
             on_open_change: None,
@@ -240,6 +250,25 @@ impl Popover {
         self
     }
 
+    /// Set whether the surface animates, default is `true`.
+    ///
+    /// Opening, it fades in over [`POPOVER_ENTER`] while rising 4 pt into
+    /// place. A controlled popover (see [`Self::open`]) also fades out over
+    /// [`POPOVER_EXIT`] where it stood, without taking input. Turn this off
+    /// for content that animates itself, such as a [`crate::menu::PopupMenu`].
+    /// Reduce Motion always shows and hides the surface immediately.
+    pub fn motion(mut self, motion: bool) -> Self {
+        self.motion = motion;
+        self
+    }
+
+    /// Set whether a controlled popover fades out after closing, default is
+    /// `true`. The entrance is kept; see [`Self::motion`].
+    pub fn exit_motion(mut self, exit_motion: bool) -> Self {
+        self.exit_motion = exit_motion;
+        self
+    }
+
     /// Set whether clicking outside the popover will dismiss it, default is `true`.
     pub fn overlay_closable(mut self, closable: bool) -> Self {
         self.overlay_closable = closable;
@@ -314,6 +343,129 @@ impl Popover {
     }
 }
 
+/// Open and close motion kept across frames for one popover.
+#[derive(Default)]
+struct PopoverMotion {
+    was_open: bool,
+    closed_at: Option<Instant>,
+    /// The surface's bounds on its last open frame, where the exit fades.
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The last resolved position, so the closing surface keeps its arrow.
+    resolved: Rc<Cell<Option<(gpui_base::ResolvedPosition, Bounds<Pixels>)>>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arrow_canvas(
+    anchor: Anchor,
+    resolved: Rc<Cell<Option<(gpui_base::ResolvedPosition, Bounds<Pixels>)>>>,
+    arrow_size: Pixels,
+    radius: Pixels,
+    background: gpui::Background,
+    ring: gpui::Hsla,
+    appearance: bool,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let Some((_, trigger)) = resolved.get() else {
+                return;
+            };
+            let (side, target) = arrow_anchor(anchor, trigger);
+            let trigger = Bounds::new(target, gpui::size(px(0.), px(0.)));
+            let points = arrow_points(bounds, trigger, side, arrow_size, radius);
+            let mut fill = PathBuilder::fill();
+            fill.move_to(points[0]);
+            fill.line_to(points[1]);
+            fill.line_to(points[2]);
+            fill.close();
+            if let Ok(path) = fill.build() {
+                window.paint_path(path, background);
+            }
+            // The triangle ends exactly at the surface edge.
+            // Cover the ring and the antialiased base on both
+            // sides of that edge before drawing its two slopes.
+            window.paint_quad(gpui::fill(
+                arrow_join_bounds(points, side, px(1.)),
+                background,
+            ));
+            if appearance {
+                let mut outline = PathBuilder::stroke(px(1.));
+                outline.move_to(points[0]);
+                outline.line_to(points[1]);
+                outline.line_to(points[2]);
+                if let Ok(path) = outline.build() {
+                    window.paint_path(path, ring);
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+/// Forwards the popover's own layout untouched and, while a closed surface is
+/// fading out, draws that picture above the page where it last stood.
+struct WithExitGhost {
+    inner: AnyElement,
+    ghost: Option<(AnyElement, Bounds<Pixels>)>,
+}
+
+impl IntoElement for WithExitGhost {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for WithExitGhost {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.inner.request_layout(window, cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.inner.prepaint(window, cx);
+        if let Some((mut ghost, bounds)) = self.ghost.take() {
+            ghost.layout_as_root(bounds.size.map(Into::into), window, cx);
+            window.defer_draw(ghost, bounds.origin, gpui_base::POPUP_PRIORITY, None);
+        }
+    }
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.inner.paint(window, cx);
+    }
+}
+
 impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let anchor = self.anchor;
@@ -323,8 +475,6 @@ impl RenderOnce for Popover {
             px(0.)
         };
         let offset = self.offset.unwrap_or(window.rem_size() * 0.25) + arrow_size;
-        let resolved = Rc::new(Cell::new(None));
-        let arrow_position = resolved.clone();
         let arrow = self.arrow;
         let background = self
             .style
@@ -333,14 +483,87 @@ impl RenderOnce for Popover {
             .and_then(gpui::Fill::color)
             .unwrap_or_else(|| cx.theme().popover.into());
         let ring = popover_ring(cx);
-        let radius = cx.theme().radius;
+        let radius = popover_radius(cx);
         let appearance = self.appearance;
         let style = self.style;
         let children = self.children;
         let content = self.content;
         let trigger_style = self.trigger_style;
+        let reduce_motion = cx.reduce_motion();
+        let motion_enabled = self.motion && !reduce_motion;
+        let exit_enabled = motion_enabled && self.exit_motion;
+        let lift = popover_lift(cx);
+        let rest = window.rem_size() * 0.25;
 
-        BasePopover::new(self.id)
+        // Motion state lives beside Base's open state. A controlled popover
+        // reports its open state here, so its exit can keep the closed
+        // surface on screen for a short fade after Base stops rendering it.
+        let motion = window.use_keyed_state(
+            ElementId::NamedChild(self.id.clone().into(), "popover-motion".into()),
+            cx,
+            |_, _| PopoverMotion::default(),
+        );
+        let now = Instant::now();
+        let exit_alpha = motion.update(cx, |motion, _| {
+            if let Some(open) = self.open {
+                if motion.was_open && !open && exit_enabled && motion.bounds.get().is_some() {
+                    motion.closed_at = Some(now);
+                }
+                if open {
+                    motion.closed_at = None;
+                }
+                motion.was_open = open;
+            }
+            let t = motion.closed_at.map(|at| {
+                now.duration_since(at).as_secs_f32() / POPOVER_EXIT.as_secs_f32()
+            })?;
+            if t >= 1. || !exit_enabled {
+                motion.closed_at = None;
+                return None;
+            }
+            Some(1. - ease_out_cubic(t.clamp(0., 1.)))
+        });
+        let (last_bounds, resolved) = {
+            let motion = motion.read(cx);
+            (motion.bounds.clone(), motion.resolved.clone())
+        };
+        let arrow_position = resolved.clone();
+
+        let ghost = exit_alpha
+            .zip(last_bounds.get())
+            .zip(content.clone())
+            .map(|((alpha, bounds), content)| {
+                window.request_animation_frame();
+                // Base keeps the open state under the popover's id, closed now;
+                // content that reads it (to dismiss) sees a no-op.
+                let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
+                    PopoverState::new(false, cx)
+                });
+                let body = state.update(cx, |state, cx| (content)(state, window, cx));
+                let ghost = v_flex()
+                    .when(appearance, |this| this.popover_style(cx).p_3())
+                    .child(body)
+                    .refine_style(&style)
+                    .w(bounds.size.width)
+                    .h(bounds.size.height)
+                    .opacity(alpha)
+                    .when(arrow, |this| {
+                        this.child(arrow_canvas(
+                            anchor,
+                            resolved.clone(),
+                            arrow_size,
+                            radius,
+                            background,
+                            ring,
+                            appearance,
+                        ))
+                    })
+                    // A dismissed surface must never take a click while it fades.
+                    .child(div().absolute().inset_0().occlude());
+                (ghost.into_any_element(), bounds)
+            });
+
+        let popover = BasePopover::new(self.id)
             .anchor(self.anchor)
             .offset(offset)
             .on_position(move |position, trigger| resolved.set(Some((position, trigger))))
@@ -348,59 +571,61 @@ impl RenderOnce for Popover {
             .default_open(self.default_open)
             .overlay_closable(self.overlay_closable)
             .content(move |state, window, cx| {
-                v_flex()
+                let opens_up = matches!(
+                    anchor,
+                    Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight
+                );
+                let surface = v_flex()
                     .id("content")
                     .occlude()
                     .tab_group()
                     .when(appearance, |this| this.popover_style(cx).p_3())
+                    .map(|this| if opens_up { this.bottom(rest) } else { this.top(rest) })
                     .when_some(content, |this, content| {
                         this.child((content)(state, window, cx))
                     })
                     .children(children)
                     .refine_style(&style)
                     .when(arrow, |this| {
-                        this.child(
-                            canvas(
-                                |_, _, _| {},
-                                move |bounds, _, window, _| {
-                                    let Some((_, trigger)) = arrow_position.get() else {
-                                        return;
-                                    };
-                                    let (side, target) = arrow_anchor(anchor, trigger);
-                                    let trigger = Bounds::new(target, gpui::size(px(0.), px(0.)));
-                                    let points =
-                                        arrow_points(bounds, trigger, side, arrow_size, radius);
-                                    let mut fill = PathBuilder::fill();
-                                    fill.move_to(points[0]);
-                                    fill.line_to(points[1]);
-                                    fill.line_to(points[2]);
-                                    fill.close();
-                                    if let Ok(path) = fill.build() {
-                                        window.paint_path(path, background);
-                                    }
-                                    // The triangle ends exactly at the surface edge.
-                                    // Cover the ring and the antialiased base on both
-                                    // sides of that edge before drawing its two slopes.
-                                    window.paint_quad(gpui::fill(
-                                        arrow_join_bounds(points, side, px(1.)),
-                                        background,
-                                    ));
-                                    if appearance {
-                                        let mut outline = PathBuilder::stroke(px(1.));
-                                        outline.move_to(points[0]);
-                                        outline.line_to(points[1]);
-                                        outline.line_to(points[2]);
-                                        if let Ok(path) = outline.build() {
-                                            window.paint_path(path, ring);
-                                        }
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .inset_0()
-                            .size_full(),
-                        )
+                        this.child(arrow_canvas(
+                            anchor,
+                            arrow_position.clone(),
+                            arrow_size,
+                            radius,
+                            background,
+                            ring,
+                            appearance,
+                        ))
                     })
+                    .on_prepaint({
+                        let last_bounds = last_bounds.clone();
+                        move |bounds, _, _| last_bounds.set(Some(bounds))
+                    });
+                if !motion_enabled {
+                    return surface.into_any_element();
+                }
+                // Opening, the surface fades in and rises the last few points
+                // into place; the first frame already holds focus.
+                surface
+                    .with_animation(
+                        "popover-enter",
+                        Animation::new(POPOVER_ENTER).with_easing(ease_out_cubic),
+                        move |this, delta| {
+                            let rise = lift * (1. - delta);
+                            this.map(|this| {
+                                if opens_up {
+                                    this.bottom(rest - rise)
+                                } else {
+                                    this.top(rest + rise)
+                                }
+                            })
+                            .opacity(delta)
+                            .when(appearance, |this| {
+                                this.shadow(popover_shadow(ring, delta * delta * delta))
+                            })
+                        },
+                    )
+                    .into_any_element()
             })
             .when_some(self.trigger, |this, trigger| this.trigger_with(trigger))
             .when_some(trigger_style, |this, style| this.refine_style(&style))
@@ -411,7 +636,11 @@ impl RenderOnce for Popover {
             .when_some(self.on_open_change, |this, callback| {
                 this.on_open_change(move |open, window, cx| callback(open, window, cx))
             })
-            .into_any_element()
+            .into_any_element();
+        WithExitGhost {
+            inner: popover,
+            ghost,
+        }
     }
 }
 

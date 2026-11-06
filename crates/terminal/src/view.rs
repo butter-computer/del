@@ -59,6 +59,79 @@ pub struct TerminalView {
     pub option_as_meta: bool,
 }
 
+/// Set by the host while a panel or sidebar animates the layout. Terminals
+/// then keep their PTY size and resize once, to the settled size, afterwards:
+/// resizing on every frame would flood the program with SIGWINCH.
+static LAYOUT_ANIMATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_layout_animating(animating: bool) {
+    LAYOUT_ANIMATING.store(animating, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn layout_animating() -> bool {
+    LAYOUT_ANIMATING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug, PartialEq)]
+enum ResizeStep {
+    Apply(TerminalSize),
+    /// Keep the current size and paint again until the layout settles.
+    Wait,
+    Idle,
+}
+
+/// The PTY size to apply now, if any, given the size the layout asks for.
+fn resize_step(size: TerminalSize, current: TerminalSize, animating: bool) -> ResizeStep {
+    if size == current {
+        ResizeStep::Idle
+    } else if animating {
+        ResizeStep::Wait
+    } else {
+        ResizeStep::Apply(size)
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+
+    fn size(cols: u16) -> TerminalSize {
+        TerminalSize {
+            cols,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        }
+    }
+
+    #[test]
+    fn an_animated_layout_resizes_once_when_it_settles() {
+        let mut current = size(80);
+        assert_eq!(resize_step(size(80), current, false), ResizeStep::Idle);
+        // A lone change applies at once.
+        assert_eq!(
+            resize_step(size(90), current, false),
+            ResizeStep::Apply(size(90))
+        );
+        current = size(90);
+        // Every frame of an animation asks for a new size; none applies.
+        for frame in 1..=13u16 {
+            assert_eq!(
+                resize_step(size(90 + frame), current, true),
+                ResizeStep::Wait
+            );
+        }
+        // The first settled frame applies the final size, once.
+        assert_eq!(
+            resize_step(size(103), current, false),
+            ResizeStep::Apply(size(103))
+        );
+        current = size(103);
+        assert_eq!(resize_step(size(103), current, false), ResizeStep::Idle);
+    }
+}
+
 const MAX_COLS: u16 = 1024;
 const MAX_ROWS: u16 = 512;
 
@@ -530,12 +603,21 @@ impl TerminalView {
             .unwrap_or(zoom_px(8.));
         let cols = ((bounds.size.width / self.cell_width).floor() as u16).clamp(2, MAX_COLS);
         let rows = ((bounds.size.height / zoom_px(LINE_HEIGHT)).floor() as u16).clamp(1, MAX_ROWS);
-        let _ = self.session.resize(TerminalSize {
+        let size = TerminalSize {
             cols,
             rows,
             cell_width: f32::from(self.cell_width).ceil() as u16,
             cell_height: zoom_px(LINE_HEIGHT).as_f32().ceil() as u16,
-        });
+        };
+        // While the host animates the layout, keep the PTY size; the first
+        // settled frame applies the final size once.
+        match resize_step(size, self.session.size(), layout_animating()) {
+            ResizeStep::Apply(size) => {
+                let _ = self.session.resize(size);
+            }
+            ResizeStep::Wait => window.request_animation_frame(),
+            ResizeStep::Idle => {}
+        }
         let theme = self.session.theme();
         self.session.with_term(|term| {
             let content = term.renderable_content();

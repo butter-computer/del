@@ -1,11 +1,19 @@
 use crate::{Icon, IconName, Sizable, Size};
 use gpui::{
-    Animation, AnimationExt as _, App, Hsla, IntoElement, ParentElement, RenderOnce, Styled as _,
-    Transformation, Window, div, ease_in_out, percentage, prelude::FluentBuilder as _,
+    Animation, AnimationExt as _, App, Hsla, IntoElement, ParentElement, Pixels, RenderOnce,
+    Styled as _, Transformation, Window, div, percentage, prelude::FluentBuilder as _, px, rems,
 };
 use instant::Duration;
 
+/// One full turn. Every spinner shares this period and a clock, so two
+/// spinners for the same work (a sidebar row and its top tab) stay in phase.
+pub const SPINNER_PERIOD: Duration = Duration::from_millis(800);
+
 /// A cycling loading spinner.
+///
+/// It turns at a constant rate, phase-locked to the app-wide animation clock.
+/// Under Reduce Motion it shows a small static dot rather than a ring frozen
+/// mid-turn, which would read as stalled.
 #[derive(IntoElement)]
 pub struct Spinner {
     size: Size,
@@ -20,8 +28,8 @@ impl Spinner {
     pub fn new() -> Self {
         Self {
             size: Size::Medium,
-            speed: Duration::from_secs_f64(0.8),
-            easing: Box::new(ease_in_out),
+            speed: SPINNER_PERIOD,
+            easing: Box::new(|t| t),
             icon: Icon::new(IconName::Loader),
             color: None,
         }
@@ -43,10 +51,26 @@ impl Spinner {
         self
     }
 
-    /// Set the easing function.
+    /// Set the easing function. The default is linear, for constant rotation.
     pub fn ease(mut self, easing: impl Fn(f32) -> f32 + 'static) -> Self {
         self.easing = Box::new(easing);
         self
+    }
+
+    /// Set the duration of one turn. The default is [`SPINNER_PERIOD`].
+    pub fn period(mut self, period: Duration) -> Self {
+        self.speed = period;
+        self
+    }
+
+    fn side(&self, window: &Window) -> Pixels {
+        match self.size {
+            Size::Size(side) => side,
+            Size::XSmall => rems(0.75).to_pixels(window.rem_size()),
+            Size::Small => rems(0.875).to_pixels(window.rem_size()),
+            Size::Medium => rems(1.).to_pixels(window.rem_size()),
+            Size::Large => rems(1.5).to_pixels(window.rem_size()),
+        }
     }
 }
 
@@ -58,7 +82,25 @@ impl Sizable for Spinner {
 }
 
 impl RenderOnce for Spinner {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if cx.reduce_motion() {
+            let side = self.side(window);
+            // The ring would take the inherited text colour, so the dot does too.
+            let color = self.color.unwrap_or(window.text_style().color);
+            return div()
+                .flex_none()
+                .size(side)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size((side * 0.36).max(px(4.)))
+                        .rounded_full()
+                        .bg(color),
+                )
+                .into_any_element();
+        }
         div()
             .child(
                 self.icon
@@ -66,11 +108,13 @@ impl RenderOnce for Spinner {
                     .when_some(self.color, |this, color| this.text_color(color))
                     .with_animation(
                         "circle",
-                        Animation::new(self.speed).repeat().with_easing(self.easing),
+                        Animation::new(self.speed)
+                            .repeat_synced()
+                            .with_easing(self.easing),
                         |this, delta| this.transform(Transformation::rotate(percentage(delta))),
                     ),
             )
-            .into_element()
+            .into_any_element()
     }
 }
 

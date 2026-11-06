@@ -6,19 +6,22 @@ use serde::{Deserialize, Serialize};
 
 /// The entrance presentation shared by Dialog and AlertDialog.
 ///
-/// Closing remains immediate. Reduced motion displays the final state for every option.
+/// Closing is immediate for focus and input; the closed surface and its
+/// backdrop then fade out briefly without taking input (see
+/// [`DIALOG_EXIT`](super::DIALOG_EXIT)). Reduced motion displays the final
+/// state for every option and closes without a fade.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum DialogEntrance {
     /// Slide down from the window top while fading in, preserving the legacy entrance.
-    #[default]
     SlideDown,
     /// Fade in at the final position without movement.
     Fade,
-    /// Fade in while settling from just above the final position.
+    /// Fade in while settling from just above the final position. The default.
     ///
     /// Travel comes from the theme's short motion distance and is limited by
     /// the space above the resolved surface inside the window.
+    #[default]
     FadeSlide,
     /// Show the surface and backdrop immediately without entrance animation.
     None,

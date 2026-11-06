@@ -77,7 +77,7 @@ pub(crate) fn account_menu_label(
     let scale = 18. / 26.;
     h_flex()
         .w_full()
-        .gap_3()
+        .gap(zpx(crate::ui::SPACE_LG))
         .items_center()
         .child(
             div()
@@ -140,6 +140,104 @@ pub(crate) fn account_menu_label(
 
 /// Composer controls stay readable but sit below what is being written.
 pub(crate) const CONTROL_TEXT: u32 = 0xffffffb8;
+
+/// The composer's prompt when idle, while a reply runs, and in goal mode.
+pub(crate) const PLACEHOLDER: &str = "Ask anything…";
+pub(crate) const QUEUE_PLACEHOLDER: &str = "Queue a follow-up…";
+pub(crate) const GOAL_PLACEHOLDER: &str = "Describe the goal and how to measure success…";
+
+/// What the round composer button does right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerAction {
+    /// Nothing to send yet.
+    Idle,
+    Send,
+    /// A reply is running: Return queues the draft, and so does the button.
+    Queue,
+    /// A reply is running and the draft is empty.
+    Stop,
+    /// The first prompt is starting its session.
+    Starting,
+}
+
+impl ComposerAction {
+    pub(crate) fn new(running: bool, can_send: bool, starting: bool) -> Self {
+        match (starting, running, can_send) {
+            (true, _, _) => Self::Starting,
+            (_, true, true) => Self::Queue,
+            (_, true, false) => Self::Stop,
+            (_, false, true) => Self::Send,
+            (_, false, false) => Self::Idle,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle | Self::Send => "Send (Return)",
+            Self::Queue => "Queue (Return)",
+            Self::Stop => "Stop (⌘.)",
+            Self::Starting => "Starting…",
+        }
+    }
+
+    fn accessibility_label(self) -> &'static str {
+        match self {
+            Self::Idle | Self::Send => "Send message",
+            Self::Queue => "Queue message",
+            Self::Stop => "Stop response",
+            Self::Starting => "Starting agent",
+        }
+    }
+}
+
+/// The working-folder chip, shared by new-session drafts and the composer:
+/// one icon, one label, and the full path on hover.
+pub(crate) fn folder_chip(
+    id: &'static str,
+    path: &std::path::Path,
+    compact: bool,
+    disabled_reason: Option<&'static str>,
+) -> Button {
+    let full = crate::ui::display_path(&path.to_string_lossy());
+    Button::new(id)
+        .ghost()
+        .disabled(disabled_reason.is_some())
+        .h(zpx(24.))
+        .px(zpx(if compact {
+            crate::ui::SPACE_XS
+        } else {
+            crate::ui::SPACE_MD
+        }))
+        .min_w_0()
+        .max_w(zpx(150.))
+        .text_size(zpx(12.))
+        .text_color(crate::ui::secondary_text())
+        .tooltip(match disabled_reason {
+            Some(reason) => format!("{full}\n{reason}"),
+            None => full,
+        })
+        .accessibility_label("Choose project folder")
+        .child(
+            // Shrinks inside the capped button so a long name truncates
+            // instead of pushing the icon past the button's left edge.
+            h_flex()
+                .min_w_0()
+                .overflow_hidden()
+                .gap(zpx(crate::ui::SPACE_XS))
+                .items_center()
+                .child(div().flex_none().child(
+                    crate::icons::icon(IconName::Folder).with_size(zpx(crate::icons::MARK_SIZE)),
+                ))
+                .when(!compact, |row| {
+                    row.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(crate::sessions::folder_name(path)),
+                    )
+                }),
+        )
+}
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 type PasteHandler = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
@@ -339,25 +437,40 @@ fn chip(id: &'static str) -> Button {
     Button::new(id).ghost().small().compact().rounded_full()
 }
 
+/// The provider chip. A locked chip says why in its tooltip.
 pub(crate) fn provider_button(
     id: &'static str,
     provider: Provider,
     provider_ready: bool,
-    locked: bool,
+    locked: Option<&'static str>,
 ) -> Button {
-    chip(id)
-        .tooltip_with_action("Select provider / account", &crate::SelectProvider, None)
-        .text_color(rgba(CONTROL_TEXT))
-        .h(zpx(24.))
-        .px(zpx(8.))
-        .disabled(locked)
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
-                .child(providers::display_name(provider)),
-        )
+    let chip = chip(id);
+    match locked {
+        Some(reason) => chip.tooltip(reason),
+        None => chip.tooltip_with_action("Select provider / account", &crate::SelectProvider, None),
+    }
+    .text_color(rgba(CONTROL_TEXT))
+    .h(zpx(24.))
+    .px(zpx(crate::ui::SPACE_MD))
+    .disabled(locked.is_some())
+    .child(
+        h_flex()
+            .gap(zpx(crate::ui::SPACE_SM))
+            .items_center()
+            .child(provider_logo(provider).when(!provider_ready, |l| l.opacity(0.5)))
+            .child(providers::display_name(provider)),
+    )
+}
+
+/// Why a provider cannot start yet, from its detected status.
+pub(crate) fn provider_problem(status: &del_agent::ProviderStatus) -> Option<&'static str> {
+    if !status.installed {
+        Some("Not installed")
+    } else if !providers::ready(status) {
+        Some("Sign in")
+    } else {
+        None
+    }
 }
 
 impl RenderOnce for ComposerCard {
@@ -366,7 +479,26 @@ impl RenderOnce for ComposerCard {
         let can_send = self.dictation == crate::dictation::Phase::Idle
             && (self.has_attachments
                 || composer::submission(&self.input.read(cx).value()).is_some());
-        let muted = rgba(0xffffff8c);
+        let muted = crate::ui::secondary_text();
+        // While a reply runs, Return queues: say so where the prompt goes.
+        let placeholder = if self.goal_mode {
+            GOAL_PLACEHOLDER
+        } else if self.running {
+            QUEUE_PLACEHOLDER
+        } else {
+            PLACEHOLDER
+        };
+        if self.input.read(cx).presentation().placeholder().as_ref() != placeholder {
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+        let problem = self
+            .account_state
+            .as_ref()
+            .filter(|_| !self.provider_ready)
+            .and_then(|state| state.read(cx).status_of(self.provider))
+            .and_then(provider_problem);
         let ComposerCard {
             input,
             max_width,
@@ -398,7 +530,12 @@ impl RenderOnce for ComposerCard {
             on_provider,
         } = self;
 
-        let agent = provider_button("agent", provider, provider_ready, starting);
+        let agent = provider_button(
+            "agent",
+            provider,
+            provider_ready,
+            starting.then_some("Can’t switch provider while the session starts"),
+        );
         let agent_el = {
             let current = provider;
             // The composer sits low in the window, so its menu opens upward.
@@ -410,9 +547,17 @@ impl RenderOnce for ComposerCard {
                         if let Some(state) = account_state.clone().filter(|_| p != Provider::Acp) {
                             let default_state = state.clone();
                             let (logo, color) = provider_brand(p);
+                            // A provider that cannot start says why in its row.
+                            let label = match state.read(cx).status_of(p).and_then(provider_problem)
+                            {
+                                Some(problem) => {
+                                    format!("{} · {problem}", providers::display_name(p))
+                                }
+                                None => providers::display_name(p).to_string(),
+                            };
                             menu.submenu_with_icon(
                                 Some(crate::icons::path(logo).text_color(rgb(color))),
-                                providers::display_name(p),
+                                label,
                                 window,
                                 cx,
                                 move |menu, _, cx| {
@@ -484,39 +629,48 @@ impl RenderOnce for ComposerCard {
         let agent_el = agent_el
             .open(provider_menu_open)
             .on_open_change(move |open, window, cx| on_provider_menu(*open, window, cx));
-        let folder_el = if folder_locked {
-            h_flex()
-                .id("folder")
-                .h(zpx(20.0))
-                .px_1()
-                .gap_1()
-                .items_center()
-                .text_size(zpx(12.0))
-                .text_color(muted)
-                .child(crate::icons::icon(IconName::Folder))
-                .child(folder)
-                .when_some(folder_tooltip, |row, tip| {
-                    row.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                })
-                .into_any_element()
-        } else {
-            chip("folder")
-                .disabled(starting)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(crate::icons::icon(IconName::Folder))
-                        .child(folder),
-                )
-                .text_color(muted)
-                .on_click(move |_, w, cx| on_folder(w, cx))
-                .into_any_element()
+        // One chip for the folder, whether or not it can still change.
+        let folder_el = {
+            let path = std::path::PathBuf::from(&folder);
+            let reason = if folder_locked {
+                Some("The folder is fixed once a session starts")
+            } else if starting {
+                Some("Can’t change folder while the session starts")
+            } else {
+                None
+            };
+            let chip = folder_chip("folder", &path, false, reason);
+            match folder_tooltip.filter(|_| folder_locked) {
+                Some(tip) => chip.tooltip(tip),
+                None => chip,
+            }
+            .on_click(move |_, w, cx| on_folder(w, cx))
+            .into_any_element()
         };
 
-        // One round button: send, or stop while a turn is running.
+        // One round button: send, queue while a reply runs, or stop when the
+        // draft is empty. Its fill eases between lit and idle.
+        let state = ComposerAction::new(running, can_send, starting);
+        let lit = gpui_kit::base::transition(
+            "composer-action-fill",
+            if matches!(state, ComposerAction::Idle) {
+                0.
+            } else {
+                1.
+            },
+            gpui_kit::base::Transition::new(std::time::Duration::from_millis(140))
+                .ease(crate::ui::ease_out),
+            window,
+            cx,
+        );
+        let mix = |idle: u32, active: u32| {
+            let channel = |shift: u32| {
+                let a = ((idle >> shift) & 0xff) as f32;
+                let b = ((active >> shift) & 0xff) as f32;
+                (a + (b - a) * lit).round() as u32
+            };
+            rgb((channel(16) << 16) | (channel(8) << 8) | channel(0))
+        };
         let action = div()
             .id("send")
             .debug_selector(|| "composer-action".into())
@@ -525,41 +679,39 @@ impl RenderOnce for ComposerCard {
             .items_center()
             .justify_center()
             .rounded_full();
-        let action = if starting {
-            action.child(crate::icons::spinner())
+        let action = if state == ComposerAction::Starting {
+            action
+                .role(Role::Button)
+                .aria_label(state.accessibility_label())
+                .child(crate::icons::spinner())
         } else {
             action
                 .role(Role::Button)
-                .aria_label(if running {
-                    "Stop response"
-                } else {
-                    "Send message"
+                .aria_label(state.accessibility_label())
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(state.label()).build(window, cx)
                 })
-                .bg(if running || can_send {
-                    rgb(0xffffff)
-                } else {
-                    rgb(0x4a4a4e)
-                })
-                .when(running || can_send, |a| {
-                    a.cursor_pointer().on_click(move |_, w, cx| {
-                        if running {
-                            on_stop(w, cx);
-                        } else {
-                            on_send(w, cx);
-                        }
-                    })
+                .bg(mix(0x4a4a4e, 0xffffff))
+                .when(state != ComposerAction::Idle, |a| {
+                    a.cursor_pointer()
+                        .hover(|a| a.bg(rgb(0xe4e4e4)))
+                        .active(|a| a.bg(rgb(0xc8c8c8)))
+                        .on_click(move |_, w, cx| {
+                            if state == ComposerAction::Stop {
+                                on_stop(w, cx);
+                            } else {
+                                // Send, or queue while a reply runs: what Return does.
+                                on_send(w, cx);
+                            }
+                        })
                 })
                 .child(
                     crate::micro_motion::MorphIcon::new(
                         "send-stop-icon",
                         crate::animated_icons::Morph::SendStop,
-                        running,
+                        state == ComposerAction::Stop,
                     )
-                    .text_color(if running || can_send {
-                        rgb(0x111113)
-                    } else {
-                        rgb(0x8a8a8e)
-                    }),
+                    .text_color(mix(0x8a8a8e, 0x111113)),
                 )
         };
 
@@ -597,9 +749,9 @@ impl RenderOnce for ComposerCard {
             .debug_selector(|| "composer-card".into())
             .w_full()
             .max_w(zpx(max_width))
-            .p_2()
-            .gap_1()
-            .rounded(zpx(8.0))
+            .p(zpx(crate::ui::SPACE_MD))
+            .gap(zpx(crate::ui::SPACE_XS))
+            .rounded(zpx(crate::ui::RADIUS_CARD))
             .bg(crate::appearance::composer_surface())
             // A hairline holds the edge over any background; focus firms it up.
             .border_1()
@@ -607,6 +759,26 @@ impl RenderOnce for ComposerCard {
                 rgba(0xffffff1f)
             } else {
                 crate::appearance::separator()
+            })
+            .when_some(problem, |card, problem| {
+                // The selected provider cannot start: say what to fix before sending.
+                card.child(
+                    h_flex()
+                        .px(zpx(crate::ui::SPACE_XS))
+                        .gap(zpx(crate::ui::SPACE_SM))
+                        .items_center()
+                        .text_size(zpx(del_core::typography::TEXT_SM))
+                        .text_color(crate::appearance::ActionTone::Warning.foreground())
+                        .child(format!(
+                            "{} · {}",
+                            providers::display_name(provider),
+                            if problem == "Sign in" {
+                                "Sign in to send messages"
+                            } else {
+                                "Not installed"
+                            }
+                        )),
+                )
             })
             .when_some(attachment_content, |card, content| card.child(content))
             .child(
@@ -618,7 +790,7 @@ impl RenderOnce for ComposerCard {
                             .token(|token, _, _| {
                                 h_flex()
                                     .items_center()
-                                    .gap_1()
+                                    .gap(zpx(crate::ui::SPACE_XS))
                                     .text_size(zpx(TEXT_PROSE))
                                     .text_color(rgb(0x579fff))
                                     .child(
@@ -644,7 +816,7 @@ impl RenderOnce for ComposerCard {
                             .flex_1()
                             .min_w_0()
                             .items_center()
-                            .gap_0p5()
+                            .gap(zpx(crate::ui::SPACE_2XS))
                             .child(crate::micro_motion::control(
                                 "attach-motion",
                                 true,
@@ -663,7 +835,7 @@ impl RenderOnce for ComposerCard {
                                 h_flex()
                                     .min_w_0()
                                     .items_center()
-                                    .gap_0p5()
+                                    .gap(zpx(crate::ui::SPACE_2XS))
                                     .child(div().flex_none().child(agent_el))
                                     .when_some(model_picker, |row, picker| row.child(picker))
                                     .into_any_element()
@@ -674,7 +846,7 @@ impl RenderOnce for ComposerCard {
                                         .child(
                                             h_flex()
                                                 .items_center()
-                                                .gap_1()
+                                                .gap(zpx(crate::ui::SPACE_XS))
                                                 .child(crate::icons::icon(
                                                     gpui_kit::assets::IconName::Target,
                                                 ))
@@ -693,7 +865,7 @@ impl RenderOnce for ComposerCard {
                         h_flex()
                             .flex_none()
                             .items_center()
-                            .gap_1()
+                            .gap(zpx(crate::ui::SPACE_XS))
                             .when(show_voice, |row| row.child(voice))
                             .child(action),
                     ),
@@ -779,12 +951,38 @@ mod tests {
                 });
                 assert_eq!(cx.debug_bounds("composer-action").unwrap().center(), target);
                 // Click on the first frame, before the glyph finishes morphing.
+                // A draft while a reply runs queues, exactly like Return.
                 cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
                 cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
-                assert_eq!(sent.get(), index + 1);
-                assert_eq!(stopped.get(), index + 1 + usize::from(running));
+                assert_eq!(sent.get(), 2 * index + 1 + usize::from(running));
+                assert_eq!(stopped.get(), 1);
             }
         }
+        // With the draft cleared, the running button is Stop again.
+        cx.update(|window, cx| {
+            root.update(cx, |view, cx| {
+                view.input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        assert_eq!(stopped.get(), 2);
+    }
+
+    #[test]
+    fn running_with_a_draft_queues_and_only_an_empty_draft_stops() {
+        use ComposerAction::*;
+        assert_eq!(ComposerAction::new(false, false, false), Idle);
+        assert_eq!(ComposerAction::new(false, true, false), Send);
+        assert_eq!(ComposerAction::new(true, true, false), Queue);
+        assert_eq!(ComposerAction::new(true, false, false), Stop);
+        assert_eq!(ComposerAction::new(true, true, true), Starting);
+        assert_eq!(Queue.label(), "Queue (Return)");
+        assert_eq!(Stop.label(), "Stop (⌘.)");
+        assert_eq!(Send.label(), "Send (Return)");
     }
 
     #[gpui::test]

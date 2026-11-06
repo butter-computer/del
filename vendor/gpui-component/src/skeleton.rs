@@ -48,7 +48,7 @@ impl RenderOnce for Skeleton {
             .with_animation(
                 "skeleton",
                 Animation::new(Duration::from_secs(2))
-                    .repeat()
+                    .repeat_synced()
                     .with_easing(bounce(ease_in_out)),
                 move |this, delta| {
                     let v = 1.0 - delta * 0.5;

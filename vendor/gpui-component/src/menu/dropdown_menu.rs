@@ -124,6 +124,8 @@ where
         }
 
         Popover::new(SharedString::from(format!("popover:{}", self.id)))
+            // The menu fades and lifts itself, and keeps itself mounted to fade out.
+            .motion(false)
             .appearance(false)
             .when_some(self.open, |popover, open| popover.open(open))
             .overlay_closable(false)

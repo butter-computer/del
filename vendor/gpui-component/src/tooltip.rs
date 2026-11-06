@@ -18,7 +18,7 @@ use gpui_base::{
 
 use crate::{
     ActiveTheme, Placement, StyledExt,
-    animation::{EffectTransition, ease_in_out_cubic, ease_out_cubic},
+    animation::{EffectTransition, ease_out_cubic},
     kbd::Kbd,
     text::Text,
 };
@@ -136,7 +136,9 @@ impl Render for Tooltip {
                 .justify_between()
                 .py_0p5()
                 .px_2()
-                .text_sm()
+                // Whole logical sizes (12 and 11 at 100% zoom), scaled with the
+                // theme font size, rather than rems that land on 11.375/9.75.
+                .text_size(cx.theme().font_size * (12. / 13.))
                 .gap_3()
                 .refine_style(&self.style)
                 .map(|this| {
@@ -148,7 +150,7 @@ impl Render for Tooltip {
                 .when_some(key_binding, |this, kbd| {
                     this.child(
                         div()
-                            .text_xs()
+                            .text_size(cx.theme().font_size * (11. / 13.))
                             .flex_shrink_0()
                             .text_color(cx.theme().muted_foreground)
                             .child(kbd.appearance(false)),
@@ -162,8 +164,9 @@ impl Render for Tooltip {
 
 /// Duration of the slide-down enter animation.
 const ENTER_DURATION: Duration = Duration::from_millis(150);
-/// Duration of the position-slide animation when switching tooltips.
-const SLIDE_DURATION: Duration = Duration::from_millis(200);
+/// Duration of the position-slide animation when switching tooltips. Short
+/// and ease-out, so the label is readable as soon as the pointer settles.
+const SLIDE_DURATION: Duration = Duration::from_millis(140);
 pub(crate) fn render_tooltip(
     content_view: AnyView,
     transition: BaseTooltipTransition,
@@ -198,7 +201,7 @@ pub(crate) fn render_tooltip(
             }
             let dx = current.center().x - previous.center().x;
             EffectTransition::new(SLIDE_DURATION)
-                .ease(ease_in_out_cubic)
+                .ease(ease_out_cubic)
                 .slide_x(-dx, px(0.))
                 .apply(
                     element,

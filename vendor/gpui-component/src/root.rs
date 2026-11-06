@@ -1,6 +1,6 @@
 use crate::{
     ActiveTheme, ElementExt, Placement,
-    dialog::{ANIMATION_DURATION, Dialog},
+    dialog::{ANIMATION_DURATION, DIALOG_EXIT, Dialog},
     input::AnyInputState,
     native_menu::FallbackMenuOverlay,
     notification::{Notification, NotificationList},
@@ -16,7 +16,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_base::{TextSelection, TextSelectionScopeId};
-use std::{any::TypeId, rc::Rc};
+use std::{any::TypeId, cell::Cell, rc::Rc, time::Instant};
 
 pub(crate) fn init(cx: &mut App) {
     gpui_base::Root::register_plugin::<WindowState>(cx, WindowState::new);
@@ -26,6 +26,8 @@ pub(crate) fn init(cx: &mut App) {
 pub(crate) struct WindowState {
     pub(crate) active_sheet: Option<ActiveSheet>,
     pub(crate) active_dialogs: Vec<ActiveDialog>,
+    /// Dialogs already closed, painted for [`DIALOG_EXIT`] as they fade out.
+    closing_dialogs: Vec<ClosingDialog>,
     pub(super) focused_input: Option<AnyInputState>,
     pub notification: Entity<NotificationList>,
     pub(crate) tooltip_overlay: Entity<gpui_base::TooltipOverlay>,
@@ -57,6 +59,18 @@ pub(crate) struct ActiveDialog {
     previous_focused_handle: Option<WeakFocusHandle>,
     selection_scope: TextSelectionScopeId,
     builder: Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static>,
+    /// The opacity the builder gave the dialog on its last frame, so a dialog
+    /// that has already faded itself out does not reappear for the exit.
+    presented_opacity: Rc<Cell<f32>>,
+    /// Whether the dialog showed the backdrop on its last frame.
+    presented_overlay: Rc<Cell<bool>>,
+}
+
+#[derive(Clone)]
+struct ClosingDialog {
+    dialog: ActiveDialog,
+    started: Instant,
+    from: f32,
 }
 
 impl ActiveDialog {
@@ -71,6 +85,8 @@ impl ActiveDialog {
             previous_focused_handle,
             selection_scope,
             builder: Rc::new(builder),
+            presented_opacity: Rc::new(Cell::new(1.)),
+            presented_overlay: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -80,6 +96,7 @@ impl WindowState {
         Self {
             active_sheet: None,
             active_dialogs: Vec::new(),
+            closing_dialogs: Vec::new(),
             focused_input: None,
             notification: cx.new(|cx| NotificationList::new(window, cx)),
             tooltip_overlay: cx
@@ -197,10 +214,37 @@ impl WindowState {
         cx: &mut App,
     ) -> Option<impl IntoElement + use<>> {
         let active_dialogs = root.read(cx).active_dialogs.clone();
+        let now = Instant::now();
+        let closing_dialogs = root.update(cx, |root, _| {
+            root.closing_dialogs
+                .retain(|closing| now.duration_since(closing.started) < DIALOG_EXIT);
+            root.closing_dialogs.clone()
+        });
 
-        if active_dialogs.is_empty() {
+        if active_dialogs.is_empty() && closing_dialogs.is_empty() {
             return None;
         }
+        if !closing_dialogs.is_empty() {
+            window.request_animation_frame();
+        }
+        // Closed dialogs paint first, under any dialog still open.
+        let ghosts = closing_dialogs
+            .iter()
+            .map(|closing| {
+                let t = (now.duration_since(closing.started).as_secs_f32()
+                    / DIALOG_EXIT.as_secs_f32())
+                .clamp(0., 1.);
+                let mut dialog = (closing.dialog.builder)(Dialog::new(cx), window, cx);
+                // An owner fading the dialog itself keeps control: take the lower.
+                let own = dialog.style.opacity.unwrap_or(1.);
+                let alpha = (closing.from * (1. - crate::animation::ease_out_cubic(t))).min(own);
+                dialog.focus_handle = closing.dialog.focus_handle.clone();
+                dialog.selection_scope = closing.dialog.selection_scope;
+                dialog.props.overlay_visible = closing.dialog.presented_overlay.get();
+                dialog.exit = Some(alpha.max(0.));
+                dialog
+            })
+            .collect::<Vec<_>>();
 
         let mut show_overlay_ix = None;
 
@@ -211,6 +255,9 @@ impl WindowState {
                 let mut dialog = Dialog::new(cx);
 
                 dialog = (active_dialog.builder)(dialog, window, cx);
+                active_dialog
+                    .presented_opacity
+                    .set(dialog.style.opacity.unwrap_or(1.));
 
                 // Give the dialog the focus handle, because `dialog` is a temporary value, is not possible to
                 // keep the focus handle in the dialog.
@@ -234,6 +281,17 @@ impl WindowState {
                 dialog.props.overlay_visible = true;
             }
         }
+        for (dialog, active) in dialogs.iter().zip(active_dialogs.iter()) {
+            active.presented_overlay.set(dialog.props.overlay_visible);
+        }
+        // A dialog still open keeps the backdrop; a closing one under it must
+        // not darken it twice.
+        let mut ghosts = ghosts;
+        if show_overlay_ix.is_some() {
+            for ghost in &mut ghosts {
+                ghost.props.overlay_visible = false;
+            }
+        }
 
         // Named so a test can assert the layer actually reached the screen. A
         // dialog that opens into a root which never renders this layer looks
@@ -241,6 +299,7 @@ impl WindowState {
         Some(
             div()
                 .debug_selector(|| "dialog-layer".to_string())
+                .children(ghosts)
                 .children(dialogs),
         )
     }
@@ -277,16 +336,29 @@ impl WindowState {
         cx.notify();
     }
 
-    fn close_dialog_internal(&mut self) -> Option<FocusHandle> {
+    fn close_dialog_internal(&mut self, reduce_motion: bool) -> Option<FocusHandle> {
         self.focused_input = None;
-        self.active_dialogs
-            .pop()
-            .and_then(|d| d.previous_focused_handle)
-            .and_then(|h| h.upgrade())
+        let dialog = self.active_dialogs.pop()?;
+        self.fade_out(dialog.clone(), reduce_motion);
+        dialog.previous_focused_handle.and_then(|h| h.upgrade())
+    }
+
+    /// Keep painting a closed dialog while it fades. It no longer owns focus,
+    /// keyboard or the backdrop press: those are back with the window already.
+    fn fade_out(&mut self, dialog: ActiveDialog, reduce_motion: bool) {
+        let from = dialog.presented_opacity.get();
+        if reduce_motion || from <= 0.01 {
+            return;
+        }
+        self.closing_dialogs.push(ClosingDialog {
+            dialog,
+            started: Instant::now(),
+            from,
+        });
     }
 
     pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, WindowState>) {
-        if let Some(handle) = self.close_dialog_internal() {
+        if let Some(handle) = self.close_dialog_internal(cx.reduce_motion()) {
             window.focus(&handle, cx);
         }
         gpui_base::TextSelection::clear(window, cx);
@@ -298,7 +370,7 @@ impl WindowState {
         window: &mut Window,
         cx: &mut Context<'_, WindowState>,
     ) {
-        if let Some(handle) = self.close_dialog_internal() {
+        if let Some(handle) = self.close_dialog_internal(cx.reduce_motion()) {
             let dialogs_count = self.active_dialogs.len();
 
             // Save for new dialogs opened during animation to maintain focus chain
@@ -327,7 +399,10 @@ impl WindowState {
             .active_dialogs
             .first()
             .and_then(|d| d.previous_focused_handle.clone());
-        self.active_dialogs.clear();
+        let reduce_motion = cx.reduce_motion();
+        for dialog in std::mem::take(&mut self.active_dialogs) {
+            self.fade_out(dialog, reduce_motion);
+        }
         if let Some(handle) = previous_focused_handle.and_then(|h| h.upgrade()) {
             window.focus(&handle, cx);
         }

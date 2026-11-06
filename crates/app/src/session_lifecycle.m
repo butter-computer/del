@@ -44,6 +44,11 @@ static NSApplicationTerminateReply delShouldTerminate(id delegate, SEL selector,
     return NSTerminateNow;
 }
 
+void del_show_about_panel(void) {
+    [NSApp activateIgnoringOtherApps:YES];
+    [NSApp orderFrontStandardAboutPanel:nil];
+}
+
 bool del_session_lifecycle_install(bool (*decide)(bool), void (*notify)(void)) {
     Class delegateClass = object_getClass(NSApp.delegate);
     if (!delegateClass) return false;

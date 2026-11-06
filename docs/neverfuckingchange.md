@@ -1112,3 +1112,41 @@ activity bar. It supersedes earlier rules where they conflict.
   space. Retain the height cap and contained scrolling for long diffs.
 - Keep Dotfiles inside the Files content toolbar above the tree, never in the tab
   strip. Preserve filtering and the file-preview splitter.
+
+## Polish pass (0.1.53)
+
+- Hand-built UI takes spacing, radii, row heights, list fills, text roles and motion
+  timings from `crates/app/src/ui.rs`. Do not use gpui rem utilities in the app crate;
+  at the 13 px base they land on fractional sizes. List rows use one hover fill and one
+  selected fill; muted text is only secondary or faint; borders use `separator()`.
+- Floating menus, pickers, popovers and hover cards share a 10 pt radius and the popover
+  shadow; modals use 12 pt. Keyboard focus rings are drawn inside the control's edge.
+- The shared row highlight fades in (100 ms) on first hover and out in place (120 ms);
+  moving between rows still slides over 90 ms. Popovers fade in over 180 ms with a 4 pt
+  rise and out over 120 ms; dialogs fade out over 140 ms. Toasts enter in 200 ms with a
+  16 pt rise and leave in 150 ms. Spinners turn linearly and in phase; text shimmers
+  share one 1600 ms clock. Reduce Motion settles all of these instantly.
+- Cmd-K keeps a fixed top while typing, shows one highlight for pointer and keyboard,
+  and runs actions immediately. A search result whose title repeats its first prompt
+  appears once. The slash menu fades in, eases its height and shares one highlight.
+- Command-key tab number hints appear only after Command alone is held for 600 ms and
+  hide on release, any key, or deactivation. Tabs restored at launch open at full width.
+- A ↓ pill over the transcript returns to the latest content after scrolling up.
+  Automatic queue and peer deliveries never scroll a reader who has scrolled away.
+  Expanding a row pauses tail-follow so it stays under the pointer.
+- While a reply runs, a non-empty draft makes the composer button Send (queues, like
+  Return); an empty draft shows Stop. The placeholder reads "Queue a follow-up…".
+  Sending while history loads or attachments import holds the message until ready.
+- Queue and Side chat persistence runs in the background, coalesced and ordered, and
+  flushes on quit. Rendering never takes locks or rebuilds derived transcript state.
+- Fatal turn errors show only inline, with Retry; recoverable ones are toasts. Toasts
+  have a severity: errors stay until dismissed; housekeeping and information hide on
+  their own; duplicates coalesce; titles are specific, never "Something went wrong".
+- Permanently deleting a session always confirms, from every entry point. Archiving
+  or unloading a working session says its reply or command was stopped; archive offers Undo.
+- Provider statuses are unknown until detection reports; never show "Not installed"
+  before then. New sessions never default to `/`; the fallback is the home folder.
+- The window remembers its frame and display. The menu bar keeps About, Settings, Hide,
+  Hide Others, Show All, Run in Background and Quit, plus Edit and Window menus.
+- User-facing copy says "session", "Could not", uses real plurals, 24-hour times,
+  `~`-abbreviated paths and grouped numbers. Disabled controls explain why in their tooltip.

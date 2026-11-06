@@ -170,7 +170,7 @@ impl AppShell {
                                         .update(cx, |input, cx| input.focus(window, cx));
                                 }
                                 this.state.update(cx, |state, cx| {
-                                    state.error = Some(message);
+                                    state.report_error(message);
                                     cx.notify();
                                 });
                             }

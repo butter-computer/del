@@ -46,6 +46,23 @@ impl TerminalLaunchKind {
             Self::Custom => "Custom",
         }
     }
+    /// The launcher's choice name. A plain shell is a "Terminal" to people;
+    /// `label` keeps "Shell" for saved titles and agent-facing metadata.
+    pub fn choice_label(self) -> &'static str {
+        match self {
+            Self::Shell => "Terminal",
+            kind => kind.label(),
+        }
+    }
+    /// The provider CLI this choice needs on PATH.
+    fn binary(self) -> Option<&'static str> {
+        match self {
+            Self::Codex => Some("codex"),
+            Self::Claude => Some("claude"),
+            Self::OpenCode => Some("opencode"),
+            Self::Shell | Self::Custom => None,
+        }
+    }
 }
 
 /// History-safe command description. Never append MCP config to these fields
@@ -114,21 +131,16 @@ impl TerminalLaunchSpec {
         }
     }
     pub fn agent(kind: TerminalLaunchKind, cwd: impl Into<PathBuf>) -> io::Result<Self> {
-        let name = match kind {
-            TerminalLaunchKind::Codex => "codex",
-            TerminalLaunchKind::Claude => "claude",
-            TerminalLaunchKind::OpenCode => "opencode",
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "choose Codex, Claude, or OpenCode",
-                ));
-            }
+        let Some(name) = kind.binary() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Choose Codex, Claude, or OpenCode",
+            ));
         };
         let path = del_agent::detect::find_binary(name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{} is not installed", kind.label()),
+                format!("{} isn't installed", kind.label()),
             )
         })?;
         Ok(Self {
@@ -552,25 +564,32 @@ impl TerminalLauncher {
         cx.notify();
     }
 }
+/// Why a launch choice is unavailable, or None when it can be chosen.
+fn unavailable_reason(kind: TerminalLaunchKind, installed: bool) -> Option<String> {
+    (!installed && kind.binary().is_some()).then(|| format!("{} isn't installed", kind.label()))
+}
+
 impl Render for TerminalLauncher {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut choices = h_flex().gap_1().flex_wrap();
+        use crate::appearance::{ActionTone, rgba};
+        use crate::ui;
+        let mut choices = h_flex().gap(zpx(ui::SPACE_XS)).flex_wrap();
         for kind in TerminalLaunchKind::ALL {
-            let installed = match kind {
-                TerminalLaunchKind::Codex => del_agent::detect::find_binary("codex").is_some(),
-                TerminalLaunchKind::Claude => del_agent::detect::find_binary("claude").is_some(),
-                _ => true,
-            };
+            let installed = kind
+                .binary()
+                .is_none_or(|name| del_agent::detect::find_binary(name).is_some());
+            let reason = unavailable_reason(kind, installed);
             let selected = kind == self.kind;
             choices = choices.child(
                 Button::new(("terminal-kind", kind as usize))
                     .ghost()
                     .small()
-                    .label(kind.label())
-                    .disabled(self.launching || !installed)
+                    .label(kind.choice_label())
+                    .disabled(self.launching || reason.is_some())
+                    .when_some(reason, |b, reason| b.tooltip(reason))
                     .when(selected, |b| {
-                        b.bg(crate::appearance::ActionTone::Accent.surface(false))
-                            .text_color(crate::appearance::ActionTone::Accent.foreground())
+                        b.bg(ActionTone::Accent.surface(false))
+                            .text_color(ActionTone::Accent.foreground())
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.kind = kind;
@@ -589,40 +608,49 @@ impl Render for TerminalLauncher {
             .flex()
             .items_center()
             .justify_center()
-            .p_4()
+            .p(zpx(ui::SPACE_XL))
             .child(
                 v_flex()
                     .w_full()
                     .max_w(zpx(560.))
-                    .gap_3()
+                    .gap(zpx(ui::SPACE_LG))
                     .child(
                         div()
                             .text_size(zpx(del_core::typography::TEXT_XL))
-                            .text_color(rgb(0xf5f5f5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(ui::primary_text())
                             .child("Open a terminal"),
                     )
                     .child(
                         div()
-                            .text_size(zpx(12.))
-                            .text_color(rgb(0x999999))
-                            .child(self.cwd.to_string_lossy().into_owned()),
+                            .text_size(zpx(del_core::typography::TEXT_SM))
+                            .text_color(ui::secondary_text())
+                            .truncate()
+                            .child(ui::display_path(&self.cwd.to_string_lossy())),
                     )
                     .child(choices)
                     .when(self.kind == TerminalLaunchKind::Custom, |d| {
+                        // A visible field surface, like the new-tab address bar.
                         d.child(
-                            Input::new(&self.custom)
-                                .appearance(false)
-                                .bordered(false)
-                                .disabled(self.launching),
+                            h_flex()
+                                .h(zpx(ui::ROW_MENU))
+                                .px(zpx(ui::SPACE_MD))
+                                .rounded(zpx(ui::RADIUS_CARD))
+                                .bg(rgba(0xffffff14))
+                                .child(
+                                    Input::new(&self.custom)
+                                        .small()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .focus_bordered(false)
+                                        .disabled(self.launching),
+                                ),
                         )
                     })
                     .when_some(self.error.clone(), |d, error| {
-                        d.child(
-                            div()
-                                .text_size(zpx(12.))
-                                .text_color(rgb(0xe58b8b))
-                                .child(error),
-                        )
+                        d.child(ui::inline_error(error))
                     })
                     .child(
                         Button::new("launch-terminal")
@@ -1133,6 +1161,26 @@ fn claude_workspace_trust_key(screen: &str, cwd: &std::path::Path) -> Option<&'s
 mod tests {
     use super::{TerminalHost, TerminalLaunchKind, TerminalLaunchSpec};
     use std::path::PathBuf;
+
+    #[test]
+    fn launcher_choices_say_why_they_are_unavailable() {
+        use super::unavailable_reason;
+        assert_eq!(
+            unavailable_reason(TerminalLaunchKind::Codex, false).as_deref(),
+            Some("Codex isn't installed")
+        );
+        assert_eq!(
+            unavailable_reason(TerminalLaunchKind::OpenCode, false).as_deref(),
+            Some("OpenCode isn't installed")
+        );
+        assert_eq!(unavailable_reason(TerminalLaunchKind::Claude, true), None);
+        // A shell and a custom command never depend on a provider CLI.
+        assert_eq!(unavailable_reason(TerminalLaunchKind::Shell, false), None);
+        assert_eq!(unavailable_reason(TerminalLaunchKind::Custom, false), None);
+        assert_eq!(TerminalLaunchKind::Shell.choice_label(), "Terminal");
+        assert_eq!(TerminalLaunchKind::Shell.label(), "Shell");
+        assert_eq!(TerminalLaunchKind::OpenCode.choice_label(), "OpenCode");
+    }
 
     #[test]
     fn saved_terminal_account_survives_restore_and_isolates_authentication() {
