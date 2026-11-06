@@ -61,6 +61,18 @@ impl Ghost {
     }
 }
 
+static LAUNCHED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+/// Marks the start of the launch; call once while restoring the workspace.
+pub fn mark_launch() {
+    LAUNCHED.get_or_init(std::time::Instant::now);
+}
+/// Restoring the saved workspace is over, so new tabs are the user's own.
+fn launch_settled() -> bool {
+    LAUNCHED
+        .get()
+        .is_some_and(|at| at.elapsed() > Duration::from_secs(1))
+}
+
 /// How far a tab's opening animation has got, `opened` time ago.
 pub fn opening_fraction(elapsed: Duration) -> f32 {
     crate::ui::ease_out(elapsed.as_secs_f32() / TAB_ANIM.as_secs_f32())
@@ -265,6 +277,7 @@ impl AppState {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
+        mark_launch();
         let rt = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -495,16 +508,9 @@ impl AppState {
             settings_scroll: Default::default(),
             space_switcher_open: false,
             expanded_sidebar_projects: Default::default(),
-            providers: Provider::ALL
-                .iter()
-                .map(|&provider| ProviderStatus {
-                    provider,
-                    installed: false,
-                    path: None,
-                    version: None,
-                    login: LoginState::Unknown,
-                })
-                .collect(),
+            // Unknown until detection reports: a placeholder "not installed"
+            // would flash install hints on every launch.
+            providers: Vec::new(),
             signin: None,
             checking: Default::default(),
             caffeine_enabled: false,
@@ -1907,9 +1913,19 @@ impl AppState {
 
     fn new_uid(&mut self, tab: Tab) {
         self.uids.insert(tab, self.next_uid);
-        self.tab_opened
-            .insert(self.next_uid, std::time::Instant::now());
+        // Tabs restored at launch are already open; only later tabs grow in.
+        // Otherwise a window that starts in the background, where frames are
+        // not drawn, shows its first tab frozen part of the way open.
+        if launch_settled() {
+            self.tab_opened
+                .insert(self.next_uid, std::time::Instant::now());
+        }
         self.next_uid += 1;
+    }
+
+    /// Whether this tab plays its opening animation.
+    pub fn tab_grows_in(&self, uid: u64) -> bool {
+        self.tab_opened.contains_key(&uid)
     }
 
     pub fn uid_of(&self, tab: &Tab) -> u64 {

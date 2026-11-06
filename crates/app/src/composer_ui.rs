@@ -218,10 +218,16 @@ pub(crate) fn folder_chip(
         })
         .accessibility_label("Choose project folder")
         .child(
+            // Shrinks inside the capped button so a long name truncates
+            // instead of pushing the icon past the button's left edge.
             h_flex()
+                .min_w_0()
+                .overflow_hidden()
                 .gap(zpx(crate::ui::SPACE_XS))
                 .items_center()
-                .child(crate::icons::icon(IconName::Folder).with_size(zpx(crate::icons::MARK_SIZE)))
+                .child(div().flex_none().child(
+                    crate::icons::icon(IconName::Folder).with_size(zpx(crate::icons::MARK_SIZE)),
+                ))
                 .when(!compact, |row| {
                     row.child(
                         div()

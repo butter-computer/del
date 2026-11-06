@@ -139,7 +139,8 @@ fn code_fence(text: &str) -> String {
         longest = longest.max(run);
     }
     let fence = "`".repeat(longest.max(2) + 1);
-    format!("{fence}text\n{text}\n{fence}")
+    // No language: a "text" label above commands and output is noise.
+    format!("{fence}\n{text}\n{fence}")
 }
 
 /// "N more lines" under a capped block.
@@ -250,7 +251,10 @@ impl ChatView {
                 gpui_kit::base::MotionReveal::new(
                     ("work-row-reveal", ix),
                     progress,
+                    // The reveal measures its child on its own, so the row
+                    // must claim the column's width or it shrinks to content.
                     div()
+                        .w_full()
                         .opacity(progress)
                         .child(self.render_block_row(ix, cx))
                         .into_any_element(),
@@ -1075,6 +1079,7 @@ impl ChatView {
         let (approve_id, deny_id) = (approval.id.clone(), approval.id.clone());
         let attention = ActionTone::Warning.foreground();
         let card = v_flex()
+            .w_full()
             .my(zpx(crate::ui::SPACE_XS))
             .p(zpx(TEXT_INSET))
             .gap(zpx(10.))
@@ -1384,6 +1389,9 @@ fn user_message(
         })
         .child(
             v_flex()
+                // A full-width card hands its width to the text; a compact
+                // Side chat bubble sizes itself to its plain text instead.
+                .when(full_width, |column| column.flex_1())
                 .flex_shrink_1()
                 .min_w_0()
                 .gap(zpx(crate::ui::SPACE_XS))
@@ -1395,7 +1403,9 @@ fn user_message(
                             .text_size(zpx(TEXT_PROSE))
                             .line_height(relative(PROSE_LEADING))
                             .text_color(rgb(STRONG))
-                            .child(match ix {
+                            // Selectable text measures at its narrowest inside a
+                            // shrink-to-fit bubble, so only full-width cards use it.
+                            .child(match ix.filter(|_| full_width) {
                                 Some(ix) => {
                                     selectable_text(("user-text", ix), markdown).into_any_element()
                                 }

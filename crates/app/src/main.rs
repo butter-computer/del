@@ -2470,7 +2470,7 @@ impl AppShell {
                                             let live = tab_key.is_some();
                                             let terminal = matches!(&tab_key, Some(Tab::Terminal(_)));
                                             let preview = tab_key.as_ref().is_some_and(|tab| self.state.read(cx).preview_tab.as_ref() == Some(tab));
-                                            let animate_open = !matches!(tab_key, Some(Tab::Session(_)));
+                                            let animate_open = !matches!(tab_key, Some(Tab::Session(_))) && self.state.read(cx).tab_grows_in(uid);
 
                                             let shortcut_number = tab_key.as_ref().and_then(|tab| self.state.read(cx).tabs.iter().position(|candidate| candidate == tab)).filter(|index| *index < 9).map(|index| index + 1);
                                             let shortcut_hint = !self.search_open && self.state.read(cx).shortcut_hints && shortcut_number.is_some();
