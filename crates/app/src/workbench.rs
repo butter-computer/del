@@ -287,11 +287,17 @@ impl Render for ProcessMenu {
                     .text_color(crate::appearance::secondary_text())
                     .child(if current {
                         "This session"
+                    } else if self.owner.is_some() {
+                        "Other sessions"
                     } else {
                         "All sessions"
                     }),
             );
-            let rows: Vec<_> = snapshot.commands(owner).cloned().collect();
+            let rows: Vec<_> = snapshot
+                .commands(owner)
+                .filter(|process| current || self.owner.is_none() || process.owner != self.owner)
+                .cloned()
+                .collect();
             if rows.is_empty() {
                 list = list.child(div().text_size(zpx(TEXT_SM)).child("0 running"));
             }

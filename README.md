@@ -6,15 +6,14 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.55` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.56` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.55 release notes](docs/releases/0.1.55.md).
+See the [0.1.56 source update notes](docs/releases/0.1.56.md).
 
-This release fixes session ownership in the Processes menu for Claude, Codex and
-OpenCode, including detached servers and Side chats. Hover a process row to stop
-that command and its children; both This session and All sessions update live.
-It also includes the earlier [0.1.54 reliability fixes](docs/releases/0.1.54.md)
-and [0.1.53 interface polish](docs/releases/0.1.53.md).
+This source update fixes Side chat messages wrapping one character per line and
+removes duplicate process rows. **This session** and **Other sessions** now show
+separate lists; empty drafts still show **All sessions**. It builds on the
+[0.1.55 process controls](docs/releases/0.1.55.md).
 
 Del includes expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
@@ -66,7 +65,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.55-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.56-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -394,7 +393,7 @@ page's edge. The 22 px status bar shows session metrics and the Chat/Terminal to
 - **Context**: active conversation context (history, instructions, tools and current output), shown as percent used. Capacity comes from provider telemetry or an exact known model specification; unknown capacities stay unavailable. This is not cumulative lifetime token traffic. It resets on provider switches; Terminal mode shows unavailable.
 - **Limits**: the selected provider/account's most constrained allowance, with individual windows and local reset times in the menu. Claude and Codex report these; unsupported accounts show unavailable. Refreshes at most once a minute while active.
 - **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the total for the main chat plus all its side chats, including closed side chats. Hover or click for each provider’s combined cost across repeated switches. Each chat is reconciled independently before summing, so sibling chats cannot mask or duplicate one another’s usage. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
-- **Processes**: commands and servers for the current session, including its Side chats and sidebar terminals, with PIDs and listening TCP ports. **All sessions** includes commands from other sessions and shared project terminals; empty drafts count all sessions. Empty sections say **0 running**. Provider connections, shell wrappers, Del housekeeping and known REPL helpers are hidden. Claude, Codex and OpenCode commands carry a per-execution marker, so shared Codex servers and detached commands retain exact ownership. Older untagged commands with unverifiable ownership stay in All sessions. Snapshots refresh every two seconds while active, including while the menu is open. Hover a row, or focus its trailing control with the keyboard, to reveal **Stop process**. Stopping shows **Stopping…**, signals only that command and its descendants, and force-stops remaining processes after a two-second grace period. Each signal verifies the process's birth time so an old row cannot target a reused PID. It never signals the provider's shared process group.
+- **Processes**: commands and servers for the current session, including its Side chats and sidebar terminals, with PIDs and listening TCP ports. **Other sessions** includes commands from other sessions and shared project terminals, excluding entries already shown under **This session**; empty drafts show **All sessions**. Empty sections say **0 running**. Provider connections, shell wrappers, Del housekeeping and known REPL helpers are hidden. Claude, Codex and OpenCode commands carry a per-execution marker, so shared Codex servers and detached commands retain exact ownership. Older untagged commands with unverifiable ownership stay in Other sessions (or All sessions for an empty draft). Snapshots refresh every two seconds while active, including while the menu is open. Hover a row, or focus its trailing control with the keyboard, to reveal **Stop process**. Stopping shows **Stopping…**, signals only that command and its descendants, and force-stops remaining processes after a two-second grace period. Each signal verifies the process's birth time so an old row cannot target a reused PID. It never signals the provider's shared process group.
 
 - **Chat / Terminal**: switch the active conversation between its chat and native terminal UI.
 

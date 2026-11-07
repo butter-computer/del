@@ -3221,6 +3221,80 @@ mod search_tests {
             div().w(px(650.)).h(px(350.)).child(self.0.clone())
         }
     }
+    struct SideChatPromptFixture(Entity<ChatView>, f32);
+    impl Render for SideChatPromptFixture {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(14.));
+            h_flex()
+                .w(px(650. + self.1))
+                .h(px(600.))
+                .child(div().w(px(650.)).flex_none())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .whitespace_normal()
+                        .child(div().flex_1().min_h_0().child(self.0.clone())),
+                )
+        }
+    }
+    #[gpui::test]
+    fn side_chat_prompts_fit_text_and_wrap_within_panel(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        for (width, text, single_line) in [
+            (350., "is that so".to_owned(), true),
+            (240., "is that so".to_owned(), true),
+            (
+                350.,
+                "A longer message should wrap within the side chat. ".repeat(4),
+                false,
+            ),
+            (240., "x".repeat(128), false),
+            (350., "first line\nsecond line".to_owned(), false),
+        ] {
+            let (_dir, _runtime, backend) = backend();
+            let messages = vec![search::Message { role: "You", text }];
+            let (root, cx) = cx.add_window_view(|_, cx| {
+                SideChatPromptFixture(
+                    cx.new(|cx| {
+                        ChatView::saved_transcript(backend, search::model(&messages), cx)
+                            .with_compact_user_messages()
+                    }),
+                    width,
+                )
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let chat = root.read_with(cx, |root, _| root.0.clone());
+            let row = chat.read_with(cx, |chat, _| chat.scroller.bounds_for_item(0).unwrap());
+            let card = cx.debug_bounds("user-message-0").unwrap();
+            let text = cx.debug_bounds("user-text-0").unwrap();
+            assert!(
+                card.left() >= row.left() && card.right() <= row.right(),
+                "card overflow: {card:?}, {row:?}"
+            );
+            assert!(
+                text.left() >= card.left() && text.right() <= card.right(),
+                "text overflow: {text:?}, {card:?}"
+            );
+            if single_line {
+                assert!(
+                    row.size.height < px(70.),
+                    "short prompt wrapped vertically: {row:?}"
+                );
+                assert!(
+                    card.size.width < row.size.width - px(40.),
+                    "short bubble should hug its text"
+                );
+            } else {
+                assert!(
+                    text.size.height > px(30.) && text.size.height < px(300.),
+                    "long prompt should wrap: {text:?}"
+                );
+            }
+        }
+    }
     #[gpui::test]
     fn message_jump_settles_in_one_frame_with_reduce_motion(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
