@@ -8,9 +8,9 @@ context and exchange requests and replies as equal peers.
 
 Del `0.1.56` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.56 source update notes](docs/releases/0.1.56.md).
+See the [0.1.56 release notes](docs/releases/0.1.56.md).
 
-This source update fixes Side chat messages wrapping one character per line and
+This release fixes Side chat messages wrapping one character per line and
 removes duplicate process rows. **This session** and **Other sessions** now show
 separate lists; empty drafts still show **All sessions**. It builds on the
 [0.1.55 process controls](docs/releases/0.1.55.md).
@@ -43,9 +43,7 @@ when making future changes.
 
 ## Download and install
 
-The latest downloadable release is **0.1.55**; see its [release notes](docs/releases/0.1.55.md)
-and [validation record](docs/releases/0.1.55-validation.md).
-Download **Del-0.1.55-arm64.dmg** from the [0.1.55 release](https://github.com/butter-computer/del/releases/tag/v0.1.55),
+Download **Del-0.1.56-arm64.dmg** from the [0.1.56 release](https://github.com/butter-computer/del/releases/tag/v0.1.56),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
