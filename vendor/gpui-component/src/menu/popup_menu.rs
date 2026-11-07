@@ -321,6 +321,7 @@ pub struct PopupMenu {
     /// The parent menu of this menu, if this is a submenu
     parent_menu: Option<WeakEntity<Self>>,
     scrollable: bool,
+    flush_items: bool,
     external_link_icon: bool,
     scroll_handle: ScrollHandle,
     // This will update on render
@@ -365,6 +366,7 @@ impl PopupMenu {
             check_side: Side::Left,
             bounds: Bounds::default(),
             scrollable: false,
+            flush_items: false,
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
             size: Size::default(),
@@ -467,6 +469,12 @@ impl PopupMenu {
     /// Set the menu to be scrollable to show vertical scrollbar.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Remove the menu and item padding so custom content can reach the surface edges.
+    pub fn flush_items(mut self) -> Self {
+        self.flush_items = true;
         self
     }
 
@@ -1309,7 +1317,7 @@ impl PopupMenu {
             .relative()
             .text_size(cx.theme().font_size)
             .py_0()
-            .px(INNER_PADDING)
+            .px(if self.flush_items { px(0.) } else { INNER_PADDING })
             .rounded(radius)
             .items_center()
             .selected(selected)
@@ -1600,6 +1608,7 @@ impl Render for PopupMenu {
                 v_flex()
                     .id("items")
                     .p_1()
+                    .when(self.flush_items, |items| items.p_0())
                     .gap_y_0p5()
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))

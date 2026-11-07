@@ -1170,6 +1170,9 @@ activity bar. It supersedes earlier rules where they conflict.
   helpers. Tagged Claude, Codex and OpenCode commands retain their owner after
   detaching; unverified shared commands appear under Shared
   (All sessions for drafts).
+- Set the Processes popup width to 260 points at default zoom and inset the text
+  by 12 points. Row highlights reach both edges and follow the popup’s rounded
+  corners while scrolling, expanding, and collapsing sections.
 - Use text-only section headings that toggle the shared disclosure animation.
   Shared starts collapsed on each menu opening. Other sections start expanded.
   Keep each choice while the open menu refreshes.

@@ -11,7 +11,7 @@ use crate::{AppShell, ResizePreview};
 use del_core::typography::{TEXT_SM, TEXT_XS};
 use del_mcp::SessionMode;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -22,6 +22,8 @@ pub const PANEL_DEFAULT_HEIGHT: f32 = 200.0;
 const PANEL_MIN_HEIGHT: f32 = 96.0;
 const PANEL_HEADER_HEIGHT: f32 = 30.0;
 const STATUS_POPOVER_WIDTH: f32 = 340.0;
+const PROCESS_POPUP_WIDTH: f32 = 260.0;
+const PROCESS_ROW_INSET: f32 = 12.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Title-bar control size, matching the sidebar's header buttons.
 const NAV_BUTTON: f32 = 28.0;
@@ -238,8 +240,58 @@ fn reachable(state: &AppState) -> impl Fn(&Tab) -> bool + '_ {
     }
 }
 
+fn process_popup<V: Render>(menu: PopupMenu, list: Entity<V>) -> PopupMenu {
+    let width = zpx(PROCESS_POPUP_WIDTH);
+    menu.flush_items()
+        .min_w(width)
+        .max_w(width)
+        .scrollable(true)
+        .max_h(zpx(320.))
+        .item(PopupMenuItem::element(move |_, _| list.clone()).custom_highlight())
+}
+
+/// Paint each hovered row as a slice of the rounded popup. The visible surface
+/// stays fixed as rows scroll through it or a section animates underneath it.
+#[derive(Default)]
+struct ProcessSurface(std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>);
+
+impl ProcessSurface {
+    fn list(&self) -> Div {
+        let viewport = self.0.clone();
+        v_flex().w_full().on_prepaint(move |bounds, window, _| {
+            viewport.set(bounds.intersect(&window.content_mask().bounds));
+        })
+    }
+
+    fn row(&self, id: impl Into<ElementId>) -> Stateful<Div> {
+        let viewport = self.0.clone();
+        div().id(id).relative().group("process-hover").child(
+            div()
+                .absolute()
+                .inset_0()
+                .invisible()
+                .group_hover("process-hover", |s| s.visible())
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                window.paint_quad(
+                                    fill(viewport.get(), crate::ui::row_hover())
+                                        .corner_radii(gpui_kit::component::popover_radius(cx)),
+                                );
+                            });
+                        },
+                    )
+                    .size_full(),
+                ),
+        )
+    }
+}
+
 /// Use the same measured spring reveal as the transcript disclosures.
 fn process_section(
+    surface: &ProcessSurface,
     heading: &'static str,
     open: bool,
     content: impl IntoElement,
@@ -251,18 +303,17 @@ fn process_section(
         .w_full()
         .flex_none()
         .child(
-            div()
-                .id(heading)
+            surface
+                .row(heading)
                 .keyboard_control()
                 .role(gpui::Role::Button)
                 .aria_label(heading)
                 .aria_expanded(open)
                 .debug_selector(move || format!("process-heading-{heading}"))
                 .w_full()
+                .px(zpx(PROCESS_ROW_INSET))
                 .py(zpx(6.))
-                .rounded(zpx(4.))
                 .cursor_pointer()
-                .hover(|s| s.bg(crate::ui::row_hover()))
                 .text_size(zpx(TEXT_XS))
                 .text_color(crate::appearance::secondary_text())
                 .child(heading)
@@ -299,9 +350,10 @@ impl ProcessMenu {
 }
 impl Render for ProcessMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = v_flex()
+        let surface = ProcessSurface::default();
+        let mut list = surface
+            .list()
             .id("process-list")
-            .w(zpx(STATUS_POPOVER_WIDTH))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation());
         let Some(shell) = self.shell.upgrade() else {
@@ -310,13 +362,19 @@ impl Render for ProcessMenu {
         let snapshot = shell.read(cx).processes.clone();
         let stopping = shell.read(cx).stopping_processes.clone();
         if let Some(error) = &snapshot.error {
-            return list.child(error.clone());
+            return list.child(div().px(zpx(PROCESS_ROW_INSET)).child(error.clone()));
         }
         for (heading, rows) in snapshot.sections(self.owner.as_deref()) {
             let open = !self.collapsed.contains(heading);
             let mut body = v_flex().w_full();
             if rows.is_empty() {
-                body = body.child(div().text_size(zpx(TEXT_SM)).child("0 running"));
+                body = body.child(
+                    h_flex()
+                        .h(zpx(30.))
+                        .px(zpx(PROCESS_ROW_INSET))
+                        .text_size(zpx(TEXT_SM))
+                        .child("0 running"),
+                );
             }
             for process in rows {
                 let pid = process.pid;
@@ -332,14 +390,14 @@ impl Render for ProcessMenu {
                 let target = process.clone();
                 let shell = self.shell.clone();
                 body = body.child(
-                    h_flex()
-                        .id(("process-row", pid as u64))
+                    surface
+                        .row(("process-row", pid as u64))
+                        .h_flex()
                         .debug_selector(move || format!("process-row-{pid}"))
                         .w_full()
+                        .px(zpx(PROCESS_ROW_INSET))
                         .h(zpx(30.))
                         .gap(zpx(8.))
-                        .rounded(zpx(4.))
-                        .hover(|s| s.bg(crate::ui::row_hover()))
                         .on_hover(cx.listener(move |this, entered, _, cx| {
                             if *entered {
                                 this.hovered = Some(pid);
@@ -359,6 +417,8 @@ impl Render for ProcessMenu {
                         .child(
                             div()
                                 .flex_none()
+                                .max_w(relative(0.5))
+                                .truncate()
                                 .text_size(zpx(TEXT_XS))
                                 .text_color(crate::appearance::secondary_text())
                                 .child(if busy { "Stopping…".into() } else { detail }),
@@ -400,6 +460,7 @@ impl Render for ProcessMenu {
                 );
             }
             list = list.child(process_section(
+                &surface,
                 heading,
                 open,
                 body,
@@ -1256,9 +1317,7 @@ impl AppShell {
                         let Some(shell) = process_shell.upgrade() else { return menu; };
                         let owner = process_owner.clone();
                         let list = cx.new(|cx| ProcessMenu::new(shell, owner, cx));
-                        menu.scrollable(true).max_h(zpx(320.)).item(
-                            PopupMenuItem::element(move |_, _| list.clone()).custom_highlight()
-                        )
+                        process_popup(menu, list)
                     }),
             ))
             .child(
@@ -1323,12 +1382,15 @@ mod status_tests {
         }
     }
     #[::gpui::test]
-    fn process_heading_click_reveals_and_hides_the_rows(cx: &mut ::gpui::TestAppContext) {
+    fn full_width_process_heading_reveals_and_hides_the_rows(cx: &mut ::gpui::TestAppContext) {
         struct Fixture(bool);
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                v_flex()
+                let surface = ProcessSurface::default();
+                surface
+                    .list()
                     .child(process_section(
+                        &surface,
                         "Shared",
                         self.0,
                         div().h(px(40.)).child("concord-mcp"),
@@ -1344,30 +1406,56 @@ mod status_tests {
             gpui_kit::init(cx);
             cx.set_reduce_motion(false);
         });
-        let (_, cx) = cx.add_window_view(|_, _| Fixture(false));
+        struct Trigger;
+        impl Render for Trigger {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                status_item("process-test")
+                    .child(
+                        div()
+                            .debug_selector(|| "process-trigger".into())
+                            .child("0 running"),
+                    )
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, |menu, _, cx| {
+                        process_popup(menu, cx.new(|_| Fixture(false)))
+                    })
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Trigger);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("process-trigger").unwrap().center();
+        cx.simulate_mouse_down(trigger, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(trigger, MouseButton::Left, Default::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let header = cx.debug_bounds("process-heading-Shared").unwrap();
-        let closed = cx.debug_bounds("after-section").unwrap().top();
-        assert_eq!(closed, header.bottom());
-        let click = |cx: &mut ::gpui::VisualTestContext| {
-            cx.simulate_mouse_down(header.center(), MouseButton::Left, Default::default());
-            cx.simulate_mouse_up(header.center(), MouseButton::Left, Default::default());
+        assert_eq!(header.size.width, zpx(PROCESS_POPUP_WIDTH));
+        let revealed_height = |cx: &mut ::gpui::VisualTestContext| {
+            cx.debug_bounds("after-section").unwrap().top()
+                - cx.debug_bounds("process-heading-Shared").unwrap().bottom()
+        };
+        assert_eq!(revealed_height(cx), px(0.));
+        let click = |cx: &mut ::gpui::VisualTestContext, x| {
+            let y = cx
+                .debug_bounds("process-heading-Shared")
+                .unwrap()
+                .center()
+                .y;
+            cx.simulate_mouse_down(point(x, y), MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(point(x, y), MouseButton::Left, Default::default());
             cx.update(|window, cx| window.draw(cx).clear(cx));
         };
-        click(cx);
+        click(cx, header.left() + px(1.));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(32));
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let partial = cx.debug_bounds("after-section").unwrap().top();
-        assert!(partial > closed && partial < closed + px(40.));
+        let partial = revealed_height(cx);
+        assert!(partial > px(0.) && partial < px(40.));
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(
-            cx.debug_bounds("after-section").unwrap().top(),
-            closed + px(40.)
-        );
-        click(cx);
-        assert_eq!(cx.debug_bounds("after-section").unwrap().top(), closed);
+        assert_eq!(revealed_height(cx), px(40.));
+        click(cx, header.right() - px(1.));
+        assert_eq!(revealed_height(cx), px(0.));
     }
 
     #[::gpui::test]

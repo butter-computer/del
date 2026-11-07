@@ -6,12 +6,13 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.57` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.58` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.57 release notes](docs/releases/0.1.57.md).
+See the [0.1.58 release notes](docs/releases/0.1.58.md).
 
 The Processes menu shows recognizable Node and Python tools by launcher, script
-or module name. Click any section heading to expand or collapse its rows.
+or module name. The compact popup highlights the full row up to its rounded
+edges. Click anywhere on a section heading to expand or collapse its rows.
 **Shared** starts collapsed and holds processes without a known session owner.
 
 Del includes expandable historical commit diffs, friendly commit dates, and
@@ -42,7 +43,7 @@ when making future changes.
 
 ## Download and install
 
-Download **Del-0.1.57-arm64.dmg** from the [0.1.57 release](https://github.com/butter-computer/del/releases/tag/v0.1.57),
+Download **Del-0.1.58-arm64.dmg** from the [0.1.58 release](https://github.com/butter-computer/del/releases/tag/v0.1.58),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -62,7 +63,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.57-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.58-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
