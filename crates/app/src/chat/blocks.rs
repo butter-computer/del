@@ -1350,6 +1350,7 @@ fn user_message(
     // Main-chat cards span the transcript; Side chats keep text-sized bubbles.
     h_flex()
         .group(group)
+        .debug_selector(move || format!("user-message-{}", ix.unwrap_or(usize::MAX)))
         .relative()
         .max_w_full()
         .when(full_width, |row| row.w_full())
@@ -1381,7 +1382,12 @@ fn user_message(
                     let (markdown, _) = literal_markdown(&text, 0..0);
                     column.child(
                         div()
-                            .min_w_0()
+                            // Compact bubbles need the text's intrinsic minimum;
+                            // zero collapses it to one character per line.
+                            .when(full_width, |text| text.min_w_0())
+                            .debug_selector(move || {
+                                format!("user-text-{}", ix.unwrap_or(usize::MAX))
+                            })
                             .text_size(zpx(TEXT_PROSE))
                             .line_height(relative(PROSE_LEADING))
                             .text_color(rgb(STRONG))
