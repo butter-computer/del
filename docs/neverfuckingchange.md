@@ -995,7 +995,7 @@ activity bar. It supersedes earlier rules where they conflict.
 - Context means the active conversation carried by the model, measured by its latest usage snapshot, never cumulative lifetime tokens. Show percent used with a reported capacity or an exact known model specification; clear it on provider switch, and show unavailable in Terminal mode.
 - Missing allowance or price data is unknown, not zero. Account allowances identify the selected profile by full email (including the default CLI account), include reset times when reported, and refresh no more than once per minute, including failed queries.
 - The cost headline sums the main chat and all its side chats, including closed ones; hover/click breaks down that family by provider across every switch. Reconcile each chat independently before summing. Side-chat costs follow their stable storage identity and migrate with draft-to-session/terminal-to-chat ownership; keep them when a side tab closes. Cost updates are cumulative within a stable provider scope and replace earlier values. Persist captured costs across app restarts; don't reconstruct CLI process costs from native history without reliable boundaries. Disclose that captured pricing may exclude older/Terminal activity and may differ from actual billing.
-- Git and process inspection run off the UI thread with deadlines. Count renamed files once. Process lists include only Del-owned trees and attached provider roots; hide background provider connections, shells and helpers. Count this session’s commands and offer separate This session and Other sessions sections with listening ports. Drafts show All sessions. Empty sections say “0 running”. Shared provider commands with unverifiable ownership belong only in Other sessions (All sessions for drafts); never collect command arguments.
+- Git and process inspection run off the UI thread with deadlines. Count renamed files once. Process lists include only Del-owned trees and attached provider roots; hide background provider connections, shells and helpers. Count this session’s commands and offer separate This session and Other sessions sections with listening ports. Drafts show All sessions. Empty sections say “0 running”. Shared provider commands with unverifiable ownership appear under Shared (All sessions for drafts). Show only the interpreter entry-point name.
 
 - Keep allowance account identity/reset information, but omit provider/account actions and all checked/refresh interval rows from status popovers. Composer overflow fades use the theme surface and actual wrapped text geometry without intercepting editing.
 - Estimated costs use a dated, source-linked model rate table and stable message/thread scopes. Reconcile reported/estimated coverage within each native session (each step for OpenCode), then sum across visits without adding overlapping totals; unknown models remain unpriced. Estimates use standard rates, may differ after model/tier changes, and are never subscription bills.
@@ -1164,17 +1164,22 @@ activity bar. It supersedes earlier rules where they conflict.
 - Processes shows This session and Other sessions without repeating a process.
   Drafts show All sessions. This session includes the main chat, its temporary
   Side chats, and its sidebar terminals; shared project shells belong only in
-  Other sessions (All sessions for drafts). Never attribute by directory or current selection.
+  Shared (All sessions for drafts). Never attribute by directory or current selection.
 - Include only registered provider/terminal trees or commands with a known launch
   marker. Hide shell wrappers, provider connections, Del housekeeping and known REPL
   helpers. Tagged Claude, Codex and OpenCode commands retain their owner after
-  detaching; unverified shared commands remain in Other sessions
+  detaching; unverified shared commands appear under Shared
   (All sessions for drafts).
+- Use text-only section headings that toggle the shared disclosure animation.
+  Shared starts collapsed on each menu opening. Other sections start expanded.
+  Keep each choice while the open menu refreshes.
 - Refresh the process snapshot every two seconds while active and update open menus.
   Keep Git polling at ten seconds and preserve account usage throttling.
 - A trailing close control appears on row hover or keyboard focus. Stop only that
   command and its descendants, show Stopping…, allow two seconds for graceful exit,
   then force-stop verified survivors. Never kill a shared provider group. Recheck
   process birth time before every signal; stale PIDs must not target replacements.
-- Native marker extraction skips argv without decoding it and discards its buffer.
-  Never retain, display or log arguments or unrelated environment values.
+- Native marker extraction skips argv. For visible Node and Python rows, show
+  an identifiable launcher, script basename or module. Fall back to the executable
+  for inline code or ambiguous invocations. Discard the native buffer and never
+  expose full paths, command lines or unrelated environment values.

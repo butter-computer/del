@@ -1,5 +1,5 @@
-//! Session-scoped snapshots of Del-owned process trees. Command arguments (which may
-//! contain secrets) are deliberately never collected or displayed.
+//! Session-scoped snapshots of Del-owned process trees. Only a runtime entry-point
+//! name may be shown; full command lines are never retained.
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
@@ -203,19 +203,20 @@ fn identity(_: u32) -> Option<Identity> {
     None
 }
 
-// KERN_PROCARGS2 is the only macOS API for inherited environment markers. Skip
-// argv without decoding it; retain only our exact non-secret marker. Never log,
-// display or persist the buffer, arguments, or other environment values.
-fn marker_from_buffer(bytes: &[u8]) -> Option<String> {
-    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
-    if !(0..=65536).contains(&argc) {
+// macOS packs argc, the executable path, alignment padding, argv and env into
+// one buffer. The argc boundary keeps arguments and environment entries distinct.
+fn launch_fields(bytes: &[u8]) -> Option<(usize, &[u8])> {
+    let argc = usize::try_from(i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?)).ok()?;
+    if argc > 65536 {
         return None;
     }
-    let mut rest = &bytes[4..];
-    rest = &rest[rest.iter().position(|&b| b == 0)? + 1..];
-    while rest.first() == Some(&0) {
-        rest = &rest[1..];
-    }
+    let payload = &bytes[4..];
+    let rest = &payload[payload.iter().position(|&b| b == 0)? + 1..];
+    Some((argc, &rest[rest.iter().position(|&b| b != 0)?..]))
+}
+
+fn marker_from_buffer(bytes: &[u8]) -> Option<String> {
+    let (argc, mut rest) = launch_fields(bytes)?;
     for _ in 0..argc {
         rest = &rest[rest.iter().position(|&b| b == 0)? + 1..];
     }
@@ -226,8 +227,68 @@ fn marker_from_buffer(bytes: &[u8]) -> Option<String> {
             .then(|| String::from_utf8_lossy(value).into_owned())
     })
 }
+// Only inspect the interpreter's entry-point position. Options such as -e/-c
+// contain arbitrary code and other operands can contain credentials.
+#[derive(Clone, Copy)]
+enum Interpreter {
+    Node,
+    Python,
+}
+impl Interpreter {
+    fn from_executable(name: &str) -> Option<Self> {
+        let lower = name.to_ascii_lowercase();
+        if lower == "node" || lower == "nodejs" {
+            Some(Self::Node)
+        } else if lower
+            .strip_prefix("python")
+            .is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+        {
+            Some(Self::Python)
+        } else {
+            None
+        }
+    }
+
+    fn entry_name(self, bytes: &[u8]) -> Option<String> {
+        let (argc, fields) = launch_fields(bytes)?;
+        let mut args = fields.split(|&b| b == 0).take(argc).skip(1);
+        let mut arg = args.next()?;
+        if arg == b"--" {
+            arg = args.next()?;
+        } else if matches!(self, Self::Python) && arg == b"-m" {
+            let module = std::str::from_utf8(args.next()?).ok()?;
+            return (module.len() <= 96
+                && module.split('.').all(|part| {
+                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                }))
+            .then(|| module.to_owned());
+        }
+        let path = std::str::from_utf8(arg).ok()?;
+        if path.starts_with('-') || path.contains(['=', '?', '#', ':']) {
+            return None;
+        }
+        let path = std::path::Path::new(path);
+        let name = path.file_name()?.to_str()?;
+        let installed_launcher = path.is_absolute()
+            && path
+                .parent()
+                .is_some_and(|parent| parent.ends_with("bin") || parent.ends_with(".bin"));
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let script = match self {
+            Self::Node => matches!(ext, "js" | "mjs" | "cjs" | "ts" | "mts" | "cts"),
+            Self::Python => matches!(ext, "py" | "pyw"),
+        };
+        (installed_launcher || script).then_some(())?;
+        (name.len() <= 96
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+        .then(|| name.to_owned())
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn process_marker(pid: u32) -> Option<String> {
+fn inspect_launch<T>(pid: u32, extract: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
     let mut bytes = vec![0u8; 1024 * 1024];
     let mut len = bytes.len();
@@ -241,17 +302,17 @@ fn process_marker(pid: u32) -> Option<String> {
             0,
         )
     } == 0;
-    let marker = if ok {
-        marker_from_buffer(&bytes[..len])
-    } else {
-        None
-    };
+    let result = if ok { extract(&bytes[..len]) } else { None };
     bytes.fill(0);
-    marker
+    result
 }
 #[cfg(not(target_os = "macos"))]
-fn process_marker(_: u32) -> Option<String> {
+fn inspect_launch<T>(_: u32, _: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
     None
+}
+
+fn process_marker(pid: u32) -> Option<String> {
+    inspect_launch(pid, marker_from_buffer)
 }
 
 async fn process_table() -> Result<String, String> {
@@ -311,6 +372,14 @@ pub async fn read(
     let mut rows = parse(&text, &roots, &anchors, std::process::id());
     for row in &mut rows {
         row.identity = births.get(&row.pid).cloned();
+        if !row.background
+            && row.identity.is_some()
+            && let Some(runtime) = Interpreter::from_executable(&row.name)
+            && let Some(name) = inspect_launch(row.pid, |bytes| runtime.entry_name(bytes))
+            && identity(row.pid) == row.identity
+        {
+            row.name = name;
+        }
     }
     if !rows.is_empty() {
         let pids = rows
@@ -350,7 +419,30 @@ pub async fn read(
     }
 }
 
+pub const SHARED_SECTION: &str = "Shared";
+
 impl Snapshot {
+    pub fn sections(&self, selected: Option<&str>) -> Vec<(&'static str, Vec<&Process>)> {
+        let Some(owner) = selected else {
+            return vec![("All sessions", self.commands(None).collect())];
+        };
+        let mut current = Vec::new();
+        let mut other = Vec::new();
+        let mut unassigned = Vec::new();
+        for process in self.commands(None) {
+            match process.owner.as_deref() {
+                Some(id) if id == owner => current.push(process),
+                Some(_) => other.push(process),
+                None => unassigned.push(process),
+            }
+        }
+        let mut sections = vec![("This session", current), ("Other sessions", other)];
+        if !unassigned.is_empty() {
+            sections.push((SHARED_SECTION, unassigned));
+        }
+        sections
+    }
+
     pub fn commands(&self, owner: Option<&str>) -> impl Iterator<Item = &Process> {
         self.rows.iter().filter(move |p| {
             !p.background && owner.is_none_or(|owner| p.owner.as_deref() == Some(owner))
@@ -553,6 +645,90 @@ mod tests {
             std::panic::resume_unwind(panic);
         }
     }
+    #[test]
+    fn runtime_names_show_only_the_entry_point() {
+        fn label(runtime: Interpreter, args: &[&str]) -> Option<String> {
+            let mut bytes = (args.len() as i32).to_ne_bytes().to_vec();
+            bytes.extend_from_slice(b"/runtime\0\0");
+            for arg in args {
+                bytes.extend_from_slice(arg.as_bytes());
+                bytes.push(0);
+            }
+            bytes.extend_from_slice(b"SECRET=never-display.js\0");
+            runtime.entry_name(&bytes)
+        }
+        use Interpreter::{Node, Python};
+        assert_eq!(
+            label(
+                Node,
+                &["node", "/opt/bin/concord-mcp", "--token", "private"]
+            )
+            .as_deref(),
+            Some("concord-mcp")
+        );
+        assert_eq!(
+            label(Node, &["node", "/project/node_modules/.bin/vite"]).as_deref(),
+            Some("vite")
+        );
+        assert_eq!(
+            label(Node, &["node", "src/server.mjs"]).as_deref(),
+            Some("server.mjs")
+        );
+        assert_eq!(
+            label(Python, &["python3", "-m", "http.server", "8000"]).as_deref(),
+            Some("http.server")
+        );
+        for args in [
+            &["node", "-e", "private.js"][..],
+            &["node", "--require", "secret.js"],
+            &["node"],
+        ] {
+            assert!(label(Node, args).is_none());
+        }
+        assert!(label(Python, &["python", "-c", "private.py"]).is_none());
+    }
+
+    #[test]
+    fn unassigned_helpers_are_not_other_sessions() {
+        let snapshot = Snapshot {
+            rows: parse(
+                "10 1 S codex\n11 10 S node\n12 10 S python\n13 10 S ruby",
+                &[Root {
+                    pid: 10,
+                    owner: None,
+                }],
+                &[
+                    Root {
+                        pid: 12,
+                        owner: Some("a".into()),
+                    },
+                    Root {
+                        pid: 13,
+                        owner: Some("b".into()),
+                    },
+                ],
+                1,
+            ),
+            ..Default::default()
+        };
+        let sections = |owner| {
+            snapshot
+                .sections(owner)
+                .into_iter()
+                .map(|(title, rows)| (title, rows.iter().map(|r| r.pid).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sections(Some("a")),
+            vec![
+                ("This session", vec![12]),
+                ("Other sessions", vec![13]),
+                ("Shared", vec![11])
+            ]
+        );
+        assert_eq!(sections(None), vec![("All sessions", vec![11, 12, 13])]);
+    }
+
     #[test]
     fn markers_cannot_come_from_arguments_or_other_environment_values() {
         let tag = "12345678-1234-1234-1234-123456789abc";

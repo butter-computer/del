@@ -6,14 +6,13 @@ a follow-up queue, a file viewer, integrated terminals, a session browser, and
 native Apple voice dictation. Sessions in a project can read each other’s recorded
 context and exchange requests and replies as equal peers.
 
-Del `0.1.56` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
+Del `0.1.57` builds from the current source for Apple Silicon Macs running macOS 11 or later. Provider CLIs handle authentication and inference;
 Del does not include model weights or replace their account requirements.
-See the [0.1.56 release notes](docs/releases/0.1.56.md).
+See the [0.1.57 release notes](docs/releases/0.1.57.md).
 
-This release fixes Side chat messages wrapping one character per line and
-removes duplicate process rows. **This session** and **Other sessions** now show
-separate lists; empty drafts still show **All sessions**. It builds on the
-[0.1.55 process controls](docs/releases/0.1.55.md).
+The Processes menu shows recognizable Node and Python tools by launcher, script
+or module name. Click any section heading to expand or collapse its rows.
+**Shared** starts collapsed and holds processes without a known session owner.
 
 Del includes expandable historical commit diffs, friendly commit dates, and
 a project-folder footer. Commit hashes copy with hover feedback, and each diff
@@ -43,7 +42,7 @@ when making future changes.
 
 ## Download and install
 
-Download **Del-0.1.56-arm64.dmg** from the [0.1.56 release](https://github.com/butter-computer/del/releases/tag/v0.1.56),
+Download **Del-0.1.57-arm64.dmg** from the [0.1.57 release](https://github.com/butter-computer/del/releases/tag/v0.1.57),
 open it, and drag **Del.app** to **Applications**. The release includes a `.sha256`
 file for verifying the download. Provider CLIs and their accounts are installed
 and authenticated separately; they are not included in the DMG.
@@ -63,7 +62,7 @@ To build the public release artifacts locally:
 
 ```sh
 ./scripts/make-dmg.sh
-# target/release/Del-0.1.56-arm64.dmg, its .sha256 sidecar, and latest.json
+# target/release/Del-0.1.57-arm64.dmg, its .sha256 sidecar, and latest.json
 ```
 
 This builds the optimized executable, packages the icon and permission descriptions,
@@ -391,15 +390,15 @@ page's edge. The 22 px status bar shows session metrics and the Chat/Terminal to
 - **Context**: active conversation context (history, instructions, tools and current output), shown as percent used. Capacity comes from provider telemetry or an exact known model specification; unknown capacities stay unavailable. This is not cumulative lifetime token traffic. It resets on provider switches; Terminal mode shows unavailable.
 - **Limits**: the selected provider/account's most constrained allowance, with individual windows and local reset times in the menu. Claude and Codex report these; unsupported accounts show unavailable. Refreshes at most once a minute while active.
 - **Cost**: reported usage value or a token-based USD estimate, marked `(est)`. Input, cached input, cache writes and output use separate standard rates. Captured costs persist across app restarts/provider switches. The footer shows the total for the main chat plus all its side chats, including closed side chats. Hover or click for each provider’s combined cost across repeated switches. Each chat is reconciled independently before summing, so sibling chats cannot mask or duplicate one another’s usage. Reported and estimated costs are reconciled within each native session (each step for OpenCode), then summed across visits. Old ledgers without session identity provide a conservative coverage floor. Earlier/Terminal activity, unknown models, premium tiers and model changes may affect accuracy. This is not your subscription bill.
-- **Processes**: commands and servers for the current session, including its Side chats and sidebar terminals, with PIDs and listening TCP ports. **Other sessions** includes commands from other sessions and shared project terminals, excluding entries already shown under **This session**; empty drafts show **All sessions**. Empty sections say **0 running**. Provider connections, shell wrappers, Del housekeeping and known REPL helpers are hidden. Claude, Codex and OpenCode commands carry a per-execution marker, so shared Codex servers and detached commands retain exact ownership. Older untagged commands with unverifiable ownership stay in Other sessions (or All sessions for an empty draft). Snapshots refresh every two seconds while active, including while the menu is open. Hover a row, or focus its trailing control with the keyboard, to reveal **Stop process**. Stopping shows **Stopping…**, signals only that command and its descendants, and force-stops remaining processes after a two-second grace period. Each signal verifies the process's birth time so an old row cannot target a reused PID. It never signals the provider's shared process group.
+- **Processes**: commands and servers for the current session, including its Side chats and sidebar terminals, with PIDs and listening TCP ports. **Other sessions** shows commands assigned to another session. Shared terminal commands and tools without a known owner appear under **Shared**. Click a section heading to expand or collapse its rows. Shared starts collapsed each time the menu opens. Empty drafts show **All sessions**. Empty sections say **0 running**. Provider connections, shell wrappers, Del housekeeping and known REPL helpers are hidden. Claude, Codex and OpenCode commands carry a per-execution marker, so shared Codex servers and detached commands retain exact ownership. Node and Python rows show an identifiable script, installed launcher or Python module name, with the executable name as a fallback. Snapshots refresh every two seconds while active, including while the menu is open. Hover a row, or focus its trailing control with the keyboard, to reveal **Stop process**. Stopping shows **Stopping…**, signals only that command and its descendants, and force-stops remaining processes after a two-second grace period. Each signal verifies the process's birth time so an old row cannot target a reused PID. It never signals the provider's shared process group.
 
 - **Chat / Terminal**: switch the active conversation between its chat and native terminal UI.
 
-Process markers are local, non-secret launch identifiers. On macOS Del reads only
-its exact marker from the native process environment; it skips arguments without
-decoding them and discards the temporary buffer. Arguments and unrelated environment
-values are never displayed, logged or persisted. Marker ownership lasts for this Del
-launch; commands that deliberately remove their marker and detach before being
+Process markers are local, non-secret launch identifiers. On macOS Del reads its
+marker from the native process environment and discards the temporary buffer
+after each lookup. Runtime labels use only the entry-point name. Full paths,
+command lines and unrelated environment values are never displayed, logged or
+persisted. Marker ownership lasts for this Del launch; commands that deliberately remove their marker and detach before being
 observed cannot be attributed. Provider switching routes new markers to the same
 Del conversation, and Side chat commands stay with their parent workspace.
 

@@ -15,7 +15,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub const PANEL_DEFAULT_HEIGHT: f32 = 200.0;
@@ -238,12 +238,49 @@ fn reachable(state: &AppState) -> impl Fn(&Tab) -> bool + '_ {
     }
 }
 
+/// Use the same measured spring reveal as the transcript disclosures.
+fn process_section(
+    heading: &'static str,
+    open: bool,
+    content: impl IntoElement,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    gpui_kit::component::collapsible::Collapsible::new()
+        .motion_id((ElementId::from(heading), "process-section-reveal"))
+        .open(open)
+        .w_full()
+        .flex_none()
+        .child(
+            div()
+                .id(heading)
+                .keyboard_control()
+                .role(gpui::Role::Button)
+                .aria_label(heading)
+                .aria_expanded(open)
+                .debug_selector(move || format!("process-heading-{heading}"))
+                .w_full()
+                .py(zpx(6.))
+                .rounded(zpx(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::ui::row_hover()))
+                .text_size(zpx(TEXT_XS))
+                .text_color(crate::appearance::secondary_text())
+                .child(heading)
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    on_toggle(event, window, cx);
+                }),
+        )
+        .content(content)
+}
+
 /// A live menu: an open list follows snapshots and stop completion, rather than
 /// keeping the clone captured when the popover first opened.
 struct ProcessMenu {
     shell: WeakEntity<AppShell>,
     owner: Option<String>,
-    hovered: Option<(bool, u32)>,
+    hovered: Option<u32>,
+    collapsed: HashSet<&'static str>,
     focus: crate::keyboard_control::FocusHandles,
     _subscription: Subscription,
 }
@@ -254,6 +291,7 @@ impl ProcessMenu {
             shell: shell.downgrade(),
             owner,
             hovered: None,
+            collapsed: HashSet::from([crate::status_processes::SHARED_SECTION]),
             focus: Default::default(),
             _subscription: subscription,
         }
@@ -274,39 +312,16 @@ impl Render for ProcessMenu {
         if let Some(error) = &snapshot.error {
             return list.child(error.clone());
         }
-        let sections = self
-            .owner
-            .iter()
-            .map(|owner| (true, Some(owner.as_str())))
-            .chain(std::iter::once((false, None)));
-        for (current, owner) in sections {
-            list = list.child(
-                div()
-                    .py(zpx(6.))
-                    .text_size(zpx(TEXT_XS))
-                    .text_color(crate::appearance::secondary_text())
-                    .child(if current {
-                        "This session"
-                    } else if self.owner.is_some() {
-                        "Other sessions"
-                    } else {
-                        "All sessions"
-                    }),
-            );
-            let rows: Vec<_> = snapshot
-                .commands(owner)
-                .filter(|process| current || self.owner.is_none() || process.owner != self.owner)
-                .cloned()
-                .collect();
+        for (heading, rows) in snapshot.sections(self.owner.as_deref()) {
+            let open = !self.collapsed.contains(heading);
+            let mut body = v_flex().w_full();
             if rows.is_empty() {
-                list = list.child(div().text_size(zpx(TEXT_SM)).child("0 running"));
+                body = body.child(div().text_size(zpx(TEXT_SM)).child("0 running"));
             }
             for process in rows {
-                let key = (current, process.pid);
-                let focus = self
-                    .focus
-                    .control(&format!("{}-{}", current, process.pid), cx);
-                let show = self.hovered == Some(key)
+                let pid = process.pid;
+                let focus = self.focus.control(&pid.to_string(), cx);
+                let show = self.hovered == Some(pid)
                     || crate::keyboard_control::keyboard_within(&focus, window, cx);
                 let busy = stopping.contains(&process.pid);
                 let detail = if process.ports.is_empty() {
@@ -316,17 +331,10 @@ impl Render for ProcessMenu {
                 };
                 let target = process.clone();
                 let shell = self.shell.clone();
-                list = list.child(
+                body = body.child(
                     h_flex()
-                        .id((
-                            if current {
-                                "current-process"
-                            } else {
-                                "all-process"
-                            },
-                            process.pid as u64,
-                        ))
-                        .debug_selector(move || format!("process-row-{}-{}", current, key.1))
+                        .id(("process-row", pid as u64))
+                        .debug_selector(move || format!("process-row-{pid}"))
                         .w_full()
                         .h(zpx(30.))
                         .gap(zpx(8.))
@@ -334,8 +342,8 @@ impl Render for ProcessMenu {
                         .hover(|s| s.bg(crate::ui::row_hover()))
                         .on_hover(cx.listener(move |this, entered, _, cx| {
                             if *entered {
-                                this.hovered = Some(key);
-                            } else if this.hovered == Some(key) {
+                                this.hovered = Some(pid);
+                            } else if this.hovered == Some(pid) {
                                 this.hovered = None;
                             }
                             cx.notify();
@@ -358,11 +366,9 @@ impl Render for ProcessMenu {
                         .child(
                             div()
                                 .id(("stop-process", process.pid as u64))
-                                .keyboard_control_with(&focus)
+                                .when(open, |button| button.keyboard_control_with(&focus))
                                 .aria_label(format!("Stop {} (PID {})", process.name, process.pid))
-                                .debug_selector(move || {
-                                    format!("stop-process-{}-{}", current, key.1)
-                                })
+                                .debug_selector(move || format!("stop-process-{pid}"))
                                 .size(zpx(22.))
                                 .flex_none()
                                 .flex()
@@ -380,7 +386,8 @@ impl Render for ProcessMenu {
                                 })
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
-                                    if show
+                                    if open
+                                        && show
                                         && !busy
                                         && let Some(shell) = shell.upgrade()
                                     {
@@ -392,6 +399,18 @@ impl Render for ProcessMenu {
                         ),
                 );
             }
+            list = list.child(process_section(
+                heading,
+                open,
+                body,
+                cx.listener(move |this, _, _, cx| {
+                    if !this.collapsed.remove(heading) {
+                        this.collapsed.insert(heading);
+                    }
+                    this.hovered = None;
+                    cx.notify();
+                }),
+            ));
         }
         list
     }
@@ -1303,6 +1322,54 @@ mod status_tests {
             )
         }
     }
+    #[::gpui::test]
+    fn process_heading_click_reveals_and_hides_the_rows(cx: &mut ::gpui::TestAppContext) {
+        struct Fixture(bool);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex()
+                    .child(process_section(
+                        "Shared",
+                        self.0,
+                        div().h(px(40.)).child("concord-mcp"),
+                        cx.listener(|this, _, _, cx| {
+                            this.0 = !this.0;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().debug_selector(|| "after-section".into()).h(px(1.)))
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(false);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Fixture(false));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let header = cx.debug_bounds("process-heading-Shared").unwrap();
+        let closed = cx.debug_bounds("after-section").unwrap().top();
+        assert_eq!(closed, header.bottom());
+        let click = |cx: &mut ::gpui::VisualTestContext| {
+            cx.simulate_mouse_down(header.center(), MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(header.center(), MouseButton::Left, Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        click(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(32));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let partial = cx.debug_bounds("after-section").unwrap().top();
+        assert!(partial > closed && partial < closed + px(40.));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            cx.debug_bounds("after-section").unwrap().top(),
+            closed + px(40.)
+        );
+        click(cx);
+        assert_eq!(cx.debug_bounds("after-section").unwrap().top(), closed);
+    }
+
     #[::gpui::test]
     fn status_menu_opens_on_pointer_press(cx: &mut ::gpui::TestAppContext) {
         cx.update(|cx| {
