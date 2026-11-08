@@ -5,7 +5,7 @@ use crate::animated_icons::Glyph;
 use crate::appearance::{rgb, rgba};
 use crate::keyboard_control::KeyboardControl as _;
 use crate::micro_motion::MotionIconExt as _;
-use crate::sessions::Row;
+use crate::sessions::{Row, TreeNode};
 use crate::state::{AppState, Panel, Selection};
 use crate::zoom::px as zpx;
 use del_core::typography::{TEXT_MD, TEXT_SM};
@@ -662,6 +662,8 @@ fn row_item(
     rename: &Entity<InputState>,
     state: &Entity<AppState>,
     archived: bool,
+    nested: bool,
+    agents: Option<(usize, bool)>,
     window: &Window,
     cx: &App,
 ) -> AnyElement {
@@ -732,7 +734,8 @@ fn row_item(
             ))),
         ));
 
-    if !archived && !renaming {
+    // A spawned agent stays with its creator; only top-level rows reorder.
+    if !archived && !renaming && !nested {
         item = draggable_row(
             item,
             SidebarDrag {
@@ -810,6 +813,13 @@ fn row_item(
         )
     };
 
+    // Like the row actions, the fold chevron is laid out only while the row is
+    // hovered or keyboard-focused, never faded in at paint time.
+    if let Some((_, collapsed)) = agents
+        .filter(|_| !renaming && (motion.is_hovered(&row.id.0) || focused))
+    {
+        item = item.child(agent_group_toggle(&id, collapsed, state));
+    }
     if !renaming {
         let (pin_state, archive_state) = (state.clone(), state.clone());
         let (pin_id, archive_id) = (id.clone(), id.clone());
@@ -1163,6 +1173,7 @@ fn session_rows(s: &AppState) -> Vec<Row> {
                 archived: true,
                 pinned: false,
                 unread: false,
+                parent: None,
             }),
     );
     rows.retain(|r| s.space_has_project(&r.cwd));
@@ -1171,18 +1182,179 @@ fn session_rows(s: &AppState) -> Vec<Row> {
 
 const PROJECT_SESSION_LIMIT: usize = 5;
 
-fn visible_project_rows<'a>(
-    s: &AppState,
-    rows: &[&'a Row],
-    path: &std::path::Path,
-) -> Vec<&'a Row> {
+/// A project's rows as drawn: top-level sessions (capped until the project is
+/// expanded), each followed by the agent sessions it spawned.
+struct ProjectTree<'a> {
+    rows: Vec<(&'a Row, TreeNode)>,
+    /// Rows hidden behind "Show more".
+    remaining: usize,
+    /// Top-level rows, shown or not.
+    roots: usize,
+}
+
+fn project_tree<'a>(s: &AppState, rows: &[&'a Row], path: &std::path::Path) -> ProjectTree<'a> {
     let expanded = s
         .expanded_sidebar_projects
         .contains(&(s.spaces.active.clone(), path.to_path_buf()));
-    rows.iter().copied().enumerate().filter_map(|(index, row)| {
-        let selected = matches!(&s.selection, Selection::Session(id) | Selection::Terminal(id) if *id == row.id);
-        (expanded || index < PROJECT_SESSION_LIMIT || selected).then_some(row)
-    }).collect()
+    let selected = match &s.selection {
+        Selection::Session(id) | Selection::Terminal(id) => Some(id),
+        Selection::Draft(_) => None,
+    };
+    let trees = crate::sessions::agent_tree(rows, s.group_agent_sessions(), |id| {
+        s.agent_group_collapsed(id)
+    });
+    let roots = trees.len();
+    let mut shown = Vec::new();
+    let mut remaining = 0;
+    for (index, tree) in trees.into_iter().enumerate() {
+        // A spawned agent's selection keeps its whole group visible.
+        if expanded
+            || index < PROJECT_SESSION_LIMIT
+            || tree.iter().any(|node| Some(&rows[node.index].id) == selected)
+        {
+            shown.extend(tree.into_iter().map(|node| (rows[node.index], node)));
+        } else {
+            remaining += tree.len();
+        }
+    }
+    ProjectTree {
+        rows: shown,
+        remaining,
+        roots,
+    }
+}
+
+/// Horizontal step for each level of agent sessions nested under their creator.
+const TREE_INDENT: f32 = 20.0;
+/// A row's provider mark is centred this far from the row's left edge.
+const TREE_TRUNK_X: f32 = 8.0 + crate::icons::MARK_SIZE / 2.0;
+/// The session list's gap between rows, bridged by branch lines.
+const TREE_GAP: f32 = 2.0;
+const TREE_RADIUS: f32 = 9.0;
+
+/// Indent a spawned agent's row and draw its branch: a vertical line down from
+/// its creator's mark that curves into the row, continuing past it to later siblings.
+fn tree_branch(node: &TreeNode, item: AnyElement) -> AnyElement {
+    if node.depth == 0 {
+        return item;
+    }
+    // Opaque, so the joins where segments meet never show brighter spots.
+    let surface = crate::appearance::sidebar_surface();
+    let ink = crate::appearance::secondary_text();
+    let mix = |from: f32, to: f32| from + (to - from) * 0.3;
+    let line = Rgba {
+        r: mix(surface.r, ink.r),
+        g: mix(surface.g, ink.g),
+        b: mix(surface.b, ink.b),
+        a: 1.,
+    };
+    let trunk = |level: usize| level as f32 * TREE_INDENT + TREE_TRUNK_X - 0.5;
+    let mut gutter = div()
+        .relative()
+        .flex_none()
+        .w(zpx(node.depth as f32 * TREE_INDENT))
+        .h(zpx(ROW_HEIGHT));
+    for (level, passes) in node.guides.iter().enumerate() {
+        if *passes {
+            gutter = gutter.child(
+                div()
+                    .absolute()
+                    .left(zpx(trunk(level)))
+                    .top(zpx(-TREE_GAP - 1.))
+                    .w(zpx(1.))
+                    .h(zpx(ROW_HEIGHT + TREE_GAP + 1.))
+                    .bg(line),
+            );
+        }
+    }
+    let level = node.depth - 1;
+    let start = trunk(level);
+    // The first branch reaches up to just below its creator's mark.
+    let reach = TREE_GAP
+        + 1.
+        + if node.first {
+            ROW_HEIGHT / 2. - crate::icons::MARK_SIZE / 2. - 3.
+        } else {
+            0.
+        };
+    // Stop just short of this row's own mark.
+    let end = node.depth as f32 * TREE_INDENT + 5.;
+    gutter = gutter.child(
+        div()
+            .absolute()
+            .left(zpx(start))
+            .top(zpx(-reach))
+            .w(zpx(end - start))
+            .h(zpx(ROW_HEIGHT / 2. + reach + 0.5))
+            .border_l_1()
+            .border_b_1()
+            .border_color(line)
+            .rounded_bl(zpx(TREE_RADIUS)),
+    );
+    if !node.last {
+        // Later siblings: the trunk carries on where this branch starts to curve.
+        gutter = gutter.child(
+            div()
+                .absolute()
+                .left(zpx(start))
+                .top(zpx(ROW_HEIGHT / 2. - TREE_RADIUS))
+                .w(zpx(1.))
+                .h(zpx(ROW_HEIGHT / 2. + TREE_RADIUS))
+                .bg(line),
+        );
+    }
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .child(gutter)
+        .child(div().flex_1().min_w_0().child(item))
+        .into_any_element()
+}
+
+/// Fold or unfold the agents a session spawned.
+fn agent_group_toggle(
+    id: &del_agent::SessionId,
+    collapsed: bool,
+    state: &Entity<AppState>,
+) -> AnyElement {
+    let state = state.clone();
+    let toggle = id.clone();
+    let label = if collapsed {
+        "Show spawned agents"
+    } else {
+        "Hide spawned agents"
+    };
+    h_flex()
+        .id(SharedString::from(format!("agent-group-{}", id.0)))
+        .keyboard_control()
+        .role(Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .size(zpx(18.))
+        .justify_center()
+        .items_center()
+        .rounded_sm()
+        .text_size(zpx(TEXT_SM))
+        .text_color(crate::appearance::faint_text())
+        .hover(|toggle| {
+            toggle
+                .bg(rgba(0xffffff14))
+                .text_color(crate::appearance::secondary_text())
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |s, cx| s.toggle_agent_group(&toggle, cx));
+        })
+        .child(
+            crate::icons::icon(if collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .with_size(zpx(10.)),
+        )
+        .into_any_element()
 }
 
 pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
@@ -1213,9 +1385,10 @@ pub(crate) fn navigation_tabs(s: &AppState) -> Vec<crate::state::Tab> {
                 .filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path)
                 .collect::<Vec<_>>();
             tabs.extend(
-                visible_project_rows(s, &project_rows, &path)
+                project_tree(s, &project_rows, &path)
+                    .rows
                     .into_iter()
-                    .map(tab),
+                    .map(|(row, _)| tab(row)),
             );
         }
     }
@@ -1342,7 +1515,7 @@ fn space_contents(
                             .hover(|heading| heading.text_color(crate::appearance::secondary_text())).child("Pinned")
                             .on_click(move |_, _, cx| pinned_state.update(cx, |s, cx| s.toggle_sidebar_section("Pinned", cx))))
                         .content(v_flex().w_full().gap_0p5()
-                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, window, cx))))))
+                            .children(rows.iter().filter(|r| r.pinned && !r.archived).map(|row| row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, false, false, None, window, cx))))))
                 // The Space switcher in the header names the Space, so projects follow
                 // directly; the archive view keeps a plain label.
                 .when(show_archived, |list| list.child(div().px_2().pt_2().pb_1().text_size(zpx(TEXT_SM)).text_color(crate::appearance::faint_text()).child("Archived")))
@@ -1362,8 +1535,9 @@ fn space_contents(
                     let group = SharedString::from(format!("project-{}", path.display()));
                     let project_rows: Vec<&Row> = rows.iter().filter(|r| (!r.pinned || r.archived) && s.project_root(&r.cwd) == path).collect();
                     let needs = project_rows.iter().filter(|r| r.status == del_agent::SessionStatus::WaitingApproval).count();
-                    let visible_rows = visible_project_rows(s, &project_rows, &path);
-                    let remaining = project_rows.len() - visible_rows.len();
+                    let tree = project_tree(s, &project_rows, &path);
+                    let remaining = tree.remaining;
+                    let roots = tree.roots;
                     let expanded = s.expanded_sidebar_projects.contains(&(s.spaces.active.clone(), path.clone()));
                     let expand_state = state.clone();
                     let expand_key = (s.spaces.active.clone(), path.clone());
@@ -1428,9 +1602,12 @@ fn space_contents(
                                         }).motion_child(true, |feedback| feedback.glyph(Glyph::Close).with_size(zpx(crate::icons::TAB_CLOSE_GLYPH))))
                                     .on_click(move |_, _, cx| state.update(cx, |s, cx| s.select_tab(&crate::state::Tab::Draft(key), cx)))
                             }))
-                            .children(visible_rows.iter().map(|row|
-                                div().opacity(if row.archived { 0.6 } else { 1. }).child(row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, window, cx))))
-                            .when(remaining > 0 || (expanded && project_rows.len() > PROJECT_SESSION_LIMIT), |list| list.child(
+                            .children(tree.rows.iter().map(|(row, node)| {
+                                let agents = (node.children > 0).then(|| (node.children, s.agent_group_collapsed(&row.id)));
+                                let item = row_item(row, active.as_ref() == Some(&row.id) && !providers_open, s.renaming.as_ref() == Some(&row.id), rename, state, row.archived, node.depth > 0, agents, window, cx);
+                                div().opacity(if row.archived { 0.6 } else { 1. }).child(tree_branch(node, item))
+                            }))
+                            .when(remaining > 0 || (expanded && roots > PROJECT_SESSION_LIMIT), |list| list.child(
                                 Button::new(SharedString::from(format!("project-show-more-{}", path.display())))
                                     .ghost().w_full().h(zpx(ROW_HEIGHT)).justify_start().px_2()
                                     .text_color(crate::appearance::secondary_text()).text_size(zpx(TEXT_SM))
@@ -2348,6 +2525,8 @@ mod session_hover_tests {
                                 &self.rename,
                                 &self.state,
                                 row.archived,
+                                false,
+                                None,
                                 window,
                                 cx,
                             )
@@ -2383,6 +2562,7 @@ mod session_hover_tests {
             archived,
             pinned: false,
             unread: true,
+            parent: None,
         };
         state.update(cx, |s, cx| {
             s.mark_session_unread(&row.id, cx);

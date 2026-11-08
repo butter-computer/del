@@ -348,6 +348,7 @@ mod tests {
                 context: None,
                 journal: Some(path.clone()),
             }],
+            spawned_by: None,
         };
         begin_terminal(&record, std::slice::from_ref(&old)).unwrap();
         assert!(terminal_resume_existing(&record).unwrap());

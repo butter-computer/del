@@ -46,6 +46,8 @@ pub struct Row {
     pub archived: bool,
     pub pinned: bool,
     pub unread: bool,
+    /// The session whose agent spawned this one, when an agent created it.
+    pub parent: Option<SessionId>,
 }
 
 /// A terminal session stays separate from the manager's chat index.
@@ -210,6 +212,7 @@ impl Overrides {
                     archived: meta.is_some_and(|m| m.archived),
                     pinned: meta.is_some_and(|m| m.pinned),
                     unread: meta.is_some_and(|m| m.unread || !m.unread_side_chats.is_empty()),
+                    parent: r.spawned_by.clone(),
                 }
             })
             .collect();
@@ -391,9 +394,221 @@ pub fn folder_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// One row's place when agent-spawned sessions are grouped under their creator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeNode {
+    /// Index into the rows given to [`agent_tree`].
+    pub index: usize,
+    /// 0 for a top-level row, 1 for an agent its creator spawned, and so on.
+    pub depth: usize,
+    /// One entry per ancestor level between the top level and this row's parent:
+    /// whether that ancestor has later siblings, so its guide line passes this row.
+    pub guides: Vec<bool>,
+    /// First and last among its siblings; the connector's shape depends on both.
+    pub first: bool,
+    pub last: bool,
+    /// Direct children, counted even while they are folded away.
+    pub children: usize,
+}
+
+/// Arrange rows into trees: each top-level row followed by every session its agent
+/// spawned, directly or through other spawned agents, all one level down. Each inner list is one
+/// top-level row with its visible descendants. A parent outside `rows` (pinned,
+/// another project, deleted) leaves the child at the top level, and a parent
+/// chain that loops back on itself never hides a row.
+pub fn agent_tree(
+    rows: &[&Row],
+    group: bool,
+    collapsed: impl Fn(&SessionId) -> bool,
+) -> Vec<Vec<TreeNode>> {
+    let at: HashMap<&SessionId, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (&row.id, index))
+        .collect();
+    let parent = |index: usize| {
+        group
+            .then(|| rows[index].parent.as_ref())
+            .flatten()
+            .and_then(|id| at.get(id).copied())
+            .filter(|&p| p != index)
+    };
+    let nested = |index: usize| {
+        let mut cursor = parent(index);
+        let mut steps = 0;
+        while let Some(at) = cursor {
+            if at == index {
+                return false;
+            }
+            steps += 1;
+            if steps > rows.len() {
+                // An ancestor loop not including this row: those ancestors are
+                // top-level, so this row still nests under one of them.
+                return true;
+            }
+            cursor = parent(at);
+        }
+        parent(index).is_some()
+    };
+    let mut kids = vec![Vec::new(); rows.len()];
+    let mut roots = Vec::new();
+    for index in 0..rows.len() {
+        match parent(index).filter(|_| nested(index)) {
+            Some(p) => kids[p].push(index),
+            None => roots.push(index),
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        index: usize,
+        depth: usize,
+        guides: Vec<bool>,
+        first: bool,
+        last: bool,
+        kids: &[Vec<usize>],
+        open: &dyn Fn(usize) -> bool,
+        out: &mut Vec<TreeNode>,
+    ) {
+        let children = &kids[index];
+        out.push(TreeNode {
+            index,
+            depth,
+            guides: guides.clone(),
+            first,
+            last,
+            children: children.len(),
+        });
+        // Depth is bounded by the row count: loops were broken above.
+        if children.is_empty() || !open(index) {
+            return;
+        }
+        let mut next = guides;
+        if depth > 0 {
+            next.push(!last);
+        }
+        for (at, &child) in children.iter().enumerate() {
+            let last = at + 1 == children.len();
+            emit(child, depth + 1, next.clone(), at == 0, last, kids, open, out);
+        }
+    }
+    // Only a top-level row folds; deeper agents are drawn one level down with it.
+    let open = |index: usize| parent(index).is_some() || !collapsed(&rows[index].id);
+    roots
+        .into_iter()
+        .map(|root| {
+            let mut out = Vec::new();
+            emit(root, 0, Vec::new(), true, true, &kids, &open, &mut out);
+            // The sidebar shows a single level: an agent spawned by a spawned
+            // agent sits beside its creator, under the same top-level session.
+            fn descendants(index: usize, kids: &[Vec<usize>]) -> usize {
+                kids[index].iter().map(|&kid| 1 + descendants(kid, kids)).sum()
+            }
+            let branches = out.len() - 1;
+            for (at, node) in out.iter_mut().enumerate() {
+                if at == 0 {
+                    node.children = descendants(root, &kids);
+                    continue;
+                }
+                node.depth = 1;
+                node.guides.clear();
+                node.first = at == 1;
+                node.last = at == branches;
+                node.children = 0;
+            }
+            out
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree_row(id: &str, parent: Option<&str>) -> Row {
+        Row {
+            id: SessionId::new(id),
+            provider: Provider::Claude,
+            model: None,
+            cwd: "/repo".into(),
+            title: id.into(),
+            status: SessionStatus::Idle,
+            updated_secs: 0,
+            archived: false,
+            pinned: false,
+            unread: false,
+            parent: parent.map(SessionId::new),
+        }
+    }
+
+    fn shape(trees: &[Vec<TreeNode>], rows: &[&Row]) -> Vec<(String, usize)> {
+        trees
+            .iter()
+            .flatten()
+            .map(|node| (rows[node.index].id.0.clone(), node.depth))
+            .collect()
+    }
+
+    #[test]
+    fn agent_tree_nests_spawned_sessions_under_their_creator_in_row_order() {
+        let rows = [
+            tree_row("worker-b", Some("lead")),
+            tree_row("other", None),
+            tree_row("lead", None),
+            tree_row("worker-a", Some("lead")),
+            tree_row("sub", Some("worker-b")),
+            tree_row("orphan", Some("pinned-elsewhere")),
+        ];
+        let rows: Vec<&Row> = rows.iter().collect();
+        let trees = agent_tree(&rows, true, |_| false);
+        assert_eq!(
+            shape(&trees, &rows),
+            [
+                ("other".into(), 0),
+                ("lead".into(), 0),
+                ("worker-b".into(), 1),
+                ("sub".into(), 1),
+                ("worker-a".into(), 1),
+                ("orphan".into(), 0),
+            ]
+        );
+        let lead = &trees[1];
+        // Deeper agents count toward, and fold with, the top-level session.
+        assert_eq!(lead[0].children, 3);
+        assert!(lead[1].first && !lead[1].last);
+        assert!(lead.iter().all(|node| node.guides.is_empty()));
+        assert!(lead[2].children == 0 && !lead[2].last);
+        assert!(!lead[3].first && lead[3].last);
+    }
+
+    #[test]
+    fn agent_tree_folds_collapsed_groups_and_can_be_turned_off() {
+        let rows = [
+            tree_row("lead", None),
+            tree_row("worker", Some("lead")),
+        ];
+        let rows: Vec<&Row> = rows.iter().collect();
+        let folded = agent_tree(&rows, true, |id| id.0 == "lead");
+        assert_eq!(shape(&folded, &rows), [("lead".into(), 0)]);
+        assert_eq!(folded[0][0].children, 1);
+        let flat = agent_tree(&rows, false, |_| false);
+        assert_eq!(shape(&flat, &rows), [("lead".into(), 0), ("worker".into(), 0)]);
+    }
+
+    #[test]
+    fn agent_tree_keeps_every_row_when_parents_form_a_loop() {
+        let rows = [
+            tree_row("a", Some("b")),
+            tree_row("b", Some("a")),
+            tree_row("c", Some("a")),
+            tree_row("self", Some("self")),
+        ];
+        let rows: Vec<&Row> = rows.iter().collect();
+        let trees = agent_tree(&rows, true, |_| false);
+        assert_eq!(
+            shape(&trees, &rows),
+            [("a".into(), 0), ("c".into(), 1), ("b".into(), 0), ("self".into(), 0)]
+        );
+    }
 
     fn record(id: &str, title: Option<&str>, updated_ms: u64) -> SessionRecord {
         SessionRecord {
@@ -412,6 +627,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: updated_ms,
             status: SessionStatus::Idle,
+            spawned_by: None,
         }
     }
 

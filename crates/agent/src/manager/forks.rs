@@ -223,6 +223,7 @@ impl SessionManager {
                 inherited: snapshot.inherited,
                 pending: Some(pending),
             }),
+            spawned_by: None,
         };
         let recorded = self.shared.index.lock().unwrap().upsert_temporary(record);
         if let Err(error) = recorded {
@@ -496,6 +497,7 @@ impl SessionManager {
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
+            spawned_by: None,
         };
         let recorded = {
             let mut index = self.shared.index.lock().unwrap();

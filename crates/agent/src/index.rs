@@ -32,6 +32,10 @@ pub struct SessionRecord {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub status: SessionStatus,
+    /// The session whose agent created this one with `spawn_session`. The
+    /// sidebar can group such sessions under their creator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<SessionId>,
 }
 
 impl SessionRecord {
@@ -405,6 +409,7 @@ mod tests {
             created_at_ms: at,
             updated_at_ms: at,
             status,
+            spawned_by: None,
         }
     }
 

@@ -462,6 +462,7 @@ impl AppShell {
                     status: del_agent::SessionStatus::Idle,
                     fork: None,
                     title_turns: 0,
+                    spawned_by: None,
                 })
                 .map_err(|e| e.to_string())?;
             backend
@@ -708,6 +709,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
             status: del_agent::SessionStatus::Idle,
+            spawned_by: None,
         }
     }
 

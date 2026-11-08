@@ -448,6 +448,7 @@ impl SessionManager {
                 .unwrap()
                 .update(&child.id, |record| {
                     record.title = Some(prompt.trim().chars().take(60).collect());
+                    record.spawned_by = Some(caller.clone());
                 })?;
             // Startup awaits the provider. Inherit the caller's current project,
             // which Git inspection may have resolved while startup was pending.

@@ -487,6 +487,16 @@ pub fn render(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .checked(s.spaces.global_tabs).accessibility_label("Global session tabs")
                         .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_global_space_tabs(*checked, cx)))))
             })
+            .when(preferences, |content| {
+                let state = state.clone();
+                content.child(h_flex().w_full().p_4().gap_4().items_center()
+                    .child(v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().child("Group agent sessions under parent"))
+                        .child(div().text_size(zpx(TEXT_SM)).text_color(crate::appearance::secondary_text()).child("Show sessions an agent creates as a branch beneath the session that created them.")))
+                    .child(gpui_kit::component::switch::Switch::new("group-agent-sessions")
+                        .checked(s.group_agent_sessions()).accessibility_label("Group agent sessions under parent")
+                        .on_click(move |checked, _, cx| state.update(cx, |s, cx| s.set_group_agent_sessions(*checked, cx)))))
+            })
             .when(section == SettingsSection::Sessions, |content| content.child(
                 v_flex().w_full().gap_4()
                     .child(h_flex().w_full().gap_4().items_center()

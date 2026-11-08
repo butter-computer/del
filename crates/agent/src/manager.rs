@@ -338,7 +338,7 @@ impl SessionManager {
         backends: impl IntoIterator<Item = Arc<dyn AgentBackend>>,
     ) -> Result<Self> {
         let (all_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let index = SessionIndex::open(index_path.as_ref())?;
+        let mut index = SessionIndex::open(index_path.as_ref())?;
         let mut peers =
             crate::peers::PeerStore::open(index_path.as_ref().with_extension("peers.json"))?;
         for record in index.list() {
@@ -346,6 +346,7 @@ impl SessionManager {
                 peers.register(&record.id, &record.cwd)?;
             }
         }
+        backfill_spawn_parents(&mut index, &peers)?;
         Ok(Self {
             shared: Arc::new(Shared {
                 backends: backends.into_iter().map(|b| (b.provider(), b)).collect(),
@@ -769,6 +770,7 @@ impl SessionManager {
             created_at_ms: now,
             updated_at_ms: now,
             status: SessionStatus::Idle,
+            spawned_by: None,
         });
         if let Err(error) = recorded {
             // Never leave a provider process running for a session nobody can reach.
@@ -1577,6 +1579,30 @@ impl SessionManager {
         let flush = self.shared.index.lock().unwrap().flusher();
         let _ = tokio::task::spawn_blocking(move || flush.wait()).await;
     }
+}
+
+/// Chats spawned before `spawned_by` was recorded still carry their creator in the
+/// mailbox's first request; copy it onto the record so the sidebar can group them.
+fn backfill_spawn_parents(
+    index: &mut SessionIndex,
+    peers: &crate::peers::PeerStore,
+) -> Result<()> {
+    let records = index.list();
+    let record_id = |id: &SessionId| {
+        records
+            .iter()
+            .find(|r| &r.id == id || r.segments.iter().any(|s| &s.session_id == id))
+            .map(|r| r.id.clone())
+    };
+    for (child, parent) in peers.spawn_parents() {
+        let (Some(child), Some(parent)) = (record_id(&child), record_id(&parent)) else {
+            continue;
+        };
+        if child != parent && index.get(&child).is_some_and(|r| r.spawned_by.is_none()) {
+            index.update(&child, |record| record.spawned_by = Some(parent))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

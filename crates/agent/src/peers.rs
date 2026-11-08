@@ -428,6 +428,17 @@ impl PeerStore {
         self.state.messages.iter().find(|m| m.id == id).cloned()
     }
 
+    /// `(child, creator)` for every chat created with `spawn_session`, whose first
+    /// request is keyed by the child's id. Lets older spawns be grouped too.
+    pub fn spawn_parents(&self) -> Vec<(SessionId, SessionId)> {
+        self.state
+            .messages
+            .iter()
+            .filter(|m| m.idempotency_key == format!("spawn:{}", m.to))
+            .map(|m| (self.resolve(&m.to), self.resolve(&m.from)))
+            .collect()
+    }
+
     pub fn messages(&self, id: &SessionId) -> Vec<PeerMessage> {
         self.state
             .messages
@@ -738,6 +749,27 @@ mod tests {
         assert!(store.wait(&a).is_err());
         store.finish_work(&a).unwrap();
         assert!(!store.user_queue_blocked(&a));
+    }
+
+    #[test]
+    fn spawn_parents_come_from_first_requests_keyed_by_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = setup(dir.path().join("peers.json"));
+        let project = Path::new("/project");
+        for name in ["lead", "worker", "peer"] {
+            store.register(&id(name), project).unwrap();
+        }
+        store
+            .send(&id("lead"), &id("worker"), "spawn:worker", "Task", None, false)
+            .unwrap();
+        // Ordinary requests, including ones that only look similar, are not spawns.
+        store
+            .send(&id("lead"), &id("peer"), "spawn:worker", "Other", None, false)
+            .unwrap_err();
+        store
+            .send(&id("peer"), &id("worker"), "spawn:other", "Hi", None, false)
+            .unwrap();
+        assert_eq!(store.spawn_parents(), [(id("worker"), id("lead"))]);
     }
 
     #[test]

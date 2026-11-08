@@ -1277,6 +1277,8 @@ async fn spawned_chat_model_controls_are_scoped_and_close_pauses_delivery() {
     assert_eq!(record.reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(record.service_tier, None);
     assert_eq!(record.permission_mode, del_agent::PermissionMode::FullAuto);
+    // The sidebar groups the new chat under the session whose agent created it.
+    assert_eq!(record.spawned_by.as_ref(), Some(&parent));
     for tool in ["configure_session", "close_session"] {
         let denied = call(&config, tool, json!({"session_id":parent})).await;
         assert_eq!(denied["isError"], true, "{denied}");

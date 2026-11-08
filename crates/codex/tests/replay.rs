@@ -308,6 +308,7 @@ async fn provider_names_refresh_and_persist_without_resuming_or_reordering_chats
         created_at_ms: 1,
         updated_at_ms: 2,
         status: SessionStatus::Idle,
+        spawned_by: None,
     };
     del_agent::index::SessionIndex::open(&path)
         .unwrap()
@@ -396,6 +397,7 @@ async fn resumed_history_reaches_chat_subscribers() {
             created_at_ms: 1,
             updated_at_ms: 1,
             status: SessionStatus::Idle,
+            spawned_by: None,
         })
         .unwrap();
     let manager =

@@ -1336,12 +1336,26 @@ impl AppState {
         let id = ids.remove(from);
         ids.insert(to, id);
         if self.sidebar_drag.active.is_some() {
-            self.sidebar_drag.shifts = ids
+            // Shift rows by where they are drawn: spawned agents follow their creator.
+            let group = !source.pinned && self.group_agent_sessions();
+            let drawn = |order: &[SessionId]| -> Vec<SessionId> {
+                let ordered: Vec<&crate::sessions::Row> = order
+                    .iter()
+                    .filter_map(|id| rows.iter().find(|row| &row.id == id))
+                    .collect();
+                crate::sessions::agent_tree(&ordered, group, |id| self.agent_group_collapsed(id))
+                    .into_iter()
+                    .flatten()
+                    .map(|node| ordered[node.index].id.clone())
+                    .collect()
+            };
+            let (before, after) = (drawn(&previous), drawn(&ids));
+            self.sidebar_drag.shifts = after
                 .iter()
                 .enumerate()
-                .map(|(at, id)| {
-                    let before = previous.iter().position(|old| old == id).unwrap();
-                    (id.0.clone(), (before as f32 - at as f32) * 30.)
+                .filter_map(|(at, id)| {
+                    let before = before.iter().position(|old| old == id)?;
+                    Some((id.0.clone(), (before as f32 - at as f32) * 30.))
                 })
                 .collect();
             self.sidebar_drag.generation += 1;
@@ -3011,6 +3025,7 @@ impl AppState {
                     archived: false,
                     pinned: r.pinned,
                     unread: self.terminal_unread(&r.id),
+                    parent: None,
                 }),
         );
         rows.sort_by_cached_key(|r| {
@@ -3230,6 +3245,30 @@ impl AppState {
             }
         });
         cx.notify();
+    }
+
+    /// Whether the sidebar nests agent-spawned sessions under the session that created them.
+    pub fn group_agent_sessions(&self) -> bool {
+        !self.project_preferences.flat_agent_sessions
+    }
+
+    pub fn set_group_agent_sessions(&mut self, group: bool, cx: &mut Context<Self>) {
+        self.project_preferences.flat_agent_sessions = !group;
+        self.save_projects(cx);
+    }
+
+    pub fn agent_group_collapsed(&self, id: &SessionId) -> bool {
+        self.project_preferences
+            .collapsed_agent_groups
+            .contains(id.as_str())
+    }
+
+    pub fn toggle_agent_group(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        let groups = &mut self.project_preferences.collapsed_agent_groups;
+        if !groups.remove(id.as_str()) {
+            groups.insert(id.as_str().to_owned());
+        }
+        self.save_projects(cx);
     }
 
     pub fn toggle_sidebar_section(&mut self, section: &str, cx: &mut Context<Self>) {
@@ -4959,6 +4998,7 @@ pub(crate) mod tests {
                 created_at_ms: 1,
                 updated_at_ms: 1,
                 status: SessionStatus::Idle,
+                spawned_by: None,
             });
             for (name, cwd) in [("terminal", "/repo"), ("other", "/elsewhere")] {
                 s.terminal_rows.push(TerminalRow {
@@ -5122,6 +5162,7 @@ pub(crate) mod tests {
             created_at_ms: 1,
             updated_at_ms: 1_000,
             status: del_agent::SessionStatus::Idle,
+            spawned_by: None,
         }
     }
 

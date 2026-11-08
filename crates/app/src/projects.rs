@@ -398,6 +398,12 @@ pub struct ProjectPreferences {
     pub collapsed: std::collections::HashSet<PathBuf>,
     #[serde(default)]
     pub collapsed_sections: std::collections::HashSet<String>,
+    /// Show agent-spawned sessions as ordinary rows rather than under their creator.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flat_agent_sessions: bool,
+    /// Creator sessions whose spawned agents are folded away in the sidebar.
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub collapsed_agent_groups: std::collections::HashSet<String>,
 }
 impl ProjectPreferences {
     /// Unreadable preferences are preserved aside and reported, never overwritten.

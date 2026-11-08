@@ -1296,6 +1296,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
             status: del_agent::SessionStatus::Idle,
+            spawned_by: None,
         };
         assert!(for_record(&record).is_none());
         let id = uuid::Uuid::new_v4().to_string();
